@@ -1450,7 +1450,7 @@ or deprecated, docs rows rewritten, tools updated.
 | **2** | k2 (#3, #4) onto the tracker. k2 keeps the Ready-time rule `noteReady` applies today (#288), now read from the tracker; nothing is switched on twice. First task: a fixture from #361's workload-patch group restart (leader and workers recreated, pod names kept, Ready times differ). It establishes where a group's Ready time comes from. Done: the latest Ready time over the leader and its Ready workers (`TestLWSGroupReadyTimeIsTheLatestOfItsPods`). The rule: each pod waits from the later of its own Ready time and first sight. `learn` lands. `learner-write` for k2, at V(3). Restart suite | flow control off, P/D, same-name restart (no) | After a controller restart every replica waits once: `P1-obs-unsettled` across the fleet for 1 min, and with the snapshot off k2-less fleets price at k1 for that minute (SLO side). A pod back from a restart under the same name already waits today (#288) and still does. `learner-start` at the default; k2 writes at `--v=3` |
 | **3** | Mu (#5, #6). The fold across pods stays the mean (#282). Its joined test reads k2's stamp. Exact repeats count as use. Unknown age resolves safe. The latch persisted or restored safe-side. Two prefill pods in one spacing pin #7's max before the fold is touched. The closed-loop probe and its fleet simulator land here (2.5) | flow control off (no) | `learner-write` for mu, including choice flips. `throughput-demand-floor` names `muKey`, `muSource`, `startEstimateSeconds`, `startSource`. Measured mu waits out the post-restart settle |
 | **4a** | ITL #1 and #13 onto the tracker. Cap admission above the band (#293, #331), the policy band, the steady-gate keys and the persisted held slope (`ITLSlopes`, #329) stay as they are. Neutral on the recording except two named changes, each behind its own switch: ITL waits the settle after a controller restart (today it takes the first cycle as settled), and one missing row no longer restarts a settle (the 1 min absence rule, 4.2). Neither occurs in the OLS recording, so 4a carries its own two tests through ITL, a controller restart and one missing row, each failing on 4a's parent; PR 2's restart suite runs as well. The closed-loop probe runs through a controller restart (4.4) | a run that reaches OLS, SLO analyzer recorded with its router latency (no) | No ITL refit for 2 min after a controller restart; with the snapshot off the throughput floor is silent for about 2.75 min (SLO side, masked by the default 300 s scale-down stabilization as long as the controller is back within about 2 min). A missed scrape no longer restarts ITL's settle |
-| **4b** | ITL #16 (throughput analyzer) moves onto `itl.Tracker`, a tracker of its own, and gains #273's fixes and row 1's cap admission, still reading the policy band (`ITLBand()`). Four switches over four PRs (4b-0 to 4b-3): the steady gate (the move, with the settling stamp, the pinned fit over the window, positive B, +Inf refused and the held slope), the settle tracker, the wait after a controller restart, and cap admission; each with a negative control on the parent, and the probe for the slope hold. Design: [PR 4b](#pr-4b-the-throughput-analyzers-itl-line) | `throughput-sweep` and `throughput-sweep-restart` (no) | `learner-write` when A or B moves; `Reason` `T2-held`; no throughput capacity for about 2 min after a controller restart. Throughput-analyzer fleets may change, as named: mostly fewer replicas where the throughput analyzer set the order (above-band rows and joiners' warm-up no longer steepen A), and the analyzer is silent, so out of the scale-down vote, more often. Metrics: none |
+| **4b** | ITL #16 (throughput analyzer) moves onto `itl.Tracker`, a tracker of its own, and gains #273's fixes and row 1's cap admission, still reading the policy band (`ITLBand()`). Five switches over four PRs (4b-0 to 4b-3): the steady gate (the move, with the settling stamp, the pinned fit over the window, positive B, +Inf refused and the held slope), the GPS-mismatch clear dropped, the settle tracker, the wait after a controller restart, and cap admission; each with a negative control on the parent, and the probe for the slope hold. Design: [PR 4b](#pr-4b-the-throughput-analyzers-itl-line) | `throughput-sweep` and `throughput-sweep-restart` (no) | `learner-write` when A or B moves; `Reason` `T2-held`; no throughput capacity for about 2 min after a controller restart. Throughput-analyzer fleets may change, as named: mostly fewer replicas where the throughput analyzer set the order (above-band rows and joiners' warm-up no longer steepen A), and the analyzer is silent, so out of the scale-down vote, more often. Metrics: none |
 | **5** | Start time (#12) and snapshot. Confirmations counted by distinct pod. The first-sample rule, a named change that bounds **both** sides. PR 5 first wires the seed, a named change of its own: `replicaStartSeconds` is reserved and read by nothing today ([trigger reference](../reference/scaledobject-trigger.md)), so every estimate starts from 70 s. Once it is read, the first-sample bound is anchored to the seed when the ScaledObject sets one, not to the 70 s default. With no seed it blends toward the default until N distinct pods agree, rather than clamping: measured starts run from 15 s (snapshot restore) to 463 s (cold JIT cache) ([start time](../reference/start-time.md)), and a fixed band around 70 s would clamp both ends. Property cases: with a seed of 120 s, a first sample of 15 s gives an estimate in [lower bound, 120] and one of 460 s an estimate in [120, upper bound]; with no seed the estimate sits strictly between the sample and 70 s (never clamped to 70) and reaches the measured value after N distinct pods. First sight persisted. The writer stays central (`internal/engines/steadystate/learned_state_store.go`) with per-learner adapters. The document stays **v1 and additive**: new fields are `omitempty`, as #329's `itlSlopes` was, and PR 5 does not bump the version, which is part of the data key (a v2 would make every upgrade a cold start). `PriorK2` and `K2BorrowedSince` stay dual-written for rollback builds. Fixtures: a v0.10.0 v1 document (no `itlSlopes`) and a v0.10.1 v1 document both restore, and the previous release reads PR 5's document: a test pins a frozen copy of v0.10.1's `learnedStateDoc` and decodes PR 5's document with it. Restart suite plus restore-then-run, including a restore under light load that keeps the ITL line (issue #316) | controller restart with the snapshot on (no) | Start estimates no longer take one pod's first sample raw. `restored: true` on restored lines. With the snapshot on, only replicas with no record wait after a restart |
 
 Later, each after a recorded run that covers it: idle room and the decode gate
@@ -1538,10 +1538,11 @@ keys differ. What blocks the move today, each fixed in 4b-0:
    `admission` does (`slo/analyzer.go:504-517`). Replay already runs the
    analyzers on one store; the field check for a throughput-only replay is
    `EngineParams` (2.4).
-3. **The two window clears.** Kept (decided), holding B and the last A.
-   #453 added `Tracker.ClearWindow(key)` (`I/tracker.go:503`): the main and
-   steady windows go; B, the held slope and the settle traces stay. The
-   shape-change and GPS-mismatch clears call it from 4b-1.
+3. **The two window clears.** The shape-change clear is kept, holding B and
+   the last A. #453 added `Tracker.ClearWindow(key)` (`I/tracker.go:503`):
+   the main and steady windows go; B, the held slope and the settle traces
+   stay. The shape-change clear calls it from 4b-1. The GPS-mismatch clear
+   is dropped in 4b-1 ([below](#the-gps-mismatch-clear-dropped-in-4b-1)).
 4. **Config through an interface.** `internal/config`'s tests import this
    package (`T/analyzer.go:295-297`), so steadiness and the cap's preemption
    rate are read as `ITLBand` is: `ITLSteadiness() itl.Steadiness` and
@@ -1562,7 +1563,8 @@ base goldens.
 
 | switch | changes | an operator sees | negative control (fails on the parent) |
 | --- | --- | --- | --- |
-| `throughput-itl-steady-gate` | The move onto the tracker, with the key's own trace, and #273's fixes with it: the steady gate on the full fit; the settling stamp; a pinned fit over the window's readings, in the band, k-weighted, with at least 10 readings and 3 settled; a positive B only; +Inf refused; the held slope. Shape and GPS clears through `ClearWindow` | `Reason` `T2-held`. `learner-write` for the line when A or B moves (band 5 %, as 4a), and a tier change. Fewer `T2-*` lines in a variant's first cycles (10 readings first). Metrics: none | A joiner's warm-up reading (k 0.46, 450 ms against a line near 0.09) moves A on the parent and not on; one reading of one replica sets A on the parent and not on; an +Inf ITL leaves `T2-failed` for 20 rows on the parent; a step through the band teaches B on the parent from unsteady rows |
+| `throughput-itl-steady-gate` | The move onto the tracker, with the key's own trace, and #273's fixes with it: the steady gate on the full fit; the settling stamp; a pinned fit over the window's readings, in the band, k-weighted, with at least 10 readings and 3 settled; a positive B only; +Inf refused; the held slope. The shape-change clear through `ClearWindow` | `Reason` `T2-held`. `learner-write` for the line when A or B moves (band 5 %, as 4a), and a tier change. Fewer `T2-*` lines in a variant's first cycles (10 readings first). Metrics: none | A joiner's warm-up reading (k 0.46, 450 ms against a line near 0.09) moves A on the parent and not on; one reading of one replica sets A on the parent and not on; an +Inf ITL leaves `T2-failed` for 20 rows on the parent; a step through the band teaches B on the parent from unsteady rows |
+| `throughput-itl-keeps-the-window-on-gps-mismatch` | Three cycles of GPS mismatch no longer clear the window; the comparison stays a diagnostic, on the minute-mean k, one summary line per variant ([why](#the-gps-mismatch-clear-dropped-in-4b-1)) | `GPS mismatch persisted, clearing observation window` is gone; `GPS mismatch detected` moves to the debug level with a per-variant summary. More full fits on a P/D decode fleet | A correct line with the generation rate 30 % off for three cycles: the window empties on the parent, keeps every reading on |
 | `throughput-itl-reads-the-settle-tracker` | A replica's settle start comes from the engine's tracker, with 4a's rules: restart under its name, idle on evidence, the absence tolerance, the Finite pod mean. Meaningful only with the gate on; on alone it moves nothing | None in logs; a missed scrape no longer restarts a replica's settle | A restart under the same Pod name with no not-Ready row between: settles on, not on the key's own trace |
 | `throughput-itl-waits-after-controller-restart` | After a controller restart, replicas already serving wait their settle. With no snapshot of this line (none exists), the analyzer has no line for `steadyFor` | `T2-failed` and no throughput capacity for about 2 min after a restart: the analyzer is not live, so it neither orders nor vetoes a scale-down | The restart case of 4a, through the throughput analyzer: a line on the first cycle on the parent, none for `steadyFor` on |
 | `throughput-itl-admits-at-sequence-cap` | Readings above the band from a replica at its stated cap, with preemption at most `itlBand.capMaxPreemptionRate`, enter the window | A line, and so throughput capacity, on a variant whose only replica in reach is at its cap (#287) | A replica at its cap above the band: refused on the parent, admitted on. With the gate on and this off, the variant has no line |
@@ -1649,7 +1651,7 @@ not hold the decode pod at its cap without preempting.
 | PR | contains | goldens |
 | --- | --- | --- |
 | 4b-0 | the admission's inputs, wired and not yet used: settle view, slope hold and interval in the admission; the capacity store wired but not read until 4b-1 (`EngineParams` only, then), wired in main (`Engine.NewThroughputAnalyzer`) and in replay; the policy read through interfaces (`itlPolicyOf`); `start.ThroughputConfig`, so a recording states the analyzer's settings and a replay builds it as the run did. The window still reads only the band | none move: every golden replays byte for byte |
-| 4b-1 | the two recordings with base goldens (own commit, taken after 4b-0 merged); the shared generator and simulator; the verbosity test; `throughput-itl-steady-gate`, `learner-write` | as named above |
+| 4b-1 | the two recordings with base goldens (own commit, taken after 4b-0 merged); the shared generator and simulator; the verbosity test; `throughput-itl-steady-gate`, `throughput-itl-keeps-the-window-on-gps-mismatch`, `learner-write` | as named above |
 | 4b-2 | `throughput-itl-reads-the-settle-tracker`, `throughput-itl-waits-after-controller-restart` | the restart wait's |
 | 4b-3 | `throughput-itl-admits-at-sequence-cap` | none expected |
 
@@ -1659,21 +1661,80 @@ recordings then land in 4b-2 with their base goldens. Forget for this line
 own after 4b-3.
 
 Decided on the design: the real 2-GPU recording; the cap stays synthetic;
-the shape-change and GPS clears are kept, holding B and the last A; the
+the shape-change clear is kept, holding B and the last A (the GPS-mismatch
+clear, first kept too, is dropped: see below); the
 analyzer reads `EngineParams` from the store now, not after #345;
 `T2-held` is a new `Reason`; the k-weighted pinned fit is in scope (the
 exception section 7 names); the four-PR split.
 
-**For 4b-1 to decide: the GPS-mismatch clear.** The throughput analyzer
-clears its window after three cycles in a row whose generated-token rate
-disagrees with its line (`T/analyzer.go`, `DefaultGPSMismatchClearThreshold`),
-a rule that predates 4b. Kept, it can empty the window every few cycles, so
-a run never fills it and never fits a full line; a differential test of
-4b-0 had to drop the generated-token rate to fill its window at all. The
-recording counts the clears (the recipe's step 4 greps for
-`GPS mismatch persisted, clearing observation window`) and is kept whatever
-the count. 4b-1 reads that count against the run's full fits and decides
-whether the clear stays, holding B and the last A, or goes for the line.
+#### The GPS-mismatch clear: dropped in 4b-1
+
+**Decision: the throughput line's window is no longer cleared on a GPS
+mismatch.** The mismatch is still computed and logged, and the line keeps
+its readings. It is a named change of its own in 4b-1, behind
+`throughput-itl-keeps-the-window-on-gps-mismatch`, apart from the steady
+gate. This revises the earlier "kept" for this clear; the shape-change
+clear stays, through `Tracker.ClearWindow`.
+
+**What it does today.** Each cycle `checkVariantGPSMismatch`
+(`T/analyzer.go:855-939` at f7b4f7e47) compares, per replica at an instant k
+of at least 0.30, the rate the line predicts, `k·C / KVreq / ITL(k)`
+(`itl.TokenRate`), with the replica's `GenerationTokenRate`. Over 15 %
+(`itl.DefaultGPSMismatchThresholdPct`) on any replica is a mismatch. Three
+cycles in a row clear the variant's window (`consecutiveGPSMismatches`,
+`T/analyzer.go:441-455`, `DefaultGPSMismatchClearThreshold`); B is kept.
+
+**Why it existed, and why that is gone.** It came with the analyzer
+(efca1b4cf, #1250). There a mismatch also suppressed spare capacity, and the
+stale readings kept that suppression on for up to the window's 30 minutes;
+the clear was added "to break calibration lock". The same PR then dropped
+the suppression: `anyGPSMismatch` is a placeholder no output reads
+(`T/analyzer.go:528-529`). Nothing is locked any more, so the clear only
+throws readings away.
+
+**It trips on a correct line.** On the committed recordings, the check was
+run per Ready row with a known generation rate and ITL, at k >= 0.30, with
+the replica's own observed ITL as the line: the best line there can be, so
+every error left comes from the footprint model `k·C / KVreq` and the time
+base, not from the fit. A clear is three such rows in a row on one pod.
+
+| recording | rows | over 15 %, instant k (as today) | clears, instant k | over 15 %, minute-mean k | `k·C/KVreq` vs running, median / p90 |
+| --- | --- | --- | --- | --- | --- |
+| `e1` (aggregated decode, steady shape) | 596 | 7.4 % | 9 | 0.8 % | 2.5 % / 8.6 % |
+| `e1-tuned` | 564 | 8.2 % | 10 | 1.4 % | 2.5 % / 8.5 % |
+| `ols-sweep` (P/D decode, steps of load and shape) | 95 | 49.5 % | 13 | 36.6 % | 8.6 % / 246 % |
+| `ols-sweep-slo` | 27 | 40.7 % | 2 | 7.1 % | 9.9 % / 24 % |
+| `ols-sweep-slo-restart` | 66 | 53.0 % | 10 | 47.9 % | 26.7 % / 293 % |
+| `pd-restart` (decode at its cap, queued) | 8 | 100 % | 2 | 100 % | 3069 % / 4283 % |
+
+On a steady aggregated fleet a perfect line still clears the window about
+ten times a run, from the instant k alone against a minute's rate. On a P/D
+decode fleet the footprint model itself misses: across a step of load or
+shape, and above all with requests whose KV landed and that wait to be
+scheduled (`pd-restart`), the KV holds far more than the running sequences
+`k·C / KVreq` assumes. A check that cannot pass on the true line is no test
+of the line, and the clear it triggers is what kept the 4b-0 differential
+test's window from filling until its rows dropped the generated-token rate.
+
+**What 4b-1 does instead.** The comparison stays as a diagnostic, on the
+minute-mean k where it was read (`KvUsageForITL`), and its per-pod INFO line
+moves to the debug level with one summary per variant (the verbosity test,
+shipped-behaviour table, would fail a per-replica line at the default
+level). The window keeps its readings: a line that really moved is refitted
+by the steady gate and the window's age and size, which is what row 1 does
+and what no GPS signal ever told it. Kept in the switch-off path, the clear
+is as today.
+
+**Negative control.** A fleet whose generation rate disagrees with a
+correct line by 30 % for three cycles: on the parent the window empties
+(its sample count falls to 0); with the switch on it keeps every reading.
+The step 4 count of the throughput recording (the recipe) is the run-level
+check: with the switch on, the replay must keep at least as many full fits
+as there were clears off.
+
+The recipe keeps its step 4 grep: the recording is taken on 4b-0, where the
+clear still runs, and its count of clears is the evidence above, measured
+on the line itself.
 
 ## 8. Risks and limits
 
