@@ -60,6 +60,8 @@ type ThroughputAnalyzer struct {
 	// learner PR 4b-1 (itl_line.go): SwitchITLSteadyGate and
 	// SwitchITLKeepsWindowOnGPSMismatch. On by the constructor.
 	itlSteadyGate, itlKeepsOnGPSMismatch bool
+	// paths counts the line's fits by path, for the replay (path_counts.go).
+	paths pathCounters
 }
 
 // variantState holds the cross-cycle calibration state for a single variant.
@@ -225,6 +227,7 @@ func (a *ThroughputAnalyzer) observe(
 		// tracker judges each row; the window below is left as it was.
 		if a.itlSteadyGate {
 			state.reading = a.lines.Observe(key, variantName, freshRows(variantMetrics), adm, now)
+			a.paths.count(state.reading)
 			state.hasReading = true
 			continue
 		}

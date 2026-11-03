@@ -677,10 +677,22 @@ type GoldenCheck struct {
 // between them: a golden set that never reaches a path pins nothing about
 // it (analyzer-learner.md, 2.5). Each can run on this base, and so can the
 // settle tracker's verdicts the recordings reach (requiredSettlePaths), and
-// the slo analyzer's line fits (the ols-sweep-slo goldens reach both). With
-// the engine's replay registered, its composite paths are required too.
+// the slo analyzer's line fits (the ols-sweep-slo goldens reach both), and
+// the throughput analyzer's line (requiredThroughputPaths). With the
+// engine's replay registered, its composite paths are required too.
 func requiredPaths() []string {
-	return slices.Concat(saturation.PathNames(), requiredSettlePaths(), slo.PathNames(), enginePathNames())
+	return slices.Concat(saturation.PathNames(), requiredSettlePaths(), slo.PathNames(),
+		requiredThroughputPaths(), enginePathNames())
+}
+
+// requiredThroughputPaths is the throughput line's fits the goldens must
+// keep reaching: full, pinned and held (learner PR 4b-1; the in-process
+// goldens reach each, the held slope on the engine fixture alone). Its settling readings are not: no committed golden
+// carries a joiner's warm-up past the line's admission, so the count is zero
+// there by construction. The throughput-sweep recording's floor requires
+// them once it lands (TestGoldens_ThroughputSweepFloors).
+func requiredThroughputPaths() []string {
+	return []string{throughput.PathITLOLS, throughput.PathITLPinned, throughput.PathITLHeld}
 }
 
 // pathProblems names each required path the fixtures ran on no cycle.

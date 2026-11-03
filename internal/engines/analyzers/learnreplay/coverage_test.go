@@ -93,8 +93,9 @@ var reviewed = map[reflect.Type]buckets{
 	reflect.TypeFor[*throughput.ThroughputAnalyzer](): {
 		recorded: []string{"Analyze", "Observe"},
 		// StartConfig states what the builders set, for the recording's
-		// first line; it changes nothing.
-		readers: []string{"Name", "VariantState", "StartConfig"},
+		// first line; it changes nothing. PathCounts reads the per-path
+		// counters of the ITL line's fits (2.5), which only a replay reads.
+		readers: []string{"Name", "VariantState", "StartConfig", "PathCounts"},
 		// WithSettleView and WithCapacityStore hand the ITL line's admission
 		// the engine's settle tracker and store, read-only; the replay hands
 		// it its own (start.ThroughputConfig).

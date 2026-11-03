@@ -69,7 +69,8 @@ type Report struct {
 	Mismatches []Mismatch
 	// Paths is how often each learner path ran in the replay, by
 	// saturation.PathNames, the settle tracker's verdicts, slo.PathNames
-	// when the run built the slo analyzer, and the engine's paths
+	// when the run built the slo analyzer, throughput.PathNames when it
+	// built the throughput analyzer, and the engine's paths
 	// (analyzer-learner.md, 2.5).
 	Paths map[string]int64
 }
@@ -182,6 +183,9 @@ func Replay(ctx context.Context, recording []byte, opts Options) (*Report, error
 	maps.Copy(r.rep.Paths, r.settle.pathCounts())
 	if r.slo != nil {
 		maps.Copy(r.rep.Paths, r.slo.PathCounts())
+	}
+	if r.tp != nil {
+		maps.Copy(r.rep.Paths, r.tp.PathCounts())
 	}
 	if r.engine != nil {
 		maps.Copy(r.rep.Paths, r.engine.PathCounts())
