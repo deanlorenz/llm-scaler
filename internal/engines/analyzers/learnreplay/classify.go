@@ -238,6 +238,7 @@ var keyRules = map[string]rule{
 	"Accelerators": {class: classComposite}, "Args": {class: classComposite}, "Config": {class: classComposite},
 	"Forgotten": {class: classComposite}, "ITLBaseline": {class: classComposite},
 	"ITLBaselineStash": {class: classComposite}, "ITLLines": {class: classComposite},
+	"ITLLineShapes":    {class: classComposite},
 	"ITLLinesPerToken": {class: classComposite}, "ITLPerToken": {class: classComposite},
 	"ITLSlopes": {class: classComposite}, "K2": {class: classComposite}, "K2Args": {class: classComposite},
 	"K2BorrowedSince": {class: classComposite}, "K2Stash": {class: classComposite},

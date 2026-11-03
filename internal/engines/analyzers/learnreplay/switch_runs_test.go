@@ -40,34 +40,26 @@ import (
 // replaySwitches is each replay switch of this PR, saturation's or slo's
 // (switchPackage), and the golden outputs (fixture/file) it is named to move.
 //
-// #432 fits an ITL line for an aggregated (unlabeled, RoleBoth) variant, as
-// for decode, and reports the mu it derives without pricing it (until #275:
-// the line depends on the request shape); its line is shared only with
-// other aggregated variants (a physics key ending in |both). It moves the
-// acceptance and engine fixtures, the two whose models run aggregated
-// variants (model-01's variant-01 and variant-02, model-02's variant-03); no
-// other fixture has one. Measured, all off against all on:
+// #275 prices an aggregated variant's ITL line by request shape, in two
+// switches. Its base is #432's head (bda06fb18): #432's switch is an earlier
+// seam here (earlierSeams), on in every run below. Measured, each alone
+// against all off:
 //
-//   - lines.csv: model-01's variant-01 publishes a line under its |both key
-//     on its first fit (09:32:00), and variant-02, on the same engine
-//     configuration, borrows it on three cycles. No decode line moves.
-//   - learned-state.csv: that line, variant-01's intercept and its held
-//     slope join the two exports (three rows each).
-//   - variant-capacities.csv: 28 of 180 rows (acceptance) and 28 of 156
-//     (engine), all on the three aggregated variants. ServiceRate reads the
-//     ITL window on all 28 and its sample count on 16; on six rows of
-//     variant-01 and variant-02 it has a line (A 0.020, B 0.006,
-//     ITL 0.0196 s at the pricing point) and a reported rate of 10.88/s,
-//     source derived-report-only. Nothing is priced from it: no demand,
-//     capacity, reason or borrow record moves (TotalDemand,
-//     PerReplicaCapacity, Reason and Borrowed are unchanged on every row),
-//     and the composite's records do not move at all.
+//   - SwitchITLAggregatedShapeTerm moves acceptance/learned-state.csv and
+//     engine/learned-state.csv, one row each export (two per file): model-01's
+//     |both line now carries the shape it was fitted at (ITLLineShapes, g
+//     257.14 at the fixture's shape), with no prefill reading (sigmaOK false:
+//     the recordings carry no running-request count or completion rate on
+//     the aggregated rows) and no point (a point needs one). Nothing else
+//     moves: with no prefill reading the reported figure is #432's, on the
+//     same case (the shape never moves past the tolerance in either fixture).
+//   - SwitchITLAggregatedSizes moves nothing: it lifts only a figure with a
+//     prefill reading and a GPS check that agreed, and no fixture has
+//     either for an aggregated variant. Its unit tests hold it (heldBy), as
+//     the shape term's cases, c, the prefill correction and the cap at a
+//     measured rate are held by theirs (itl_aggregated_shape_test.go).
 //
-// That the line never sizes -- at steady load, through a shape change and
-// after it, held through light load -- moves no golden further: no fixture
-// would order on it. TestITLAggregated_TheDerivedMuIsReportedNotPriced,
-// TestITLAggregated_AnOldShapeLineNeverOrders and
-// TestITLAggregated_AHeldLineNeverOrders hold it.
+// Both on moves nothing past the shape term's two files: no interaction.
 //
 // #438 prices a vLLM data-parallel decode or aggregated variant at zero
 // replicas at every engine rank its leader pod runs, not one: the derived
@@ -80,15 +72,13 @@ import (
 // batch cap, #415's mu key, #392's first k2 reading, #420's batch-cap
 // readers, #274's ITL per accepted token, #276's output spread, #427's
 // zero-replica batch cap, #431's forget of the slo line, #277's resident
-// prefix-cache hits) are not here: "all off" is this PR's switches, and an
-// earlier PR's stay at their constructor default, on, as the base goldens
-// were written (analyzer-learner.md, 2.5).
+// prefix-cache hits, #432's aggregated line) are not here: "all off" is this
+// PR's switches, and an earlier PR's stay at their constructor default, on,
+// as the base goldens were written (analyzer-learner.md, 2.5).
 var replaySwitches = map[string][]string{
 	saturation.SwitchZeroReplicaDataParallel: nil,
-	saturation.SwitchITLFitsAggregated: {
-		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
-		"engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
-	},
+	saturation.SwitchITLAggregatedShapeTerm:  {"acceptance/learned-state.csv", "engine/learned-state.csv"},
+	saturation.SwitchITLAggregatedSizes:      nil,
 }
 
 // learner4aSeams is learner PR 4a's switches, earlier seams now (merged
@@ -196,9 +186,37 @@ var earlierSeams = withSeams(learner4aSeams, map[string][]string{
 	// between the prefix-cache hit rate's discount and none. It moves the
 	// derived mu, and the decode demand the floor prices from it, in the two
 	// fixtures whose derived mu the KV binds rather than the batch cap.
+	//
+	// Since #275 it moves the shape an aggregated line is fitted at too
+	// (ITLLineShapes in the acceptance and engine exports): g is priced from
+	// the KV a request holds, which #277 bounds (g 257.14 on, 281.25 off).
 	saturation.SwitchKVPerRequestHitsResident: {
+		"acceptance/learned-state.csv",
 		"e1-tuned/results.csv", "e1-tuned/variant-capacities.csv",
 		"e1/results.csv", "e1/variant-capacities.csv",
+		"engine/learned-state.csv",
+	},
+	// #432 fits an ITL line for an aggregated (unlabeled, RoleBoth) variant,
+	// as for decode, and reports the mu it derives without pricing it; its
+	// line is shared only with other aggregated variants (a physics key
+	// ending in |both). It moves the acceptance and engine fixtures, the two
+	// whose models run aggregated variants (model-01's variant-01 and
+	// variant-02, model-02's variant-03); no other fixture has one. As #432
+	// measured it, all off against all on:
+	//
+	//   - lines.csv: model-01's variant-01 publishes a line under its |both
+	//     key on its first fit (09:32:00), and variant-02, on the same engine
+	//     configuration, borrows it on three cycles. No decode line moves.
+	//   - learned-state.csv: that line, variant-01's intercept and its held
+	//     slope join the two exports (three rows each); since #275 the line's
+	//     shape (ITLLineShapes) too, which #275's switches need it on for.
+	//   - variant-capacities.csv: 28 of 180 rows (acceptance) and 28 of 156
+	//     (engine), all on the three aggregated variants: the ITL window, the
+	//     line and a reported rate of 10.88/s, source derived-report-only.
+	//     No demand, capacity, reason or borrow record moves.
+	saturation.SwitchITLFitsAggregated: {
+		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
+		"engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
 	},
 })
 
@@ -223,6 +241,14 @@ func withSeams(more, rows map[string][]string) map[string][]string {
 // test that holds the same on either side is a control, not a hold, and is
 // not listed here.
 var heldBy = map[string][]heldTest{
+	// Issue #275's lift: an aggregated figure sizes once the GPS check has
+	// agreed. Both run the switch on and fail with it off: the first checks
+	// the lifted rate against a run with it off, the second needs the lift
+	// before the shape moves.
+	saturation.SwitchITLAggregatedSizes: {
+		{"../saturation", "TestAggregatedShape_ALiftedLineSizesAtTheCorrectedRate"},
+		{"../saturation", "TestAggregatedShape_AnOldLineDoesNotPriceAHeavierShape"},
+	},
 	// Issue #438's data-parallel ranks at zero replicas.
 	saturation.SwitchZeroReplicaDataParallel: {
 		{"../saturation", "TestZeroReplicaDataParallel_AnEightRankDecodeIsPricedAtEveryRank"},
@@ -418,15 +444,11 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch of this PR names, as the
-// base commit's goldens hold it (ebcba8528, main after #450; the six are
-// unchanged since 0da4f9ac2). #438's switch names none.
+// base commit's goldens hold it (bda06fb18, #432's head). #438's switch and
+// #275's lift name none.
 var switchBase = map[string]string{
-	"acceptance/learned-state.csv":      "a6eececb06d24586d9b1325423e2f362c75038b4d3aeb20e50bf9409d7ce82cf",
-	"acceptance/lines.csv":              "085ad326a18aa646144b6fd11718ae04ceda58ab77c03b7fca62a5f01ad155a6",
-	"acceptance/variant-capacities.csv": "30f5279ca4c19b6e50fb1567b8e018172423e5756782535a9a94411591ffb63a",
-	"engine/learned-state.csv":          "a6eececb06d24586d9b1325423e2f362c75038b4d3aeb20e50bf9409d7ce82cf",
-	"engine/lines.csv":                  "085ad326a18aa646144b6fd11718ae04ceda58ab77c03b7fca62a5f01ad155a6",
-	"engine/variant-capacities.csv":     "4765d306858eb2dc564bc93cf352c5947ec85f3ca9d503d48629a98e11cab755",
+	"acceptance/learned-state.csv": "abbdac1e95770a5ae4c725df3fad79ff7161c51ddcbb4f4b5556a04ad5ef81fe",
+	"engine/learned-state.csv":     "b952523f5c06d191f70de1b824a8d9db1ab760f37122d0cdb5672f5632ed6aa1",
 }
 
 // The slow tests of this package run in parallel with each other (each

@@ -546,34 +546,51 @@ P/D-specific: the decode view of the queue (`pd_decode_queue.go`), the
 settled-idle count that relaxes prefill's hold (`idle_room.go`) and decode's
 saturation flag.
 
-An aggregated line is **reported, never priced** (`itlLineReportOnly`, until
-#275). `priceReplicas` derives its mu and logs it (`derived-mu` with
-`reportOnly=true`), then prices the replica with no derived figure
-(`derivedWhyReportOnly`), exactly as with the switch off: no order, no
-settled shape change and no borrow record rests on it. The figure reaches
+An aggregated line is **reported** until it has earned sizing
+(`itlLineReportOnly`; #432 reported it only). `priceReplicas` derives its mu
+and logs it (`derived-mu` with `reportOnly=true`), then prices the replica
+with no derived figure (`derivedWhyReportOnly`): no order, no settled shape
+change and no borrow record rests on it. The figure reaches
 `wva_service_rate_per_replica` as `source=derived-report-only` when the
-variant has no other rate. Why it may not size yet, the inputs for #275:
+variant has no other rate. Three things stood in the way of sizing, and
+`itl_aggregated_shape.go` handles each (issue #275,
+[the proposal](../proposals/aggregated-itl-shape.md)):
 
 - Shape dependence. An aggregated pod's ITL carries the chunked prefill it
   runs between decode steps, about `n*IL/OL` prompt tokens a step, so the
-  line is a property of the request shape. A line fitted under one shape
-  mis-prices another, and nothing bounds how long: a pinned fit takes several
-  cycles to move, a held slope (#284), a restored line and a `|both` borrow
-  carry an old shape for as long as they are kept, well past the 5-minute
-  shape-change window.
-- Prefill occupancy. A sequence being prefilled holds KV and emits no token,
-  so a mu priced from `k` and `ITL(k)` over-states the rate by about
-  `TTFT/(OL*ITL)`.
+  slope at shape `g = C*IL_eff/(KVreq*OL)` is `A + c*g`. Every line carries
+  the `g` it was fitted at (`lineShape.g` on `learnedLine`, `aggState.lineG`
+  for a held slope); `noteAggregatedShape` drops the window
+  (`itl.Tracker.ClearWindow`) when `g` moves past `aggShapeTolerance`, so no
+  fit mixes two shapes. `c` is fitted from the slopes of two or more shapes
+  (`lineShape.points`, `fitShapeTerm`). `resolveAggregatedPrice` prices a
+  shape at or below the line's own `g` at the line's slope (never lower:
+  `c >= 0`), a heavier one through `c` only, and a heavier one with no `c`
+  not at all (`shape-unpriced`).
+- Prefill occupancy. A sequence being prefilled holds KV and emits no token.
+  `noteOccupancy` reads the prefill steps per prompt token (`sigma`) by
+  Little's law, `RunningRequests/(RequestRate*ITL) - OL` over `IL_eff`,
+  refusing a residence under `OL` (`aggState.refused`); `occupancyFactor`
+  scales the derived rate by `OL/(OL + sigma*IL_eff)`.
+- The lift. `noteAggregatedLift` lifts a variant once its GPS check
+  (`gpsErrorPct`, with the shape term and the correction) agrees within 15%
+  on `aggLiftCycles` consecutive comparable cycles, and drops it on as many
+  disagreeing ones, a shape move, a missing figure or `sigma`, or an
+  outstanding shape change. A lifted figure carries `capAtMeasured`, so
+  `pricedDerivedRate` never prices it above a measured rate of the variant's
+  own. The thresholds are named constants and unmeasured.
 - One shape per fleet. The line is fitted at the fleet's shape, so a variant
-  serving a shape of its own gets an average.
+  serving a shape of its own gets an average. Not handled.
+
+`SwitchITLAggregatedShapeTerm` gates the tags, the window drop, the points
+and the corrected figure; `SwitchITLAggregatedSizes` the lift, which needs
+the tags. A line's shape is persisted in `itlLineShapes`; a held slope
+restored across a restart takes its shape from the line it published.
 
 An aggregated line is shared under its own key: `itlLineKeyForRole` appends
 `|both` to the physics key, so the same model on the same engine
 configuration keeps one line for decode pods and another for aggregated pods,
-and neither lends to the other. The window key is per variant already. An
-aggregated pod's ITL also carries the chunked prefill it interleaves, so its
-line depends on the request shape (issue #275); it is fitted at the shape the
-fleet runs and is not corrected for a change of it.
+and neither lends to the other. The window key is per variant already.
 
 ### ITL per accepted token (speculative decoding)
 

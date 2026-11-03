@@ -436,7 +436,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		}
 	}
 	if useDerived(derived.ok, reading) || yield != muYieldNone {
-		saturatedThroughput = derived.rate
+		saturatedThroughput = pricedDerivedRate(derived, reading)
 		throughputBucket = derivedBucket
 		// Not the stale measured count, which describes a different figure
 		// entirely and only ever reached a log line as a confusing number.
@@ -678,6 +678,21 @@ func useDerived(derivedOK bool, reading throughputReading) bool {
 	ownMeasured := !reading.borrowed && reading.rate > 0 &&
 		reading.samples >= floor.MinThroughputSamplesToOrder
 	return !ownMeasured
+}
+
+// pricedDerivedRate is the rate a derived figure prices a replica at: the
+// figure, and for one that may not price above a measured rate of the
+// variant's own (derivedMu.capAtMeasured, an aggregated variant's lifted
+// figure, issue #275) the lower of the two where the variant has one,
+// however thin. The figure rests on a shape term and a prefill correction
+// that are estimates, so the lower prices it, as a stale pair that
+// disagrees does (measuredYieldsToDerived). A reading borrowed from another
+// bucket is not the variant's own.
+func pricedDerivedRate(derived derivedMu, reading throughputReading) float64 {
+	if derived.capAtMeasured && !reading.borrowed && reading.rate > 0 {
+		return min(derived.rate, reading.rate)
+	}
+	return derived.rate
 }
 
 // derivedBucket is the sentinel the bucket label carries when mu was derived

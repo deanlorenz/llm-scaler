@@ -240,6 +240,7 @@ SATURATION_CONFIG_MAP_NAME
 SCALE_FROM_ZERO_ENGINE_MAX_CONCURRENCY
 SCALING
 SCALING_POLICY_CONFIG_MAP_NAME
+SGLang
 STOP
 Safety
 Saturation
@@ -347,6 +348,8 @@ against
 age
 aged
 ago
+agree
+agreed
 aim
 all
 all2all_backend
@@ -568,6 +571,7 @@ complete
 completed
 completely
 completes
+completion
 completions
 composite
 composite-built
@@ -594,6 +598,7 @@ configuration
 configured
 confirmCycles
 confirmedFor
+consecutive
 consecutiveFailures
 considered
 constrained
@@ -700,6 +705,8 @@ disabledBy
 disabledByPerModelEntry
 disables
 disaggregation_transfer_backend
+disagree
+disagreed
 discarded
 discarding
 discover
@@ -879,6 +886,7 @@ fresh
 freshFor
 from
 fromBucket
+fromG
 fromLastConstraintsAge
 frozen
 full
@@ -1024,6 +1032,11 @@ it
 items
 iteration
 itl
+itl-aggregated-lift
+itl-aggregated-no-occupancy
+itl-aggregated-shape-moved
+itl-aggregated-shape-term
+itl-aggregated-sizes
 itl-fit
 itl-fit-declined
 itl-gps-mismatch
@@ -1044,6 +1057,7 @@ itl-window
 itl-withheld
 itl-withheld-ended
 itlA
+itlAggregated
 itlArgs
 itlAtKPrice
 itlB
@@ -1064,6 +1078,7 @@ itlWindows
 itlWithheldLogged
 itlZero
 itl_non_positive
+itlshape|
 itlslope|
 itlstash|
 itlunit|
@@ -1191,6 +1206,7 @@ lenderDebounce
 length
 lent
 let
+lifted
 likely
 limit
 limited
@@ -1198,6 +1214,7 @@ limiter
 limiterTypes
 limiters
 line
+line-shape-unknown
 lineA
 lineB
 lineBatchCap
@@ -1206,6 +1223,7 @@ lineBorrowed
 lineBorrowedFrom
 lineHeld
 lineKey
+lineShapeG
 lineSlopeAge
 lineSlopeHeld
 lineTier
@@ -1236,6 +1254,7 @@ lowerBound
 lowerBounds
 lowered
 lowering
+made
 main.go
 make
 makes
@@ -1280,6 +1299,7 @@ measure
 measured
 measuredRate
 measures
+medianErrPct
 medium
 mem_fraction_static
 memory-bound
@@ -1458,6 +1478,7 @@ observe
 observed
 observed/historical/derived
 observedGPS
+occupancy
 of
 off
 offered
@@ -1608,6 +1629,9 @@ prefill-required
 prefill-throughput-bound-reading
 prefillDemandAfter
 prefillDemandBefore
+prefillKnown
+prefillRefused
+prefillStepsPerToken
 prefix-cache-scorer
 prefix_caching_disabled
 preparation
@@ -1620,7 +1644,9 @@ previousB
 previousSource
 previousValue
 price
+priceCase
 priced
+pricedA
 prior
 prior-live
 priority
@@ -1642,6 +1668,7 @@ provided
 provider
 providersSkipped
 published
+publishes
 quantization
 quarter
 query
@@ -1942,7 +1969,15 @@ sh
 shadow
 shape
 shape-change
+shape-covered
+shape-term
+shape-unknown
+shape-unpriced
 shapeChangeHoldSeconds
+shapeChanging
+shapeG
+shapeTermC
+shapeTermIdentified
 share
 share-claimed
 shared
@@ -1957,6 +1992,7 @@ siblingRate
 siblingRateNow
 side
 sight
+sigmaOK
 signal
 since
 single
@@ -1990,6 +2026,7 @@ slo.EvictStale
 slo.ForgetVariant
 slo.NoteVariantsPresent
 sloEntries
+slope
 slopeAge
 slopeAgeSeconds
 slopeHeld
@@ -2016,6 +2053,7 @@ speculative_eagle_topk
 speculative_num_draft_tokens
 speculative_num_steps
 spend
+spends
 spent
 spread
 stabilization.skipWaitsWhen
@@ -2055,6 +2093,7 @@ steadyHeld
 steadySpread
 steered
 step
+steps
 still
 stop
 stopped
@@ -2148,6 +2187,7 @@ tls.crt
 tls.key
 to
 toBucket
+toG
 today
 together
 token
@@ -2281,6 +2321,8 @@ victim
 vllm
 vllm.entrypoints
 vllm:cache_config_info
+vllm:num_requests_running
+vllm:request_generation_tokens_count
 vllm:spec_decode_num_accepted_tokens_total
 volume
 wait
@@ -2295,6 +2337,7 @@ warm-pool
 warm-pool-bridge-supply
 warm-pool-supply
 was
+wasLifted
 watch
 watch-namespace
 watchNamespace
@@ -2322,6 +2365,7 @@ whose
 why
 will
 window
+windowDropped
 windowSamples
 windows
 wins

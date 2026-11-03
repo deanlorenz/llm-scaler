@@ -71,6 +71,17 @@ var derivedMuMetricFields = map[string]derivedMuField{
 	"reportOnly":           {excluded: "an aggregated line's figure is reported, not priced (#432); wva_service_rate_per_replica publishes it as source=derived-report-only"},
 	"residentKVBound":      {excluded: "which bound kvReqPerSeq held residentKVPerSeq to (#277), a label, not a figure: the shape family (stage 1), not built yet"},
 	"residentKVBoundFleet": {excluded: "which bound kvReqFleet held residentKVPerSeq to (#277), a label, not a figure: the shape family (stage 1), not built yet"},
+	"shapeG":               {excluded: "an aggregated line's shape now (#275): a term of the price, logged to diagnose it; wva_service_rate_per_replica publishes the rate"},
+	"lineShapeG":           {excluded: "the shape an aggregated line was fitted at (#275): a term of the price, logged to diagnose it"},
+	"priceCase":            {excluded: "which case priced an aggregated line (#275), a label, not a figure"},
+	"pricedA":              {excluded: "the slope an aggregated line priced (#275): itlA moved by the shape term; wva_itl_line_slope publishes the line's own"},
+	"shapeTermC":           {excluded: "the prefill cost per token of an aggregated line (#275): a term of the price, logged to diagnose it"},
+	"shapeTermIdentified":  {excluded: "whether shapeTermC is identified (#275), a flag, not a figure"},
+	"prefillStepsPerToken": {excluded: "the prefill steps per prompt token of an aggregated variant (#275): a term of the occupancy correction"},
+	"prefillKnown":         {excluded: "whether prefillStepsPerToken is read (#275), a flag, not a figure"},
+	"prefillRefused":       {excluded: "the prefill readings an aggregated variant has had refused (#275): residence under the output's own steps, a diagnostic"},
+	"occupancy":            {excluded: "the share of an aggregated replica's steps that emit a token (#275), already in rate"},
+	"lifted":               {excluded: "an aggregated figure sizes (#275); wva_service_rate_per_replica says it by its source"},
 }
 
 // derivedMuLogKeys parses analyze.go and returns the string-literal keys of
