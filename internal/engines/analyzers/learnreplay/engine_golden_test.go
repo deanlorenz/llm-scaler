@@ -67,6 +67,7 @@ func TestEngineGoldens_EveryEngineOutputComparesRows(t *testing.T) {
 // Negative control: an engine golden that no longer matches its replay is a
 // problem, named by its file, for each engine output.
 func TestEngineGoldens_AnEditedEngineGoldenFails(t *testing.T) {
+	t.Parallel() // reads the goldens, writes only to its own copies (TestGoldens_TheSwitchRuns)
 	for _, o := range EngineOutputNames() {
 		t.Run(o, func(t *testing.T) {
 			dir := copyGoldens(t)
@@ -144,6 +145,7 @@ func TestEngineGoldens_TheEmptyRulesReadTheEnginesPathNames(t *testing.T) {
 // Accept side: pd-restart's replay does neither, and its two files are empty
 // by the rule, not by its name.
 func TestEngineGoldens_AnEmptyEngineOutputNeedsARule(t *testing.T) {
+	t.Parallel() // reads the goldens, writes only to its own copies (TestGoldens_TheSwitchRuns)
 	ctx := context.Background()
 	empty, err := writeRows(nil)
 	require.NoError(t, err)

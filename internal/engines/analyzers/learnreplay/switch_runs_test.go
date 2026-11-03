@@ -4,12 +4,16 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -359,7 +363,16 @@ var switchBase = map[string]string{
 	"ols-sweep-slo-restart/variant-capacities.csv": "9aa0b55d9a5742e32dc1ede8df641bbc1374429cb6c25680e666d465f257fb08",
 }
 
+// The slow tests of this package run in parallel with each other (each
+// marked "reads the goldens, writes only to its own copies"): each replays
+// with analyzers of its own and writes only under t.TempDir. The one test
+// that swaps the registered engine replayer
+// (TestEngineGoldens_NoEngineRegisteredIsAProblem) is not
+// parallel, so it has restored it before any of them starts. Run in turn,
+// the package took about 330 s with coverage, past the CI job's 10 min on a
+// runner half as fast; this test alone took 139 s of it.
 func TestGoldens_TheSwitchRuns(t *testing.T) {
+	t.Parallel() // reads the goldens, writes nowhere
 	m, err := ReadManifest(goldenDir)
 	require.NoError(t, err)
 	named := map[string]bool{}
@@ -369,34 +382,6 @@ func TestGoldens_TheSwitchRuns(t *testing.T) {
 			require.Contains(t, switchBase, o, "an output a switch names needs its base digest")
 		}
 	}
-	// run replays every fixture with the switches set, and returns its
-	// outputs by fixture/file.
-	run := func(sw map[string]bool) map[string][]byte {
-		out := map[string][]byte{}
-		for _, g := range m.Goldens {
-			gz, err := os.ReadFile(filepath.Join(goldenDir, filepath.FromSlash(g.Recording)))
-			require.NoError(t, err)
-			rec, err := gunzip(gz)
-			require.NoError(t, err)
-			byPkg := map[string]map[string]bool{}
-			for name, on := range sw {
-				pkg := switchPackage(name)
-				if byPkg[pkg] == nil {
-					byPkg[pkg] = map[string]bool{}
-				}
-				byPkg[pkg][name] = on
-			}
-			rep, err := Replay(context.Background(), rec, Options{Mode: Normal, Switches: byPkg})
-			require.NoError(t, err)
-			require.Empty(t, rep.Failed(), "%s: the replay failed", g.Name)
-			outs, err := Outputs(rep.Recording)
-			require.NoError(t, err)
-			for _, f := range g.Outputs {
-				out[f] = outs[path.Base(f)]
-			}
-		}
-		return out
-	}
 	set := func(on ...string) map[string]bool {
 		sw := map[string]bool{}
 		for name := range replaySwitches {
@@ -404,6 +389,30 @@ func TestGoldens_TheSwitchRuns(t *testing.T) {
 		}
 		return sw
 	}
+	allOn := func() map[string]bool { return set(slices.Collect(maps.Keys(replaySwitches))...) }
+
+	// Every run the rule asks for, replayed up front: all off, each of this
+	// PR's switches alone, all on, and each earlier seam off alone from all
+	// on. Each run is independent of the others (its own analyzers, store
+	// and settle tracker), so the replays run in parallel, one per fixture
+	// per run, bounded by GOMAXPROCS; the comparisons below then read them
+	// in the order the rule states.
+	mine := slices.Sorted(maps.Keys(replaySwitches))
+	earlier := slices.Sorted(maps.Keys(earlierSeams))
+	sets := make([]map[string]bool, 0, len(mine)+len(earlier)+2)
+	sets = append(sets, set())
+	for _, name := range mine {
+		sets = append(sets, set(name))
+	}
+	sets = append(sets, allOn())
+	for _, name := range earlier {
+		sw := allOn()
+		sw[name] = false
+		sets = append(sets, sw)
+	}
+	runs := replaySets(t, m, sets)
+	off, alone, on, earlierOff := runs[0], runs[1:1+len(mine)], runs[1+len(mine)], runs[2+len(mine):]
+
 	// moved is the outputs that differ between two runs, sorted, each
 	// logged with the replay's one-line summary of how.
 	moved := func(name string, from, to map[string][]byte) []string {
@@ -420,7 +429,6 @@ func TestGoldens_TheSwitchRuns(t *testing.T) {
 		return out
 	}
 
-	off := run(set())
 	for f, b := range off {
 		if named[f] {
 			sum := sha256.Sum256(b)
@@ -434,14 +442,13 @@ func TestGoldens_TheSwitchRuns(t *testing.T) {
 		require.NoError(t, err)
 		require.Nil(t, d, "all off: %s moved, and no switch names it", f)
 	}
-	for _, name := range slices.Sorted(maps.Keys(replaySwitches)) {
-		got := moved(name, off, run(set(name)))
+	for i, name := range mine {
+		got := moved(name, off, alone[i])
 		// Exactly what it names: a named output that does not move is an off
 		// path that went dead.
 		require.ElementsMatch(t, replaySwitches[name], got, "%s alone must move exactly the outputs it names", name)
 		t.Logf("%s alone moves %d outputs: %v", name, len(got), got)
 	}
-	on := run(set(slices.Collect(maps.Keys(replaySwitches))...))
 	for f, b := range on {
 		committed, err := os.ReadFile(filepath.Join(goldenDir, filepath.FromSlash(f)))
 		require.NoError(t, err)
@@ -449,11 +456,90 @@ func TestGoldens_TheSwitchRuns(t *testing.T) {
 		require.NoError(t, err)
 		require.Nil(t, d, "all on: %s is not the committed golden", f)
 	}
-	for _, name := range slices.Sorted(maps.Keys(earlierSeams)) {
-		sw := set(slices.Collect(maps.Keys(replaySwitches))...)
-		sw[name] = false
-		got := moved(name, on, run(sw))
+	for i, name := range earlier {
+		got := moved(name, on, earlierOff[i])
 		require.ElementsMatch(t, earlierSeams[name], got, "%s off alone must move exactly the outputs its PR named", name)
 		t.Logf("%s off alone moves %d outputs: %v", name, len(got), got)
 	}
+}
+
+// replaySets replays every fixture of m once per switch set, and returns,
+// per set, its outputs by fixture/file. Each fixture's recording is read
+// once; the replays run on GOMAXPROCS workers, since each builds its own
+// analyzers and touches no state another shares.
+func replaySets(t *testing.T, m *Manifest, sets []map[string]bool) []map[string][]byte {
+	t.Helper()
+	recs := make([][]byte, len(m.Goldens))
+	for i, g := range m.Goldens {
+		gz, err := os.ReadFile(filepath.Join(goldenDir, filepath.FromSlash(g.Recording)))
+		require.NoError(t, err)
+		recs[i], err = gunzip(gz)
+		require.NoError(t, err)
+	}
+	type job struct{ set, golden int }
+	type result struct {
+		job
+		outs map[string][]byte
+		err  error
+	}
+	jobs := make(chan job)
+	results := make(chan result)
+	var wg sync.WaitGroup
+	for range runtime.GOMAXPROCS(0) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				outs, err := replayGolden(recs[j.golden], m.Goldens[j.golden].Name, sets[j.set])
+				results <- result{job: j, outs: outs, err: err}
+			}
+		}()
+	}
+	go func() {
+		for s := range sets {
+			for g := range m.Goldens {
+				jobs <- job{set: s, golden: g}
+			}
+		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+	}()
+	out := make([]map[string][]byte, len(sets))
+	for i := range out {
+		out[i] = map[string][]byte{}
+	}
+	var errs []error
+	for r := range results {
+		if r.err != nil {
+			errs = append(errs, r.err)
+			continue
+		}
+		for _, f := range m.Goldens[r.golden].Outputs {
+			out[r.set][f] = r.outs[path.Base(f)]
+		}
+	}
+	require.NoError(t, errors.Join(errs...))
+	return out
+}
+
+// replayGolden replays one fixture's recording with the switches set, and
+// returns its outputs by file.
+func replayGolden(rec []byte, name string, sw map[string]bool) (map[string][]byte, error) {
+	byPkg := map[string]map[string]bool{}
+	for n, on := range sw {
+		pkg := switchPackage(n)
+		if byPkg[pkg] == nil {
+			byPkg[pkg] = map[string]bool{}
+		}
+		byPkg[pkg][n] = on
+	}
+	rep, err := Replay(context.Background(), rec, Options{Mode: Normal, Switches: byPkg})
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
+	}
+	if f := rep.Failed(); len(f) > 0 {
+		return nil, fmt.Errorf("%s: the replay failed: %v", name, f)
+	}
+	return Outputs(rep.Recording)
 }

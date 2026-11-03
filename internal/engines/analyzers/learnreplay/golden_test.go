@@ -105,6 +105,7 @@ func editGolden(t *testing.T, dir, output string, edit func([]row) []row) {
 // check reports, and two ways a replay varies that are not a change of
 // output are not.
 func TestGoldens_TheCheckFails(t *testing.T) {
+	t.Parallel() // reads the goldens, writes only to its own copies (TestGoldens_TheSwitchRuns)
 	require.Empty(t, checkProblems(t, copyGoldens(t)), "precondition: the copy passes")
 
 	t.Run("when an output moves", func(t *testing.T) {
