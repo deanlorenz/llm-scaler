@@ -51,6 +51,14 @@ func TestFleetHasMeasuredItselfRejectsABorrowedLine(t *testing.T) {
 				"earned, and clears the staleShape that would otherwise cap it")
 	})
 
+	t.Run("a shape-stale line does not settle the hold", func(t *testing.T) {
+		// An aggregated variant's own line while the shape changes (#432):
+		// fitted under the shape that left, it speaks for that one.
+		rc := derivedFrom(false)
+		rc.SaturatedThroughputShapeStale = true
+		assert.False(t, fleetHasMeasuredItself([]capacity.ReplicaCapacity{rc}))
+	})
+
 	t.Run("a measured window still settles it, borrowed line or not", func(t *testing.T) {
 		// A variant may hold a borrowed line AND have its own measured window;
 		// the window is what settles the hold, and must keep doing so.

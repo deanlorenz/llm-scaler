@@ -202,9 +202,11 @@ type Term struct {
 // serving different request shapes.
 //
 // A derived figure from the variant's OWN line is not borrowed and keeps its
-// licence to order without a sample count.
+// licence to order without a sample count -- unless that line depends on the
+// request shape and the shape is changing (SaturatedThroughputShapeStale):
+// then it describes the shape that left, and is routed as a borrowed figure.
 func borrowedReading(rc capacity.ReplicaCapacity) bool {
-	if rc.SaturatedThroughputLineBorrowed {
+	if rc.SaturatedThroughputLineBorrowed || rc.SaturatedThroughputShapeStale {
 		return true
 	}
 	return rc.SaturatedThroughputBorrowed && !rc.SaturatedThroughputDerived
@@ -336,6 +338,10 @@ func Estimate(
 	// the hold can name which, instead of reporting a bucket borrow for
 	// something else entirely.
 	lineBorrowed := make(map[string]bool)
+	// shapeStaleLine records, per role, that what was routed as borrowed was
+	// a figure derived from a shape-dependent line while the shape changes
+	// (SaturatedThroughputShapeStale), so the hold names that.
+	shapeStaleLine := make(map[string]bool)
 	borrowedCosts := make(map[string][]float64)
 	borrowedMus := make(map[string][]float64)
 	mayOrder := make(map[string]bool)
@@ -393,6 +399,9 @@ func Estimate(
 			borrowedMus[role] = append(borrowedMus[role], rc.SaturatedThroughput)
 			if rc.SaturatedThroughputLineBorrowed {
 				lineBorrowed[role] = true
+			}
+			if rc.SaturatedThroughputShapeStale {
+				shapeStaleLine[role] = true
 			}
 			continue
 		}
@@ -608,6 +617,9 @@ func Estimate(
 				}
 				if borrowedOnly[role] {
 					term.HeldWhy = "borrowed"
+					if shapeStaleLine[role] {
+						term.HeldWhy = "shape-stale-line"
+					}
 					if lineBorrowed[role] {
 						term.HeldWhy = "borrowed-line"
 					}

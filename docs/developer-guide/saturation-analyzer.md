@@ -555,7 +555,13 @@ configuration keeps one line for decode pods and another for aggregated pods,
 and neither lends to the other. The window key is per variant already. An
 aggregated pod's ITL also carries the chunked prefill it interleaves, so its
 line depends on the request shape (issue #275); it is fitted at the shape the
-fleet runs and is not corrected for a change of it.
+fleet runs and is not corrected for a change of it. So while a shape change
+is outstanding (`c.shapeChanging` or `c.shapeChanged`), a figure derived
+from an aggregated line is marked `SaturatedThroughputShapeStale`
+(`itlShapeStale`): `fleetHasMeasuredItself` does not count it, so it does
+not settle the change, and `floor.borrowedReading` routes it as a borrowed
+line, so it may hold the role and not grow it (`heldWhy=shape-stale-line`).
+A decode line is never marked.
 
 ### ITL per accepted token (speculative decoding)
 

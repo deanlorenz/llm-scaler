@@ -789,6 +789,11 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			// order it has earned.
 			rc.SaturatedThroughputLineBorrowed =
 				rc.SaturatedThroughputDerived && c.itlBorrowedFrom[rm.VariantName] != ""
+			// An aggregated line depends on the request shape (issue #275), so
+			// while the shape changes its derived figure may hold the fleet and
+			// not grow it, and does not settle the change (itlShapeStale).
+			rc.SaturatedThroughputShapeStale = rc.SaturatedThroughputDerived &&
+				itlShapeStale(role, c.shapeChanging || c.shapeChanged)
 			replicaCapacities = append(replicaCapacities, *rc)
 			pricedRows = append(pricedRows, raw)
 		}

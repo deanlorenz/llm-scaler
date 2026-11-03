@@ -65,6 +65,18 @@ func itlLineKeyForRole(physicsKey, role, fingerprint string) string {
 	return physicsKey + "|" + domain.RoleBoth
 }
 
+// itlShapeStale reports whether a line of this role is stale while the
+// fleet's shape changes: an aggregated variant's is. Its ITL carries the
+// chunked prefill it runs between decode steps, about n*IL/OL prompt tokens
+// a step, so a line fitted under one shape mis-prices another (issue #275),
+// where a decode line describes the engine at every shape. A derived figure
+// from a stale line is then held to what a borrowed line may do
+// (capacity.ReplicaCapacity.SaturatedThroughputShapeStale): hold the fleet,
+// not grow it, and not settle the change. A decode variant's is never stale.
+func itlShapeStale(role string, shapeChanging bool) bool {
+	return shapeChanging && domain.CanonicalRole(role) == domain.RoleBoth
+}
+
 // itlReportRole is the role an ITL learner report and its learner-write line
 // name for a variant: the variant's own with SwitchITLFitsAggregated on,
 // decode (the one role that fitted a line) with it off.

@@ -37,12 +37,17 @@ type aggVariant struct {
 
 // aggregatedRig is one analyzer over a fleet of variants, all on the same
 // engine configuration, accelerator and GPU count, so with reuse on they
-// share one fingerprint.
+// share one fingerprint. in and out are the request shape every replica
+// reports, arrival the model's arrival rate (0: none stated), and noHold
+// the policy's disableShapeChangeHold.
 type aggregatedRig struct {
 	a        *SaturationAnalyzer
 	clock    time.Time
 	variants []aggVariant
 	reuse    bool
+	in, out  float64
+	arrival  float64
+	noHold   bool
 }
 
 func newAggregatedRig(fitsAggregated, reuse bool, variants ...aggVariant) *aggregatedRig {
@@ -51,46 +56,58 @@ func newAggregatedRig(fitsAggregated, reuse bool, variants ...aggVariant) *aggre
 		store.Update("test-ns", "test-model", v.name, capacity.Record{AcceleratorName: "H100", GpuCount: 1,
 			EngineParams: keyParams(256)}, propStart)
 	}
-	r := &aggregatedRig{a: NewSaturationAnalyzer(store), clock: propStart, variants: variants, reuse: reuse}
+	r := &aggregatedRig{a: NewSaturationAnalyzer(store), clock: propStart, variants: variants, reuse: reuse,
+		in: 600, out: 200}
 	r.a.now = func() time.Time { return r.clock }
 	r.a.itlFitsAggregated = fitsAggregated
 	return r
 }
 
-// run drives aggregatedCycles cycles of 10 replicas per variant, at KV
-// fills 0.20 to 0.65 (or 0.05, below the band), and returns the last
-// cycle's result.
+// run drives aggregatedCycles cycles (step), and returns the last cycle's
+// result.
 func (r *aggregatedRig) run(t *testing.T) *domain.AnalyzerResult {
 	t.Helper()
-	const replicas = 10
+	var res *domain.AnalyzerResult
+	for range aggregatedCycles {
+		res = r.step(t)
+	}
+	return res
+}
+
+// aggregatedReplicas is how many replicas each variant of the rig runs.
+const aggregatedReplicas = 10
+
+// step drives one cycle of aggregatedReplicas replicas per variant, at KV
+// fills 0.20 to 0.65 (or 0.05, below the band), at the rig's shape and
+// arrival rate.
+func (r *aggregatedRig) step(t *testing.T) *domain.AnalyzerResult {
+	t.Helper()
 	states := make([]domain.VariantReplicaState, 0, len(r.variants))
 	for _, v := range r.variants {
 		states = append(states, domain.VariantReplicaState{VariantName: v.name, Role: v.role,
-			AcceleratorName: "H100", CurrentReplicas: replicas, GPUsPerReplica: 1})
+			AcceleratorName: "H100", CurrentReplicas: aggregatedReplicas, GPUsPerReplica: 1})
 	}
-	var res *domain.AnalyzerResult
-	for range aggregatedCycles {
-		rows := make([]domain.ReplicaMetrics, 0, replicas*len(r.variants))
-		for _, v := range r.variants {
-			for i := range replicas {
-				k := 0.20 + 0.05*float64(i)
-				if !v.inBand {
-					k = 0.05
-				}
-				rm := makeReplicaMetrics(fmt.Sprintf("%s-%d", v.name, i), v.name,
-					int64(k*16000), 16000, 0, 600, 200)
-				rm.KvUsageInstant, rm.KvUsageInstantKnown = k, true
-				rm.AvgITL, rm.AvgITLKnown = v.slope*k+propTrueB, true
-				rows = append(rows, rm)
+	rows := make([]domain.ReplicaMetrics, 0, aggregatedReplicas*len(r.variants))
+	for _, v := range r.variants {
+		for i := range aggregatedReplicas {
+			k := 0.20 + 0.05*float64(i)
+			if !v.inBand {
+				k = 0.05
 			}
+			rm := makeReplicaMetrics(fmt.Sprintf("%s-%d", v.name, i), v.name,
+				int64(k*16000), 16000, 0, r.in, r.out)
+			rm.KvUsageInstant, rm.KvUsageInstantKnown = k, true
+			rm.AvgITL, rm.AvgITLKnown = v.slope*k+propTrueB, true
+			rows = append(rows, rm)
 		}
-		in := makeAnalyzerInput(rows, states)
-		in.Config.(*config.ScalingPolicy).EnableLearnedStateReuse = r.reuse
-		var err error
-		res, err = r.a.Analyze(context.Background(), in)
-		require.NoError(t, err)
-		r.clock = r.clock.Add(propCycle)
 	}
+	in := makeAnalyzerInput(rows, states)
+	in.Config.(*config.ScalingPolicy).EnableLearnedStateReuse = r.reuse
+	in.Config.(*config.ScalingPolicy).DisableShapeChangeHold = r.noHold
+	in.ArrivalRate = r.arrival
+	res, err := r.a.Analyze(context.Background(), in)
+	require.NoError(t, err)
+	r.clock = r.clock.Add(propCycle)
 	return res
 }
 
@@ -235,6 +252,107 @@ func TestITLAggregated_AnAggregatedAndADecodeVariantKeepSeparateLines(t *testing
 			}
 		}
 	}
+}
+
+// The aggregated line sizes the fleet: at steady load, an aggregated
+// variant with a line of its own has a derived mu, the throughput floor
+// prices the arrival rate on it, and the model's demand is what the floor
+// asks for, lambda x P x scaleUpThreshold / mu (floor.replicaCost: a derived
+// mu has the headroom in it). Off, as before, the variant has no derived mu
+// and no measured window, the floor has nothing to order on, and the demand
+// is its KV occupancy alone.
+//
+// The rig: 10 replicas of 16,000 KV tokens at fills 0.20-0.65 (68,000 tokens
+// in use), requests of 1,000 in and 500 out, P = 12,800 tokens, and
+// 50 requests/s arriving. The derived mu is about 0.396/s a replica, so the
+// floor asks for 50 x 12,800 x 0.85 / 0.396, about 1,375,000 tokens:
+// about 20x the occupancy, the floor binding.
+func TestITLAggregated_TheDerivedMuSizesTheFleet(t *testing.T) {
+	demand := func(on bool) (*domain.AnalyzerResult, *domain.ServiceRateSignal) {
+		r := newAggregatedRig(on, false, aggVariant{name: "agg", role: "", slope: propTrueA, inBand: true})
+		r.in, r.out = 1000, 500
+		r.run(t)
+		r.arrival = 50
+		res := r.step(t)
+		return res, signal(t, res, "agg")
+	}
+	off, offSig := demand(false)
+	assert.InDelta(t, 68000, off.TotalDemand, 1, "off: the occupancy alone")
+	assert.Empty(t, offSig.RateSource, "off: no rate to price the arrivals on")
+
+	on, onSig := demand(true)
+	require.Equal(t, domain.ServiceRateSourceDerived, onSig.RateSource)
+	assert.InDelta(t, 0.396, onSig.Rate, 0.001, "the derived mu")
+	p := on.VariantCapacities[0].PerReplicaCapacity
+	assert.InDelta(t, 12800, p, 1)
+	want := 50 * p * 0.85 / onSig.Rate
+	assert.InEpsilon(t, want, on.TotalDemand, 0.005, "the floor's lambda x P x scaleUp / mu")
+	assert.InDelta(t, 1375000, on.TotalDemand, 5000)
+	assert.Greater(t, on.TotalDemand, 10*off.TotalDemand, "the floor does not bind")
+}
+
+// While the request shape changes (1,000/500 to 8,000/1,000 here), an
+// aggregated line is stale: it was fitted under the shape that left, and an
+// aggregated pod's ITL carries the prefill it interleaves, which the new
+// shape changes (issue #275). Its derived figure then does what a borrowed
+// line's does: it does not settle the shape change, so the hold stays
+// outstanding, and the floor may hold the fleet on it but not grow it -- the
+// demand stays at the hold, scaleUpThreshold x the 10 replicas' P
+// (0.85 x 128,000 = 108,800 tokens), where the stale line alone would order
+// 100 requests/s at its mu of 0.029/s. A decode variant on the same run
+// keeps its licence: its line describes the engine at every shape, so it
+// settles the change and orders, as before.
+func TestITLAggregated_AStaleLineHoldsAndDoesNotGrow(t *testing.T) {
+	run := func(role string) (demands []float64, outstanding []bool, sig *domain.ServiceRateSignal) {
+		r := newAggregatedRig(true, false, aggVariant{name: "v", role: role, slope: propTrueA, inBand: true})
+		r.in, r.out, r.arrival = 1000, 500, 100
+		r.run(t)
+		r.in, r.out = 8000, 1000
+		for range 8 {
+			res := r.step(t)
+			_, _, out := r.a.fleetShapeState("test-ns", "test-model")
+			demands = append(demands, res.TotalDemand)
+			outstanding = append(outstanding, out)
+			sig = signal(t, res, "v")
+		}
+		return demands, outstanding, sig
+	}
+
+	demands, outstanding, sig := run("")
+	require.Equal(t, domain.ServiceRateSourceDerived, sig.RateSource, "the stale line still prices the variant")
+	hold := 0.85 * aggregatedReplicas * 12800
+	for i := range demands {
+		assert.True(t, outstanding[i], "cycle %d: the stale aggregated line settled the shape change", i)
+		assert.LessOrEqual(t, demands[i], hold+1, "cycle %d: the stale aggregated line grew the fleet", i)
+	}
+	assert.InDelta(t, hold, demands[len(demands)-1], 1, "the fleet is held at its supply")
+
+	decode, decodeOutstanding, _ := run(domain.RoleDecode)
+	assert.False(t, decodeOutstanding[len(decodeOutstanding)-1], "decode: its own line settles the change, as before")
+	assert.Greater(t, decode[len(decode)-1], 10*hold, "decode: its own line orders through the change, as before")
+}
+
+// With the shape-change hold turned off (disableShapeChangeHold) no change is
+// ever outstanding, but the shape still changed within the window
+// (c.shapeChanging), and the aggregated line is as stale: its figure still
+// holds the fleet at its supply and does not grow it. A decode line orders.
+func TestITLAggregated_AStaleLineDoesNotGrowWithTheHoldOff(t *testing.T) {
+	last := func(role string) float64 {
+		r := newAggregatedRig(true, false, aggVariant{name: "v", role: role, slope: propTrueA, inBand: true})
+		r.in, r.out, r.arrival, r.noHold = 1000, 500, 100, true
+		r.run(t)
+		r.in, r.out = 8000, 1000
+		var res *domain.AnalyzerResult
+		for range 4 {
+			res = r.step(t)
+		}
+		_, _, out := r.a.fleetShapeState("test-ns", "test-model")
+		require.False(t, out, "precondition: with the hold off no change is outstanding")
+		return res.TotalDemand
+	}
+	hold := 0.85 * aggregatedReplicas * 12800
+	assert.InDelta(t, hold, last(""), 1, "the stale aggregated line grew the fleet")
+	assert.Greater(t, last(domain.RoleDecode), 10*hold, "decode: its own line orders, as before")
 }
 
 // The learner report names an aggregated variant's own role, and with the

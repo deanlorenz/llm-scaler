@@ -104,6 +104,10 @@ only to change it. Limiters an admin published in a policy namespace
    NAMESPACE=<namespace> WVA_NS=wva-<namespace> make scaledobjects-rewire
    ```
 
+### Upgrading from v0.10.2 to the next release
+
+An ordinary aggregated deployment (a variant with no `llm-d.ai/role` label) now has an inter-token-latency line and a derived service rate, as decode variants do, so its sizing gains a new input: under steady load the throughput floor can order replicas from that rate where it used to size by KV occupancy alone, and `wva_itl_line_slope` and `wva_service_rate_per_replica{source="derived"}` appear for it. While the request shape changes, that rate may hold the fleet and not grow it (`heldWhy=shape-stale-line`).
+
 ### Upgrading from v0.10.1 to v0.10.2
 
 Follow [Upgrade](#upgrade) above: back up the policy first, check out

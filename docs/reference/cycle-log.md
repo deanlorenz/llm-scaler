@@ -169,8 +169,9 @@ total, so a second line, `throughput-demand-floor-total`, gives it:
 | `borrowed` | the only rate is borrowed from a neighbouring output-length bucket, or the output length is in the middle of a large change and the old bucket's window is held for up to 2 minutes | a reading in the bucket the traffic is in now |
 | `borrowed-line` | the rate is derived from an inter-token-latency line another variant fitted (shared because `enableLearnedStateReuse` is on) | the variant fitting its own line |
 | `shape-change` | the traffic's shape changed and the rate was measured on the old one | the new shape settling |
+| `shape-stale-line` | the rate is derived from an aggregated (unlabeled) variant's own inter-token-latency line while the traffic's shape changes: that line also carries the prefill the pods run between decode steps, so it describes the shape that left | the new shape settling: the variant measuring itself under it, or the change's hold ending |
 | `lower-bound` | prefill's only rate is a lower bound with one reading | a second reading a minute later, or prefill's own measurement |
-| `borrowed+shape-change`, `borrowed-line+shape-change`, `lower-bound+shape-change` | both at once; the borrow is named first because it is the one that does not go away on its own | as above, both |
+| `borrowed+shape-change`, `borrowed-line+shape-change`, `shape-stale-line+shape-change`, `lower-bound+shape-change` | both at once; the borrow is named first because it is the one that does not go away on its own | as above, both |
 
 A borrowed figure never orders replicas here: it can hold demand up while the
 role measures itself, never raise it above what the fleet already supplies.
@@ -246,7 +247,7 @@ A mu reading is admitted beside a k2 reading, so each entry normally carries
 that reading's `settledForSeconds` and `passedBy`; an entry with no k2
 margin on record leaves both out.
 
-For `learner` `itl` the key is the decode variant's ITL window, and the line
+For `learner` `itl` the key is the ITL window of the decode or aggregated (unlabeled) variant, and the line
 carries `a` and `b` (seconds per token, and seconds per token per unit of KV
 fill) with `previousA` and `previousB`, `source` (`ols` for a full fit,
 `pinned-B` for a fit of A with B pinned, `pinned-B-held` for the last A held

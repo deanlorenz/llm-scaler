@@ -497,9 +497,13 @@ func fleetHasMeasuredItself(replicas []capacity.ReplicaCapacity) bool {
 		// an order.
 		// Nor is a prefill lower bound: it is the reading the fleet could
 		// NOT take as its own, recorded for its direction alone.
-		own := (rc.SaturatedThroughputDerived && !rc.SaturatedThroughputLineBorrowed) ||
+		// Nor is a figure derived from a line that depends on the shape
+		// (an aggregated variant's, SaturatedThroughputShapeStale): fitted
+		// under the shape that left, it speaks for that one.
+		lineFits := !rc.SaturatedThroughputLineBorrowed && !rc.SaturatedThroughputShapeStale
+		own := (rc.SaturatedThroughputDerived && lineFits) ||
 			(rc.SaturatedThroughput > 0 && !rc.SaturatedThroughputBorrowed &&
-				!rc.SaturatedThroughputLineBorrowed && !rc.SaturatedThroughputLowerBound &&
+				lineFits && !rc.SaturatedThroughputLowerBound &&
 				rc.SaturatedThroughputSamples >= floor.MinThroughputSamplesToOrder)
 		measured[rc.VariantName] = measured[rc.VariantName] || own
 	}

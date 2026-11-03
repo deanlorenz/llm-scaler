@@ -64,6 +64,13 @@ import (
 //   - engine/composite-variants.csv: variant-02's three borrow rows, as
 //     above.
 //
+// While the shape changes, an aggregated line's derived figure may hold the
+// fleet and not grow it, and does not settle the change
+// (SaturatedThroughputShapeStale). No fixture prices an aggregated variant
+// from its line while a change is outstanding, so that moves no golden
+// further; TestITLAggregated_AStaleLineHoldsAndDoesNotGrow and
+// TestITLAggregated_AStaleLineDoesNotGrowWithTheHoldOff hold it.
+//
 // Earlier PRs' rows: #277's switch (kv-per-request-hits-resident) went to
 // earlierSeams; off alone from all on it still moves only e1 and e1-tuned.
 //

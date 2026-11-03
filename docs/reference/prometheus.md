@@ -1745,7 +1745,7 @@ per pod, at `--v=3`.
 - **Description**: How many (k, ITL) readings a decode or aggregated variant's **own** ITL window holds, published while it has no line too, zero included, and absent while none of its replicas reports. A line needs enough readings spread far enough apart in k; a variant priced on a borrowed line still reports its own count here.
 - **Labels**: as `wva_itl_line_slope`
 - **Use Case**: Explain an absent line. A fleet with no line produces no derived service rate, and the reason is almost always this count or the spread of k rather than anything wrong. A fresh fleet takes about 28 cycles from load start to fit.
-- **Example**: serving decode variants with no usable line this cycle, their own or a borrowed one:
+- **Example**: serving decode or aggregated variants with no usable line this cycle, their own or a borrowed one:
   ```promql
   wva_itl_line_samples unless on (exported_namespace, model_name, variant_name) wva_itl_line_slope
   ```
