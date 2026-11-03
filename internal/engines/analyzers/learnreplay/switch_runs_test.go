@@ -41,7 +41,7 @@ import (
 // (switchPackage), and the golden outputs (fixture/file) it is named to move.
 //
 // #275 prices an aggregated variant's ITL line by request shape, in two
-// switches. Its base is #432's head (bda06fb18): #432's switch is an earlier
+// switches. Its base is main after #432 (67790e633): #432's switch is an earlier
 // seam here (earlierSeams), on in every run below. Measured, each alone
 // against all off:
 //
@@ -444,7 +444,7 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch of this PR names, as the
-// base commit's goldens hold it (bda06fb18, #432's head). #438's switch and
+// base commit's goldens hold it (67790e633, main after #432). #438's switch and
 // #275's lift name none.
 var switchBase = map[string]string{
 	"acceptance/learned-state.csv": "abbdac1e95770a5ae4c725df3fad79ff7161c51ddcbb4f4b5556a04ad5ef81fe",
