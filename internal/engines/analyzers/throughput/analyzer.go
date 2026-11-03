@@ -491,12 +491,13 @@ func (a *ThroughputAnalyzer) analyze(
 			nDecodeVariants++
 		}
 
-		if a.itlKeepsOnGPSMismatch {
+		switch {
+		case a.itlKeepsOnGPSMismatch:
 			// A diagnostic only: the window keeps its readings (itl_line.go).
 			if a.noteGPSMismatch(ctx, state, healthyMetrics, shape, model, input.Namespace, input.ModelID, variantName) {
 				anyGPSMismatch = true
 			}
-		} else if checkVariantGPSMismatch(ctx, healthyMetrics, shape, model, input.Namespace, input.ModelID, variantName) {
+		case checkVariantGPSMismatch(ctx, healthyMetrics, shape, model, input.Namespace, input.ModelID, variantName):
 			anyGPSMismatch = true
 			state.consecutiveGPSMismatches++
 			if state.consecutiveGPSMismatches >= DefaultGPSMismatchClearThreshold {
@@ -512,7 +513,7 @@ func (a *ThroughputAnalyzer) analyze(
 					"threshold", DefaultGPSMismatchClearThreshold,
 				)
 			}
-		} else {
+		default:
 			state.consecutiveGPSMismatches = 0
 		}
 

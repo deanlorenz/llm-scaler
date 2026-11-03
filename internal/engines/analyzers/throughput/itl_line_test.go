@@ -141,7 +141,7 @@ func TestITLLine_AnInfiniteITLIsNoReading(t *testing.T) {
 func TestITLLine_ANegativeInterceptIsNotRemembered(t *testing.T) {
 	early := lineStart.Add(-time.Hour)
 	spread := func() []domain.ReplicaMetrics {
-		var rows []domain.ReplicaMetrics
+		rows := make([]domain.ReplicaMetrics, 0, 5)
 		for i, k := range []float64{0.20, 0.35, 0.50, 0.65, 0.80} {
 			rows = append(rows, lineRow("pod-"+string(rune('a'+i)), k, 0.1*k-0.01, early))
 		}
@@ -213,7 +213,7 @@ func TestITLLine_TheSlopeHoldsBelowTheBandForTheHold(t *testing.T) {
 func TestITLLine_AGPSMismatchKeepsTheWindow(t *testing.T) {
 	early := lineStart.Add(-time.Hour)
 	rows := func() []domain.ReplicaMetrics {
-		var out []domain.ReplicaMetrics
+		out := make([]domain.ReplicaMetrics, 0, 3)
 		for i, k := range []float64{0.40, 0.50, 0.60} {
 			row := lineRow("pod-"+string(rune('a'+i)), k, lineAt(k), early)
 			row.GenerationTokenRate = 1e6 // far off any rate the line predicts
