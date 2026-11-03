@@ -77,6 +77,10 @@ var fingerprintExcluded = []string{
 	// llm-d.ai/max-num-seqs annotation), not a setting of it. Read only for
 	// the derived k2 where the flags state no cap, and compared for capacity.
 	"DeclaredBatchCap",
+	// Not hashed: vLLM's --data-parallel-size-local, the ranks a pod of a
+	// variant at zero replicas runs. Compared for capacity instead, and
+	// hashing it would move every stored digest.
+	"DataParallelSizeLocal",
 }
 
 func TestFingerprintCoversEveryEngineParamsField(t *testing.T) {
@@ -218,6 +222,8 @@ func TestFingerprintIgnoresTheResolvedInputs(t *testing.T) {
 			p.MaxNumSeqsSet = !p.MaxNumSeqsSet
 		case "DeclaredBatchCap":
 			p.DeclaredBatchCap = 128
+		case "DataParallelSizeLocal":
+			p.DataParallelSizeLocal = 8
 		default:
 			t.Fatalf("no case for excluded field %s", name)
 		}

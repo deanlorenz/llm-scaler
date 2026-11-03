@@ -40,8 +40,9 @@ import (
 // replaySwitches is each replay switch of this PR, saturation's or slo's
 // (switchPackage), and the golden outputs (fixture/file) it is named to move.
 //
-// #438 prices a data-parallel decode or aggregated variant at zero replicas
-// at every engine rank its flags state, not one. It moves no golden: no
+// #438 prices a vLLM data-parallel decode or aggregated variant at zero
+// replicas at every engine rank its leader pod runs, not one: the derived
+// figure, and the stored budget it falls back to. It moves no golden: no
 // recorded scale target states a data-parallel size above 1, so every
 // zero-replica estimate the fixtures price is one rank's either way. Its unit
 // tests hold it (heldBy).
@@ -185,6 +186,8 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestZeroReplicaDataParallel_AnEightRankDecodeIsPricedAtEveryRank"},
 		{"../saturation", "TestZeroReplicaDataParallel_AWholeNodePodWithNoDeclaredCap"},
 		{"../saturation", "TestZeroReplicaDataParallel_TheClampsStillBound"},
+		{"../saturation", "TestZeroReplicaDataParallel_AGroupIsPricedAtItsLeadersRanks"},
+		{"../saturation", "TestZeroReplicaDataParallel_TheColdStartBudgetIsEveryRanks"},
 	},
 	// Issue #431's forget of the slo line.
 	slo.SwitchITLForgetReachesTheLine: {

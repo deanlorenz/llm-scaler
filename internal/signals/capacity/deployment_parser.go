@@ -248,6 +248,15 @@ type EngineParams struct {
 	DataParallelSize     int  // default 1 (vLLM --data-parallel-size / SGLang --dp-size)
 	PipelineParallelSize int  // default 1 (vLLM --pipeline-parallel-size / SGLang --pp-size)
 	ExpertParallel       bool // vLLM --enable-expert-parallel / SGLang --ep-size > 1 or --enable-ep-moe
+	// DataParallelSizeLocal is vLLM's --data-parallel-size-local: the ranks
+	// one pod runs when a group's ranks span several pods. 0 is not stated.
+	// Read to price a variant at zero replicas (the saturation analyzer's
+	// zeroReplicaRanks), and compared for capacity (IsCapacityCompatible):
+	// a group's leader reports its own ranks, so two groups that split the
+	// same global size differently are not each other's measurement. Not
+	// hashed, so it moves no digest; an unreadable value is left unstated
+	// rather than recorded as unresolved.
+	DataParallelSizeLocal int
 	// SpeculativeConfig is vLLM's --speculative-config, re-encoded so key
 	// order and spacing do not split it, or SGLang's --speculative-* flags as
 	// sorted key=value pairs. Empty is no speculative decoding.
@@ -1103,6 +1112,8 @@ func applyParam(key, value string, params *EngineParams) applyResult {
 		params.ChunkedPrefillEnabled = false
 	case "data_parallel_size":
 		return applyParallelSize(value, &params.DataParallelSize)
+	case "data_parallel_size_local":
+		return applyParallelSize(value, &params.DataParallelSizeLocal)
 	case "pipeline_parallel_size":
 		return applyParallelSize(value, &params.PipelineParallelSize)
 	case "enable_expert_parallel":
@@ -1463,6 +1474,7 @@ func (p *EngineParams) IsCapacityCompatible(other *EngineParams) bool {
 		p.Quantization == other.Quantization &&
 		p.MemoryLayout == other.MemoryLayout &&
 		parallelSize(p.DataParallelSize) == parallelSize(other.DataParallelSize) &&
+		p.DataParallelSizeLocal == other.DataParallelSizeLocal &&
 		parallelSize(p.PipelineParallelSize) == parallelSize(other.PipelineParallelSize) &&
 		p.ExpertParallel == other.ExpertParallel &&
 		p.SpeculativeConfig == other.SpeculativeConfig &&
