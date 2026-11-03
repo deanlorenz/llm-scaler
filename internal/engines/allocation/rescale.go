@@ -428,9 +428,12 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 	pinned := pinnedModel(satNamed)
 	tgtByRole := curByRole
 	if !pinned {
-		uncapped := distributeGPUsByWeight(targetGPUs, roles, demByRole, curByRole, floorByRole, nil)
-		ceilByRole := roleShareCeilings(records, stateMap, accType, roles, demByRole, uncapped)
-		tgtByRole = distributeGPUsByWeight(targetGPUs, roles, demByRole, curByRole, floorByRole, ceilByRole)
+		split := func(total int) map[string]int {
+			uncapped := distributeGPUsByWeight(total, roles, demByRole, curByRole, floorByRole, nil)
+			ceilByRole := roleShareCeilings(records, stateMap, accType, roles, demByRole, uncapped)
+			return distributeGPUsByWeight(total, roles, demByRole, curByRole, floorByRole, ceilByRole)
+		}
+		tgtByRole = split(targetGPUs)
 		if uniformPods(records, stateMap) {
 			roundFillsToReplicas(records, stateMap, roles, tgtByRole, curByRole, demByRole, targets)
 			// Each role's share is at or above the floor reserved in the split.
@@ -438,7 +441,7 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 		} else {
 			// With more than one replica size the two greedy passes are not
 			// monotone in the target (#219): fill and shed are searched together.
-			roundExact(satNamed, records, stateMap, roles, tgtByRole, curByRole, demByRole, targets)
+			roundExact(satNamed, records, stateMap, roles, split, targetGPUs, tgtByRole, curByRole, demByRole, targets)
 		}
 	}
 
