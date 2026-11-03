@@ -149,3 +149,26 @@ func TestMeanRespectsInclude(t *testing.T) {
 		t.Errorf("Mean = %v, want 100", got)
 	}
 }
+
+// WeightedBy weighs each replica by the caller's weight in place of its
+// request rate, and a weight that is not finite and positive leaves the
+// replica in the plain mean only.
+func TestMeanWeightedBy(t *testing.T) {
+	rows := []domain.ReplicaMetrics{
+		{RequestRate: 1, AvgInputTokens: 3000, PrefixCacheHitRate: 0.8},
+		{RequestRate: 1, AvgInputTokens: 1000, PrefixCacheHitRate: 0.0},
+	}
+	hit := func(rm domain.ReplicaMetrics) float64 { return rm.PrefixCacheHitRate }
+	all := func(domain.ReplicaMetrics) bool { return true }
+	prompt := WeightedBy(func(rm domain.ReplicaMetrics) float64 { return rm.RequestRate * rm.AvgInputTokens })
+	if got := Mean(rows, hit, all, ZeroIsAReading(), prompt); math.Abs(got-0.6) > 1e-12 {
+		t.Errorf("prompt-weighted hit rate %v, want 0.6", got)
+	}
+	if got := Mean(rows, hit, all, ZeroIsAReading()); math.Abs(got-0.4) > 1e-12 {
+		t.Errorf("request-weighted hit rate %v, want 0.4", got)
+	}
+	inf := WeightedBy(func(domain.ReplicaMetrics) float64 { return math.Inf(1) })
+	if got := Mean(rows, hit, all, ZeroIsAReading(), inf); math.Abs(got-0.4) > 1e-12 {
+		t.Errorf("an infinite weight is not the plain mean: %v", got)
+	}
+}

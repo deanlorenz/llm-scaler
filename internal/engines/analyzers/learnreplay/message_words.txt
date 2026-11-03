@@ -569,6 +569,7 @@ collecting
 combined
 comes
 commit
+comparable
 compared
 compatible
 compatible-variant-live
@@ -684,6 +685,7 @@ deployment-stored-fallback
 depth
 derivation
 derived
+derived-aggregated
 derived-from-args
 derived-mu
 derived-report-only
@@ -915,6 +917,7 @@ going
 gone
 got
 gpsErrPct
+gpsMedianErrOK
 gpsMedianErrPct
 gpu-and-quota-limiter
 gpu-inventory
@@ -1491,6 +1494,7 @@ observed
 observed/historical/derived
 observedGPS
 occupancy
+occupancy-unknown
 of
 off
 offered
@@ -1988,6 +1992,7 @@ shape-move-pending
 shape-term
 shape-unknown
 shape-unpriced
+shape-worst-case
 shapeChangeHoldSeconds
 shapeChanging
 shapeG

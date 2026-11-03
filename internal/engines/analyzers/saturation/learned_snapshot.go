@@ -290,7 +290,7 @@ func restoredLineShape(s LineShapeSnapshot, now time.Time) lineShape {
 	if finitePositive(s.G) {
 		out.g = s.G
 	}
-	if s.SigmaOK && s.Sigma >= 0 && !math.IsInf(s.Sigma, 0) && !math.IsNaN(s.Sigma) {
+	if s.SigmaOK && s.Sigma >= 0 && !math.IsInf(s.Sigma, 0) { // >= refuses NaN
 		out.sigma, out.sigmaOK = s.Sigma, true
 	}
 	for _, p := range s.Points {

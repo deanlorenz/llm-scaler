@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 )
@@ -43,9 +45,11 @@ func (w shapeWorld) step(k, ilEff, ol float64) float64 {
 	return w.b + (w.a0+w.c*w.g(ilEff, ol))*k
 }
 
-// mu is the completions a second one replica sustains at fill k: by Little's
-// law, its resident sequences over the steps each spends, prefill included.
-func (w shapeWorld) mu(k, ilEff, ol float64) float64 {
+// mu is the completions a second one replica sustains at the pricing fill
+// (shapePricingK): by Little's law, its resident sequences over the steps
+// each spends, prefill included.
+func (w shapeWorld) mu(ilEff, ol float64) float64 {
+	k := shapePricingK
 	n := k * w.capTokens / w.kvReq(ilEff, ol)
 	return n / ((ol/(1+w.spec) + w.sigma*ilEff) * w.step(k, ilEff, ol))
 }
@@ -69,6 +73,17 @@ type aggShapeRig struct {
 	coldLoad float64
 	// specKnown is whether a speculating replica reports its accepted tokens.
 	specKnown bool
+	// borrower adds a second aggregated variant, "agg-b", on the same engine
+	// configuration, its replicas below the band at borrowerHit, so it has
+	// no line of its own and borrows agg's (reuse turns sharing on).
+	borrower    bool
+	borrowerHit float64
+	reuse       bool
+	// ranks is the engine ranks each replica runs (data parallel), 1 when 0;
+	// its KV capacity is the whole replica's.
+	ranks int
+	// mutate, when set, changes every warm row before Analyze reads it.
+	mutate func(*domain.ReplicaMetrics)
 }
 
 const shapeReplicas = 10
@@ -83,6 +98,8 @@ func newAggShapeRigOn(t *testing.T, switches map[string]bool, params *capacity.E
 	store := capacity.NewStore()
 	store.Update("test-ns", "test-model", "agg", capacity.Record{AcceleratorName: "H100", GpuCount: 1,
 		EngineParams: params}, propStart)
+	store.Update("test-ns", "test-model", "agg-b", capacity.Record{AcceleratorName: "H100", GpuCount: 1,
+		EngineParams: params}, propStart)
 	r := &aggShapeRig{a: NewSaturationAnalyzer(store), store: store, clock: propStart, in: 1000, out: 500,
 		world: shapeTruth, specKnown: true}
 	r.a.now = func() time.Time { return r.clock }
@@ -93,9 +110,17 @@ func newAggShapeRigOn(t *testing.T, switches map[string]bool, params *capacity.E
 // row is one replica at fill k and hit rate hit, its completions scaled by
 // load.
 func (r *aggShapeRig) row(name string, k, hit, load float64) domain.ReplicaMetrics {
+	return r.rowOf("agg", name, k, hit, load)
+}
+
+// rowOf is row for a replica of variant.
+func (r *aggShapeRig) rowOf(variant, name string, k, hit, load float64) domain.ReplicaMetrics {
 	w := r.world
 	ilEff := r.in * (1 - hit)
-	rm := makeReplicaMetrics(name, "agg", int64(k*w.capTokens), int64(w.capTokens), 0, r.in, r.out)
+	rm := makeReplicaMetrics(name, variant, int64(k*w.capTokens), int64(w.capTokens), 0, r.in, r.out)
+	if r.ranks > 1 {
+		rm.EngineRanks = r.ranks
+	}
 	rm.KvUsageInstant, rm.KvUsageInstantKnown = k, true
 	rm.PrefixCacheHitRate = hit
 	stepSec := w.step(k, ilEff, r.out)
@@ -118,19 +143,38 @@ func (r *aggShapeRig) step(t *testing.T) *domain.AnalyzerResult {
 		if r.idle {
 			k = 0.05
 		}
-		rows = append(rows, r.row(fmt.Sprintf("agg-%d", i), k, r.hit, 1))
+		rm := r.row(fmt.Sprintf("agg-%d", i), k, r.hit, 1)
+		if r.mutate != nil {
+			r.mutate(&rm)
+		}
+		rows = append(rows, rm)
 	}
 	for i := range r.cold {
 		rows = append(rows, r.row(fmt.Sprintf("agg-cold-%d", i), 0.10, r.coldHit, r.coldLoad))
 	}
 	states := []domain.VariantReplicaState{{VariantName: "agg", AcceleratorName: "H100",
 		CurrentReplicas: shapeReplicas + r.cold, GPUsPerReplica: 1}}
+	if r.borrower {
+		for i := range shapeReplicas {
+			rows = append(rows, r.rowOf("agg-b", fmt.Sprintf("agg-b-%d", i), 0.05, r.borrowerHit, 1))
+		}
+		states = append(states, domain.VariantReplicaState{VariantName: "agg-b", AcceleratorName: "H100",
+			CurrentReplicas: shapeReplicas, GPUsPerReplica: 1})
+	}
 	in := makeAnalyzerInput(rows, states)
 	in.ArrivalRate = r.arrival
+	in.Config.(*config.ScalingPolicy).EnableLearnedStateReuse = r.reuse
 	res, err := r.a.Analyze(context.Background(), in)
 	require.NoError(t, err)
 	r.clock = r.clock.Add(propCycle)
 	return res
+}
+
+// occTestInput is an occupancyInput for variant "agg" over rows, in the
+// default ITL band at 1,000 in / 500 out.
+func occTestInput(key string, rows []domain.ReplicaMetrics, params *capacity.EngineParams) occupancyInput {
+	return occupancyInput{key: key, variant: "agg", rows: rows, params: params, minK: 0.15, maxK: 0.80,
+		fleetIL: 1000, fleetOL: 500}
 }
 
 func (r *aggShapeRig) steps(t *testing.T, n int) *domain.AnalyzerResult {
@@ -157,12 +201,20 @@ func (r *aggShapeRig) shapeOf(t *testing.T) lineShape {
 // state is a copy of the variant's shape state.
 func (r *aggShapeRig) state(t *testing.T) aggState {
 	t.Helper()
+	return r.stateOf(t, "agg")
+}
+
+// stateOf is a copy of variant's shape state.
+func (r *aggShapeRig) stateOf(t *testing.T, variant string) aggState {
+	t.Helper()
 	r.a.mu.Lock()
 	defer r.a.mu.Unlock()
-	for _, st := range r.a.itlAggregated {
-		return *st
+	for key, st := range r.a.itlAggregated {
+		if strings.HasPrefix(key, "test-ns|test-model|"+variant+"|") {
+			return *st
+		}
 	}
-	t.Fatal("the variant has no shape state")
+	t.Fatalf("%s has no shape state", variant)
 	return aggState{}
 }
 
@@ -173,7 +225,7 @@ func (r *aggShapeRig) lifted(t *testing.T) *domain.AnalyzerResult {
 	r.steps(t, 13)
 	r.arrival = 50
 	res := r.steps(t, 6)
-	require.Equal(t, domain.ServiceRateSourceDerived, signal(t, res, "agg").RateSource, "precondition: lifted")
+	require.Equal(t, domain.ServiceRateSourceDerivedAggregated, signal(t, res, "agg").RateSource, "precondition: lifted")
 	return res
 }
 
@@ -195,9 +247,9 @@ func TestAggregatedShape_ALiftedLineSizesAtTheCorrectedRate(t *testing.T) {
 	}
 	res, r := run(nil)
 	sig := signal(t, res, "agg")
-	want := r.world.mu(shapePricingK, r.in, r.out)
+	want := r.world.mu(r.in, r.out)
 	uncorrected := want * (r.out + r.world.sigma*r.in) / r.out
-	assert.Equal(t, domain.ServiceRateSourceDerived, sig.RateSource, "a lifted aggregated line does not size: %+v", sig)
+	assert.Equal(t, domain.ServiceRateSourceDerivedAggregated, sig.RateSource, "a lifted aggregated line does not size: %+v", sig)
 	assert.InDelta(t, want, sig.Rate, 0.02*want, "the priced rate is not the physics' at the pricing fill (uncorrected %.4f)", uncorrected)
 	assert.Less(t, sig.Rate, 0.9*uncorrected, "the prefill steps are not priced")
 
@@ -217,12 +269,12 @@ func TestAggregatedShape_AnOldLineDoesNotPriceAHeavierShape(t *testing.T) {
 	r := newAggShapeRig(t, nil)
 	r.steps(t, 13)
 	r.arrival = 50
-	require.Equal(t, domain.ServiceRateSourceDerived, signal(t, r.steps(t, 6), "agg").RateSource, "precondition: lifted")
+	require.Equal(t, domain.ServiceRateSourceDerivedAggregated, signal(t, r.steps(t, 6), "agg").RateSource, "precondition: lifted")
 	r.in, r.out, r.idle = 4000, 250, true
 	for i := range 30 {
 		res := r.step(t)
 		sig := signal(t, res, "agg")
-		assert.NotEqual(t, domain.ServiceRateSourceDerived, sig.RateSource, "cycle %d: the old-shape line sized the new shape", i)
+		assert.NotEqual(t, domain.ServiceRateSourceDerivedAggregated, sig.RateSource, "cycle %d: the old-shape line sized the new shape", i)
 		assert.NotEqual(t, domain.ServiceRateSourceReportOnly, sig.RateSource, "cycle %d: the old-shape line reported a figure for the new shape", i)
 	}
 	sh := r.shapeOf(t)
@@ -261,7 +313,7 @@ func TestAggregatedShape_AHeavierShapeIsPricedThroughTheTerm(t *testing.T) {
 	require.True(t, r.shapeOf(t).cOK, "precondition: c identified")
 	r.in, r.out, r.idle = 8000, 250, true
 	sig := signal(t, r.step(t), "agg")
-	want := r.world.mu(shapePricingK, r.in, r.out)
+	want := r.world.mu(r.in, r.out)
 	assert.Equal(t, domain.ServiceRateSourceReportOnly, sig.RateSource)
 	assert.InDelta(t, want, sig.Rate, 0.03*want, "the heavier shape is not priced through the shape term")
 }
@@ -270,7 +322,7 @@ func TestAggregatedShape_AHeavierShapeIsPricedThroughTheTerm(t *testing.T) {
 // lighter than the line's own (g* <= gFit) is priced at the line's slope
 // as measured -- an ITL no lower than measured -- and any heavier one is
 // moved by c, upward, however small the move. Without c a shape up to 20%
-// heavier is priced at the measured slope, a heavier one has no figure, and
+// heavier is priced at the worst case, a heavier one has no figure, and
 // a line with no shape none either.
 func TestAggregatedShape_NeverExtrapolatesTowardABetterPrice(t *testing.T) {
 	const lineA, lineG, c = 0.03, 500.0, 2e-5
@@ -289,8 +341,8 @@ func TestAggregatedShape_NeverExtrapolatesTowardABetterPrice(t *testing.T) {
 	}
 	a, priceCase, figure := resolveAggregatedPrice(lineA, lineG, 590, 0, false)
 	require.True(t, figure)
-	assert.Equal(t, aggCaseCovered, priceCase, "no c: inside the band, the measured slope")
-	assert.Equal(t, lineA, a)
+	assert.Equal(t, aggCaseWorstCase, priceCase, "no c: inside the band, the worst case c allows")
+	assert.InDelta(t, lineA*590/lineG, a, 1e-12)
 
 	_, priceCase, figure = resolveAggregatedPrice(lineA, lineG, 1000, 0, false)
 	assert.False(t, figure)
@@ -365,7 +417,7 @@ func TestAggregatedShape_PrefillStepsSurviveANoisyReading(t *testing.T) {
 	rows[1].RequestRate = 64 / (0.9 * 500 * 0.02)
 	// A reading twenty times the rest.
 	rows[3].RequestRate = 64 / ((500 + 2*1000) * 0.02)
-	a.noteOccupancy(key, "agg", rows, nil, 0.15, 0.80, 1000, 500, 0, logr.Discard())
+	a.noteOccupancy(occTestInput(key, rows, nil), logr.Discard())
 	a.mu.Lock()
 	st := *a.itlAggregated[key]
 	a.mu.Unlock()
@@ -380,7 +432,7 @@ func TestAggregatedShape_PrefillStepsSurviveANoisyReading(t *testing.T) {
 
 	// Exactly at the output's steps: zero prefill, not refused.
 	b := NewSaturationAnalyzer(capacity.NewStore())
-	b.noteOccupancy(key, "agg", sigmaRows(3, 0), nil, 0.15, 0.80, 1000, 500, 0, logr.Discard())
+	b.noteOccupancy(occTestInput(key, sigmaRows(3, 0), nil), logr.Discard())
 	b.mu.Lock()
 	stb := *b.itlAggregated[key]
 	b.mu.Unlock()

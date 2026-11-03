@@ -119,10 +119,10 @@ For the shape priced now, `g*`, and the line's `(A_g, gFit)`:
 2. `g*` heavier, `c` identified: price `A_g + c * (g* - gFit)`, however
    small the move. This only ever raises the ITL and lowers mu, so an
    over-estimated `c` over-provisions and never under-provisions.
-3. `g*` heavier by at most 20%, no `c`: price `A_g` as it is. This can price
-   the ITL up to about 8% low at a 40% prefill share (20% of the prefill
-   part); it is the band the window is kept in, and the GPS check reads the
-   result.
+3. `g*` heavier by at most 20%, no `c`: price the worst case,
+   `A_g * g* / gFit`. Since `A_g = A + c * gFit` with `A >= 0`, `c` is at
+   most `A_g / gFit`, so the true slope `A + c * g*` is never above it.
+   A line is never priced lighter than its shape, with no exception.
 4. `g*` heavier by more, no `c`: no figure (`priceCase=shape-unpriced`),
    reported or priced. A line with no `gFit` (from a #432 build) has none
    either.
@@ -157,7 +157,7 @@ It goes back to report-only on 3 consecutive disagreeing cycles, when the
 shape moves, when the figure or `sigma` is missing, while a shape change is
 outstanding, on a change of engine arguments, and on a controller restart.
 `itl-aggregated-lift` logs each move; `wva_service_rate_per_replica` shows
-`source="derived-report-only"` before and `source="derived"` after.
+`source="derived-report-only"` before and `source="derived-aggregated"` after.
 
 ## A shape change
 

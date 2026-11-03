@@ -552,8 +552,7 @@ func (c *cycle) fitLines() {
 			gNow = c.aggregatedShapeNow(variant, params)
 			c.a.noteAggregatedShape(variantKey, variant, gNow, itlLogger)
 			if !c.shapeChanging {
-				c.a.noteOccupancy(variantKey, variant, c.input.ReplicaMetrics, params, lo, hi, c.fleetInput, c.fleetOutput,
-					c.fleetHitRate, itlLogger)
+				c.a.noteOccupancy(c.occupancyInput(variantKey, variant, params), itlLogger)
 			}
 		}
 		reading := c.a.noteITL(variantKey, rows, variant, adm, c.a.now(), itlLogger)
@@ -601,8 +600,8 @@ func (c *cycle) fitLines() {
 			c.itlModels[variant] = own
 			c.itlHeld[variant] = reading.SlopeHeld
 			if aggOn {
-				c.agg[variant] = c.a.resolveAggregated(variantKey, physicsKey, own, aggG, aggSigma, aggSigmaOK, gNow,
-					perStepLine, c.shapeChanging)
+				c.agg[variant] = c.a.resolveAggregated(aggLine{model: own, g: aggG, sigma: aggSigma, sigmaOK: aggSigmaOK,
+					perStep: perStepLine, shapeChanging: c.shapeChanging, gNow: gNow, key: variantKey, physicsKey: physicsKey})
 			}
 			continue
 		}
@@ -633,10 +632,11 @@ func (c *cycle) fitLines() {
 		c.itlModels[variant] = borrowed
 		c.itlBorrowedFrom[variant] = from
 		if aggOn {
-			// A borrowed line prices at the lender's shape (lineShape).
+			// A borrowed line prices at the lender's shape (lineShape), never
+			// at the borrower's shape now.
 			ls := c.a.lineShapeOf(physicsKey)
-			c.agg[variant] = c.a.resolveAggregated(variantKey, physicsKey, borrowed, ls.g, ls.sigma, ls.sigmaOK, gNow,
-				perStepLine, c.shapeChanging)
+			c.agg[variant] = c.a.resolveAggregated(aggLine{model: borrowed, g: ls.g, sigma: ls.sigma, sigmaOK: ls.sigmaOK,
+				perStep: perStepLine, shapeChanging: c.shapeChanging, gNow: gNow, key: variantKey, physicsKey: physicsKey})
 		}
 		itlLogger.V(logging.DEFAULT).Info("itl-line-borrowed",
 			"variant", variant, "from", from, "physicsKey", physicsKey,
@@ -711,12 +711,10 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		// (issue #432), whose pods generate as decode's do. Stated here as
 		// well as there, so a prefill replica is never priced from a line
 		// even if one were in itlModels.
-		var derived derivedMu
 		// An aggregated variant priced by shape (issue #275): the slope its
 		// case gives, and the occupancy correction (itl_aggregated_shape.go).
 		ac := c.agg[rm.VariantName]
-		reportOnly := itlLineReportOnly(role)
-		var occupancy float64 = 1
+		price := aggPrice{model: itlModel, occupancy: 1.0, reportOnly: itlLineReportOnly(role)}
 		if c.a.itlLineRole(role) {
 			kPrice := pricingK(c.cfg)
 			// The cap the derived k2 is priced at (pricingBatchCap), so a
@@ -731,43 +729,23 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				// No cap at all (the scale target unread): say so, not "".
 				batchCap.source = batchCapNone
 			}
-			priceModel := itlModel
-			if ac != nil && !ac.figure {
-				// No figure for the shape now: nothing is derived, not even
-				// to report (resolveAggregatedPrice).
-				derived = derivedMu{why: ac.priceCase}
+			if ac != nil {
+				// Sized from, not reported only, once lifted
+				// (noteAggregatedLift), never above a measured rate of its
+				// own (capAtMeasured).
+				price = c.priceAggregated(ac, rm, itlModel, engineParams, batchCap.perRank, fleetShape, muShape, kPrice)
 			} else {
-				if ac != nil {
-					priceModel = itl.Model{A: ac.a, B: itlModel.B}
-				}
-				derived = deriveMuAtCap(priceModel, engineParams, batchCap.perRank, rm.Ranks(), rm.TotalKvCapacityTokens,
+				price.derived = deriveMuAtCap(itlModel, engineParams, batchCap.perRank, rm.Ranks(), rm.TotalKvCapacityTokens,
 					muShape, kPrice, c.muDivisor)
-				if ac != nil && derived.ok && ac.sigmaOK {
-					occupancy = occupancyFactor(ac.decodeSteps(c.muDivisor), muShape.ILeff, ac.sigma)
-					derived.rate *= occupancy
-					derived.tokenSec *= occupancy
-				}
-				if ac != nil && ac.figure && ac.sigmaOK && !rm.FromWarmPool {
-					if errPct, ok := gpsErrorPct(ac, itlModel.B, rm,
-						capacityTokensFor(engineParams, rm.Ranks(), rm.TotalKvCapacityTokens), fleetShape.KVreq,
-						fleetShape.AvgOutputTokens, fleetShape.ILeff); ok {
-						ac.errs = append(ac.errs, errPct)
-					}
-				}
 			}
-			// Sized from, not reported only, once lifted (noteAggregatedLift),
-			// never above a measured rate of its own (capAtMeasured).
-			if ac != nil && reportOnly && c.a.itlAggSizes && ac.lifted && ac.sigmaOK && ac.blocked == "" &&
-				!c.shapeChanging {
-				reportOnly = false
-				derived.capAtMeasured = true
+			if !price.derived.ok {
+				muMissing[rm.PodName] = price.derived.why
 			}
-			if !derived.ok {
-				muMissing[rm.PodName] = derived.why
-			}
-			c.logDerivedMu(rm, derived, reportOnly, kPrice, itlModel, priceModel, ac, occupancy,
-				fleetShape, muShape, residentBound, residentBoundFleet, engineParams, batchCap)
+			c.logDerivedMu(derivedMuLog{rm: rm, price: price, kPrice: kPrice, line: itlModel, agg: ac,
+				fleetShape: fleetShape, muShape: muShape, residentBound: residentBound,
+				residentBoundFleet: residentBoundFleet, params: engineParams, batchCap: batchCap})
 		}
+		derived := price.derived
 		c.a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq,
 			c.itlBorrowedFrom[rm.VariantName], c.logger)
 		// An aggregated line's derived mu is reported, never priced
@@ -775,7 +753,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		// is priced as if it had none, and the figure goes to the
 		// service-rate signal only.
 		priced := derived
-		if derived.ok && reportOnly {
+		if derived.ok && price.reportOnly {
 			if !rm.FromWarmPool {
 				c.reportedMu[rm.VariantName] = append(c.reportedMu[rm.VariantName], derived.rate)
 			}
@@ -857,11 +835,29 @@ func (c *cycle) pricingShapes(hitRate float64) (fleetShape, muShape shape.Shape,
 	return fleetShape, muShape, residentBoundFleet, residentBound
 }
 
+// derivedMuLog is what the derived-mu line reports for one replica: the
+// row, its price, the line and the shapes it was priced from, and the cap.
+type derivedMuLog struct {
+	rm                                domain.ReplicaMetrics
+	price                             aggPrice
+	kPrice                            float64
+	line                              itl.Model
+	agg                               *aggCycle
+	fleetShape, muShape               shape.Shape
+	residentBound, residentBoundFleet string
+	params                            *capacity.EngineParams
+	batchCap                          pricedBatchCap
+}
+
+// noAggCycle is the aggregated part of the derived-mu line for any other
+// line: every term zero.
+var noAggCycle = &aggCycle{}
+
 // logDerivedMu logs one replica's derived mu with every term it was priced
 // from.
-func (c *cycle) logDerivedMu(rm domain.ReplicaMetrics, derived derivedMu, reportOnly bool, kPrice float64,
-	itlModel, priceModel itl.Model, ac *aggCycle, occupancy float64, fleetShape, muShape shape.Shape,
-	residentBound, residentBoundFleet string, engineParams *capacity.EngineParams, batchCap pricedBatchCap) {
+func (c *cycle) logDerivedMu(l derivedMuLog) {
+	rm, derived, kPrice, itlModel, priceModel := l.rm, l.price.derived, l.kPrice, l.line, l.price.model
+	fleetShape, muShape, engineParams, batchCap := l.fleetShape, l.muShape, l.params, l.batchCap
 	// Every term, because the result alone cannot be attributed to one.
 	// A derived mu that is wrong by 8x looks identical in the log
 	// whether the fault is the output length, the sequence count, the
@@ -879,16 +875,16 @@ func (c *cycle) logDerivedMu(rm domain.ReplicaMetrics, derived derivedMu, report
 	// An aggregated line priced by shape (issue #275): the shape now and
 	// the line's, the case, c, and the share of steps that emit a token
 	// (occupancyFactor). Zero for any other line.
-	var agg aggCycle
-	if ac != nil {
-		agg = *ac
+	agg := l.agg
+	if agg == nil {
+		agg = noAggCycle
 	}
 	c.logger.V(perReplicaLogLevel).Info("derived-mu",
 		"namespace", c.input.Namespace, "variant", rm.VariantName, "pod", rm.PodName,
 		"ok", derived.ok,
 		// An aggregated line's figure is reported, not priced (#432), until
 		// it is lifted (#275).
-		"reportOnly", reportOnly,
+		"reportOnly", l.price.reportOnly,
 		"rate", derived.rate, "seqs", derived.seqs, "tokenSec", derived.tokenSec,
 		"kPrice", kPrice, "itlAtKPrice", priceModel.ITLAt(kPrice),
 		"itlA", itlModel.A, "itlB", itlModel.B, "itlZero", itlModel.IsZero(),
@@ -919,7 +915,7 @@ func (c *cycle) logDerivedMu(rm domain.ReplicaMetrics, derived derivedMu, report
 		// (no discount), no-hit, no-reading or off (issue #277);
 		// residentKVBoundFleet the same for kvReqFleet.
 		"residentKVPerSeq", c.resident.perSeq(), "residentRunning", c.resident.running,
-		"residentKVBound", residentBound, "residentKVBoundFleet", residentBoundFleet,
+		"residentKVBound", l.residentBound, "residentKVBoundFleet", l.residentBoundFleet,
 		"replicaKvTokens", rm.TotalKvCapacityTokens,
 		// Per engine rank; the replica admits engineRanks times the
 		// lower of the two (0 when the active cap is unset).
@@ -930,12 +926,15 @@ func (c *cycle) logDerivedMu(rm domain.ReplicaMetrics, derived derivedMu, report
 		"shapeG", agg.g, "lineShapeG", agg.lineG, "priceCase", agg.priceCase, "pricedA", priceModel.A,
 		"shapeTermC", agg.c, "shapeTermIdentified", agg.cOK,
 		"prefillStepsPerToken", agg.sigma, "prefillKnown", agg.sigmaOK, "prefillRefused", agg.refused,
-		"occupancy", occupancy,
+		"occupancy", l.price.occupancy,
 		"lifted", agg.lifted,
 		// Every cycle, lifted or not: the last comparable cycle's median GPS
 		// error, the agreeing cycles behind the lift, and why it is or is
 		// not lifted (aggLiftReason).
-		"gpsMedianErrPct", agg.medErr, "agreeCycles", agg.agree, "liftReason", agg.liftReason)
+		// gpsMedianErrPct reads aggNoComparableCycle before any comparable
+		// cycle (medErrOK false), never a 0 that reads as a perfect match.
+		"gpsMedianErrPct", agg.medErrLogged(), "gpsMedianErrOK", agg.medErrOK,
+		"agreeCycles", agg.agree, "liftReason", agg.liftReason)
 }
 
 // settleShape releases an outstanding shape change once the fleet has measured

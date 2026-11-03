@@ -42,9 +42,14 @@ const (
 	// ServiceRateSourceReportOnly is a rate derived from an aggregated
 	// variant's own ITL(k) line, reported and not priced: the line depends on
 	// the request shape (chunked prefill), so the throughput floor does not
-	// order on it, and the variant is sized as if it had no rate (#432, until
-	// #275).
+	// order on it, and the variant is sized as if it had no rate (#432), until
+	// it is lifted (#275).
 	ServiceRateSourceReportOnly = "derived-report-only"
+	// ServiceRateSourceDerivedAggregated is a rate derived from an aggregated
+	// variant's own ITL(k) line, priced by request shape and lifted: its GPS
+	// check agreed on consecutive cycles, so the variant is sized from it,
+	// never above a measured rate of its own (#275).
+	ServiceRateSourceDerivedAggregated = "derived-aggregated"
 )
 
 // ServiceRateSignal is what the saturation analyzer priced one variant's

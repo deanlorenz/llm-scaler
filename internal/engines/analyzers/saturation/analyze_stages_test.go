@@ -36,7 +36,7 @@ var derivedMuFields = []string{
 	"avgOutputTokens",
 	"batchCap", "batchCapSource",
 	"engineRanks",
-	"gpsMedianErrPct",
+	"gpsMedianErrOK", "gpsMedianErrPct",
 	"itlA",
 	"itlAtKPrice",
 	"itlB",

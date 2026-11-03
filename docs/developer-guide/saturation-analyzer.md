@@ -568,8 +568,10 @@ variant has no other rate. Three things stood in the way of sizing, and
   two or more shapes (`lineShape.points`, `fitShapeTerm`).
   `resolveAggregatedPrice` prices a shape at or below the line's own `g` at
   the line's slope (never lower: `c >= 0`), any heavier one through `c` when
-  it is identified, one up to 20% heavier at the line's slope when it is not,
-  and a heavier one not at all (`shape-unpriced`).
+  it is identified, one up to 20% heavier at the worst case `A_g*g*/gFit`
+  when it is not (`shape-worst-case`: `c <= A_g/gFit` since the decode
+  slope is not negative), and a heavier one not at all (`shape-unpriced`).
+  A lifted figure is published as `source=derived-aggregated`.
 - Prefill occupancy. A sequence being prefilled holds KV and emits no token.
   `noteOccupancy` reads the prefill steps per prompt token (`sigma`) by
   Little's law, `RunningRequests/(RequestRate*ITL) - D` over `IL_eff`, with

@@ -52,7 +52,7 @@ func TestAggregatedShape_AColdScaleUpKeepsTheWindowAndTheLift(t *testing.T) {
 			}
 			r.coldHit = 0.7
 			res := r.step(t)
-			assert.Equal(t, domain.ServiceRateSourceDerived, signal(t, res, "agg").RateSource,
+			assert.Equal(t, domain.ServiceRateSourceDerivedAggregated, signal(t, res, "agg").RateSource,
 				"the caches warmed and the variant is not sized from its line")
 			assert.Equal(t, before.windowG, r.state(t).windowG)
 		})
@@ -70,7 +70,7 @@ func TestAggregatedShape_AShapeMoveEndsTheLift(t *testing.T) {
 	before := r.state(t)
 	r.hit = 0.7
 	first := r.step(t)
-	assert.Equal(t, domain.ServiceRateSourceDerived, signal(t, first, "agg").RateSource, "a pending move ended the lift")
+	assert.Equal(t, domain.ServiceRateSourceDerivedAggregated, signal(t, first, "agg").RateSource, "a pending move ended the lift")
 	second := r.step(t)
 	assert.Equal(t, domain.ServiceRateSourceReportOnly, signal(t, second, "agg").RateSource,
 		"the lift outlived the shape move that dropped the window")
@@ -105,7 +105,7 @@ func TestAggregatedShape_ALiftedFigureIsCappedAtItsOwnMeasurementThroughAnalyze(
 		r.a.mu.Unlock()
 	}
 	sig := signal(t, r.step(t), "agg")
-	assert.Equal(t, domain.ServiceRateSourceDerived, sig.RateSource)
+	assert.Equal(t, domain.ServiceRateSourceDerivedAggregated, sig.RateSource)
 	assert.InDelta(t, derived/2, sig.Rate, 0.01*derived, "the lifted figure priced above the variant's own measurement")
 }
 
@@ -118,7 +118,7 @@ func TestAggregatedShape_AnArgsChangeDropsTheLiftAndTheShapeState(t *testing.T) 
 	r.store.Update("test-ns", "test-model", "agg", capacity.Record{AcceleratorName: "H100", GpuCount: 1,
 		EngineParams: keyParams(128)}, r.clock)
 	res := r.step(t)
-	assert.NotEqual(t, domain.ServiceRateSourceDerived, signal(t, res, "agg").RateSource, "the lift outlived the arguments")
+	assert.NotEqual(t, domain.ServiceRateSourceDerivedAggregated, signal(t, res, "agg").RateSource, "the lift outlived the arguments")
 	st := r.state(t)
 	assert.False(t, st.lifted)
 	assert.LessOrEqual(t, len(st.sigmas), shapeReplicas, "prefill readings from the old arguments were kept")
@@ -209,7 +209,7 @@ func TestAggregatedShape_ASpeculatingVariantIsReadInDecodeSteps(t *testing.T) {
 	r := newAggShapeRigOn(t, nil, speculatingParams())
 	r.world.spec = 1
 	res := r.lifted(t)
-	want := r.world.mu(shapePricingK, r.in, r.out)
+	want := r.world.mu(r.in, r.out)
 	assert.InDelta(t, want, signal(t, res, "agg").Rate, 0.02*want)
 	st := r.state(t)
 	assert.Zero(t, st.refused, "prefill readings were refused against the output's tokens")
@@ -224,7 +224,7 @@ func TestAggregatedShape_ASpeculatingVariantWithNoAcceptedTokensStaysReportOnly(
 	core, logs := observer.New(zapcore.Level(-logging.DEFAULT))
 	logger := zapr.NewLogger(zap.New(core))
 	for range 2 {
-		a.noteOccupancy(key, "agg", sigmaRows(5, 0.1), speculatingParams(), 0.15, 0.80, 1000, 500, 0, logger)
+		a.noteOccupancy(occTestInput(key, sigmaRows(5, 0.1), speculatingParams()), logger)
 	}
 	a.mu.Lock()
 	st := *a.itlAggregated[key]
@@ -241,7 +241,7 @@ func TestAggregatedShape_ASpeculatingVariantWithNoAcceptedTokensStaysReportOnly(
 	r.steps(t, 13)
 	r.arrival = 50
 	res := r.steps(t, 6)
-	assert.NotEqual(t, domain.ServiceRateSourceDerived, signal(t, res, "agg").RateSource)
+	assert.NotEqual(t, domain.ServiceRateSourceDerivedAggregated, signal(t, res, "agg").RateSource)
 	assert.Equal(t, aggBlockedSpecUnknown, r.state(t).blocked)
 }
 
@@ -261,7 +261,7 @@ func TestAggregatedShape_AnSGLangVariantStaysReportOnly(t *testing.T) {
 	r.steps(t, 13)
 	r.arrival = 50
 	res := r.steps(t, 6)
-	assert.NotEqual(t, domain.ServiceRateSourceDerived, signal(t, res, "agg").RateSource, "an SGLang variant sized")
+	assert.NotEqual(t, domain.ServiceRateSourceDerivedAggregated, signal(t, res, "agg").RateSource, "an SGLang variant sized")
 	st := r.state(t)
 	assert.Equal(t, aggBlockedSGLang, st.blocked)
 	assert.Empty(t, st.sigmas)
@@ -270,7 +270,7 @@ func TestAggregatedShape_AnSGLangVariantStaysReportOnly(t *testing.T) {
 	core, logs := observer.New(zapcore.Level(-logging.DEFAULT))
 	logger := zapr.NewLogger(zap.New(core))
 	for range 3 {
-		a.noteOccupancy("k", "agg", sigmaRows(3, 0.1), sglangParams(), 0.15, 0.80, 1000, 500, 0, logger)
+		a.noteOccupancy(occTestInput("k", sigmaRows(3, 0.1), sglangParams()), logger)
 	}
 	assert.Equal(t, 1, logs.FilterMessage(aggBlockedSGLang).Len(), "not logged exactly once")
 }
