@@ -102,6 +102,10 @@ type Start struct {
 	SLO *SLOStart
 	// Throughput is whether the run registered the throughput analyzer.
 	Throughput bool
+	// ThroughputConfig is what the throughput analyzer's builders set; nil
+	// when the run had no throughput analyzer, or was recorded before the
+	// analyzer had builders of its own (a replay then builds it with none).
+	ThroughputConfig *ThroughputStart `json:",omitempty"`
 	// StoreRecords is how many records the capacity store held. A recording
 	// starts only at a controller start, when the store is new and empty; a
 	// replay refuses any other count, since it has no way to file them.
@@ -134,6 +138,17 @@ type SaturationStart struct {
 type SLOStart struct {
 	StateTimeout, SlopeHoldFor time.Duration
 	Judging                    bool
+}
+
+// ThroughputStart is what the throughput analyzer's builders set: how long
+// its ITL line may hold a fitted slope (WithSlopeHoldFor), the controller's
+// optimize interval (WithOptimizationInterval), and whether it was handed the
+// engine's settle tracker (WithSettleView) and the capacity store
+// (WithCapacityStore). A replay hands it its own of each exactly when the run
+// did.
+type ThroughputStart struct {
+	SlopeHoldFor, OptimizationInterval time.Duration
+	SettleView, CapacityStore          bool
 }
 
 // Commit is the commit this binary was built from: BuildCommit when the

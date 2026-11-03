@@ -278,7 +278,7 @@ func (s *recScript) engine(t *testing.T) *Engine {
 		WithSettleView(e.settleTracker())
 	e.sloAnalyzer = judging
 	e.analyzers.replaceBuiltin(domain.SLOAnalyzerName, judging)
-	require.NoError(t, e.RegisterAnalyzer(throughput.AnalyzerName, throughput.NewThroughputAnalyzer().WithClock(e.Clock())))
+	require.NoError(t, e.RegisterAnalyzer(throughput.AnalyzerName, e.NewThroughputAnalyzer()))
 	if s.external != nil {
 		e.UpsertExternalAnalyzer(s.external.Name(), s.external)
 	}
