@@ -84,6 +84,13 @@ type Admission struct {
 	// rank, whose AvgITL is its Finite ranks' mean, is no reading. Without
 	// it, as before, any finite AvgITL above zero is.
 	FiniteOnly bool
+	// AboveBandFallback keeps the readings above the band that are not
+	// admitted (no sequence cap) in a window of their own, stamped by the
+	// same steady gate and settle as the band's, and fits a line from them
+	// when the band gives none and the key holds no slope it may hold
+	// (Reading.AboveBandFit). It never sets the held slope or the
+	// intercept. Without it, as before, such a reading is only counted.
+	AboveBandFallback bool
 }
 
 // MaxNumSeqsSourceNone is Admission.MaxNumSeqsSource when no cap is stated:
