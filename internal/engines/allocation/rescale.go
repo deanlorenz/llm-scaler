@@ -418,20 +418,12 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 		curByRole[role] = roleCurrentGPUs(records, stateMap, accType, role)
 		demByRole[role] = roleDemandGPUs(satNamed, records, stateMap, accType, role)
 		floorByRole[role] = roleFloorGPUs(records, stateMap, accType, role)
-		// A role that may not shrink keeps what it has in the split, so the
-		// other roles are cut to what is left rather than to a share computed
-		// as if this one would shrink.
-		if satNamed.Holds[role].NoScaleDown {
-			floorByRole[role] = max(floorByRole[role], curByRole[role])
-		}
 	}
 	pinned := pinnedModel(satNamed)
 	tgtByRole := curByRole
 	if !pinned {
 		split := func(total int) map[string]int {
-			uncapped := distributeGPUsByWeight(total, roles, demByRole, curByRole, floorByRole, nil)
-			ceilByRole := roleShareCeilings(records, stateMap, accType, roles, demByRole, uncapped)
-			return distributeGPUsByWeight(total, roles, demByRole, curByRole, floorByRole, ceilByRole)
+			return splitRoles(satNamed, records, stateMap, accType, roles, total, demByRole, curByRole, floorByRole)
 		}
 		tgtByRole = split(targetGPUs)
 		if uniformPods(records, stateMap) {
@@ -485,6 +477,40 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 		}
 	}
 	return decisions
+}
+
+// splitRoles splits a model's GPU target total across its roles by demand dem,
+// each role at least its floor and at most its share ceiling
+// (roleShareCeilings). A role held against scale-down keeps at least what it
+// holds cur: when its share falls below that, it is set to cur and the other
+// roles split what is left. Its cur is not reserved as a floor beneath a share
+// of the rest: the fill then made the role's new pods next cycle's floor, so
+// at a constant target it took a share of the other role's GPUs every cycle
+// and moved pods to it for cycle after cycle (#440).
+func splitRoles(e NamedAnalyzerResult, records []variantRecord, stateMap map[string]domain.VariantReplicaState,
+	accType string, roles []string, total int, dem, cur, floor map[string]int) map[string]int {
+	low := maps.Clone(floor)
+	kept := map[string]int{}
+	for {
+		uncapped := distributeGPUsByWeight(total, roles, dem, cur, low, kept)
+		ceil := roleShareCeilings(records, stateMap, accType, roles, dem, uncapped)
+		maps.Copy(ceil, kept)
+		out := distributeGPUsByWeight(total, roles, dem, cur, low, ceil)
+		more := false
+		for _, role := range roles {
+			if _, ok := kept[role]; ok || !e.Holds[role].NoScaleDown || out[role] >= cur[role] {
+				continue
+			}
+			// Held at what it holds, its floor and its ceiling: what its
+			// share would have added re-splits over the others.
+			keep := max(cur[role], low[role])
+			kept[role], low[role] = keep, keep
+			more = true
+		}
+		if !more {
+			return out
+		}
+	}
 }
 
 // roleGrowth is n replicas a rescale fill added to variant.

@@ -547,7 +547,12 @@ takes them from discovery (`ModelScalingRequest.Variants`).
 ### Rescale under holds
 
 A role held against scale-down keeps its GPUs both in
-the water-fill and in the model's split across its roles. A model's
+the water-fill and in the model's split across its roles. In the split
+(`splitRoles`) its share is the larger of its demand share and what it
+holds; when it holds more, the other roles split what is left. What it holds
+is not reserved beneath a share of the rest: that made each cycle's gain the
+next cycle's reserve, and at a constant target the held role took pods from
+the other role cycle after cycle. A model's
 water-fill cap is each role's demand in GPUs capped at that role's
 `maxReplicas` GPUs, summed: counted uncapped, prefill at its maximum of 16
 GPUs sized the cap on 560, and the GPUs that share left free stayed free
