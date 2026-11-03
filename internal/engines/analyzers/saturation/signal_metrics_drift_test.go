@@ -66,8 +66,9 @@ var derivedMuMetricFields = map[string]derivedMuField{
 	"kvReqPerSeq":      {excluded: "the shape family (stage 1, wva_shape_kv_tokens_per_request{basis=priced}), not built yet"},
 	"kvReqFleet":       {excluded: "the shape family (stage 1, wva_shape_kv_tokens_per_request{basis=fleet}), not built yet"},
 	"outputDispersion": {excluded: "a term of kvReqPerSeq (#276), and published with it: the shape family (stage 1), not built yet"},
-	"residentKVPerSeq": {excluded: "a bound on kvReqPerSeq (#277), and published with it: the shape family (stage 1), not built yet"},
-	"residentKVKnown":  {excluded: "whether residentKVPerSeq was read (#277): a term of kvReqPerSeq, published with it"},
+	"residentKVPerSeq": {excluded: "the measured KV per running request (#277), which kvReqPerSeq is that reading held to its bounds: the shape family (stage 1), not built yet"},
+	"residentRunning":  {excluded: "how many running requests residentKVPerSeq was measured over (#277): a term of kvReqPerSeq, published with it"},
+	"residentKVBound":  {excluded: "which bound kvReqPerSeq held residentKVPerSeq to (#277), a label, not a figure: the shape family (stage 1), not built yet"},
 }
 
 // derivedMuLogKeys parses analyze.go and returns the string-literal keys of

@@ -1404,6 +1404,7 @@ no-line
 no-listed-analyzer-sizes-role
 no-node-fits
 no-rate
+no-reading
 no-seqs
 no-shape
 no-waiting
@@ -1771,8 +1772,9 @@ reserved
 residency
 resident
 residentDemand
-residentKVKnown
+residentKVBound
 residentKVPerSeq
+residentRunning
 residual
 resolve
 resolved
@@ -2215,6 +2217,7 @@ up
 update
 updated
 updating
+upper
 urgent
 usable
 usable-capacity

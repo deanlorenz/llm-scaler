@@ -142,38 +142,70 @@ count by that figure, so it over-stated mu and ordered too few replicas.
 
 The engine reports how many requests it is running
 (`vllm:num_requests_running`, `sglang:num_running_reqs`,
-`ReplicaMetrics.RunningRequests`), so the derived mu and the GPS check price a
-resident request at the KV those requests are measured to hold
-(`prefix_cache_kv.go`):
+`ReplicaMetrics.RunningRequests`). Where those are read, the derived mu and
+the GPS check price a resident request at the KV the requests are measured to
+hold, instead of the assumed discount (`prefix_cache_kv.go`):
 
 ```
 measured = sum(KvUsageInstant x TotalKvCapacityTokens) / sum(RunningRequests)
 KVreq    = clamp(measured, ILeff + D x OL/2, IL + D x OL/2)
 ```
 
-The sums run over the Ready generating replicas that report both readings
-(`fleetResidentKVPerRequest`). Warm-pool bridges and replicas with no live
-capacity are left out. The clamp keeps the reading to the hit term. Below the
-lower bound, requests are part way through their prefill; above the upper
-bound, the prompt length lags the workload. Neither is more or less sharing
-than the hit rate allows.
+The sums run over the Ready generating replicas that report both readings and
+whose KV fill is at least the ITL band's lower edge,
+`analyzerTuning.itlBand.minObservableK` (`fleetResidentKVPerRequest`).
+Warm-pool bridges and replicas with no live capacity are left out.
 
-With no reading, the request is priced at `IL + D x OL/2`, with no discount.
-No reading means fewer than eight requests running across the fleet
-(`minResidentSequences`), a missing running-requests or KV series, or an
-outstanding shape change, when the resident requests belong to both shapes.
-The issue left this choice open, and this is the safer side: keeping `ILeff`
-is the over-statement the issue is about. So the derived mu is never above the
-one before. The cost is an over-order of up to the hit discount on a caching
-fleet with fewer than eight requests running, where the arrival rate is small.
+The band gate matters for shared prompts. A prefix that several running
+requests share is held once, and the reading spreads it over the requests
+running now. Take 500 shared and 500 unique prompt tokens with 100 out, at hit
+0.5. The shape says 550 a request. A replica running 123 requests reads 554. A
+replica running 2 reads 800, and priced at that the KV-bound mu would be 31%
+low. Only replicas inside the band, where the line mu is priced from is
+fitted, are read.
+
+The clamp keeps the reading to the hit term:
+
+- Below the lower bound: requests part way through their prefill. Not taken as
+  more sharing than the hit rate allows.
+- Above the upper bound: the prompt length lags the workload. Or, on the decode
+  side of a P/D split, vLLM has allocated KV for requests still pulling their
+  prompt's KV from prefill. Those requests wait, so they are not counted as
+  running. The reading then moves towards no discount. No gauge counts those
+  blocks, so they are not subtracted.
+
+With no reading, the price stays `ILeff + D x OL/2`, as before. No reading
+means no replica in the band, a missing running-requests or KV series, or
+fewer requests than `minResidentSequences` asks for. So the switch moves the
+price only where there is evidence, and only towards more KV: the derived mu
+is never above the one before.
+
+The fewest requests depends on the shape. Each request is caught at its own
+age, so its generated part varies by about `D x OL / sqrt(12)`, while the
+prompt is the same at every age. The fewest is the count that brings the
+mean's spread within 5% of `IL + D x OL/2`, and at least 2. At `IL = OL`
+that is 15; at `IL = 10 OL`, 2. A fixed count large enough for the first
+would never be reached by one or two whole-node pods serving long prompts.
+
+During a shape change the reading is kept. Each shape priced bounds it by its
+own `ILeff` and `IL`, and the short-window shape is the new one. So a mixed
+population of old and new requests moves the price no further than between
+the new shape's discount and none.
+
+SGLang publishes both readings as the busiest rank's (`max by pod`), against
+the pod's whole KV capacity. On a pod running data-parallel attention ranks,
+the reading would over-read by about the rank count and land on the upper
+bound, which means more replicas, at most the price with no discount. This has
+not been checked on a cluster.
 
 The prompt that prefill's throughput key is discounted by (`throughputKeyInput`)
 keeps `ILeff`, because a hit does save prefill compute. The derived k2 and the
 zero-replica estimate already price the full prompt. `derived-mu` logs the
-reading as `residentKVPerSeq` and whether there was one as `residentKVKnown`.
-The replay switch is `kv-per-request-hits-resident`
-(`SwitchKVPerRequestHitsResident`). The throughput and slo analyzers still
-price their KV per request at `ILeff`.
+reading as `residentKVPerSeq`, the requests it was taken over as
+`residentRunning`, and `residentKVBound`: `none` (priced as read), `lower`,
+`upper`, `no-reading` or `off`. The replay switch is
+`kv-per-request-hits-resident` (`SwitchKVPerRequestHitsResident`). The
+throughput and slo analyzers still price their KV per request at `ILeff`.
 
 `KVreq` is the single most load-bearing quantity in the analyzer. Everything
 that asks "how many requests fit" divides by it.
@@ -1562,8 +1594,9 @@ the per-variant `replica-capacity-summary` stands in for them.
   priced shape and `kvReqFleet` the fleet's own; `outputDispersion` is the
   spread of output lengths priced into `kvReqPerSeq` (1 is none, or none
   read); `residentKVPerSeq` is the KV the running requests were measured to
-  hold, which bounds `kvReqPerSeq` between the hit rate's discount and none,
-  and `residentKVKnown` says whether there was a reading (issue #277);
+  hold, over `residentRunning` requests, and `residentKVBound` which bound
+  `kvReqPerSeq` held it to (`none`, `lower`, `upper`, `no-reading`, `off`;
+  issue #277);
   `muShortWindow` says whether the pair moved to the short window.
   It, and every ITL line (`itl-window`, `itl-fit`, `itl-fit-declined`,
   `itl-line-borrowed`, `itl-line-none`, `itl-gps-mismatch`), carries `namespace` beside

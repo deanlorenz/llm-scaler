@@ -40,23 +40,35 @@ import (
 // replaySwitches is each replay switch of this PR, saturation's or slo's
 // (switchPackage), and the golden outputs (fixture/file) it is named to move.
 //
-// #277 prices a resident request at the KV the running requests are
-// measured to hold, between the hit rate's discount and none, and at none
-// with no reading. It moves the derived mu, and with it the decode demand
-// the floor and the backlog cap price from it, in the two fixtures whose
-// derived mu the KV binds, not the batch cap: e1 and e1-tuned, both
+// #277 prices a resident request, where the running requests are read, at
+// the KV they are measured to hold, between the hit rate's discount and none;
+// with no reading, at the discount as before. It moves the derived mu, and
+// the decode demand the floor prices from it, in the two fixtures whose
+// derived mu the KV binds rather than the batch cap: e1 and e1-tuned, both
 // cluster recordings with a hit rate of about 1.5%. Every rate moved falls
-// (ServiceRate.Rate by 0.02% to 0.86%), as the change says it must: a
-// reading can take the discount back, never add to it. The decode demand
-// rises with it on most cycles it moves (246 of 285 in e1, 191 of 229 in
-// e1-tuned, by up to 0.87%) and falls on the rest by at most 0.08%: the
-// backlog an engine is charged is capped at what it drains, mu x T
-// (localQueueBacklog), so a lower mu can lower that term (not traced cycle
-// by cycle). In e1 1020 derived-mu lines priced a reading and 119 had none
-// and priced no discount; in e1-tuned 1034 and 97. The acceptance, engine and mu-paths
-// fixtures carry a hit rate of 0.1 but move nothing: every derived mu they
-// price is capped at their batch cap of 64, which the KV per request does
-// not reach.
+// (ServiceRate.Rate on 153 and 158 rows, by 0.02% to 0.54%), as the change
+// says it must: a reading can take the discount back, never add to it. Of
+// the derived-mu lines with the switch on, e1 priced 19 inside the bounds,
+// 288 at the upper bound, 191 at the lower (as before) and 641 with no
+// reading (as before); e1-tuned 19, 309, 163 and 640.
+//
+// The decode demand rises on most cycles it moves (70 of 107 in e1, 57 of
+// 93 in e1-tuned, by up to 0.49%) and falls on the rest, by at most 0.08%.
+// Traced cycle by cycle with the switch off and on, every fall (37 and 36)
+// is the floor's trust blend, and none the backlog cap, which binds on none
+// of them: the floor moves want towards the resident demand by trust, and
+// trust grows with the arrival demand lambda x PerReplica / mu, which a
+// lower mu raises (throughput_floor.go,
+// want -= trust x (want - max(resident, tokens))).
+// In e1, ns-01's decode on the second floor line: mu 6.3771 -> 6.3678 at an
+// arrival of 12/s, flooredTo 683929.0 -> 683923.9, between the resident
+// 683453 and the 684954 before the floor, with one request queued and none
+// capped.
+//
+// The acceptance, engine and mu-paths fixtures carry a hit rate of 0.1 and
+// read at the upper bound on every priced line, but move nothing: every
+// derived mu they price is capped at their batch cap of 64 before the KV
+// binds.
 var replaySwitches = map[string][]string{
 	saturation.SwitchKVPerRequestHitsResident: {
 		"e1-tuned/results.csv", "e1-tuned/variant-capacities.csv",

@@ -200,11 +200,9 @@ type cycle struct {
 	// shape change is outstanding, or with SwitchKVPerRequestOutputDispersion
 	// off.
 	fleetDispersion float64
-	// residentKV is the KV the fleet's running requests hold each, measured
-	// (fleetResidentKVPerRequest), and residentKVKnown whether there is a
-	// reading: none while a shape change is outstanding (issue #277).
-	residentKV      float64
-	residentKVKnown bool
+	// resident is the KV the fleet's running requests hold, and how many
+	// they are (fleetResidentKVPerRequest, issue #277).
+	resident residentReading
 	// shapeChanging is a shape change outstanding (resolvePricing): the mu
 	// moves to the short window if it can, and no path prices a spread.
 	shapeChanging bool
@@ -339,10 +337,10 @@ func (c *cycle) observeFleetShape() {
 	if c.a.kvOutputDispersion {
 		c.fleetDispersion = fleetOutputDispersion(c.input.ReplicaMetrics, c.rolesByVariant)
 	}
-	// The KV the running requests hold each, which says how much of the hit
-	// discount is real (issue #277). resolvePricing drops it while a shape
-	// change is outstanding.
-	c.residentKV, c.residentKVKnown = fleetResidentKVPerRequest(c.input.ReplicaMetrics, c.rolesByVariant)
+	// The KV the running requests hold, which says how much of the hit
+	// discount is real (issue #277), read from replicas inside the ITL band.
+	minK, _ := c.cfg.ITLBand()
+	c.resident = fleetResidentKVPerRequest(c.input.ReplicaMetrics, c.rolesByVariant, minK)
 	// The prefill side's hit rate, once for the role, for the same reason:
 	// it discounts the prompt length that buckets prefill's throughput key,
 	// and a per-replica figure would split one window between replicas.
@@ -423,9 +421,6 @@ func (c *cycle) resolvePricing() {
 	// (replicaOutputDispersion), and so does the zero-replica estimate.
 	if c.shapeChanging {
 		c.fleetDispersion = 1
-		// The requests resident now belong to both shapes, so their KV is
-		// no reading of either: the hit discount goes (prefix_cache_kv.go).
-		c.residentKVKnown = false
 		if recent := fleetOutputLengthRecent(c.input.ReplicaMetrics, c.rolesByVariant); recent > 0 {
 			c.muDivisor = recent
 			if recentIn := servedPromptLengthRecent(c.input.ReplicaMetrics); recentIn > 0 {
@@ -676,13 +671,14 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			muShape = shape.New(c.muInput, c.muDivisor, rm.PrefixCacheHitRate)
 		}
 		// A prefix-cache hit saves KV only when another running request
-		// holds the block too (issue #277): both shapes price a resident
-		// request at the KV the running requests are measured to hold,
-		// bounded by the hit rate's discount and by none, and at no
-		// discount with no reading (prefix_cache_kv.go).
+		// holds the block too (issue #277): where there is a reading, both
+		// shapes price a resident request at the KV the running requests are
+		// measured to hold, each bounded by its own discount and by none
+		// (prefix_cache_kv.go). With none, as before.
+		residentBound := residentBoundOff
 		if c.a.kvHitsResident {
-			fleetShape = withResidentKV(fleetShape, c.residentKV, c.residentKVKnown)
-			muShape = withResidentKV(muShape, c.residentKV, c.residentKVKnown)
+			fleetShape, _ = withResidentKV(fleetShape, c.resident)
+			muShape, residentBound = withResidentKV(muShape, c.resident)
 		}
 		// Only a generating role is priced from the ITL line. ITL is the gap
 		// between two generated tokens, and a prefill replica emits one and
@@ -753,10 +749,12 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				// D = E[O^2]/E[O]^2 of the output lengths, priced into
 				// KVreq; 1 is no spread, or none read.
 				"outputDispersion", muShape.OutputDispersion,
-				// The KV the running requests hold each, measured, and
-				// whether there was a reading (issue #277): kvReqPerSeq is
-				// it bounded by the hit rate's discount and by none.
-				"residentKVPerSeq", c.residentKV, "residentKVKnown", c.residentKVKnown,
+				// The KV the running requests hold each, measured over
+				// residentRunning of them, and which bound kvReqPerSeq
+				// held it to: none, lower (the hit rate's discount), upper
+				// (no discount), no-reading or off (issue #277).
+				"residentKVPerSeq", c.resident.perSeq(), "residentRunning", c.resident.running,
+				"residentKVBound", residentBound,
 				"replicaKvTokens", rm.TotalKvCapacityTokens,
 				// Per engine rank; the replica admits engineRanks times the
 				// lower of the two (0 when the active cap is unset).
