@@ -93,6 +93,10 @@ Read the review first; the implementation design says what was built.
   shortening that one field, on the shrinking target only, through the
   `wvaOwnership` opt-in. Also records what the same run does **not** show, and
   the plateau that was wrongly blamed on it.
+- **[Passive mode](passive-mode.md)** — design. The controller computes, logs
+  and publishes everything and moves no replica count, controller-wide or per
+  model. Holds the count when our trigger is alone; stays inert beside KEDA's
+  own triggers so KEDA scales and we observe.
 
 - **[WVA as a KEDA external scaler: the argument](wva-external-scaler-proposal.md)**
   — the shorter framing of the same design: compute the target, let KEDA
