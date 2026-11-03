@@ -14,9 +14,11 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/aggregation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/fleet"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
 
@@ -36,6 +38,18 @@ type ThroughputAnalyzer struct {
 	// rec records every call the engine makes, with what it returned
 	// (recording.go); nil when recording is off.
 	rec *learnrec.Recorder
+
+	// What the ITL line's admission reads (admission.go), each set by its
+	// builder before the analyzer is used: the engine's settle tracker
+	// (WithSettleView), the controller's optimize interval
+	// (WithOptimizationInterval), how long a fitted slope may be held
+	// (WithSlopeHoldFor), and the capacity store, read for each variant's
+	// engine parameters and never written (WithCapacityStore). Nil or zero
+	// when unset.
+	settle         settle.View
+	settleInterval time.Duration
+	slopeHoldFor   time.Duration
+	store          *capacity.Store
 }
 
 // variantState holds the cross-cycle calibration state for a single variant.
@@ -102,19 +116,23 @@ func (a *ThroughputAnalyzer) observeDefaultBand(
 	modelID, namespace string,
 	metrics []domain.ReplicaMetrics,
 ) map[string]SanityReport {
-	return a.observe(ctx, now, modelID, namespace, metrics, itl.DefaultMinObservableK, itl.DefaultMaxObservableK)
+	return a.observe(ctx, now, modelID, namespace, metrics, func(string) itl.Admission {
+		return itl.Admission{MinK: itl.DefaultMinObservableK, MaxK: itl.DefaultMaxObservableK}
+	})
 }
 
-// observe is Observe with the KV band [lo, hi] a reading must fall in: the
-// policy band (analyzerTuning.itlBand), which Analyze passes, as
-// the saturation and slo analyzers read them. This analyzer has no engine
-// configuration, so it takes no capped replica above the band (itl.Admission).
+// observe is Observe with each variant's admission (admissionFor): the KV
+// band [MinK, MaxK] a reading must fall in is the policy band
+// (analyzerTuning.itlBand), which Analyze passes, as the saturation and slo
+// analyzers read them. Only the band is read here: the window takes no capped
+// replica above it, and the rest of the admission waits for the line to move
+// onto itl.Tracker (analyzer-learner.md, PR 4b).
 func (a *ThroughputAnalyzer) observe(
 	ctx context.Context,
 	now time.Time,
 	modelID, namespace string,
 	metrics []domain.ReplicaMetrics,
-	lo, hi float64,
+	admissionFor func(variant string) itl.Admission,
 ) map[string]SanityReport {
 	if err := ctx.Err(); err != nil {
 		return nil
@@ -179,6 +197,8 @@ func (a *ThroughputAnalyzer) observe(
 
 		// Collect one (k*, ITL) observation per healthy replica. Per-replica variation
 		// in k* provides the k-spread needed for a reliable OLS fit.
+		adm := admissionFor(variantName)
+		lo, hi := adm.MinK, adm.MaxK
 		for _, m := range healthyMetrics {
 			// The k paired with the replica's ITL: the KV fill averaged over
 			// the minute its rate covers when the collector read that, the
@@ -291,14 +311,10 @@ func (a *ThroughputAnalyzer) analyze(
 	ownMetrics := ownReplicasOnly(input.ReplicaMetrics)
 
 	// observe updates internal state (acquires/releases a.mu internally).
-	lo, hi := itl.DefaultMinObservableK, itl.DefaultMaxObservableK
-	// Read through an interface: internal/config's tests import this package,
-	// so importing config here would be a cycle. *config.ScalingPolicy
-	// implements it, nil included.
-	if cfg, ok := input.Config.(interface{ ITLBand() (float64, float64) }); ok {
-		lo, hi = cfg.ITLBand()
-	}
-	a.observe(ctx, now, input.ModelID, input.Namespace, ownMetrics, lo, hi)
+	// One admission for the model's variants until the line reads each
+	// variant's engine parameters (admission).
+	adm := a.admission(itlPolicyOf(input.Config), input.Namespace, input.ModelID)
+	a.observe(ctx, now, input.ModelID, input.Namespace, ownMetrics, func(string) itl.Admission { return adm })
 
 	byVariant := groupByVariant(ownMetrics)
 

@@ -278,7 +278,7 @@ func (s *recScript) engine(t *testing.T) *Engine {
 		WithSettleView(e.settleTracker())
 	e.sloAnalyzer = judging
 	e.analyzers.replaceBuiltin(domain.SLOAnalyzerName, judging)
-	require.NoError(t, e.RegisterAnalyzer(throughput.AnalyzerName, throughput.NewThroughputAnalyzer().WithClock(e.Clock())))
+	require.NoError(t, e.RegisterAnalyzer(throughput.AnalyzerName, e.NewThroughputAnalyzer()))
 	if s.external != nil {
 		e.UpsertExternalAnalyzer(s.external.Name(), s.external)
 	}
@@ -638,7 +638,19 @@ func TestLearnerRecording_EveryEventRoundTripsByteForByte(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, string(ev.Data), string(b), "seq %d %s does not encode back to its bytes", ev.Seq, ev.Kind)
 		checked[ev.Kind]++
+		// The start line states what the throughput analyzer's builders set,
+		// as the engine wires it (Engine.NewThroughputAnalyzer): a replay
+		// builds the analyzer from it.
+		if ev.Kind == learnrec.KindStart {
+			start := v.(*learnrec.Start)
+			require.True(t, start.Throughput, "the run registered the throughput analyzer")
+			require.NotNil(t, start.ThroughputConfig, "the start line drops the throughput analyzer's settings")
+			assert.True(t, start.ThroughputConfig.SettleView, "the start line says no settle view")
+			assert.True(t, start.ThroughputConfig.CapacityStore, "the start line says no capacity store")
+			assert.Positive(t, start.ThroughputConfig.SlopeHoldFor, "the start line says no slope hold")
+		}
 	}
+	require.Equal(t, 1, checked[learnrec.KindStart], "one start line")
 	// The raw input and records inside an Analyze, decoded all the way down.
 	for _, ev := range events {
 		if ev.Kind != saturation.KindAnalyze {

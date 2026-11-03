@@ -50,6 +50,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/external"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/executor"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/variantmeta"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
@@ -479,6 +480,33 @@ func newEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 // ones.
 func (e *Engine) Clock() clock.PassiveClock {
 	return e.clock
+}
+
+// NewThroughputAnalyzer is a throughput analyzer wired to this engine, for
+// cmd/main to register: the cycle clock; the settle tracker the engine
+// writes at the top of every cycle, read-only; the optimize interval; the
+// capacity store, read for each variant's engine parameters; and the
+// saturation analyzer's bucket retention as the ITL line's slope hold, as the
+// slo analyzer gets it. What an engine a test built by hand lacks is left
+// unset.
+func (e *Engine) NewThroughputAnalyzer() *throughput.ThroughputAnalyzer {
+	a := throughput.NewThroughputAnalyzer()
+	if e.clock != nil {
+		a = a.WithClock(e.clock)
+	}
+	if e.settle != nil {
+		a = a.WithSettleView(e.settle)
+	}
+	if e.capacityStore != nil {
+		a = a.WithCapacityStore(e.capacityStore)
+	}
+	if e.Config != nil {
+		a = a.WithOptimizationInterval(e.Config.OptimizationInterval())
+	}
+	if sat := e.analyzers.saturationCaps().recorded; sat != nil {
+		a = a.WithSlopeHoldFor(sat.Horizons().BucketRetention)
+	}
+	return a
 }
 
 // addWarmPoolGPUs charges each namespace's warm pools into the managed usage

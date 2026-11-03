@@ -25,7 +25,7 @@ type Admission struct {
 	// only a default, which admits nothing above MaxK.
 	MaxNumSeqs int64
 	// MaxNumSeqsSource is where MaxNumSeqs came from, for the log only
-	// (flags, declared, none): nothing here reads it.
+	// (flags, declared, MaxNumSeqsSourceNone): nothing here reads it.
 	MaxNumSeqsSource string
 	// CapMaxPreemptionRate is the most preemptions per second a capped
 	// replica may show over the ITL's window and still be read above MaxK.
@@ -84,6 +84,24 @@ type Admission struct {
 	// rank, whose AvgITL is its Finite ranks' mean, is no reading. Without
 	// it, as before, any finite AvgITL above zero is.
 	FiniteOnly bool
+}
+
+// MaxNumSeqsSourceNone is Admission.MaxNumSeqsSource when no cap is stated:
+// nothing above the band is admitted. The analyzers that log the source
+// share this one value.
+const MaxNumSeqsSourceNone = "none"
+
+// PolicyReader is what an ITL line reads of a scaling policy: the KV band
+// (analyzerTuning.itlBand), the steady-state gate (analyzerTuning.steadyGate)
+// and the most preemption a capped replica may show
+// (analyzerTuning.itlBand.capMaxPreemptionRate). *config.ScalingPolicy
+// implements it, nil included, and asserts so at compile time: an analyzer
+// that cannot import config reads the policy through it, and a renamed
+// method fails the build instead of reading the defaults.
+type PolicyReader interface {
+	ITLBand() (lo, hi float64)
+	ITLSteadiness() Steadiness
+	ITLCapPreemptionRate() float64
 }
 
 // mayHold reports whether a key's last A may stand in for a fit at now: it was

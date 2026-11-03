@@ -92,9 +92,15 @@ var reviewed = map[reflect.Type]buckets{
 	},
 	reflect.TypeFor[*throughput.ThroughputAnalyzer](): {
 		recorded: []string{"Analyze", "Observe"},
-		readers:  []string{"Name", "VariantState"},
-		builders: []string{"WithClock", "WithRecorder"},
-		seams:    []string{"SetSwitchesForReplay"},
+		// StartConfig states what the builders set, for the recording's
+		// first line; it changes nothing.
+		readers: []string{"Name", "VariantState", "StartConfig"},
+		// WithSettleView and WithCapacityStore hand the ITL line's admission
+		// the engine's settle tracker and store, read-only; the replay hands
+		// it its own (start.ThroughputConfig).
+		builders: []string{"WithClock", "WithRecorder", "WithSettleView", "WithOptimizationInterval",
+			"WithSlopeHoldFor", "WithCapacityStore"},
+		seams: []string{"SetSwitchesForReplay"},
 	},
 	reflect.TypeFor[*capacity.Store](): {
 		recorded: []string{"FileScaleTarget", "EvictStale"},

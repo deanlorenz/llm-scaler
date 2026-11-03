@@ -598,6 +598,261 @@ these changes:
    - Write the new counts and times in the comments. The test's own log
      line prints the replay's counts.
 
+The `throughput-sweep` and `throughput-sweep-restart` goldens are one run
+of the `ols-sweep` scenario with the throughput analyzer listed beside
+saturation, for learner PR 4b (the throughput analyzer's ITL line moving
+onto the shared tracker). Like the slo pair, the run restarts the
+controller under load and leaves two recordings. Take it at a commit with
+4b-0 merged: from then on the recording's first line carries the throughput
+analyzer's settings (`ThroughputConfig`), and a replay builds the analyzer
+as the run did.
+
+It needs 2 H200 (one decode, one prefill) for about 70 minutes, setup
+included. It is a shared cluster: on any failure or abort, go straight to
+[Teardown](#teardown-of-the-throughput-sweep), which says where to start
+for each step.
+
+The order matters. The controller registers the throughput analyzer only
+when it starts, and only if the policy lists it then. Turning the recorder
+on restarts the controller, so the policy goes in first and the recorder
+last.
+
+`NS` is the run's namespace. The standup installs the controller into it,
+so the controller, its policy map and the model all live there.
+
+1. **The scenario and the controller.** Check out the commit, and use the
+   controller image built from it, pinned by digest. Apply the decode
+   changes of the `ols-sweep` step 1 (64 sequences, `VLLM_MAX_MODEL_LEN`
+   at 16384, `--num-gpu-blocks-override 1024`) to
+   `hack/benchmark/scenarios/guides/pd-disaggregation.yaml`, then stand it
+   up; the standup also installs the controller:
+
+   ```bash
+   make benchmark-standup BENCHMARK_NAMESPACE="$NS" BENCHMARK_SPEC=guides/pd-disaggregation \
+     MODEL_ID=Qwen/Qwen3-0.6B IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:<digest of the commit's image>
+   ```
+
+   Give both ScaledObjects 1-1 replicas, decode and prefill. With both
+   pinned, listing throughput cannot change the fleet. Then remove EPP flow
+   control: delete the `flowControl` feature gate and the `flowControl:`
+   block from the EPP's `EndpointPickerConfig`, and restart the EPP. Do
+   **not** turn the recorder on yet.
+2. **The policy.** Save the map first, for the teardown:
+
+   ```bash
+   kubectl -n "$NS" get configmap wva-scaling-policy-config -o yaml > policy-before.yaml
+   kubectl -n "$NS" edit configmap wva-scaling-policy-config
+   ```
+
+   In the `default` entry, list throughput beside saturation:
+
+   ```yaml
+   analyzers:
+     - name: saturation
+       score: 1.0
+     - name: throughput
+       score: 1.0
+   ```
+
+   This is the controller's global map: the controller registers the
+   throughput analyzer only at start, and only when an entry of that map
+   lists it. Keep `analyzerTuning` at its defaults and the learned-state
+   snapshot off.
+3. **The recorder, last.** It is the change that rolls the controller:
+
+   ```bash
+   kubectl -n "$NS" patch deployment wva-controller-manager --type strategic \
+     --patch-file config/components/learner-recorder/learner-recorder-deployment.yaml
+   kubectl -n "$NS" rollout status deployment/wva-controller-manager
+   POD1=$(kubectl -n "$NS" get pod -l control-plane=controller-manager -o name | head -1)
+   POD1=${POD1#pod/}
+   kubectl -n "$NS" logs "$POD1" -c manager | grep ThroughputAnalyzer
+   ```
+
+   It must say `ThroughputAnalyzer registered (enabled in saturation
+   config)`. If it says `NOT registered`, or nothing, the map did not list
+   throughput when the Pod started. Fix the map, restart the controller
+   explicitly, take the new Pod's name, and check again:
+
+   ```bash
+   kubectl -n "$NS" rollout restart deployment/wva-controller-manager
+   kubectl -n "$NS" rollout status deployment/wva-controller-manager
+   ```
+
+   Then check the recording's start line in that Pod:
+
+   ```bash
+   kubectl -n "$NS" exec "$POD1" -c recordings -- ls -l /var/lib/wva/learner-recordings
+   kubectl -n "$NS" exec "$POD1" -c recordings -- sh -c 'head -1 /var/lib/wva/learner-recordings/learnrec-*.jsonl'
+   ```
+
+   `Commit` is the commit you checked out. `Throughput` is `true`, and
+   `ThroughputConfig` has `SettleView` and `CapacityStore` `true` and a
+   non-zero `SlopeHoldFor` (the bucket retention, 7 days by default:
+   `604800000000000`) and `OptimizationInterval` (the controller's
+   interval in nanoseconds, `15000000000` at 15 s). A zero in either says
+   the analyzer was not built by `Engine.NewThroughputAnalyzer`: stop and
+   tear down.
+4. **The load.** Start the sweep in the background, with its PID kept for
+   the teardown, and run the `--scale` check of the `ols-sweep` step 3 on
+   its first level:
+
+   ```bash
+   nohup python3 hack/benchmark/closed_loop_sweep.py --url http://ROUTER:80 --model Qwen/Qwen3-0.6B \
+     > sweep.log 2>&1 &
+   echo $! > sweep.pid
+   ```
+
+   **After the second level (570 s), check the GPS-mismatch clear:**
+
+   ```bash
+   kubectl -n "$NS" logs "$POD1" -c manager | grep -c 'GPS mismatch persisted, clearing observation window'
+   ```
+
+   The throughput analyzer clears its window after three cycles in a row
+   whose generated-token rate disagrees with its line by more than its
+   threshold. That rule predates 4b. When it fires every few cycles, the
+   window never fills and the run may hold no `T1-ols` at all, which a
+   retake does not fix. Note the count, and **keep the recording anyway**:
+   it is the evidence 4b-1 needs to decide whether that clear is wrong for
+   the line ([analyzer-learner.md, PR 4b](../proposals/analyzer-learner.md#pr-4b-the-throughput-analyzers-itl-line)).
+5. **A controller restart under load.** 90 seconds into the fifth level
+   (56 in flight, 1000 tokens in and 500 out). The fifth level starts at
+   1110 s (300 s, then three levels of 270 s), so this is at 1200 s, 20
+   minutes into the sweep. Copy the first Pod's recordings and log out by
+   its name, then delete it:
+
+   ```bash
+   kubectl -n "$NS" get lease -o custom-columns=NAME:.metadata.name,HOLDER:.spec.holderIdentity
+   # POD1 must be the holder, up to the first underscore
+   kubectl -n "$NS" cp -c recordings "$POD1:/var/lib/wva/learner-recordings" ./recordings-1
+   kubectl -n "$NS" logs --timestamps "$POD1" -c manager > controller-1.log
+   kubectl -n "$NS" delete pod "$POD1"
+   kubectl -n "$NS" rollout status deployment/wva-controller-manager
+   POD2=$(kubectl -n "$NS" get pod -l control-plane=controller-manager -o name | head -1)
+   POD2=${POD2#pod/}
+   ```
+
+   The new Pod has a new, empty volume and opens its own recording. When
+   the sweep ends (`sweep.log` says so, about 55 minutes in), copy its
+   files and log out by its name, to a directory of their own:
+
+   ```bash
+   kubectl -n "$NS" cp -c recordings "$POD2:/var/lib/wva/learner-recordings" ./recordings-2
+   kubectl -n "$NS" logs --timestamps "$POD2" -c manager > controller-2.log
+   ```
+
+   Each file is named by the time its recording started
+   (`learnrec-<start>.jsonl`). A Pod whose container restarted (a crash, an
+   OOM) keeps its volume, so its directory can hold more than one file: the
+   one to keep is the one whose start precedes the load (`recordings-1`) or
+   follows the delete (`recordings-2`), and the others are reported, not
+   used.
+6. **Check what was captured.**
+   - Each kept file's first line passes the checks of step 3. The second
+     file's first line carries `"StoreRecords":0`, and neither file holds a
+     `saturation.RestoreLearnedState` or `saturation.TakeRestoreOutcomes`
+     event: the restart restored nothing.
+   - Each file holds `throughput.Analyze` events for the model.
+   - **Count each side the same way**, for each file and its log, over the
+     file's window: from its start line's `Now` to its last event's `Now`.
+     - *Log side.* The lines of `controller-N.log` whose message is
+       `analyzer-result`, with `"analyzer":"throughput"` and the model's
+       `modelID`, and a timestamp inside the window. That is one line a
+       cycle the analyzer ran. For each variant, count the lines whose
+       `variants` list holds an entry with its `name`, by that entry's
+       `reason`: `T1-ols`, `T2-pinned`, `T2-default`. `T2-failed` is the
+       lines less those three: a cycle with no line for the variant
+       carries no entry for it, and a cycle with no line for any variant
+       logs `"variants":[]`.
+     - *Replay side.* The `throughput.Analyze` events of the file with an
+       empty `Error`: one a cycle. For each variant, count the rows of
+       the golden's `variant-capacities.csv` whose `kind` is
+       `throughput.Analyze` and whose `item` is the variant, by the
+       `Reason` in their `data`. `T2-failed` is the events less those
+       rows.
+
+     Both sides must give the same four counts per variant. The first file
+     should hold some `T1-ols` (it has three level changes before the
+     restart). If it holds none and the GPS check of step 4 counted
+     clears, keep it (step 4). If it holds none and there were no clears,
+     the `--scale` check was skipped: retake the run.
+7. **Add each file** under its own name, at that commit:
+
+   ```bash
+   SRC="P/D benchmark scenario, flow control off, decode KV of 1024 blocks and 64 sequences on one decode replica, prefill 1-1, load sweeps of concurrency and shape, saturation and throughput listed, default analyzerTuning"
+   make learner-golden-add RECORDING=recordings-1/learnrec-<first start>.jsonl NAME=throughput-sweep SOURCE="$SRC; up to a controller restart"
+   make learner-golden-add RECORDING=recordings-2/learnrec-<second start>.jsonl NAME=throughput-sweep-restart SOURCE="$SRC; after a controller restart under load, snapshot off"
+   ```
+
+   The goldens land in a commit of their own, generated at the PR's base,
+   before any 4b switch (the golden rule,
+   [analyzer-learner.md 2.5](../proposals/analyzer-learner.md#25-replay-and-the-golden-rule)).
+   Write the counts of step 6, and the GPS clear count of step 4, in the
+   commit message.
+
+#### Teardown of the throughput sweep
+
+Run these in order at the end of the run, and on any failure or abort.
+Each is safe to run again, so after an interrupted teardown step, run it
+again and carry on from there.
+
+| aborted during | start the teardown at |
+| --- | --- |
+| step 1 or 2 (no recorder, no load) | T3 |
+| step 3 (recorder on, no load) | T2 |
+| step 4, 5 or 6 (load running or just ended) | T1 |
+| step 7, or a teardown step | the step it stopped in |
+
+- **T1. Stop the sweep.** It holds the load on the GPUs:
+
+  ```bash
+  kill "$(cat sweep.pid)" 2>/dev/null; sleep 5; kill -0 "$(cat sweep.pid)" 2>/dev/null && kill -9 "$(cat sweep.pid)"
+  ```
+
+- **T2. Save the recordings and logs first,** from every controller Pod
+  still there, by name. A Pod's recordings go with the Pod; nothing later
+  can bring them back:
+
+  ```bash
+  for P in $(kubectl -n "$NS" get pod -l control-plane=controller-manager -o name); do
+    P=${P#pod/}
+    kubectl -n "$NS" cp -c recordings "$P:/var/lib/wva/learner-recordings" "./recordings-$P"
+    kubectl -n "$NS" logs --timestamps "$P" -c manager > "controller-$P.log"
+  done
+  ```
+
+  Keep what step 5 copied as well.
+- **T3. Delete the scenario and its ScaledObjects.** The teardown target
+  also removes the controller it installed:
+
+  ```bash
+  make benchmark-teardown BENCHMARK_NAMESPACE="$NS" BENCHMARK_SPEC=guides/pd-disaggregation
+  kubectl -n "$NS" delete scaledobject --all
+  ```
+
+- **T4. Remove the policy entry and the recorder patch,** where the
+  teardown left them:
+
+  ```bash
+  kubectl -n "$NS" get configmap wva-scaling-policy-config >/dev/null 2>&1 && \
+    kubectl -n "$NS" replace --force -f policy-before.yaml
+  kubectl -n "$NS" get deployment wva-controller-manager >/dev/null 2>&1 && \
+    kubectl -n "$NS" patch deployment wva-controller-manager --type strategic \
+      --patch-file config/components/learner-recorder/learner-recorder-off-deployment.yaml
+  ```
+
+- **T5. Confirm no GPU Pod is left:**
+
+  ```bash
+  kubectl get pods -n "$NS"
+  kubectl -n "$NS" get pods -o custom-columns='NAME:.metadata.name,GPU:.spec.containers[*].resources.limits.nvidia\.com/gpu'
+  ```
+
+  No Pod may show a GPU count. If one does, delete what owns it (its
+  Deployment or LeaderWorkerSet) and check again; do not leave the
+  namespace until this reads clean.
+
 #### The engine layer
 
 The analyzer events stop at each `Analyze`. The engine layer (issue #345,

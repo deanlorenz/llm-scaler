@@ -113,6 +113,19 @@ func build(start learnrec.Start, now time.Time, opts Options, rec *learnrec.Reco
 	}
 	if start.Throughput {
 		r.tp = throughput.NewThroughputAnalyzer().WithClock(r.clock).WithRecorder(rec)
+		// Built as the run built it: the replay's own settle tracker and
+		// store exactly where the run handed it the engine's. A recording
+		// from before the analyzer had builders carries none, and it is
+		// built with none, as it ran.
+		if c := start.ThroughputConfig; c != nil {
+			r.tp = r.tp.WithSlopeHoldFor(c.SlopeHoldFor).WithOptimizationInterval(c.OptimizationInterval)
+			if c.SettleView {
+				r.tp = r.tp.WithSettleView(r.settle.tracker)
+			}
+			if c.CapacityStore {
+				r.tp = r.tp.WithCapacityStore(r.store)
+			}
+		}
 	}
 	if err := r.setSwitches(); err != nil {
 		return nil, err

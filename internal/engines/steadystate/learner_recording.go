@@ -94,6 +94,8 @@ func (e *Engine) recordLearners(rec *learnrec.Recorder) {
 			start.SLO = &learnrec.SLOStart{StateTimeout: a.StateTimeout(), SlopeHoldFor: a.SlopeHoldFor(), Judging: a.Judging()}
 		case *throughput.ThroughputAnalyzer:
 			start.Throughput = true
+			cfg := a.StartConfig()
+			start.ThroughputConfig = &cfg
 		}
 	}
 	rec.Record(learnrec.KindStart, e.clock.Now(), start)
