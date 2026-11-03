@@ -2,6 +2,7 @@ package throughput
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -49,10 +50,22 @@ func (a *ThroughputAnalyzer) WithRecorder(rec *learnrec.Recorder) *ThroughputAna
 
 // SetSwitchesForReplay sets the package's replay switches by name: the test
 // seam a replay drives one named change through (analyzer-learner.md, 2.5).
-// No switch exists yet, so the only set it accepts is the empty one. Never
-// called on a production path; a test holds that.
+// Never called on a production path; a test holds that.
 func (a *ThroughputAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
-	return learnrec.UnknownSwitches("throughput", switches)
+	rest := maps.Clone(switches)
+	fields := a.switchFields()
+	for name := range fields {
+		delete(rest, name)
+	}
+	if err := learnrec.UnknownSwitches("throughput", rest); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for name, on := range switches {
+		*fields[name] = on
+	}
+	return nil
 }
 
 // Analyze implements domain.Analyzer (analyze), and records the call.

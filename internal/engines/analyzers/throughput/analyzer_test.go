@@ -67,7 +67,7 @@ var _ = Describe("ThroughputAnalyzer", func() {
 	)
 
 	BeforeEach(func() {
-		analyzer = NewThroughputAnalyzer()
+		analyzer = newParentLineAnalyzer()
 		ctx = context.Background()
 		modelID = "llama3-8b"
 		namespace = "default"
@@ -1292,7 +1292,7 @@ var _ = Describe("ThroughputAnalyzer", func() {
 			resultNoQ, errNoQ := analyzer.Analyze(ctx, inputNoQ)
 			Expect(errNoQ).NotTo(HaveOccurred())
 
-			analyzer2 := NewThroughputAnalyzer()
+			analyzer2 := newParentLineAnalyzer()
 			injectWindowObs(analyzer2, ctx, modelID, namespace, "v-decode", ilA, olA, prefixA, kvMaxA, bA, kValuesA)
 			injectWindowObs(analyzer2, ctx, modelID, namespace, "v-prefill", ilA, olA, prefixA, kvMaxA, bA, kValuesA)
 			resultWithQ, errWithQ := analyzer2.Analyze(ctx, inputWithQ)

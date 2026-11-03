@@ -40,7 +40,7 @@ func neutralRows(start time.Time, i int) []domain.ReplicaMetrics {
 	}
 	early := start.Add(-time.Hour)
 	stepK := 0.25
-	if (i/8)%2 == 1 {
+	if (i/16)%2 == 1 {
 		stepK = 0.65
 	}
 	capped := row("pod-cap", 0.88, early)

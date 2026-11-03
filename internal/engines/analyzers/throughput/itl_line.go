@@ -1,0 +1,237 @@
+package throughput
+
+import (
+	"context"
+	"maps"
+	"math"
+	"slices"
+	"time"
+
+	ctrl "sigs.k8s.io/controller-runtime"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
+)
+
+// The ITL line on the shared tracker (docs/proposals/analyzer-learner.md,
+// PR 4b-1). The line was fitted from a window of every healthy reading, with
+// a pinned fit over the cycle's own rows; it now fits as the saturation and
+// slo analyzers' lines do, with a tracker of its own (itl.Tracker), keyed by
+// variant as the window was. Two named changes, each behind a replay switch.
+
+// SwitchITLSteadyGate is the replay switch for the move onto itl.Tracker,
+// and #273's fixes with it. On: the full fit is taken from steady readings
+// only; a reading taken while its replica settles (it joined, or load came
+// back after idle) is stamped and kept out of the pinned fit; the pinned fit
+// is the k-weighted mean of (ITL - B) / k over the window's readings in the
+// band, with at least itl.DefaultMinSamples readings and
+// steadyGate.minSettledSamples settled; B is remembered only when positive;
+// an ITL of +Inf is no reading; and when there are too few readings the
+// line holds its last A (Reason T2-held), for at most the slope hold and
+// under the same engine arguments. The settle is the key's own trace of each
+// replica (the engine's settle tracker is PR 4b-2's). Off, as before: a
+// window of every healthy reading in the band, OLS when it is ready, else A
+// by least squares through B over the cycle's healthy rows, at any k.
+const SwitchITLSteadyGate = "throughput-itl-steady-gate"
+
+// SwitchITLKeepsWindowOnGPSMismatch is the replay switch for the
+// GPS-mismatch clear (analyzer-learner.md, "The GPS-mismatch clear: dropped
+// in 4b-1"). On: three cycles in a row whose generated-token rate is more
+// than itl.DefaultGPSMismatchThresholdPct off the line's prediction no longer
+// clear the window; the comparison is a diagnostic, judged at the k paired
+// with the ITL (KvUsageForITL), logged per pod at the debug level and per
+// variant when it starts or ends. Off, as before: the window is cleared, and
+// each mismatched pod logs at the default level every cycle.
+const SwitchITLKeepsWindowOnGPSMismatch = "throughput-itl-keeps-the-window-on-gps-mismatch"
+
+// itlReasonT2Held is the Reason of a line whose A is held from an earlier
+// fit, its window too short to fit one (SwitchITLSteadyGate).
+const itlReasonT2Held = "T2-held"
+
+// ITLWriteBand is how far a variant's A or B must move from the value
+// learner-write last logged, as a fraction of that value, before it logs
+// the line again: the saturation analyzer's band (saturation.ITLWriteBand).
+const ITLWriteBand = 0.05
+
+// LearnerHeartbeat is how long a line may go without a learner-write line
+// while it holds: the saturation analyzer's heartbeat.
+const LearnerHeartbeat = 10 * time.Minute
+
+// itlLogged is the line learner-write last logged for a variant, and when.
+type itlLogged struct {
+	a, b   float64
+	reason string
+	at     time.Time
+}
+
+// switchFields is each replay switch by name, and the field it sets.
+func (a *ThroughputAnalyzer) switchFields() map[string]*bool {
+	return map[string]*bool{
+		SwitchITLSteadyGate:               &a.itlSteadyGate,
+		SwitchITLKeepsWindowOnGPSMismatch: &a.itlKeepsOnGPSMismatch,
+	}
+}
+
+// ReplaySwitchNames is every name SetSwitchesForReplay accepts, sorted.
+func ReplaySwitchNames() []string {
+	return slices.Sorted(maps.Keys((&ThroughputAnalyzer{}).switchFields()))
+}
+
+// lineAdmission is adm for one variant of the model: with the line on the
+// tracker, the engine arguments its rows were produced under, which bound a
+// held slope (itl.Admission.Args). The settle tracker is not handed on until
+// PR 4b-2: the line judges each replica's settle from its own trace.
+func (a *ThroughputAnalyzer) lineAdmission(adm itl.Admission, namespace, modelID, variant string) itl.Admission {
+	adm.Settle = nil
+	if !a.itlSteadyGate || a.store == nil {
+		return adm
+	}
+	if rec := a.store.Get(namespace, modelID, variant); rec != nil {
+		adm.Args = rec.EngineParams.ArgsTag()
+	}
+	return adm
+}
+
+// freshRows is rows less those whose metrics are stale: the tracker judges
+// every other row itself (Ready, warm pool, ITL, k, band), and a stale row
+// is not a reading of the replica now.
+func freshRows(rows []domain.ReplicaMetrics) []domain.ReplicaMetrics {
+	out := make([]domain.ReplicaMetrics, 0, len(rows))
+	for _, m := range rows {
+		if m.Metadata != nil && m.Metadata.FreshnessStatus == "stale" {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// lineModel is the variant's line from the tracker's reading this cycle, and
+// its Reason; it logs learner-write when the line moved. Called with a.mu
+// held.
+func (a *ThroughputAnalyzer) lineModel(ctx context.Context, key string, state *variantState,
+	namespace, modelID, variant string, now time.Time) (itl.Model, string, bool) {
+	if !state.hasReading {
+		return itl.Model{}, itlReasonT2Failed, false
+	}
+	r := state.reading
+	reason := lineReason(r)
+	a.noteLearnerWrite(ctx, key, r, reason, namespace, modelID, variant, now)
+	if r.Tier == "" {
+		return itl.Model{}, reason, false
+	}
+	return r.Model, reason, true
+}
+
+// lineReason is the Reason a reading's line carries.
+func lineReason(r itl.Reading) string {
+	switch {
+	case r.Tier == itl.TierOLS:
+		return itlReasonT1OLS
+	case r.Tier == itl.TierPinnedB && r.SlopeHeld:
+		return itlReasonT2Held
+	case r.Tier == itl.TierPinnedB && r.BaselineLearned:
+		return itlReasonT2Pinned
+	case r.Tier == itl.TierPinnedB:
+		return itlReasonT2Default
+	}
+	return itlReasonT2Failed
+}
+
+// noteLearnerWrite logs a learner-write line for the variant's line when it
+// is set for the first time, changed Reason (dropping to no line included),
+// moved ITLWriteBand from what was last logged, or has not logged for
+// LearnerHeartbeat. At V(3), at most one line per variant per cycle, as the
+// saturation analyzer's ITL line logs. Called with a.mu held.
+func (a *ThroughputAnalyzer) noteLearnerWrite(ctx context.Context, key string, r itl.Reading, reason string,
+	namespace, modelID, variant string, now time.Time) {
+	last, logged := a.itlLogged[key]
+	if reason == itlReasonT2Failed && (!logged || last.reason == itlReasonT2Failed) {
+		return
+	}
+	moved := func(now, was float64) bool {
+		if math.IsNaN(now) || math.IsNaN(was) {
+			return math.IsNaN(now) != math.IsNaN(was)
+		}
+		return math.Abs(now-was) > ITLWriteBand*math.Abs(was)
+	}
+	if logged && last.reason == reason && !moved(r.Model.A, last.a) && !moved(r.Model.B, last.b) &&
+		now.Sub(last.at) < LearnerHeartbeat {
+		return
+	}
+	a.itlLogged[key] = itlLogged{a: r.Model.A, b: r.Model.B, reason: reason, at: now}
+	ctrl.LoggerFrom(ctx).V(logging.VERBOSE).Info("learner-write",
+		"learner", learn.ITL, "analyzer", AnalyzerName, "modelID", modelID, "namespace", namespace,
+		"variant", variant, "a", r.Model.A, "b", r.Model.B, "previousA", last.a, "previousB", last.b,
+		"firstWrite", !logged, "source", reason, "previousSource", last.reason, "samples", r.Held,
+		"steadyHeld", r.SteadyHeld, "settling", r.Settling, "slopeAgeSeconds", r.SlopeAge(now).Seconds())
+}
+
+// lineVariantState is the variant's snapshot with the line on the tracker:
+// the window figures are the reading's (the steady readings' spread, since
+// the full fit is judged on those alone), and B the tracker's remembered
+// one. Called with a.mu held.
+func (a *ThroughputAnalyzer) lineVariantState(key string, state *variantState, s shape.Shape) ThroughputVariantState {
+	b, stored := a.lines.Baseline(key)
+	return ThroughputVariantState{
+		Shape:            s,
+		ObservationReady: state.reading.Ready,
+		KSpread:          state.reading.SteadySpread,
+		SampleCount:      a.lines.WindowLen(key),
+		LastSanityReport: state.lastSanityReport,
+		ITLModel:         state.lastITLModel,
+		PerReplicaSupply: state.lastPerReplicaSupply,
+		TotalSupply:      state.lastTotalSupply,
+		Demand:           state.lastDemand,
+		Role:             state.role,
+		LastFittedB:      b,
+		HasFittedB:       stored && b > 0,
+	}
+}
+
+// noteGPSMismatch is checkVariantGPSMismatch as a diagnostic
+// (SwitchITLKeepsWindowOnGPSMismatch): each replica at a k of at least
+// itl.DefaultGPSMinKForVerification -- the k paired with its ITL, as the
+// line reads it -- whose generated-token rate is more than
+// itl.DefaultGPSMismatchThresholdPct off the rate the line predicts. Each such
+// pod logs at the debug level; the variant logs one line at the default
+// level when it starts or stops mismatching, with how many pods did and the
+// largest error. It clears nothing. Called with a.mu held.
+func (a *ThroughputAnalyzer) noteGPSMismatch(ctx context.Context, state *variantState,
+	metrics []domain.ReplicaMetrics, s shape.Shape, model itl.Model, namespace, modelID, variant string) bool {
+	if s.KVreq <= 0 {
+		return false
+	}
+	logger := ctrl.LoggerFrom(ctx)
+	pods, worst, worstPod := 0, 0.0, ""
+	for _, m := range metrics {
+		if m.TotalKvCapacityTokens <= 0 {
+			continue
+		}
+		k := m.KvUsageForITL()
+		errPct, ok := itl.GPSErrorPct(model, k, float64(m.TotalKvCapacityTokens), s.KVreq, m.GenerationTokenRate)
+		if !ok || errPct <= DefaultGPSMismatchThresholdPct {
+			continue
+		}
+		pods++
+		if errPct > worst {
+			worst, worstPod = errPct, m.PodName
+		}
+		logger.V(logging.DEBUG).Info("throughput analyzer: GPS mismatch detected",
+			"namespace", namespace, "modelID", modelID, "variant", variant, "pod", m.PodName,
+			"k", k, "GPSObs", m.GenerationTokenRate,
+			"muDecModel", itl.TokenRate(model, k, float64(m.TotalKvCapacityTokens), s.KVreq),
+			"gpsErrPct", errPct)
+	}
+	mismatched := pods > 0
+	if mismatched != state.gpsMismatched {
+		logger.Info("throughput analyzer: GPS mismatch", "namespace", namespace, "modelID", modelID,
+			"variant", variant, "mismatched", mismatched, "pods", pods, "worstPod", worstPod, "worstErrPct", worst,
+			"thresholdPct", DefaultGPSMismatchThresholdPct)
+	}
+	state.gpsMismatched = mismatched
+	return mismatched
+}

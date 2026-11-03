@@ -16,7 +16,13 @@ import (
 func TestObservationWindowReadsThePolicyBand(t *testing.T) {
 	count := func(cfg *config.ScalingPolicy) int {
 		a := NewThroughputAnalyzer()
-		in := domain.AnalyzerInput{ModelID: "m", Namespace: "ns", ReplicaMetrics: makeMetrics("v1", 2, 0.10, 0.75)}
+		rows := makeMetrics("v1", 2, 0.10, 0.75)
+		// The line on the tracker reads Ready rows only, as the collector
+		// builds them.
+		for i := range rows {
+			rows[i].Ready = true
+		}
+		in := domain.AnalyzerInput{ModelID: "m", Namespace: "ns", ReplicaMetrics: rows}
 		if cfg != nil {
 			in.Config = cfg
 		}
@@ -61,7 +67,7 @@ func TestITLPairsTheMinuteMeanKVFill(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := replica(tc.known)
-			a := NewThroughputAnalyzer()
+			a := newParentLineAnalyzer()
 			a.observeDefaultBand(ctx, now, "m", "ns", []domain.ReplicaMetrics{m})
 			st, _ := a.VariantState("m", "ns", "v1")
 			if st.SampleCount != tc.samples {

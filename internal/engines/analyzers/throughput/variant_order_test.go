@@ -29,7 +29,7 @@ var _ = Describe("Analyze variant order", func() {
 
 	It("returns the capacities in variant-name order on every run", func() {
 		ctx := context.Background()
-		analyzer := NewThroughputAnalyzer()
+		analyzer := newParentLineAnalyzer()
 		rows := make([]domain.ReplicaMetrics, 0, len(variants))
 		for _, v := range variants {
 			injectWindowObs(analyzer, ctx, modelID, namespace, v, il, ol, prefix, kvMax, b, kValues)
