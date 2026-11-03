@@ -495,6 +495,26 @@ func (t *Tracker) Sweep(now time.Time, stale func(key string) bool) (windows, ba
 	return windows, baselines
 }
 
+// ClearWindow drops the readings filed under key, the steady ones too, and
+// keeps the key's intercept, its held slope and its replicas' settle
+// traces: the next fit is made from new readings only, and until there are
+// enough the held slope is the line, as on light load. It reports whether
+// the key held any readings.
+func (t *Tracker) ClearWindow(key string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	had := false
+	if w, ok := t.windows[key]; ok {
+		had = w.Len() > 0
+		w.Clear()
+	}
+	if w, ok := t.steady[key]; ok {
+		had = had || w.Len() > 0
+		w.Clear()
+	}
+	return had
+}
+
 // Baselines returns a copy of every key's remembered intercept.
 func (t *Tracker) Baselines() map[string]float64 {
 	t.mu.Lock()

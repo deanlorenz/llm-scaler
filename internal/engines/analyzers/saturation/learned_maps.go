@@ -101,6 +101,7 @@ func (a *SaturationAnalyzer) learnedMapsLocked() []learnedMap {
 		registered("startOutliers", scopeITLKey, a.startOutliers).working(),
 		registered("variantSeenAt", scopeITLKey, a.variantSeenAt),
 		registered("itlWithheldLogged", scopeITLKey, a.itlWithheldLogged).working(),
+		registered("itlAggregated", scopeITLKey, a.itlAggregated),
 		registered("lastAccelerator", scopeVariantName, a.lastAccelerator),
 		registered("pendingRestore", scopeVariantName, a.pendingRestore),
 		registered("itlLines", scopeOwnRule, a.itlLines),

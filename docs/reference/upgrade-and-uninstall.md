@@ -106,7 +106,7 @@ only to change it. Limiters an admin published in a policy namespace
 
 ### Upgrading from v0.10.2 to the next release
 
-An ordinary aggregated deployment (a variant with no `llm-d.ai/role` label) now reports an inter-token-latency line and the service rate it derives: `wva_itl_line_slope` and `wva_service_rate_per_replica{source="derived-report-only"}` appear for it. Its sizing does not change: nothing is sized from that rate until issue #275 makes the line account for the request shape.
+An ordinary aggregated deployment (a variant with no `llm-d.ai/role` label) now reports an inter-token-latency line and the service rate it derives: `wva_itl_line_slope` and `wva_service_rate_per_replica{source="derived-report-only"}` appear for it. Once the line accounts for the request shape and has matched the replicas' generated tokens for 3 cycles, the variant is sized from it (`source="derived-aggregated"`), never above a measured rate of its own. A vLLM aggregated variant needs `vllm:num_requests_running` scraped for that; an SGLang one stays reported only. The learned-state document gains `itlLineShapes`; an older controller ignores it. An aggregated line restored from a document written before this release has no shape, so it prices nothing, reported or sized, until the variant fits it again under load.
 
 ### Upgrading from v0.10.1 to v0.10.2
 

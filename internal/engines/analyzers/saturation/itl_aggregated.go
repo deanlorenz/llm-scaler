@@ -23,8 +23,9 @@ import "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 // line, and the two are never shared: a line fitted on an aggregated variant
 // is published and borrowed under a key of its own (itlLineKeyForRole), so a
 // decode variant of the same model and engine configuration neither lends to
-// it nor borrows from it. Until #275 models that, the line is fitted and
-// reported but sizes nothing (itlLineReportOnly).
+// it nor borrows from it. The line is priced by shape and sizes only once
+// it has been checked (itl_aggregated_shape.go, issue #275); until then it is
+// reported (itlLineReportOnly).
 
 // SwitchITLFitsAggregated is the replay switch for the line of an aggregated
 // variant (issue #432). On, a variant whose role is RoleBoth (or unlabeled)
@@ -68,7 +69,8 @@ func itlLineKeyForRole(physicsKey, role, fingerprint string) string {
 }
 
 // itlLineReportOnly reports whether the mu derived from a line of this role
-// is reported and not priced: an aggregated variant's is, until issue #275.
+// is reported and not priced: an aggregated variant's is, until its lift
+// (noteAggregatedLift, issue #275), which priceReplicas checks beside it.
 //
 // An aggregated pod's ITL carries the chunked prefill it runs between decode
 // steps, about n*IL/OL prompt tokens a step, so its line is a property of
@@ -82,7 +84,9 @@ func itlLineKeyForRole(physicsKey, role, fingerprint string) string {
 // average. So the figure is reported -- the derived-mu log line, the
 // learner report, the service-rate signal (derivedWhyReportOnly) -- and the
 // replica is priced as if it had no line: no order and no settled shape
-// change rests on it. A decode line is priced as before.
+// change rests on it. A decode line is priced as before. The shape term,
+// the prefill correction and the lift (itl_aggregated_shape.go) answer the
+// first two; the third is not handled.
 func itlLineReportOnly(role string) bool {
 	return domain.CanonicalRole(role) == domain.RoleBoth
 }

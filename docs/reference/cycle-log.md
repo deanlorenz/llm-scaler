@@ -269,7 +269,12 @@ says). The k2 source is one of the values below. Then, when they apply:
   `rollout` or `invalid`; see the table below).
 - `/mu:<why>`: a decode or aggregated (unlabeled) replica with no derived service rate. `why` is
   `no-line` (no ITL line fitted yet), `no-shape`, `k-price`, `no-seqs`,
-  `no-itl` or `no-rate`.
+  `no-itl` or `no-rate`; for an aggregated replica also `shape-unpriced` (the
+  request shape is more than 20% heavier than its line's and the prefill cost
+  is not learned), `line-shape-unknown` (a line from before the shape was
+  recorded, or a held slope that is not its line), `shape-unknown` (no
+  capacity or length to compute the shape) or `occupancy-unknown` (a prefill
+  reading that is not a number).
 - `/bridge`: a warm-pool Pod lent to the variant.
 
 A variant with very many replicas is written over several lines, each with
@@ -284,9 +289,15 @@ limit; `priced` is the variant's whole count on every part.
 
 The full per-replica detail is at `--v=3`: `replica-capacity-decision` (k1, k2,
 demand and queue terms), `k2-decision` (the k2 priority chain, with its donor
-when borrowed) and `derived-mu` (every term of a decode replica's service rate,
-including the batch cap it was capped at, `batchCap`, and where that came from,
-`batchCapSource`; see [the batch cap](scaling-policy.md#the-batch-cap-llm-daimax-num-seqs-and-enablebatchcaplearning)).
+when borrowed) and `derived-mu` (every term of a decode or aggregated replica's
+service rate, including the batch cap it was capped at, `batchCap`, and where
+that came from, `batchCapSource`; see [the batch cap](scaling-policy.md#the-batch-cap-llm-daimax-num-seqs-and-enablebatchcaplearning)).
+For an aggregated replica it also logs `reportOnly`, `shapeG` and
+`lineShapeG` (the shape now and the line's), `priceCase`, `pricedA`,
+`shapeTermC` and `shapeTermIdentified`, `prefillStepsPerToken`,
+`prefillKnown` and `prefillRefused`, `occupancy`, `lifted`, `liftReason`,
+`agreeCycles`, `gpsMedianErrPct` and `gpsMedianErrOK`; the values are listed
+in [troubleshooting](troubleshooting.md).
 They are written once per replica per cycle, about 1.9 KB a replica, so the
 default leaves them out. See [Enabling the log](#enabling-the-log).
 

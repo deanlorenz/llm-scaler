@@ -1409,7 +1409,7 @@ governs **both**:
 
 | path | what is reused |
 | --- | --- |
-| the shared ITL line | the inter-token-latency model `ITL(k) = A·k + B` another variant fitted, used to derive this one's service rate. A line fitted on aggregated (unlabeled) pods is lent only to another aggregated variant, and a decode line only to decode: an aggregated pod's ITL includes the prefill it runs between decode steps |
+| the shared ITL line | the inter-token-latency model `ITL(k) = A·k + B` another variant fitted, used to derive this one's service rate. A line fitted on aggregated (unlabeled) pods is lent only to another aggregated variant, and a decode line only to decode: an aggregated pod's ITL includes the prefill it runs between decode steps. A borrowed aggregated line is priced at the shape its lender fitted it at, so a heavier request shape is never priced lighter than it is |
 | the cross-variant capacity figure | another variant's measured per-replica capacity, as the estimate for a variant with no record of its own |
 
 It does not control learning: a variant learns from its own readings either

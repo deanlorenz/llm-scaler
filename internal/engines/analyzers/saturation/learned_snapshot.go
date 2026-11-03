@@ -126,6 +126,11 @@ type LearnedState struct {
 	// (learnedLine.perToken). A line it does not name was fitted from the
 	// step time, or on an engine where one step is one token.
 	ITLLinesPerToken map[string]bool `json:"itlLinesPerToken,omitempty"`
+	// ITLLineShapes is, keyed like ITLLines, the shape an aggregated line
+	// was fitted at and the shape term's points (lineShape, issue #275). A
+	// line it does not name has no shape: an aggregated one prices nothing
+	// until it is fitted again, and a decode line never has one.
+	ITLLineShapes map[string]LineShapeSnapshot `json:"itlLineShapes,omitempty"`
 	// K2BorrowedSince is the start of each running sibling borrow, the form
 	// a controller before LowerBounds reads. Written for a rollback; read only
 	// for a key LowerBounds does not have.
@@ -247,6 +252,55 @@ type LineSnapshot struct {
 	B           float64   `json:"b"`
 	FromVariant string    `json:"fromVariant"`
 	LearnedAt   time.Time `json:"learnedAt"`
+}
+
+// LineShapeSnapshot is a lineShape as exported.
+type LineShapeSnapshot struct {
+	G       float64              `json:"g,omitempty"`
+	Sigma   float64              `json:"sigma,omitempty"`
+	SigmaOK bool                 `json:"sigmaOK,omitempty"`
+	Points  []ShapePointSnapshot `json:"points,omitempty"`
+}
+
+// ShapePointSnapshot is a shapePoint as exported.
+type ShapePointSnapshot struct {
+	G  float64   `json:"g"`
+	A  float64   `json:"a"`
+	At time.Time `json:"at"`
+}
+
+// snapshot is s as exported, false when there is nothing to export.
+func (s lineShape) snapshot() (LineShapeSnapshot, bool) {
+	if !(s.g > 0) && len(s.points) == 0 {
+		return LineShapeSnapshot{}, false
+	}
+	out := LineShapeSnapshot{G: s.g, Sigma: s.sigma, SigmaOK: s.sigmaOK}
+	for _, p := range s.points {
+		out.Points = append(out.Points, ShapePointSnapshot{G: p.g, A: p.a, At: p.at})
+	}
+	return out, true
+}
+
+// restoredLineShape is the lineShape a snapshot carries, with every entry a
+// controller could not have written dropped: a g or a slope that is not
+// finite and positive, a negative sigma, a point from the future. c is
+// refitted from the points kept, never read.
+func restoredLineShape(s LineShapeSnapshot, now time.Time) lineShape {
+	var out lineShape
+	if finitePositive(s.G) {
+		out.g = s.G
+	}
+	if s.SigmaOK && s.Sigma >= 0 && !math.IsInf(s.Sigma, 0) { // >= refuses NaN
+		out.sigma, out.sigmaOK = s.Sigma, true
+	}
+	for _, p := range s.Points {
+		at, inTime := notFuture(p.At, now)
+		if !finitePositive(p.G) || !finitePositive(p.A) || p.At.IsZero() || !inTime {
+			continue
+		}
+		out.addPoint(shapePoint{g: p.G, a: p.A, at: at})
+	}
+	return out
 }
 
 // RestoreReport counts what a restore did with each kind of entry, for the
@@ -565,6 +619,12 @@ func (a *SaturationAnalyzer) exportLearnedState() LearnedState {
 			}
 			s.ITLLinesPerToken[k] = true
 		}
+		if sh, ok := l.shape.snapshot(); ok {
+			if s.ITLLineShapes == nil {
+				s.ITLLineShapes = map[string]LineShapeSnapshot{}
+			}
+			s.ITLLineShapes[k] = sh
+		}
 	}
 	for k, lb := range a.lowerBounds {
 		s.LowerBounds[k] = lb.snapshot()
@@ -841,7 +901,7 @@ func (a *SaturationAnalyzer) restoreLearnedState(s LearnedState) RestoreReport {
 			rep.Aged++
 		default:
 			a.itlLines[k] = learnedLine{model: itl.Model{A: l.A, B: l.B}, fromVariant: l.FromVariant, learnedAt: learnedAt,
-				perToken: s.ITLLinesPerToken[k]}
+				perToken: s.ITLLinesPerToken[k], shape: restoredLineShape(s.ITLLineShapes[k], now)}
 			rep.ITLLines++
 		}
 	}
