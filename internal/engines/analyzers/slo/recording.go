@@ -195,10 +195,13 @@ func (a *Analyzer) NoteVariantsPresent(namespace, modelID string, variantNames [
 // ForgetVariant. It returns how many entries it dropped.
 func (a *Analyzer) ForgetVariant(namespace, modelID, variant string) int {
 	if !a.rec.Active() {
-		return a.forgetVariant(namespace, modelID, variant)
+		n, forgotten := a.forgetVariant(namespace, modelID, variant)
+		logForgotten(namespace, modelID, variant, forgotten)
+		return n
 	}
 	now := a.now()
-	n := a.forgetVariant(namespace, modelID, variant)
+	n, forgotten := a.forgetVariant(namespace, modelID, variant)
+	logForgotten(namespace, modelID, variant, forgotten)
 	a.rec.Record(KindForgetVariant, now, ForgetVariantEvent{Namespace: namespace, ModelID: modelID,
 		Variant: variant, Dropped: n})
 	return n

@@ -1214,15 +1214,16 @@ what it has learned.
 2. Check the controller log on the variant's next cycle:
    `Learned state forgotten for one variant, on request`, with the variant,
    the number of `entries` dropped, and `sloEntries`, the number the SLO
-   analyzer dropped.
+   analyzer dropped. `sloEntries` is 0 for a model whose policy does not
+   list the SLO analyzer: it holds no line for that model, and nothing failed.
 
 What is forgotten: the variant's measured k2 and throughput, its ITL line
 (including one it lent to siblings), its replica start estimate, and its
-capacity record. The SLO analyzer keeps an ITL line of its own for the
-variant, and that is forgotten too. Also its previous k2 (`P2-prior`), the old service rate that
-holds the throughput floor after a change of arguments, and the windows set
-aside under earlier arguments for a rollback. The variant then prices as a new variant would until it
-saturates again: from its deployment-derived figure, or from a lower measured
+capacity record. Also its previous k2 (`P2-prior`), the old service rate
+that holds the throughput floor after a change of arguments, and the
+windows set aside under earlier arguments for a rollback. The SLO analyzer
+keeps an ITL line of its own for the variant, and that is forgotten too.
+The variant then prices as a new variant would until it saturates again: from its deployment-derived figure, or from a lower measured
 k2 of a compatible sibling where one exists (the k2 borrow), which orders more
 replicas, not fewer. Expect more replicas or a higher price for a while,
 depending on which figure was wrong.

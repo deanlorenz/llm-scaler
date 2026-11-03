@@ -41,12 +41,14 @@ import (
 // (switchPackage), and the golden outputs (fixture/file) it is named to move.
 //
 // Issue #431 routes the forget-learned-state annotation to the slo
-// analyzer's line, one switch. It moves no golden: the engine records the
-// slo analyzer's forget as an event of its own (slo.ForgetVariant), which
-// no committed recording carries, and a replay forgets in the slo analyzer
-// only where the run did. The acceptance and engine recordings forget a
-// variant, but through the saturation analyzer alone, as the engine did
-// when they were taken. Its unit tests hold it (heldBy).
+// analyzer's line, one switch, recorded as an event of its own
+// (slo.ForgetVariant). It moves no golden, measured: the in-process
+// acceptance and engine runs, taken again at this commit, each carry one
+// slo.ForgetVariant and move no output with the switch on or off. Their
+// forget lands at 09:31:30, on cycle 7, before the slo line's first fit on
+// cycle 9, so it drops a raw window (Dropped 1, no intercept); two cycles
+// later the clock jumps a day and that window would have aged out anyway.
+// No cluster recording forgets. Its unit tests hold it (heldBy).
 //
 // Earlier PRs' switches (learner PRs 2, 3 and 4a, #396's bands, #399's
 // batch cap, #415's mu key, #392's first k2 reading, #420's batch-cap
@@ -165,6 +167,8 @@ var heldBy = map[string][]heldTest{
 	// Issue #431's forget of the slo line.
 	slo.SwitchITLForgetReachesTheLine: {
 		{"../slo", "TestForget_TheAnnotationForgetsTheLine"},
+		{"../slo", "TestForget_DropsTheAcceleratorMemo"},
+		{"../slo", "TestForget_ReportsEachForgottenKey"},
 	},
 	saturation.SwitchITLKeepsSettleThroughMissingRow: {
 		{"../saturation", "TestITLSettle_OneMissingRowKeepsTheSettle"},

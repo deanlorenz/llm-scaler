@@ -1,6 +1,9 @@
 package slo
 
 import (
+	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,10 +124,85 @@ func TestForget_EveryLearnerOnTheListIsHandled(t *testing.T) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, name := range learn.Learners() {
-		_, handled := a.forgetLearnerLocked(name, "ns", "m", "v")
+		_, _, handled := a.forgetLearnerLocked(name, "ns", "m", "v")
 		assert.True(t, handled, "the learner %q is on learn's list and the slo analyzer has no forget decision for it", name)
 	}
-	dropped, handled := a.forgetLearnerLocked("no-such-learner", "ns", "m", "v")
+	dropped, keys, handled := a.forgetLearnerLocked("no-such-learner", "ns", "m", "v")
 	assert.False(t, handled, "negative control: a name the analyzer does not know is not handled")
 	assert.Zero(t, dropped)
+	assert.Empty(t, keys)
+}
+
+// A forget drops the variant's accelerator memo, as the saturation
+// analyzer's drops its lastAccelerator: a cycle whose pods do not resolve
+// the accelerator then keys the line under the reading, not under the card
+// the variant ran on before the forget. Another variant keeps its memo.
+func TestForget_DropsTheAcceleratorMemo(t *testing.T) {
+	unresolved := func(vs domain.VariantReplicaState) domain.VariantReplicaState {
+		vs.AcceleratorName = ""
+		return vs
+	}
+	for _, on := range []bool{true, false} {
+		a := New(nil, nil)
+		require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchITLForgetReachesTheLine: on}))
+		require.Equal(t, windowKey("ns", "m", settleAgg), a.variantKey("ns", "m", settleAgg), "premise: a resolved card keys the line")
+		a.variantKey("ns", "m", forgetSibling)
+		held := windowKey("ns", "m", settleAgg)
+		require.Equal(t, held, a.variantKey("ns", "m", unresolved(settleAgg)), "premise: the memo keys an unresolved cycle")
+
+		dropped := a.ForgetVariant("ns", "m", "agg")
+		got := a.variantKey("ns", "m", unresolved(settleAgg))
+		if !on {
+			assert.Zero(t, dropped)
+			assert.Equal(t, held, got, "switch off: the memo stays")
+			continue
+		}
+		assert.Equal(t, 1, dropped, "the memo, and no line was held")
+		assert.Equal(t, windowKey("ns", "m", unresolved(settleAgg)), got, "the memo is gone: the reading keys the line")
+		assert.Equal(t, windowKey("ns", "m", forgetSibling), a.variantKey("ns", "m", unresolved(forgetSibling)),
+			"control: agg2 keeps its memo")
+	}
+}
+
+// Each key a forget takes is reported, sorted and by the operator, for the
+// log: the keys the saturation analyzer files in its learner report.
+func TestForget_ReportsEachForgottenKey(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		r := newSettleRig(t, map[string]bool{SwitchITLForgetReachesTheLine: on})
+		for range settleCycles + 2 {
+			forgetCycle(r)
+		}
+		other := domain.VariantReplicaState{VariantName: "agg", Role: domain.RoleBoth, AcceleratorName: "H200", GPUsPerReplica: 2}
+		r.a.lines.Observe(windowKey("ns", "m", other), "agg", settleFleet(), itl.Admission{}, r.now)
+		_, forgotten := r.a.forgetVariant("ns", "m", "agg")
+		if !on {
+			assert.Empty(t, forgotten, "switch off: nothing is forgotten")
+			continue
+		}
+		assert.Equal(t, []learn.Forgotten{
+			{Key: windowKey("ns", "m", settleAgg), By: learn.ByOperator},
+			{Key: windowKey("ns", "m", other), By: learn.ByOperator},
+		}, forgotten, "every key of agg, under each card, and none of agg2")
+	}
+}
+
+// Every map the Analyzer holds is either forgotten by a forget or kept on
+// purpose (forget.go names each): a map added later fails here until someone
+// decides. The forgotten ones are held by the tests above; the trackers are
+// listed the same way.
+func TestForget_EveryMapIsForgottenOrKept(t *testing.T) {
+	forgotten := []string{"lines", "seen", "args", "accelerators"}
+	kept := []string{"transients", "ownSettle", "ownSettled"}
+	var state []string
+	typ := reflect.TypeFor[Analyzer]()
+	for i := range typ.NumField() {
+		f := typ.Field(i)
+		isTracker := f.Type.Kind() == reflect.Pointer && strings.HasSuffix(f.Type.Elem().Name(), "Tracker")
+		if f.Type.Kind() == reflect.Map || isTracker {
+			state = append(state, f.Name)
+		}
+	}
+	require.NotEmpty(t, state, "premise: the reflection found the analyzer's maps")
+	assert.ElementsMatch(t, append(slices.Clone(forgotten), kept...), state,
+		"each map and tracker of the Analyzer must be on forgotten or kept; say which in forget.go")
 }
