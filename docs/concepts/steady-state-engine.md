@@ -389,6 +389,7 @@ model; check the health metrics below.
 | `vllm:request_generation_tokens_sum` / `_count` | histogram | average **output** tokens per request |
 | `vllm:request_generation_tokens_bucket` | histogram | the spread of output lengths: a long request stays resident longer, so it holds more KV per request than the mean says (SGLang: `sglang:generation_tokens_histogram_bucket`) — *optional*: without it every request is priced at the mean length, as before |
 | `vllm:prefix_cache_hits_total` / `vllm:prefix_cache_queries_total` | counters | prefix-cache hit rate (discounts input-token demand) — *optional* |
+| `vllm:num_requests_running` | gauge | the requests a replica holds: with the tokens in use, the KV each holds, so a prefix-cache hit on a block no other running request holds is not counted as saved memory (SGLang: `sglang:num_running_reqs`) — *optional*: without it every hit is taken to save memory, as the hit rate says |
 | `inference_extension_flow_control_queue_size` / `_bytes` | gauges (EPP) | upstream scheduler-queue demand — *optional* |
 
 Deployment engine args (`--max-num-seqs`, `--gpu-memory-utilization`, `--block-size`,

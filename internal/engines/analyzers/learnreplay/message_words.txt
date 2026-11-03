@@ -1126,6 +1126,7 @@ kueue.releaseToNonReclaimingLenders
 kueueBorrowedGPUs
 kv-bound
 kv-cache-utilization-scorer
+kv-per-request-hits-resident
 kv-per-request-output-dispersion
 kvCacheThreshold
 kvCacheUsagePct
@@ -1396,6 +1397,7 @@ no-change
 no-compatible-donor
 no-data
 no-decode-candidate
+no-hit
 no-itl
 no-k
 no-limiter
@@ -1403,6 +1405,7 @@ no-line
 no-listed-analyzer-sizes-role
 no-node-fits
 no-rate
+no-reading
 no-seqs
 no-shape
 no-waiting
@@ -1770,6 +1773,10 @@ reserved
 residency
 resident
 residentDemand
+residentKVBound
+residentKVBoundFleet
+residentKVPerSeq
+residentRunning
 residual
 resolve
 resolved
@@ -2215,6 +2222,7 @@ up
 update
 updated
 updating
+upper
 urgent
 usable
 usable-capacity

@@ -252,7 +252,9 @@ func deriveMuAtCap(model itl.Model, params *capacity.EngineParams, batchCap int6
 	// difference to the 2026-09-24 run -- those pods export no prefix-cache
 	// series at all, so the hit rate was 0 and the two agreed at 4000 -- but
 	// that is the workload being uninteresting, not the arithmetic being
-	// right.)
+	// right.) The discount holds only for hits on blocks another running
+	// request holds too, so the caller bounds KVreq by the KV the running
+	// requests are measured to hold (withResidentKV, issue #277).
 	seqs := itl.Sequences(kPrice, capacityTokens, fleet.KVreq)
 	if seqs <= 0 {
 		return derivedMu{why: "no-seqs"}

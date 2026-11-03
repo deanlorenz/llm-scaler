@@ -45,7 +45,9 @@ state. The gaps themselves are summarized in [known gaps](why.md#known-gaps).
   ([#433](https://github.com/ev-shindin/llm-scaling-manager/issues/433); the
   saturation analyzer prices the spread of output lengths since
   [#276](https://github.com/ev-shindin/llm-scaling-manager/issues/276)),
-  prefix-cache hits ([#277](https://github.com/ev-shindin/llm-scaling-manager/issues/277)),
+  prefix-cache hits in the throughput and slo analyzers (the saturation
+  analyzer measures the KV a running request holds since
+  [#277](https://github.com/ev-shindin/llm-scaling-manager/issues/277)),
   KV-landed P/D requests ([#307](https://github.com/ev-shindin/llm-scaling-manager/issues/307))
   and `--max-num-active-seqs` ([#308](https://github.com/ev-shindin/llm-scaling-manager/issues/308)).
 - **Utilization share.** Call off a one-replica move when the donor's demand

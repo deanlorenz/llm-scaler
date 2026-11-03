@@ -200,6 +200,9 @@ type cycle struct {
 	// shape change is outstanding, or with SwitchKVPerRequestOutputDispersion
 	// off.
 	fleetDispersion float64
+	// resident is the KV the fleet's running requests hold, and how many
+	// they are (fleetResidentKVPerRequest, issue #277).
+	resident residentReading
 	// shapeChanging is a shape change outstanding (resolvePricing): the mu
 	// moves to the short window if it can, and no path prices a spread.
 	shapeChanging bool
@@ -334,6 +337,10 @@ func (c *cycle) observeFleetShape() {
 	if c.a.kvOutputDispersion {
 		c.fleetDispersion = fleetOutputDispersion(c.input.ReplicaMetrics, c.rolesByVariant)
 	}
+	// The KV the running requests hold, which says how much of the hit
+	// discount is real (issue #277), read from replicas inside the ITL band.
+	minK, _ := c.cfg.ITLBand()
+	c.resident = fleetResidentKVPerRequest(c.input.ReplicaMetrics, c.rolesByVariant, minK)
 	// The prefill side's hit rate, once for the role, for the same reason:
 	// it discounts the prompt length that buckets prefill's throughput key,
 	// and a per-replica figure would split one window between replicas.
@@ -648,9 +655,11 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		fleetShape := shape.New(c.fleetInput, c.fleetOutput, rm.PrefixCacheHitRate).WithOutputDispersion(c.fleetDispersion)
 		// muShape is the shape mu is PRICED at: fleetShape on a steady fleet,
 		// and both halves on the short window while a shape change is
-		// outstanding (see resolvePricing). fleetShape stays the fleet's own
-		// [5m] reading, because that is the figure noteLineMismatch compares
-		// an observed token rate against.
+		// outstanding (see resolvePricing). fleetShape keeps the fleet's own
+		// [5m] lengths, because that is the shape noteLineMismatch compares
+		// an observed token rate against; below, its KVreq, like muShape's,
+		// takes the measured KV per running request within its own bounds
+		// (issue #277).
 		//
 		// The short-window shape takes no spread. That is not a guard of its
 		// own: the short window opens only while a shape change is
@@ -662,6 +671,16 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		muShape := fleetShape
 		if c.muShortWindow {
 			muShape = shape.New(c.muInput, c.muDivisor, rm.PrefixCacheHitRate)
+		}
+		// A prefix-cache hit saves KV only when another running request
+		// holds the block too (issue #277): where there is a reading, both
+		// shapes price a resident request at the KV the running requests are
+		// measured to hold, each bounded by its own discount and by none
+		// (prefix_cache_kv.go). With none, as before.
+		residentBound, residentBoundFleet := residentBoundOff, residentBoundOff
+		if c.a.kvHitsResident {
+			fleetShape, residentBoundFleet = withResidentKV(fleetShape, c.resident)
+			muShape, residentBound = withResidentKV(muShape, c.resident)
 		}
 		// Only a generating role is priced from the ITL line. ITL is the gap
 		// between two generated tokens, and a prefill replica emits one and
@@ -732,6 +751,13 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				// D = E[O^2]/E[O]^2 of the output lengths, priced into
 				// KVreq; 1 is no spread, or none read.
 				"outputDispersion", muShape.OutputDispersion,
+				// The KV the running requests hold each, measured over
+				// residentRunning of them, and which bound kvReqPerSeq
+				// held it to: none, lower (the hit rate's discount), upper
+				// (no discount), no-hit, no-reading or off (issue #277);
+				// residentKVBoundFleet the same for kvReqFleet.
+				"residentKVPerSeq", c.resident.perSeq(), "residentRunning", c.resident.running,
+				"residentKVBound", residentBound, "residentKVBoundFleet", residentBoundFleet,
 				"replicaKvTokens", rm.TotalKvCapacityTokens,
 				// Per engine rank; the replica admits engineRanks times the
 				// lower of the two (0 when the active cap is unset).

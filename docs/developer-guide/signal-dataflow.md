@@ -148,6 +148,17 @@ while a shape change is outstanding (on every path), and with the replay
 switch `kv-per-request-output-dispersion` off. The throughput and slo
 analyzers still price `ILeff + O/2` (#433).
 
+A hit saves KV only when another running request holds the block too, so the
+derived mu does not assume `ILeff` for memory where it can measure it (issue
+#277). It prices a resident request at the tokens in use over
+`RunningRequests`, across the fleet's Ready generating replicas inside the ITL
+band, clamped between `ILeff + D x O/2` and `IL + D x O/2`. With no reading
+(no replica in the band, a missing series, or fewer requests than the shape
+needs or than a cache filled to the band's edge holds at the shape's own
+`KVreq`) it keeps `ILeff + D x O/2`. The replay switch is
+`kv-per-request-hits-resident`
+([saturation-analyzer.md](saturation-analyzer.md#prefix-cache-hits-stay-resident)).
+
 `KVreq` is the most load-bearing quantity in the analyzer; everything that asks
 "how many requests fit" divides by it. `O` reaches the replica count through
 **four** independent paths — this formula, k2, the queue's price, and the
@@ -677,7 +688,11 @@ Three log lines, in this order. The first two are per replica, at
 1. `derived-mu` — every term of the service rate, because the result alone
    cannot be attributed to one of them. `kvReqPerSeq` is the priced shape,
    `kvReqFleet` the fleet's own; `outputDispersion` the spread of output
-   lengths priced into it; `muShortWindow` says whether the pair moved.
+   lengths priced into it; `residentKVPerSeq`, `residentRunning` and
+   `residentKVBound` the KV the running requests were measured to hold, over
+   how many, and which bound applied (`residentKVBoundFleet` for
+   `kvReqFleet`);
+   `muShortWindow` says whether the pair moved.
 2. `replica-capacity-decision` — `k1MemoryBound`, `k2ComputeBound`,
    `k2Source`, `boundBy`, `saturatedThroughput`.
 3. `throughput-demand-floor` — `arrivalRate`, `backlogRequests`,
