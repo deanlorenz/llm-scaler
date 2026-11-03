@@ -1237,6 +1237,38 @@ func (a *SaturationAnalyzer) lookupCompatibleCapacity(namespace, modelID, varian
 	return a.capacityStore.FindCompatible(modelID, accelerator, gpuCount, rec.EngineParams)
 }
 
+// SwitchZeroReplicaDataParallel is the replay switch for the data-parallel
+// ranks of a variant at zero replicas (issue #438). On, the derived estimate
+// for a decode or aggregated variant is one engine rank's figure times the
+// ranks its flags state (--data-parallel-size, SGLang --dp-size), as
+// computeK2 prices a live replica. Off, as before, one rank's figure: a pod
+// of eight ranks was priced at an eighth of its capacity from zero.
+const SwitchZeroReplicaDataParallel = "zero-replica-data-parallel"
+
+// zeroReplicaRanks is how many engine ranks the derived estimate of a
+// variant at zero replicas is multiplied by: the data-parallel size its
+// scale target's flags state, with SwitchZeroReplicaDataParallel on, for a
+// decode or aggregated variant; 1 otherwise, and for a size not stated or
+// not above 1.
+//
+// Prefill keeps one rank, as it keeps the flags' cap (zeroReplicaBatchCap):
+// P3 never prices a live prefill replica, so the formula is not the figure
+// its first replica will get, and scaling it would raise a price nothing
+// measured.
+//
+// The clamps after it are whole-pod already and bound the product as they
+// bound a live replica: the compatible variant's and the prior live figure
+// are measured, and a carried KV total is the collector's sum over ranks.
+// A k1 from vLLM's --num-gpu-blocks-override is one engine's KV, so for a
+// data-parallel variant it still holds the estimate to about one rank: an
+// under-price, the safe side, left for its own change.
+func (a *SaturationAnalyzer) zeroReplicaRanks(role string, params *capacity.EngineParams) int64 {
+	if !a.zeroReplicaDP || params == nil || domain.CanonicalRole(role) == domain.RolePrefill {
+		return 1
+	}
+	return int64(max(params.DataParallelSize, 1))
+}
+
 // estimateStoredCapacity returns a capacity estimate for a zero-replica variant
 // using its stored capacity.Record. For live records (from a previously running
 // pod), the stored EffectiveCapacity is authoritative. For "deployment" records,
@@ -1294,7 +1326,10 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 		// the default, and never the learned cap (zeroReplicaBatchCap,
 		// issue #427).
 		batchCap := a.zeroReplicaBatchCap(namespace, modelID, variantName, role, rec.EngineParams)
-		if derived := estimateCapacityAtCapSpread(rec.EngineParams, batchCap.perRank, modelAvgInput, modelAvgOutput, modelFactor); derived > 0 {
+		// The formula prices one engine rank; the pod runs ranks of them,
+		// as computeK2 scales a live replica (zeroReplicaRanks, issue #438).
+		ranks := a.zeroReplicaRanks(role, rec.EngineParams)
+		if derived := estimateCapacityAtCapSpread(rec.EngineParams, batchCap.perRank, modelAvgInput, modelAvgOutput, modelFactor) * ranks; derived > 0 {
 			bounded := derived
 			boundedBy := "derived"
 
@@ -1353,7 +1388,8 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 				"derivedCapacity", derived, "perReplicaCapacity", bounded,
 				"modelAvgInputTokens", modelAvgInput, "modelAvgOutputTokens", modelAvgOutput,
 				"modelOutputFactor", modelFactor,
-				"batchCap", batchCap.perRank, "batchCapSource", batchCap.source)
+				"batchCap", batchCap.perRank, "batchCapSource", batchCap.source,
+				"engineRanks", ranks)
 			return float64(bounded)
 		}
 	}
@@ -1384,10 +1420,9 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 // 0 when S or avgOutput is not positive, or when params carry no budget.
 //
 // The figure is ONE engine's: B and S bound a single data-parallel rank.
-// computeK2 multiplies it by the ranks the live replica reports. The
-// zero-replica path has no live replica to count and keeps the one-engine
-// figure, which can only under-price a data-parallel variant and order more
-// on its way up from zero; its first live replica then prices it in full.
+// computeK2 multiplies it by the ranks the live replica reports, and
+// estimateStoredCapacity by the ranks the scale target's flags state
+// (zeroReplicaRanks).
 //
 // I + O/2 is a resident request's KV averaged over its life when every
 // request generates O tokens. With lengths that vary, a request generating

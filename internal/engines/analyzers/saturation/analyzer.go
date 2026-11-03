@@ -319,6 +319,9 @@ type SaturationAnalyzer struct {
 	// kvHitsResident is SwitchKVPerRequestHitsResident (#277): on from the
 	// constructor; a replay turns it off (SetSwitchesForReplay).
 	kvHitsResident bool
+	// zeroReplicaDP is SwitchZeroReplicaDataParallel (#438): on from the
+	// constructor; a replay turns it off (SetSwitchesForReplay).
+	zeroReplicaDP bool
 	// itlReadsSettle, itlWaitsAfterRestart, itlKeepsSettle and
 	// itlFiniteOnly are the ITL line's settle switches (itl_settle.go):
 	// SwitchITLReadsSettle, SwitchITLWaitsAfterRestart,
@@ -546,6 +549,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		batchCapZeroReplica:    true,
 		kvOutputDispersion:     true,
 		kvHitsResident:         true,
+		zeroReplicaDP:          true,
 		itlReadsSettle:         true,
 		itlWaitsAfterRestart:   true,
 		itlKeepsSettle:         true,
