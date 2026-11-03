@@ -87,8 +87,9 @@ func (a *ThroughputAnalyzer) admission(p itlPolicy, namespace, modelID string) i
 // WithSettleView sets the settle tracker the ITL line reads each replica's
 // settle from: the engine's, which it observes at the top of every cycle.
 // Call it before the analyzer is used. Unset, the admission carries no
-// settle tracker, and the line, once on itl.Tracker, judges each replica's
-// settle from its own trace.
+// settle tracker, and the line reads a tracker the analyzer observes itself
+// (settle.go), as one that has watched the fleet: nothing waits after a
+// restart.
 func (a *ThroughputAnalyzer) WithSettleView(v settle.View) *ThroughputAnalyzer {
 	a.settle = v
 	return a

@@ -170,7 +170,9 @@ func throughputCases(newA propAnalyzer) []learnertest.Case {
 	}
 	direct, timeBase := learnertest.FamilyDirect, learnertest.FamilyTimeBase
 	cheap := learnertest.CheapSeeds
-	return []learnertest.Case{
+	// The engine-rig cases of learner PR 4b-2 (property_settle_test.go)
+	// first, then the line's own.
+	return append(settleCases(newA), []learnertest.Case{
 		c(learnertest.ClassTransient, "joiner-warm-up", direct, cheap, checkJoinerWarmUp(newA)),
 		c(learnertest.ClassTransient, "load-step", direct, cheap, checkLoadStep(newA)),
 		c(learnertest.ClassTransient, "controller-restart", direct, cheap, checkRestart(newA)),
@@ -193,7 +195,7 @@ func throughputCases(newA propAnalyzer) []learnertest.Case {
 		c(learnertest.ClassEdges, "steady-for-default", direct, 1, checkSteadyFor(newA, nil, itl.DefaultSteadyFor)),
 		c(learnertest.ClassEdges, "steady-for-10m", direct, 1, checkSteadyFor(newA, nonDefaultSteady, 10*time.Minute)),
 		c(learnertest.ClassEdges, "sequence-cap", direct, 1, checkSequenceCap(newA)),
-	}
+	}...)
 }
 
 // The non-default policies 2.6 asks the edges to run at.

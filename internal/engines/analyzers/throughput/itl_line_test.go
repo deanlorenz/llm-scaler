@@ -17,12 +17,13 @@ import (
 func lineAt(k float64) float64 { return 0.006 + 0.05*k }
 
 // lineRow is a Ready replica of variant v1 at k, reading itlSec, Ready since
-// readySince.
+// readySince. Its ITL is Finite by its presence bits, as the collector
+// reports a read mean (SwitchITLReadsFinitePodMean).
 func lineRow(pod string, k, itlSec float64, readySince time.Time) domain.ReplicaMetrics {
 	return domain.ReplicaMetrics{
 		PodName: pod, VariantName: "v1", Ready: true, ReadySince: readySince,
 		KvCacheUsage: k, KvUsageInstant: k, TotalKvCapacityTokens: 65536,
-		AvgInputTokens: 1024, AvgOutputTokens: 256, AvgITL: itlSec, RequestRate: 2,
+		AvgInputTokens: 1024, AvgOutputTokens: 256, AvgITL: itlSec, AvgITLKnown: itlSec > 0, RequestRate: 2,
 	}
 }
 
@@ -251,9 +252,12 @@ func TestITLLine_AGPSMismatchKeepsTheWindow(t *testing.T) {
 
 // The switches are what SetSwitchesForReplay accepts, by name.
 func TestITLLine_TheReplaySwitches(t *testing.T) {
-	require.Equal(t, []string{SwitchITLKeepsWindowOnGPSMismatch, SwitchITLSteadyGate}, ReplaySwitchNames())
+	require.ElementsMatch(t, append([]string{SwitchITLKeepsWindowOnGPSMismatch, SwitchITLSteadyGate}, settleSwitches...),
+		ReplaySwitchNames())
 	a := NewThroughputAnalyzer()
-	require.True(t, a.itlSteadyGate && a.itlKeepsOnGPSMismatch, "a switch is off by the constructor")
+	for name, on := range a.switchFields() {
+		require.True(t, *on, "%s is off by the constructor", name)
+	}
 	require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchITLSteadyGate: false}))
 	require.False(t, a.itlSteadyGate)
 	require.True(t, a.itlKeepsOnGPSMismatch)

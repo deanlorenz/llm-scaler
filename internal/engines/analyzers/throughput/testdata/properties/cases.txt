@@ -12,9 +12,12 @@ known-truth/throughput-itl/line-at-kprice
 known-truth/throughput-itl/line-at-kprice-timebase
 missing-duplicated/throughput-itl/infinite-itl
 missing-duplicated/throughput-itl/missed-row
+missing-duplicated/throughput-itl/missed-row-on-the-engine-tracker
 missing-duplicated/throughput-itl/zero-k
 stale-value/throughput-itl/b-converges-n2
 stale-value/throughput-itl/b-converges-n4
 transient/throughput-itl/controller-restart
+transient/throughput-itl/controller-restart-with-a-joiner
 transient/throughput-itl/joiner-warm-up
+transient/throughput-itl/joiner-warm-up-on-the-engine-tracker
 transient/throughput-itl/load-step

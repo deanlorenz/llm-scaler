@@ -37,8 +37,8 @@ import (
 // above the band instead (Reason T2-above-band,
 // itl.Admission.AboveBandFallback), until the band fits. A shape change
 // empties the window and drops the held slope: the old shape's A is not
-// held into the new shape. The settle is the key's own trace of each
-// replica (the engine's settle tracker is PR 4b-2's). Off, as before: a
+// held into the new shape. Since PR 4b-2 the settle is read from the
+// engine's settle tracker, under switches of its own (settle.go). Off, as before: a
 // window of every healthy reading in the band, OLS when it is ready, else A
 // by least squares through B over the cycle's healthy rows, at any k.
 const SwitchITLSteadyGate = "throughput-itl-steady-gate"
@@ -81,8 +81,14 @@ type itlLogged struct {
 // switchFields is each replay switch by name, and the field it sets.
 func (a *ThroughputAnalyzer) switchFields() map[string]*bool {
 	return map[string]*bool{
-		SwitchITLSteadyGate:               &a.itlSteadyGate,
-		SwitchITLKeepsWindowOnGPSMismatch: &a.itlKeepsOnGPSMismatch,
+		SwitchITLSteadyGate:                   &a.itlSteadyGate,
+		SwitchITLKeepsWindowOnGPSMismatch:     &a.itlKeepsOnGPSMismatch,
+		SwitchITLReadsSettle:                  &a.itlReadsSettle,
+		SwitchITLWaitsAfterRestart:            &a.itlWaitsAfterRestart,
+		SwitchITLKeepsSettleThroughMissingRow: &a.itlKeepsSettle,
+		SwitchITLRestartUnderName:             &a.itlRestartUnderName,
+		SwitchITLIdleOnEvidence:               &a.itlIdleOnEvidence,
+		SwitchITLReadsFinitePodMean:           &a.itlFiniteOnly,
 	}
 }
 
@@ -93,14 +99,15 @@ func ReplaySwitchNames() []string {
 
 // lineAdmission is adm for one variant of the model: with the line on the
 // tracker, the above-band fallback, and the engine arguments its rows were
-// produced under, which bound a held slope (itl.Admission.Args). The settle
-// tracker is not handed on until PR 4b-2: the line judges each replica's
-// settle from its own trace.
+// produced under, which bound a held slope (itl.Admission.Args); and each
+// replica's settle, read as the six settle switches say (settleAdmission).
+// Called with a.mu held.
 func (a *ThroughputAnalyzer) lineAdmission(adm itl.Admission, namespace, modelID, variant string) itl.Admission {
 	adm.Settle = nil
 	if !a.itlSteadyGate {
 		return adm
 	}
+	a.settleAdmission(&adm, namespace, modelID)
 	adm.AboveBandFallback = !a.noAboveBandFallback
 	if a.store == nil {
 		return adm
