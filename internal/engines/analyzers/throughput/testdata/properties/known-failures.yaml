@@ -1,0 +1,21 @@
+# Known failures of the throughput analyzer's ITL line property tests
+# (docs/proposals/analyzer-learner.md, 2.6; PR 4b, "Tests").
+#
+# Each row is a property case that fails on today's code, and the violation
+# kind it fails with (expect). TestThroughputLineProperties requires a listed
+# case to fail with that kind: failing with another kind is a new failure,
+# and passing on every seed breaks the build until the row is removed. A row
+# naming no case is an error. A PR that fixes a row removes it; one that
+# changes a case or its generator restates measured. Nothing here is skipped,
+# and no tolerance is widened to pass a defect.
+#
+# id is class/learner/case, as the test names it; rows are sorted by id.
+# measured is the fail rate over the case's seeds and the first failure, when
+# the row was written. owner is the learner PR that clears the row.
+- id: edges/throughput-itl/sequence-cap
+  class: edges
+  learner: throughput-itl
+  expect: not-learned
+  finding: "A replica above the band at its stated sequence cap (llm-d.ai/max-num-seqs 64, 64 running, requests waiting, no preemption) is refused: the line has no cap admission, so a variant whose only replica in reach is at its cap has no line and no throughput capacity (#287). The parent refuses it too (its window reads the band alone)."
+  measured: "1/1 seeds; seed 1: a replica at its sequence cap above the band was refused: the window holds 0 readings"
+  owner: "PR 4b-3 (throughput-itl-admits-at-sequence-cap)"
