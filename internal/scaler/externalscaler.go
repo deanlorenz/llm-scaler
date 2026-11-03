@@ -82,6 +82,9 @@ type Handler struct {
 	// undecided is the set of ScaledObjects currently answered without a
 	// decision. See undecided and UndecidedTargets.
 	undecided undecidedTargets
+	// passive resolves which models are passive; nil is every model active.
+	// See WithPassive.
+	passive PassiveModels
 }
 
 // NewHandler builds a Handler. A nil store falls back to decision.Default, and a
@@ -420,6 +423,13 @@ func (h *Handler) GetMetrics(ctx context.Context, req *pb.GetMetricsRequest) (*p
 	h.observe(ref)
 	logger := log.FromContext(ctx)
 	if !h.leader() {
+		if h.standbyObserve(ctx, ref) {
+			logger.V(1).Info("external scaler GetMetrics: passive (observe), answered before the leader lease is held",
+				"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(), "metricName", MetricName, "value", 0)
+			return &pb.GetMetricsResponse{
+				MetricValues: []*pb.MetricValue{{MetricName: MetricName, MetricValue: 0}},
+			}, nil
+		}
 		// At V(1), beside IsActive's line, because this is the poll path and
 		// says the same thing every 5 s while a lease changes hands. It is
 		// logged at all because WVA used to refuse here in total silence: KEDA
@@ -436,6 +446,21 @@ func (h *Handler) GetMetrics(ctx context.Context, req *pb.GetMetricsRequest) (*p
 		logger.V(1).Info("external scaler GetMetrics failed",
 			"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(), "err", err)
 		return nil, err
+	}
+	if mode := h.passiveMode(ref, t); mode.Passive() {
+		value, err := h.passiveAnswer(ctx, ref, t, mode)
+		if err != nil {
+			logger.V(1).Info("external scaler GetMetrics failed: passive (hold) and the current replica count is unreadable",
+				"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(), "err", err)
+			return nil, err
+		}
+		h.undecided.clear(types.NamespacedName{Namespace: ref.GetNamespace(), Name: ref.GetName()})
+		logger.V(1).Info("external scaler GetMetrics",
+			"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(),
+			"metricName", MetricName, "value", value, "decided", false, "passive", string(mode))
+		return &pb.GetMetricsResponse{
+			MetricValues: []*pb.MetricValue{{MetricName: MetricName, MetricValue: value}},
+		}, nil
 	}
 	decided := ok && h.honoursDecision(d)
 	value := int64(d.DesiredReplicas)
@@ -506,6 +531,11 @@ func (h *Handler) IsActive(ctx context.Context, ref *pb.ScaledObjectRef) (*pb.Is
 	h.observe(ref)
 	logger := log.FromContext(ctx)
 	if !h.leader() {
+		if h.standbyObserve(ctx, ref) {
+			logger.V(1).Info("external scaler IsActive: passive (observe), answered before the leader lease is held",
+				"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(), "active", false)
+			return &pb.IsActiveResponse{Result: false}, nil
+		}
 		// Logged for the same reason GetMetrics' refusal is, and it was missed
 		// there first: a refusal KEDA records and WVA does not leaves the
 		// component an operator reads first with no trace of its own answer.
@@ -554,6 +584,9 @@ func (h *Handler) isActive(ctx context.Context, ref *pb.ScaledObjectRef) (bool, 
 // activeFor is isActive for a target already resolved and its decision already
 // read.
 func (h *Handler) activeFor(ctx context.Context, ref *pb.ScaledObjectRef, t registry.Target, d decision.Decision, ok bool) bool {
+	if mode := h.passiveMode(ref, t); mode.Passive() {
+		return h.passiveActive(ctx, ref, t, mode)
+	}
 	if ok && h.honoursDecision(d) {
 		return d.DesiredReplicas > 0
 	}
@@ -686,7 +719,16 @@ func (h *Handler) StreamIsActive(ref *pb.ScaledObjectRef, stream pb.ExternalScal
 	// itself does not move for the life of the stream.
 	activeNow := func() bool {
 		d, ok := h.store.Get(ref.GetNamespace(), t.Name)
-		return h.activeFor(ctx, ref, t, d, ok)
+		// The latest enrichment, when there is one: passive mode turns on what
+		// else the ScaledObject carries, which can change while the stream
+		// is open. The target's name cannot.
+		cur := t
+		if h.registry != nil {
+			if e, found := h.registry.Get(ref.GetNamespace(), ref.GetName()); found && e.Target.Name == t.Name {
+				cur = e.Target
+			}
+		}
+		return h.activeFor(ctx, ref, cur, d, ok)
 	}
 
 	// Send the opening state before waiting on anything, so KEDA is never left

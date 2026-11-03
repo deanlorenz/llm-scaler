@@ -71,6 +71,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/passive"
 	prometheusutil "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/prometheus"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/scaler"
@@ -820,6 +821,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	// One answer to "is this model passive?" for the external scaler, both
+	// engines and the warm pool, so they cannot disagree about a model.
+	passiveResolver := &passive.Resolver{Config: cfg, Registry: registry.Default}
+
 	// Register optimization engine loops with the manager. Only start when leader.
 	err = mgr.Add(optimizeLoopRunnable(func(ctx context.Context) (optimizeLooper, error) {
 		sourceRegistry := source.NewSourceRegistry()
@@ -909,6 +914,7 @@ func main() {
 		// ScaledObject is served by a cluster-wide informer, which is the LIST+WATCH
 		// this design exists to remove.
 		engine.Variants = registry.Default
+		engine.Passive = passiveResolver
 		engine.Status = controllerStatus
 		// Kueue's preemptions of managed pods, recorded from the pod informer
 		// the engine already reads pods through: a preempted pod and its
@@ -969,6 +975,7 @@ func main() {
 		// which is where the freshness actually lives, so neither re-reads what the
 		// other has just read.
 		engine.Variants = registry.Default
+		engine.Passive = passiveResolver
 		engine.VariantEnricher = registry.NewEnricher(mgr.GetAPIReader(), registry.Default, registry.DefaultTargetMaxAge)
 		engine.VariantEnricher.Recorder = mgr.GetEventRecorderFor("workload-variant-autoscaler-registry") //nolint:staticcheck // SA1019: core/v1 events; see the configmap reconciler
 		// Let the engine bring the usage picture up to date immediately before it
@@ -1034,6 +1041,7 @@ func main() {
 		// 60 s). The engines read the interval once, when they start, so this
 		// matches what they publish at.
 		DecisionInterval: cfg.OptimizationInterval,
+		Passive:          passiveResolver,
 	}
 	// Without leader election this replica is the leader from the start; the
 	// manager's Elected channel says so too, but only after it has started
@@ -1132,7 +1140,7 @@ func main() {
 		for _, warmPoolNS := range readableWatched {
 			if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 				return runWarmPool(ctx, mgr, ds, warmPoolNS, warmPoolGPUUtil, warmPoolSleepMinSize,
-					warmPoolMaxHold, warmPoolMinHold, warmPoolPreloadTop, warmPoolMemoryBudget)
+					warmPoolMaxHold, warmPoolMinHold, warmPoolPreloadTop, warmPoolMemoryBudget, passiveResolver)
 			})); err != nil {
 				setupLog.Error(err, "unable to add the warm pool to manager", "namespace", warmPoolNS)
 				os.Exit(1)
@@ -1159,7 +1167,7 @@ func main() {
 				go func() {
 					defer close(done)
 					if err := runWarmPool(nsCtx, mgr, ds, ns, warmPoolGPUUtil, warmPoolSleepMinSize,
-						warmPoolMaxHold, warmPoolMinHold, warmPoolPreloadTop, warmPoolMemoryBudget); err != nil {
+						warmPoolMaxHold, warmPoolMinHold, warmPoolPreloadTop, warmPoolMemoryBudget, passiveResolver); err != nil {
 						setupLog.Error(err, "warm pool stopped", "namespace", ns)
 					}
 				}()
@@ -1506,6 +1514,7 @@ func runWarmPool(
 	warmPoolMinHold *time.Duration,
 	warmPoolPreloadTop *int,
 	warmPoolMemoryBudget *int64,
+	passiveResolver *passive.Resolver,
 ) error {
 	// Its own, because the original sat in main() as a local. Same name so the
 	// lines this function emits are indistinguishable from before the hoist.
@@ -1519,7 +1528,15 @@ func runWarmPool(
 	go trigger.WatchRegistry(ctx, registry.Default, 30*time.Second)
 
 	reconciler := warmpool.New(
-		warmpoolpool.NewAdapter(mgr.GetClient(), warmPoolNS, warmpoolpool.Ram),
+		// A passive model is observed, never scaled: the pool does not wake,
+		// return, load or evict a copy for it (warmpoolpool.PassiveGuard).
+		&warmpoolpool.PassiveGuard{
+			Pool: warmpoolpool.NewAdapter(mgr.GetClient(), warmPoolNS, warmpoolpool.Ram),
+			Passive: func(namespace, variant string) bool {
+				m, _ := passiveResolver.Variant(namespace, variant)
+				return m.Passive()
+			},
+		},
 		&warmpool.Demand{
 			Namespace:            warmPoolNS,
 			GPUMemoryUtilization: *warmPoolGPUUtil,

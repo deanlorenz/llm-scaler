@@ -101,6 +101,60 @@ type Target struct {
 	// means KEDA's default of 30 s. The utilization-share optimizer derives
 	// how long a release and a fill take from it.
 	PollingIntervalSeconds *int32
+	// ForeignTriggers counts the ScaledObject's triggers that are not this
+	// controller's (OwnTrigger): a prometheus or cpu trigger beside ours. In
+	// passive mode it decides the answer: alone, our trigger holds the count;
+	// beside others it answers so it never wins, and KEDA scales on theirs.
+	ForeignTriggers int
+	// ModifiersUseOwnTrigger reports a spec.advanced.scalingModifiers formula
+	// that names our trigger. KEDA then feeds our answer into the formula
+	// rather than taking the highest trigger, so an inert answer is not inert.
+	ModifiersUseOwnTrigger bool
+	// KEDAPaused reports KEDA's own autoscaling.keda.sh/paused or
+	// paused-replicas annotation on the ScaledObject: KEDA does not act on
+	// any answer while it is set. Reported, never acted on.
+	KEDAPaused bool
+}
+
+// TiersOf returns the tier (scalingPolicy) each live entry of one model names,
+// "" for none: the input config.ResolvePassive takes. It reads the trigger
+// metadata as delivered, without parsing the rest of it, and expires nothing.
+func (r *Registry) TiersOf(namespace, modelID string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	var tiers []string
+	for _, e := range r.m {
+		if e.Namespace != namespace || e.Metadata[ModelIDKey] != modelID {
+			continue
+		}
+		if !e.Streaming && now.Sub(e.LastSeen) > r.ttl {
+			continue
+		}
+		tiers = append(tiers, e.Metadata[ScalingPolicyKey])
+	}
+	return tiers
+}
+
+// ByTargetName returns the live entry whose resolved scale target is named
+// name in namespace, whatever its kind: the lookup for callers that know a
+// variant by its workload's name only. Like Get, it expires nothing.
+func (r *Registry) ByTargetName(namespace, name string) (Entry, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	for _, e := range r.m {
+		if e.Namespace != namespace || e.Target.Name != name {
+			continue
+		}
+		if !e.Streaming && now.Sub(e.LastSeen) > r.ttl {
+			continue
+		}
+		copied := e.Entry
+		copied.Metadata = maps.Clone(e.Metadata)
+		return copied, true
+	}
+	return Entry{}, false
 }
 
 // Fresh reports whether the entry's target read is recent enough to use.

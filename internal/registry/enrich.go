@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"maps"
+	"strings"
 	"time"
 
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
@@ -233,6 +234,18 @@ func TargetFromScaledObject(so *kedav1alpha1.ScaledObject) Target {
 		MaxReplicas:            ptr(so.GetHPAMaxReplicas()),
 		PollingIntervalSeconds: so.Spec.PollingInterval,
 	}
+	t.KEDAPaused = so.NeedToBePausedByAnnotation()
+	var own []string
+	for _, tr := range so.Spec.Triggers {
+		if OwnTrigger(tr.Type, tr.Metadata) {
+			own = append(own, tr.Name)
+			continue
+		}
+		t.ForeignTriggers++
+	}
+	if so.IsUsingModifiers() {
+		t.ModifiersUseOwnTrigger = formulaNames(so.Spec.Advanced.ScalingModifiers.Formula, own)
+	}
 	if a := so.Spec.Advanced; a != nil && a.HorizontalPodAutoscalerConfig != nil {
 		if b := a.HorizontalPodAutoscalerConfig.Behavior; b != nil && b.ScaleDown != nil {
 			t.ScaleDownWindowSeconds = b.ScaleDown.StabilizationWindowSeconds
@@ -254,6 +267,41 @@ func TargetFromScaledObject(so *kedav1alpha1.ScaledObject) Target {
 }
 
 func ptr(v int32) *int32 { return &v }
+
+// OwnTrigger reports whether a ScaledObject trigger is this controller's: an
+// external or external-push trigger whose metadata is in our schema -- it
+// names a model or a warm pool. Another external scaler's trigger names
+// neither, and is foreign.
+func OwnTrigger(triggerType string, metadata map[string]string) bool {
+	if triggerType != "external" && triggerType != "external-push" {
+		return false
+	}
+	return metadata[ModelIDKey] != "" || metadata[WarmPoolNameKey] != ""
+}
+
+// formulaNames reports whether a scalingModifiers formula names any of the
+// given trigger names. KEDA's formula refers to a trigger by its name, so an
+// unnamed trigger cannot be in it. The match is on whole identifiers; a name
+// that is not one (it holds a '-') is matched as a substring, which can only
+// err towards reporting it used.
+func formulaNames(formula string, names []string) bool {
+	isIdent := func(r rune) bool {
+		return r == '_' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
+	}
+	tokens := map[string]bool{}
+	for _, tok := range strings.FieldsFunc(formula, func(r rune) bool { return !isIdent(r) }) {
+		tokens[tok] = true
+	}
+	for _, n := range names {
+		if n == "" {
+			continue
+		}
+		if tokens[n] || strings.ContainsFunc(n, func(r rune) bool { return !isIdent(r) }) && strings.Contains(formula, n) {
+			return true
+		}
+	}
+	return false
+}
 
 func (e *Enricher) clock() time.Time {
 	if e.now == nil {

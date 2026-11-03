@@ -67,6 +67,9 @@ type Server struct {
 	// (config.OptimizationInterval). A positive decision older than two of
 	// them is answered as stale; nil keeps the 60 s floor alone.
 	DecisionInterval func() time.Duration
+	// Passive resolves which models are passive (passive.Resolver). Nil is
+	// every model active.
+	Passive PassiveModels
 
 	// listening is set once a listener is bound and cleared when Start returns.
 	// Where the platform allows it the hand-off binds the full server before
@@ -155,7 +158,7 @@ func (s *Server) Start(ctx context.Context) error {
 	defer s.listening.Store(false)
 	s.refusals = newRefusalLog(nil)
 
-	full := NewHandler(s.Client, nil, s.Registry).WithElected(s.Elected).WithDecisionInterval(s.DecisionInterval)
+	full := NewHandler(s.Client, nil, s.Registry).WithElected(s.Elected).WithDecisionInterval(s.DecisionInterval).WithPassive(s.Passive)
 	// Only the full handler ever answers without a decision; the standby
 	// refuses instead, so its set would always read empty.
 	metrics.SetScalerUndecidedTargetsSource(full.UndecidedTargets)
@@ -169,7 +172,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	logger.Info("KEDA external scaler listening before the leader lease is held; decisions refused until then", "addr", s.Addr)
-	standby, err := s.bind(ctx, NewHandler(s.Client, nil, s.Registry).WithElected(neverElected),
+	standby, err := s.bind(ctx, NewHandler(s.Client, nil, s.Registry).WithElected(neverElected).WithPassive(s.Passive),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			MaxConnectionAge:      standbyConnectionAge,
 			MaxConnectionAgeGrace: standbyConnectionAge,
