@@ -156,13 +156,43 @@ whose KV fill is at least the ITL band's lower edge,
 `analyzerTuning.itlBand.minObservableK` (`fleetResidentKVPerRequest`).
 Warm-pool bridges and replicas with no live capacity are left out.
 
-The band gate matters for shared prompts. A prefix that several running
-requests share is held once, and the reading spreads it over the requests
-running now. Take 500 shared and 500 unique prompt tokens with 100 out, at hit
-0.5. The shape says 550 a request. A replica running 123 requests reads 554. A
-replica running 2 reads 800, and priced at that the KV-bound mu would be 31%
-low. Only replicas inside the band, where the line mu is priced from is
-fitted, are read.
+A reading is taken only where there are enough requests in it to describe
+the pricing point. A prefix that several running requests share is held once,
+and the reading spreads it over the requests running now. Take 500 shared and
+500 unique prompt tokens with 100 out, at hit 0.5. The shape says 550 a
+request. A replica running 123 requests reads 554. A replica running 2 reads
+800, and priced at that the KV-bound mu would be 31% low. Two gates, both at
+the ITL band's lower edge, `minK`:
+
+- **By fill:** only replicas whose KV fill is at least `minK` are read. The
+  band is where the line mu is priced from is fitted.
+- **By count:** the requests read must be at least `minK x C / KVreq`, where
+  `C` is the summed capacity of the replicas read and `KVreq` is the shape's
+  own, with the discount. That is the band's edge counted in requests. The
+  fill gate alone does not stop long prompts against the cache. A
+  500,000-token cache with 100,000-token prompts, 90% of them shared, holds 2
+  requests at a fill of 0.22. Those read 55,500 a request where the shape says
+  10,500: a KV-bound mu 5x low. The count gate asks for 8.
+
+The count gate costs the issue's own case some of its reach. Where hits are on
+blocks no running request shares, a request holds `IL + D x OL/2`, so the
+count gate passes only from a fill of `minK x (IL + D x OL/2) / (ILeff + D x
+OL/2)`:
+
+| Discount on the KV per request | Fill at which the count gate passes |
+|---|---|
+| halves it | 0.30 |
+| quarters it | 0.60 |
+| cuts it more than about 4.5x | above the pricing point (0.68 on the defaults) |
+
+Below that fill the price stays at the discount, as before. A line in the
+running count that separates shared KV from each request's own would read
+both cases; that is a follow-up.
+
+The noise a reading keeps is one-sided. A reading below the shape's `KVreq` is
+clamped to it and changes nothing, while a reading above it moves the price.
+The spread of prompt lengths is not modelled, so long prompts read over few
+requests err towards more replicas, at most up to the price with no discount.
 
 The clamp keeps the reading to the hit term:
 
@@ -176,7 +206,7 @@ The clamp keeps the reading to the hit term:
 
 With no reading, the price stays `ILeff + D x OL/2`, as before. No reading
 means no replica in the band, a missing running-requests or KV series, or
-fewer requests than `minResidentSequences` asks for. So the switch moves the
+fewer requests than `minResidentSequences` or the count gate asks for. So the switch moves the
 price only where there is evidence, and only towards more KV: the derived mu
 is never above the one before.
 
@@ -203,7 +233,10 @@ keeps `ILeff`, because a hit does save prefill compute. The derived k2 and the
 zero-replica estimate already price the full prompt. `derived-mu` logs the
 reading as `residentKVPerSeq`, the requests it was taken over as
 `residentRunning`, and `residentKVBound`: `none` (priced as read), `lower`,
-`upper`, `no-reading` or `off`. The replay switch is
+`upper`, `no-hit` (a shape with no hit, whose bounds are one figure),
+`no-reading` or `off`. `residentKVBoundFleet` is the same for `kvReqFleet`,
+the fleet's own shape, which differs from the priced one during a shape
+change. The replay switch is
 `kv-per-request-hits-resident` (`SwitchKVPerRequestHitsResident`). The
 throughput and slo analyzers still price their KV per request at `ILeff`.
 
@@ -1595,8 +1628,9 @@ the per-variant `replica-capacity-summary` stands in for them.
   spread of output lengths priced into `kvReqPerSeq` (1 is none, or none
   read); `residentKVPerSeq` is the KV the running requests were measured to
   hold, over `residentRunning` requests, and `residentKVBound` which bound
-  `kvReqPerSeq` held it to (`none`, `lower`, `upper`, `no-reading`, `off`;
-  issue #277);
+  `kvReqPerSeq` held it to (`none`, `lower`, `upper`, `no-hit`,
+  `no-reading`, `off`; issue #277), and `residentKVBoundFleet` the same for
+  `kvReqFleet`;
   `muShortWindow` says whether the pair moved to the short window.
   It, and every ITL line (`itl-window`, `itl-fit`, `itl-fit-declined`,
   `itl-line-borrowed`, `itl-line-none`, `itl-gps-mismatch`), carries `namespace` beside

@@ -1397,6 +1397,7 @@ no-change
 no-compatible-donor
 no-data
 no-decode-candidate
+no-hit
 no-itl
 no-k
 no-limiter
@@ -1773,6 +1774,7 @@ residency
 resident
 residentDemand
 residentKVBound
+residentKVBoundFleet
 residentKVPerSeq
 residentRunning
 residual

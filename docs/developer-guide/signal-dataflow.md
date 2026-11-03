@@ -154,7 +154,8 @@ derived mu does not assume `ILeff` for memory where it can measure it (issue
 `RunningRequests`, across the fleet's Ready generating replicas inside the ITL
 band, clamped between `ILeff + D x O/2` and `IL + D x O/2`. With no reading
 (no replica in the band, a missing series, or fewer requests than the shape
-needs) it keeps `ILeff + D x O/2`. The replay switch is
+needs or than a cache filled to the band's edge holds at the shape's own
+`KVreq`) it keeps `ILeff + D x O/2`. The replay switch is
 `kv-per-request-hits-resident`
 ([saturation-analyzer.md](saturation-analyzer.md#prefix-cache-hits-stay-resident)).
 
@@ -689,7 +690,8 @@ Three log lines, in this order. The first two are per replica, at
    `kvReqFleet` the fleet's own; `outputDispersion` the spread of output
    lengths priced into it; `residentKVPerSeq`, `residentRunning` and
    `residentKVBound` the KV the running requests were measured to hold, over
-   how many, and which bound applied;
+   how many, and which bound applied (`residentKVBoundFleet` for
+   `kvReqFleet`);
    `muShortWindow` says whether the pair moved.
 2. `replica-capacity-decision` — `k1MemoryBound`, `k2ComputeBound`,
    `k2Source`, `boundBy`, `saturatedThroughput`.

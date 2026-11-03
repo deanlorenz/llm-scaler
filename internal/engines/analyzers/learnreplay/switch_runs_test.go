@@ -49,8 +49,10 @@ import (
 // (ServiceRate.Rate on 153 and 158 rows, by 0.02% to 0.54%), as the change
 // says it must: a reading can take the discount back, never add to it. Of
 // the derived-mu lines with the switch on, e1 priced 19 inside the bounds,
-// 288 at the upper bound, 191 at the lower (as before) and 641 with no
-// reading (as before); e1-tuned 19, 309, 163 and 640.
+// 275 at the upper bound, 180 at the lower (as before), 457 with no reading
+// (as before) and 208 for a replica with no hit (as before); e1-tuned 19,
+// 288, 150, 466 and 208. The band's count gate takes no reading that moved
+// a golden: the outputs are the ones the fill gate alone gave.
 //
 // The decode demand rises on most cycles it moves (70 of 107 in e1, 57 of
 // 93 in e1-tuned, by up to 0.49%) and falls on the rest, by at most 0.08%.

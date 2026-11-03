@@ -655,9 +655,11 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		fleetShape := shape.New(c.fleetInput, c.fleetOutput, rm.PrefixCacheHitRate).WithOutputDispersion(c.fleetDispersion)
 		// muShape is the shape mu is PRICED at: fleetShape on a steady fleet,
 		// and both halves on the short window while a shape change is
-		// outstanding (see resolvePricing). fleetShape stays the fleet's own
-		// [5m] reading, because that is the figure noteLineMismatch compares
-		// an observed token rate against.
+		// outstanding (see resolvePricing). fleetShape keeps the fleet's own
+		// [5m] lengths, because that is the shape noteLineMismatch compares
+		// an observed token rate against; below, its KVreq, like muShape's,
+		// takes the measured KV per running request within its own bounds
+		// (issue #277).
 		//
 		// The short-window shape takes no spread. That is not a guard of its
 		// own: the short window opens only while a shape change is
@@ -675,9 +677,9 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		// shapes price a resident request at the KV the running requests are
 		// measured to hold, each bounded by its own discount and by none
 		// (prefix_cache_kv.go). With none, as before.
-		residentBound := residentBoundOff
+		residentBound, residentBoundFleet := residentBoundOff, residentBoundOff
 		if c.a.kvHitsResident {
-			fleetShape, _ = withResidentKV(fleetShape, c.resident)
+			fleetShape, residentBoundFleet = withResidentKV(fleetShape, c.resident)
 			muShape, residentBound = withResidentKV(muShape, c.resident)
 		}
 		// Only a generating role is priced from the ITL line. ITL is the gap
@@ -752,9 +754,10 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				// The KV the running requests hold each, measured over
 				// residentRunning of them, and which bound kvReqPerSeq
 				// held it to: none, lower (the hit rate's discount), upper
-				// (no discount), no-reading or off (issue #277).
+				// (no discount), no-hit, no-reading or off (issue #277);
+				// residentKVBoundFleet the same for kvReqFleet.
 				"residentKVPerSeq", c.resident.perSeq(), "residentRunning", c.resident.running,
-				"residentKVBound", residentBound,
+				"residentKVBound", residentBound, "residentKVBoundFleet", residentBoundFleet,
 				"replicaKvTokens", rm.TotalKvCapacityTokens,
 				// Per engine rank; the replica admits engineRanks times the
 				// lower of the two (0 when the active cap is unset).

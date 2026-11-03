@@ -3,6 +3,7 @@ package saturation
 import (
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"testing"
 	"time"
 
@@ -130,8 +131,93 @@ func TestKVHitsResident_NoReadingPricesAsBefore(t *testing.T) {
 		assert.InDelta(t, 550, on["kvReqPerSeq"], 1e-9, name)
 		assert.Equal(t, residentBoundNoReading, on["residentKVBound"], name)
 	}
-	// At the band's edge it is a reading: 15,000 over 20, 750.
-	assert.InDelta(t, 750, hitMu(t, cachingRow(0.15, 20), nil)["kvReqPerSeq"], 1e-9)
+	// The band's count gate: a cache filled to 0.15 holds 0.15 x 100,000 /
+	// 550 = 27.3 requests if the discount is right, so 27 are no reading and
+	// 28 are one (15,000 over 28, 535.7: under the discount, priced at it).
+	edge := hitMu(t, cachingRow(0.15, 27), nil)
+	assert.Equal(t, residentBoundNoReading, edge["residentKVBound"])
+	edge = hitMu(t, cachingRow(0.15, 28), nil)
+	assert.Equal(t, residentBoundLower, edge["residentKVBound"])
+	assert.InDelta(t, 550, edge["kvReqPerSeq"], 1e-9)
+}
+
+// Few long requests sharing a large prefix are no reading. A 500,000-token
+// cache serves 100,000-token prompts, 90% of them a shared prefix, with
+// 1000 out: the shape prices 10,000 + 500 = 10,500 a request. Two running
+// hold 90,000 + 2 x 10,500 = 111,000 tokens, a fill of 0.22, inside the
+// band, and read 55,500 a request: priced so, the KV-bound mu would be 5x
+// low. The band's count gate asks for 0.15 x 500,000 / 10,500 = 7.1, so 8
+// requests; 8 hold 174,000, and read 21,750.
+func TestKVHitsResident_FewLongRequestsSharingAPrefixAreNoReading(t *testing.T) {
+	row := func(running int) domain.ReplicaMetrics {
+		rm := hitRow("pod-1", 100_000, 1000, 500_000, (90_000+float64(running)*10_500)/500_000, running)
+		rm.PrefixCacheHitRate = 0.9
+		return rm
+	}
+	two := hitMu(t, row(2), nil)
+	assert.Equal(t, residentBoundNoReading, two["residentKVBound"])
+	assert.InDelta(t, 10_500, two["kvReqPerSeq"], 1e-6, "the discount, not 55,500")
+	eight := hitMu(t, row(8), nil)
+	assert.Equal(t, residentBoundNone, eight["residentKVBound"])
+	assert.InDelta(t, 21_750, eight["kvReqPerSeq"], 1e-6)
+}
+
+// The GPS check receives the KV per request the reading set. The replica
+// generates 1000 tokens a second at a fill of 0.5: 50 requests of 1000 each,
+// an ITL of 0.08 x 0.5 + 0.01 = 0.05 s. Priced at the measured 1000 the
+// line predicts exactly that, and nothing is logged; priced at the
+// discount's 550 it predicts 1818, 82% off, and itl-gps-mismatch fires.
+func TestKVHitsResident_TheGPSCheckPricesTheMeasuredKV(t *testing.T) {
+	mismatch := func(edit func(*SaturationAnalyzer)) int {
+		ctx, logs := observedCtx(t)
+		store := capacity.NewStore()
+		store.Update("test-ns", "test-model", "variant-d", capacity.Record{
+			AcceleratorName: "H200", GpuCount: 1, EngineParams: declaredParams(1024),
+		}, time.Now())
+		a := NewSaturationAnalyzer(store)
+		a.publishLine(a.itlPhysicsKey("test-ns", "test-model", "variant-d", "H200", 1, ""),
+			"a fitted line", itl.Model{A: 0.08, B: 0.01}, time.Now())
+		if edit != nil {
+			edit(a)
+		}
+		rm := cachingRow(0.5, 50)
+		rm.GenerationTokenRate, rm.GenerationTokenRateKnown = 1000, true
+		_, err := a.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{rm}, []domain.VariantReplicaState{
+			{VariantName: "variant-d", Role: domain.RoleDecode, AcceleratorName: "H200",
+				CurrentReplicas: 1, GPUsPerReplica: 1},
+		}))
+		require.NoError(t, err)
+		require.NotEmpty(t, logs.FilterMessage("derived-mu").All(), "the cycle priced the replica")
+		return logs.FilterMessage("itl-gps-mismatch").Len()
+	}
+	assert.Zero(t, mismatch(nil), "the line predicts the observed rate at the measured KV")
+	assert.Equal(t, 1, mismatch(hitsOff), "off, the discount over-predicts the rate")
+}
+
+// On a P/D fleet only decode is read. A prefill replica holds the KV of
+// prompts it is handing to decode, 90,000 tokens over 10 running here; read,
+// it would pull the decode reading of 1000 a request to 140,000 / 60 = 2333,
+// past the upper bound.
+func TestKVHitsResident_APrefillReplicaIsNotRead(t *testing.T) {
+	ctx, logs := observedCtx(t)
+	store := capacity.NewStore()
+	store.Update("test-ns", "test-model", "variant-d", capacity.Record{
+		AcceleratorName: "H200", GpuCount: 1, EngineParams: declaredParams(1024),
+	}, time.Now())
+	a := NewSaturationAnalyzer(store)
+	a.publishLine(a.itlPhysicsKey("test-ns", "test-model", "variant-d", "H200", 1, ""),
+		"a fitted line", itl.Model{A: 0.08, B: 0.01}, time.Now())
+	prefill := hitRow("prefill-1", 1000, 1, 100_000, 0.9, 10)
+	prefill.VariantName = "variant-p"
+	_, err := a.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{cachingRow(0.5, 50), prefill},
+		[]domain.VariantReplicaState{
+			{VariantName: "variant-d", Role: domain.RoleDecode, AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1},
+			{VariantName: "variant-p", Role: domain.RolePrefill, AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1},
+		}))
+	require.NoError(t, err)
+	f := requireLogged(t, logs, "derived-mu")
+	assert.EqualValues(t, 50, f["residentRunning"])
+	assert.InDelta(t, 1000, f["kvReqPerSeq"], 1e-9)
 }
 
 // The reviewer's shared-prefix case. 500 prompt tokens are a system prompt
@@ -185,7 +271,10 @@ func TestKVHitsResident_TheFewestRequestsFollowTheShape(t *testing.T) {
 func TestKVHitsResident_NoHitsPricesAsBefore(t *testing.T) {
 	rm := cachingRow(0.9, 50)
 	rm.PrefixCacheHitRate = 0
-	assert.InDelta(t, 1050, hitMu(t, rm, nil)["kvReqPerSeq"], 1e-9)
+	on := hitMu(t, rm, nil)
+	assert.InDelta(t, 1050, on["kvReqPerSeq"], 1e-9)
+	assert.Equal(t, residentBoundNoHit, on["residentKVBound"], "not upper: there is no discount to take back")
+	assert.Equal(t, residentBoundNoHit, on["residentKVBoundFleet"])
 	assert.InDelta(t, 1050, hitMu(t, rm, hitsOff)["kvReqPerSeq"], 1e-9)
 }
 
@@ -225,11 +314,23 @@ func TestKVHitsResident_AShapeChangeKeepsTheReadingInTheNewBounds(t *testing.T) 
 	require.Equal(t, true, on["muShortWindow"], "the swap opened the short window")
 	assert.InDelta(t, 1600, on["kvReqPerSeq"], 1e-9)
 	assert.Equal(t, residentBoundNone, on["residentKVBound"])
+	// The fleet's own [5m] shape (2000 in, 550 out: 1275, and 2275 with no
+	// hit) bounds the same reading by its own figures.
+	assert.InDelta(t, 1600, on["kvReqFleet"], 1e-9)
 
 	high := swap(0.95, 40, nil)
 	require.Equal(t, true, high["muShortWindow"])
 	assert.InDelta(t, 2050, high["kvReqPerSeq"], 1e-9)
 	assert.Equal(t, residentBoundUpper, high["residentKVBound"])
+	assert.InDelta(t, 2275, high["kvReqFleet"], 1e-9, "the fleet's upper bound, not the new shape's")
+	assert.Equal(t, residentBoundUpper, high["residentKVBoundFleet"])
+
+	// 44,000 over 40, 1100: inside the new shape's bounds, under the
+	// fleet's discount.
+	low := swap(0.44, 40, nil)
+	assert.InDelta(t, 1100, low["kvReqPerSeq"], 1e-9)
+	assert.InDelta(t, 1275, low["kvReqFleet"], 1e-9)
+	assert.Equal(t, residentBoundLower, low["residentKVBoundFleet"])
 
 	off := swap(0.8, 50, hitsOff)
 	require.Equal(t, true, off["muShortWindow"])
@@ -253,10 +354,13 @@ func TestKVHitsResident_TheFleetReadingCountsReadyGeneratingReplicas(t *testing.
 	counted := []domain.ReplicaMetrics{
 		row("variant-d", 0.5, 100_000, 50), // 50,000 over 50
 		row("variant-d", 0.3, 200_000, 20), // 60,000 over 20
+		row("variant-d", 1.0, 100_000, 30), // a full cache is a fill
 	}
 	got := fleetResidentKVPerRequest(counted, roles, 0.15)
-	assert.InDelta(t, 110_000, got.tokens, 1e-6)
-	assert.Equal(t, 70, got.running)
+	assert.InDelta(t, 210_000, got.tokens, 1e-6)
+	assert.Equal(t, 100, got.running)
+	assert.InDelta(t, 400_000, got.capTokens, 1e-6)
+	assert.InDelta(t, 0.15, got.minK, 1e-12)
 
 	notReady := row("variant-d", 0.9, 100_000, 10)
 	notReady.Ready = false
@@ -273,13 +377,15 @@ func TestKVHitsResident_TheFleetReadingCountsReadyGeneratingReplicas(t *testing.
 		row("variant-d", 0.9, 0, 10),
 		row("variant-d", 0.9, math.MaxInt64, 10),
 		row("variant-d", 0.1, 100_000, 10),
+		row("variant-d", 1.5, 100_000, 10),
 		row("variant-d", 0.9, 100_000, 0),
 	}
 	got = fleetResidentKVPerRequest(append(leftOut, counted...), roles, 0.15)
-	assert.InDelta(t, 110_000, got.tokens, 1e-6, "the rows left out move nothing")
-	assert.Equal(t, 70, got.running)
+	assert.InDelta(t, 210_000, got.tokens, 1e-6, "the rows left out move nothing")
+	assert.Equal(t, 100, got.running)
+	assert.InDelta(t, 400_000, got.capTokens, 1e-6)
 
-	assert.Equal(t, residentReading{}, fleetResidentKVPerRequest(leftOut, roles, 0.15), "no row counted is no reading")
+	assert.Equal(t, residentReading{minK: 0.15}, fleetResidentKVPerRequest(leftOut, roles, 0.15), "no row counted is no reading")
 	assert.Zero(t, residentReading{}.perSeq())
 }
 
@@ -303,7 +409,7 @@ func TestKVHitsResident_ResidentKVMovesOnlyKVreq(t *testing.T) {
 	assert.InDelta(t, 600, got.KVreq, 1e-9)
 
 	// A literal's dispersion of 0 reads as 1.
-	got, _ = withResidentKV(shape.Shape{AvgInputTokens: 1000, AvgOutputTokens: 100, KVreq: 550}, reading(5000))
+	got, _ = withResidentKV(shape.Shape{AvgInputTokens: 1000, AvgOutputTokens: 100, PrefixHitRate: 0.5, KVreq: 550}, reading(5000))
 	assert.InDelta(t, 1050, got.KVreq, 1e-9)
 	got, bound = withResidentKV(shape.Shape{}, reading(700))
 	assert.Equal(t, shape.Shape{}, got)
@@ -320,4 +426,42 @@ func TestKVHitsResident_TheReplayHookSetsTheSwitch(t *testing.T) {
 	}
 	assert.InDelta(t, 550, hitMu(t, cachingRow(0.5, 50), set(false))["kvReqPerSeq"], 1e-9)
 	assert.InDelta(t, 1000, hitMu(t, cachingRow(0.5, 50), set(true))["kvReqPerSeq"], 1e-9)
+}
+
+// A shape whose figures are not finite asks for more requests than any fleet
+// holds.
+func TestKVHitsResident_AShapeThatIsNotFiniteIsNeverRead(t *testing.T) {
+	assert.Equal(t, math.MaxInt32, minResidentSequences(shape.Shape{AvgInputTokens: 1000, AvgOutputTokens: math.Inf(1)}))
+}
+
+// Whatever the shape and the reading, the price is never under the
+// discount nor over no discount, and only KVreq moves.
+func TestKVHitsResident_TheReadingStaysInsideTheBounds(t *testing.T) {
+	rng := rand.New(rand.NewPCG(277, 3))
+	for i := range 2000 {
+		s := shape.New(1+rng.Float64()*50_000, 1+rng.Float64()*5000, rng.Float64()).WithOutputDispersion(1 + 3*rng.Float64())
+		r := residentReading{
+			tokens: rng.Float64() * 2e6, running: rng.IntN(500), capTokens: rng.Float64() * 2e6, minK: 0.15 * rng.Float64(),
+		}
+		got, bound := withResidentKV(s, r)
+		noHit := noHitShape(s)
+		require.GreaterOrEqual(t, got.KVreq, s.KVreq, "case %d (%s): under the discount", i, bound)
+		require.LessOrEqual(t, got.KVreq, noHit.KVreq*(1+1e-12), "case %d (%s): over no discount", i, bound)
+		got.KVreq = s.KVreq
+		require.Equal(t, s, got, "case %d: only KVreq moves", i)
+	}
+}
+
+// The derived mu is never above main's: over random shapes and readings,
+// priced through Analyze with the switch on and off.
+func TestKVHitsResident_TheDerivedMuIsNeverAboveMain(t *testing.T) {
+	rng := rand.New(rand.NewPCG(277, 4))
+	for i := range 60 {
+		capTokens := int64(50_000 + rng.IntN(950_000))
+		rm := hitRow("pod-1", 50+rng.Float64()*20_000, 10+rng.Float64()*4000, capTokens, rng.Float64(), 1+rng.IntN(400))
+		rm.PrefixCacheHitRate = rng.Float64()
+		on, off := hitMu(t, rm, nil), hitMu(t, rm, hitsOff)
+		require.LessOrEqual(t, on["rate"], off["rate"].(float64)*(1+1e-12),
+			"case %d: bound %v, kvReqPerSeq %v against %v", i, on["residentKVBound"], on["kvReqPerSeq"], off["kvReqPerSeq"])
+	}
 }
