@@ -142,14 +142,15 @@ lender (`lenderCandidates`) or a reclaim (`yieldReclaimed`): nothing lowers it.
 
 ## Interactions
 
-**Limiter, quota, share.** Under a limiter the models that scale are allocated
-first, with the passive ones left out of the pass: a passive model counts at its
-real usage, which the limiter already reads, so an active model gets exactly
-what it would with the passive neighbour absent. The passive would-be counts
-come from a quiet pass (`GreedyByScoreOptimizer.PassiveWouldBe`) over what the
-active models' growth left, at the level of the pools: node fit and cohort
-borrowing are not modelled for it. Without a limiter the models are independent
-and one pass serves both. A share group holding a passive model is planned in
+**Limiter, quota, share.** Under either optimizer the models that scale are
+allocated first, with the passive ones left out of the pass: a passive model
+counts at its real usage, which the limiter already reads, so an active model
+gets exactly what it would with the passive neighbour absent. The passive
+would-be counts come from a second pass (`allocation.PassiveWouldBe`) over what
+the active models' growth left, at the level of the pools: node fit and cohort
+borrowing are not modelled for it. Under the greedy optimizer that pass is
+quiet (`ShadowOptimize`); the cost-aware one decides each model on its own and
+publishes nothing, so its second pass is an ordinary one. A share group holding a passive model is planned in
 shadow (`wva_utilization_share_passive_shadow`); its active models get the
 ordinary optimizer's targets.
 
@@ -161,6 +162,12 @@ held count.
 **Leader election.** Passive is configuration, the same on every replica.
 `hold` needs the live count and is answered by the leader; `observe` is
 answered by a standby too.
+
+**One resolver.** `passive.Resolver` is the one source: the scaler asks
+`Model` (it has the trigger's metadata, not a registry entry), the engines ask
+`Resolve` (by ScaledObject or target name, with the entry it read), and the warm
+pool asks `Variant`; `wirePassive` in `cmd/main.go` hands the same resolver to all of
+them. The three methods stay: each caller holds a different key.
 
 **Our trigger** is an `external`/`external-push` trigger in our metadata schema
 (`modelID` or `warmPoolName`) whose `scalerAddress` is the one KEDA called us

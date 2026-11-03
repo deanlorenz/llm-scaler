@@ -742,10 +742,12 @@ across a restart, are otherwise visible only in the logs.
 - **Use Case**: Compare a passive model's would-be count with the real one, with nothing else installed. Join on `exported_namespace`, the workload's namespace ([why](#notes-on-name_spaces-in-metrics)):
 
 ```promql
-# what the controller would run, minus what runs
-(wva_desired_replicas - on(exported_namespace, variant_name) wva_current_replicas)
+# what the controller would run, minus what runs; max by drops the other
+# labels (accelerator_type, pod, instance) so the two sides match one to one
+max by (exported_namespace, variant_name) (wva_desired_replicas)
+  - max by (exported_namespace, variant_name) (wva_current_replicas)
   and on(exported_namespace, variant_name)
-  (wva_passive_mode{mode=~"hold|observe|observe-unsafe"} == 1)
+  max by (exported_namespace, variant_name) (wva_passive_mode{mode=~"hold|observe|observe-unsafe"} == 1)
 ```
 
 ### Optimization metrics

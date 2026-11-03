@@ -388,17 +388,19 @@ verbosity 3 `Passive: would scale` per variant per cycle. To compare, join on
 controller's):
 
 ```promql
-(wva_desired_replicas - on(exported_namespace, variant_name) wva_current_replicas)
+max by (exported_namespace, variant_name) (wva_desired_replicas)
+  - max by (exported_namespace, variant_name) (wva_current_replicas)
   and on(exported_namespace, variant_name)
-  (wva_passive_mode{mode=~"hold|observe|observe-unsafe"} == 1)
+  max by (exported_namespace, variant_name) (wva_passive_mode{mode=~"hold|observe|observe-unsafe"} == 1)
 ```
 
-**The limiter.** Under a limiter, the models that scale are allocated first, as
-if the passive models were absent: a passive model counts against the budget
+**The limiter.** The models that scale are allocated first, as if the passive
+models were absent, under either optimizer: a passive model counts against the budget
 at its real usage, which the limiter already reads, and its would-be growth
 takes nothing from a model that scales. Its would-be count is then computed from
 what is left, at the level of the pools (node fit and cohort borrowing are not
-modelled for it). Read it as "what it would get after the models that scale".
+modelled for it). Without a limiter the models do not compete, and the
+would-be counts are the ones a single pass would give. Read it as "what it would get after the models that scale".
 
 **Leaving passive** uses the HPA's own behavior, with no ramp of the
 controller's. Under the installer's ScaledObject: a scale-up applies at the

@@ -239,10 +239,18 @@ scale and have the scaling manager only report. Nothing else is needed.
        metadata: {serverAddress: ..., query: ..., threshold: "..."}
      - type: external-push       # ours: observes
        name: wva
+       metricType: AverageValue  # the only type our answer is a count under
        metadata:
          scalerAddress: wva-external-scaler.<controller-namespace>.svc:9090
          modelID: <model-id>
+       authenticationRef:        # TLS, the default; a plaintext install uses
+         name: wva-external-scaler-<controller-namespace>   # ...svc.cluster.local:9090
+         kind: ClusterTriggerAuthentication                 # and no authenticationRef
    ```
+
+   To compare every model at once, run the whole controller passive instead
+   of step 1: `make deploy-wva WVA_PASSIVE=true`
+   ([configuration](../../reference/configuration.md#deployment-flags)).
 
 3. Check the mode, then read the two counts side by side over the run:
 
@@ -261,8 +269,12 @@ scale and have the scaling manager only report. Nothing else is needed.
 
 The would-be count is computed from a fleet KEDA sized, so it says what the
 scaling manager would order next from where KEDA is, not where its own fleet
-would be. To let it scale, set `passive: false` (or delete the entry) and
-remove the other trigger. [Passive mode](../../reference/scaling-policy.md#passive)
+would be.
+
+To hand the model over, take the steps in this order: remove the other
+trigger first, then set `passive: false` (or delete the entry). The other way
+round, both triggers scale the model for a while, and the HPA follows
+whichever asks for more. [Passive mode](../../reference/scaling-policy.md#passive)
 has the details.
 
 ### The model cache must be ReadWriteMany
