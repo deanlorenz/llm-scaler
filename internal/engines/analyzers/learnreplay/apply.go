@@ -165,6 +165,18 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 			return err
 		}
 		r.slo.NoteVariantsPresent(d.Namespace, d.ModelID, d.Variants)
+	case slo.KindForgetVariant:
+		// A recording made before the engine forgot the slo line (#431) has
+		// none of these: its replay forgets nothing in the slo analyzer, as
+		// the run did not.
+		if r.slo == nil {
+			return errNoSLO
+		}
+		var d slo.ForgetVariantEvent
+		if err := ev.DecodeData(&d); err != nil {
+			return err
+		}
+		r.slo.ForgetVariant(ctx, d.Namespace, d.ModelID, d.Variant)
 
 	case throughput.KindAnalyze:
 		if r.tp == nil {

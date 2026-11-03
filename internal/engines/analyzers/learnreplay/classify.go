@@ -45,6 +45,7 @@ var recordedTypes = []reflect.Type{
 	reflect.TypeFor[slo.AnalyzeEvent](),
 	reflect.TypeFor[slo.EvictStaleEvent](),
 	reflect.TypeFor[slo.PresentEvent](),
+	reflect.TypeFor[slo.ForgetVariantEvent](),
 	reflect.TypeFor[metrics.SLOModelSnapshot](),
 
 	reflect.TypeFor[throughput.AnalyzeEvent](),

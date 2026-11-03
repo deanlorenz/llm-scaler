@@ -137,6 +137,14 @@ func TestResolveModelPolicyReportsAHalfConfiguredSLO(t *testing.T) {
 type sloKeeperSpy struct {
 	evictions, cycles int
 	present           map[string][]string
+	// forgotten is each variant ForgetVariant reached, as
+	// namespace/model/variant.
+	forgotten []string
+}
+
+func (s *sloKeeperSpy) ForgetVariant(_ context.Context, namespace, modelID, variant string) int {
+	s.forgotten = append(s.forgotten, namespace+"/"+modelID+"/"+variant)
+	return 0
 }
 
 func (s *sloKeeperSpy) BeginCycle() { s.cycles++ }

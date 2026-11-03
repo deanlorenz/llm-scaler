@@ -120,6 +120,9 @@ type Analyzer struct {
 	itlFiniteOnly        bool
 	itlRestartUnderName  bool
 	itlIdleOnEvidence    bool
+	// itlForgetReachesLine is SwitchITLForgetReachesTheLine (forget.go): on
+	// from the constructor; a replay turns it off (SetSwitchesForReplay).
+	itlForgetReachesLine bool
 	// settleInterval is the controller's optimize interval
 	// (WithOptimizationInterval), zero until set: what the line's own trace
 	// judges an absence by (settle.Tolerance), as the saturation analyzer's.
@@ -177,6 +180,7 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		itlFiniteOnly:        true,
 		itlRestartUnderName:  true,
 		itlIdleOnEvidence:    true,
+		itlForgetReachesLine: true,
 	}
 }
 
