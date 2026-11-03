@@ -561,17 +561,23 @@ variant has no other rate. Three things stood in the way of sizing, and
   slope at shape `g = C*IL_eff/(KVreq*OL)` is `A + c*g`. Every line carries
   the `g` it was fitted at (`lineShape.g` on `learnedLine`, `aggState.lineG`
   for a held slope); `noteAggregatedShape` drops the window
-  (`itl.Tracker.ClearWindow`) when `g` moves past `aggShapeTolerance`, so no
-  fit mixes two shapes. `c` is fitted from the slopes of two or more shapes
-  (`lineShape.points`, `fitShapeTerm`). `resolveAggregatedPrice` prices a
-  shape at or below the line's own `g` at the line's slope (never lower:
-  `c >= 0`), a heavier one through `c` only, and a heavier one with no `c`
-  not at all (`shape-unpriced`).
+  (`itl.Tracker.ClearWindow`) when `g` moves past `aggShapeTolerance` for
+  `aggShapeMoveCycles` cycles, so no fit mixes two shapes; `g` reads the
+  variant's prompt-weighted hit rate (`promptWeightedHitRate`), so a
+  scale-up's cold replicas barely move it. `c` is fitted from the slopes of
+  two or more shapes (`lineShape.points`, `fitShapeTerm`).
+  `resolveAggregatedPrice` prices a shape at or below the line's own `g` at
+  the line's slope (never lower: `c >= 0`), any heavier one through `c` when
+  it is identified, one up to 20% heavier at the line's slope when it is not,
+  and a heavier one not at all (`shape-unpriced`).
 - Prefill occupancy. A sequence being prefilled holds KV and emits no token.
   `noteOccupancy` reads the prefill steps per prompt token (`sigma`) by
-  Little's law, `RunningRequests/(RequestRate*ITL) - OL` over `IL_eff`,
-  refusing a residence under `OL` (`aggState.refused`); `occupancyFactor`
-  scales the derived rate by `OL/(OL + sigma*IL_eff)`.
+  Little's law, `RunningRequests/(RequestRate*ITL) - D` over `IL_eff`, with
+  `D = OL/(1+s)` the decode steps (`s` the draft tokens a speculating step
+  accepts), refusing a residence under `D` (`aggState.refused`);
+  `occupancyFactor` scales the derived rate by `D/(D + sigma*IL_eff)`. An
+  SGLang variant and a speculating one with no accepted-token count are
+  blocked (`aggState.blocked`) and stay reported only.
 - The lift. `noteAggregatedLift` lifts a variant once its GPS check
   (`gpsErrorPct`, with the shape term and the correction) agrees within 15%
   on `aggLiftCycles` consecutive comparable cycles, and drops it on as many

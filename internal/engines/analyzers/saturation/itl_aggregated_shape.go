@@ -8,6 +8,7 @@ import (
 	"github.com/go-logr/logr"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
@@ -80,8 +81,9 @@ const (
 // The pricing cases of an aggregated line (aggCycle.priceCase), logged as
 // the derived figure's why when there is none.
 const (
-	// aggCaseCovered: the shape now is at or below the line's own g, within
-	// aggShapeTolerance above it. The line prices it as it is.
+	// aggCaseCovered: the shape now is at or below the line's own g, or,
+	// with c not identified, within aggShapeTolerance above it. The line
+	// prices it as it is.
 	aggCaseCovered = "shape-covered"
 	// aggCaseShapeTerm: the shape now is above the line's g and c is
 	// identified. The line prices it as A_g + c*(g* - g).
@@ -183,12 +185,35 @@ func fitShapeTerm(points []shapePoint) (a0, c float64, ok bool) {
 	return a0, c, true
 }
 
+// The reasons an aggregated variant's figure is kept reported only whatever
+// its line says (aggState.blocked), each logged once per variant.
+const (
+	// aggBlockedSGLang: SGLang publishes a completion rate per pod, but its
+	// running-request count may leave out requests in chunked prefill, so
+	// Little's law would read their prefill as about none and over-state mu.
+	// Not verified either way, so not sized from.
+	aggBlockedSGLang = "itl-aggregated-sglang-unverified"
+	// aggBlockedSpecUnknown: the engine speculates (MTP, a draft model) and
+	// no replica reports the tokens a step accepts, so neither the decode
+	// steps a request takes nor the tokens a step emits can be read.
+	aggBlockedSpecUnknown = "itl-aggregated-spec-unknown"
+)
+
+// aggShapeMoveCycles is how many consecutive cycles g must hold outside
+// aggShapeTolerance of the window's shape before the window is dropped:
+// a scale-up whose cold replicas move the hit rate for a cycle is not a
+// shape change. Unmeasured.
+const aggShapeMoveCycles = 2
+
 // aggState is one aggregated variant's shape state, per ITL window key
 // (itlAggregated). Guarded by a.mu.
 type aggState struct {
 	// windowG is the shape the window's readings were taken at; 0 before
-	// the first.
-	windowG float64
+	// the first. pendingG and pendingCycles are a move away from it that has
+	// not yet held for aggShapeMoveCycles.
+	windowG       float64
+	pendingG      float64
+	pendingCycles int
 	// lineG, lineSigma and lineSigmaOK are the shape of the variant's own
 	// last fit, which a held slope keeps.
 	lineG       float64
@@ -199,10 +224,22 @@ type aggState struct {
 	// refused counts the prefill readings refused since the variant was
 	// first seen: residence under the output's own steps.
 	refused int64
+	// specPerStep is the tokens a step accepts beyond the first, the median
+	// over the replicas that report it this cycle (0 for an engine that does
+	// not speculate).
+	specPerStep float64
+	// blocked is the reason the figure stays reported only whatever the
+	// check says (aggBlockedSGLang, aggBlockedSpecUnknown), "" for none;
+	// blockedLogged the reasons already logged.
+	blocked       string
+	blockedLogged map[string]bool
 	// agree and disagree count consecutive comparable cycles; lifted is the
-	// figure sizing.
+	// figure sizing. medErr is the last comparable cycle's median GPS error,
+	// medErrOK whether there was one.
 	agree, disagree int
 	lifted          bool
+	medErr          float64
+	medErrOK        bool
 	// noOccupancyLogged is set once the variant has been logged as having no
 	// prefill reading at all.
 	noOccupancyLogged bool
@@ -232,17 +269,41 @@ type aggCycle struct {
 	// refused is how many prefill readings the variant has had refused
 	// (aggState.refused).
 	refused int64
-	c       float64
-	cOK     bool
+	// specPerStep is aggState.specPerStep: a speculating step emits
+	// 1+specPerStep tokens, so a request of OL tokens takes OL/(1+s) decode
+	// steps.
+	specPerStep float64
+	// perStepLine says the line is in step time, not per token: a vLLM
+	// engine that speculates with SwitchITLPerToken off.
+	perStepLine bool
+	c           float64
+	cOK         bool
 	// priceCase is one of the aggCase constants; figure is whether it
 	// gives a figure, and a the slope it prices.
 	priceCase string
 	figure    bool
 	a         float64
-	// lifted is the variant's lift as the cycle began.
-	lifted bool
+	// blocked is aggState.blocked.
+	blocked string
+	// pending is a shape move that has not yet held for aggShapeMoveCycles
+	// (aggState.pendingCycles): the cycle moves no lift.
+	pending bool
+	// lifted is the variant's lift as the cycle began; agree the agreeing
+	// cycles behind it, medErr the last comparable cycle's median GPS error
+	// (medErrOK), and liftReason why it is or is not lifted (aggLiftReason).
+	lifted     bool
+	agree      int
+	medErr     float64
+	medErrOK   bool
+	liftReason string
 	// errs is the GPS check's error, per comparable replica, in percent.
 	errs []float64
+}
+
+// decodeSteps is the decode steps a request of ol tokens takes: one token a
+// step, or 1+s a step on an engine that speculates.
+func (ac *aggCycle) decodeSteps(ol float64) float64 {
+	return ol / (1 + ac.specPerStep)
 }
 
 // aggShapeOn reports whether a variant of this role prices its line by shape.
@@ -263,26 +324,55 @@ func shapeG(capacityTokens, ilEff, kvReq, ol float64) float64 {
 	return g
 }
 
+// promptWeightedHitRate is a variant's prefix-cache hit rate weighted by the
+// prompt tokens each replica serves (completion rate times prompt length):
+// the share of the prompts the variant computes that its caches save. A
+// cold replica that has just joined serves little and barely moves it, where
+// a median over replicas flips when the cold ones are the majority. The
+// plain mean with no rate reported anywhere; 0 with no reading.
+func promptWeightedHitRate(rows []domain.ReplicaMetrics, variant string) float64 {
+	var weighted, weights, plain float64
+	n := 0
+	for _, rm := range rows {
+		hit := rm.PrefixCacheHitRate
+		if rm.VariantName != variant || rm.FromWarmPool || !(hit >= 0 && hit <= 1) {
+			continue
+		}
+		plain += hit
+		n++
+		if w := rm.RequestRate * rm.AvgInputTokens; w > 0 && !math.IsInf(w, 0) {
+			weighted += hit * w
+			weights += w
+		}
+	}
+	switch {
+	case weights > 0:
+		return weighted / weights
+	case n > 0:
+		return plain / float64(n)
+	default:
+		return 0
+	}
+}
+
 // aggregatedShapeNow is the shape an aggregated variant is priced at this
 // cycle: g, from the shape mu is priced at (pricingShapes) at the variant's
-// median hit rate and its median KV capacity.
+// prompt-weighted hit rate and its median KV capacity.
 func (c *cycle) aggregatedShapeNow(variant string, params *capacity.EngineParams) float64 {
-	var hits, caps []float64
+	var caps []float64
 	for _, rm := range c.input.ReplicaMetrics {
 		if rm.VariantName != variant || rm.FromWarmPool {
 			continue
 		}
-		hits = append(hits, rm.PrefixCacheHitRate)
 		if ct := capacityTokensFor(params, rm.Ranks(), rm.TotalKvCapacityTokens); ct > 0 {
 			caps = append(caps, ct)
 		}
 	}
-	hit, _ := medianRate(hits)
 	capTokens, ok := medianRate(caps)
 	if !ok {
 		return 0
 	}
-	_, muShape, _, _ := c.pricingShapes(hit)
+	_, muShape, _, _ := c.pricingShapes(promptWeightedHitRate(c.input.ReplicaMetrics, variant))
 	return shapeG(capTokens, muShape.ILeff, muShape.KVreq, c.muDivisor)
 }
 
@@ -298,10 +388,11 @@ func (a *SaturationAnalyzer) aggStateLocked(key string) *aggState {
 
 // noteAggregatedShape files the shape now, g, against the window's: the
 // first g a window sees becomes its shape, and a g past aggShapeTolerance of
-// it drops the window's readings (itl.Tracker.ClearWindow) and its prefill
-// readings, and ends a lift, so the next fit is made at the new shape only.
-// The intercept and the held slope are kept: B does not depend on shape, and
-// the held slope keeps the g it was fitted at.
+// it for aggShapeMoveCycles consecutive cycles drops the window's readings
+// (itl.Tracker.ClearWindow) and its prefill readings, and ends a lift, so
+// the next fit is made at the new shape only. The intercept and the held
+// slope are kept: B does not depend on shape, and the held slope keeps the g
+// it was fitted at.
 func (a *SaturationAnalyzer) noteAggregatedShape(key, variant string, g float64, logger logr.Logger) {
 	if !(g > 0) {
 		return
@@ -309,37 +400,63 @@ func (a *SaturationAnalyzer) noteAggregatedShape(key, variant string, g float64,
 	a.mu.Lock()
 	st := a.aggStateLocked(key)
 	from := st.windowG
-	if from > 0 && withinShape(g, from) {
+	switch {
+	case !(from > 0):
+		st.windowG = g
+		a.mu.Unlock()
+		return
+	case withinShape(g, from):
+		st.pendingG, st.pendingCycles = 0, 0
+		a.mu.Unlock()
+		return
+	case st.pendingG > 0 && withinShape(g, st.pendingG):
+		st.pendingCycles++
+	default:
+		st.pendingG, st.pendingCycles = g, 1
+	}
+	if st.pendingCycles < aggShapeMoveCycles {
 		a.mu.Unlock()
 		return
 	}
-	st.windowG = g
+	st.windowG, st.pendingG, st.pendingCycles = g, 0, 0
 	st.sigmas = nil
 	wasLifted := st.lifted
-	st.agree, st.disagree, st.lifted = 0, 0, false
+	st.agree, st.disagree, st.lifted, st.medErrOK = 0, 0, false, false
 	a.mu.Unlock()
-	if !(from > 0) {
-		return
-	}
 	dropped := a.itlTracker.ClearWindow(key)
-	logger.V(logging.DEFAULT).Info("itl-aggregated-shape-moved",
+	logger.V(logging.VERBOSE).Info("itl-aggregated-shape-moved",
 		"variant", variant, "key", key, "fromG", from, "toG", g, "tolerance", aggShapeTolerance,
-		"windowDropped", dropped, "wasLifted", wasLifted,
+		"heldCycles", aggShapeMoveCycles, "windowDropped", dropped, "wasLifted", wasLifted,
 		"reason", "the request shape moved: the window's readings were taken at another shape, so the next fit is made from new readings; the held slope keeps the shape it was fitted at")
 }
 
 // noteOccupancy takes one prefill reading per replica of variant: by
 // Little's law a replica holding n sequences and completing lambda a second
-// keeps each n/lambda seconds, n/(lambda*ITL) steps, of which OL are decode
-// steps; the rest, per prompt token, is sigma. A residence under OL steps is
-// two near-equal figures' noise and is refused (counted), never read as a
-// negative prefill. Replicas inside the ITL band only, ready and the
-// variant's own; none at all while the shape changes.
+// keeps each n/lambda seconds, n/(lambda*ITL) steps, of which OL/(1+s) are
+// decode steps (s the tokens a speculating step accepts beyond the first, 0
+// on an engine that does not); the rest, per prompt token, is sigma. A
+// residence under the decode steps is two near-equal figures' noise and is
+// refused (counted), never read as a negative prefill; refusing only that
+// side biases sigma up, toward a lower mu. Replicas inside the ITL band only,
+// ready and the variant's own; rows carry the step time as the engine
+// reports it (not itlRows' per-token reading).
+//
+// An SGLang variant, and a speculating one whose replicas report no accepted
+// tokens, take no reading and are blocked (aggState.blocked), each logged
+// once.
 func (a *SaturationAnalyzer) noteOccupancy(key, variant string, rows []domain.ReplicaMetrics,
-	minK, maxK, fleetIL, fleetOL, fleetHit float64, logger logr.Logger) {
-	var taken []float64
-	refused, readable, own := 0, 0, 0
+	params *capacity.EngineParams, minK, maxK, fleetIL, fleetOL, fleetHit float64, logger logr.Logger) {
+	speculates := params.SpeculatesPerStep()
+	blocked := ""
+	if params != nil && params.Engine == inferenceengine.EngineSGLang {
+		blocked = aggBlockedSGLang
+	}
+	var taken, specs []float64
+	refused, readable, own, specKnown := 0, 0, 0, 0
 	for _, rm := range rows {
+		if blocked != "" {
+			break
+		}
 		if rm.VariantName != variant || !rm.Ready || rm.FromWarmPool {
 			continue
 		}
@@ -347,8 +464,17 @@ func (a *SaturationAnalyzer) noteOccupancy(key, variant string, rows []domain.Re
 		if rm.RunningRequestsKnown && rm.RequestRateKnown {
 			readable++
 		}
+		s := 0.0
+		if speculates {
+			if !rm.SpecAcceptedPerStepKnown || !(rm.SpecAcceptedPerStep >= 0) || math.IsInf(rm.SpecAcceptedPerStep, 0) {
+				continue
+			}
+			s = rm.SpecAcceptedPerStep
+			specKnown++
+			specs = append(specs, s)
+		}
 		k := rm.KvUsageForITL()
-		if k < minK || k > maxK || !(rm.AvgITL > 0) || math.IsInf(rm.AvgITL, 0) ||
+		if !(k >= minK && k <= maxK) || !(rm.AvgITL > 0) || math.IsInf(rm.AvgITL, 0) ||
 			!rm.RunningRequestsKnown || !rm.RequestRateKnown || !(rm.RequestRate > 0) || rm.RunningRequests <= 0 {
 			continue
 		}
@@ -363,16 +489,21 @@ func (a *SaturationAnalyzer) noteOccupancy(key, variant string, rows []domain.Re
 		if !(ol > 0) || !(ilEff > 0) {
 			continue
 		}
+		decode := ol / (1 + s)
 		steps := float64(rm.RunningRequests) / (rm.RequestRate * rm.AvgITL)
 		if math.IsNaN(steps) || math.IsInf(steps, 0) {
 			continue
 		}
-		if steps < ol {
+		if steps < decode {
 			refused++
 			continue
 		}
-		taken = append(taken, max((steps-ol)/ilEff, 0))
+		taken = append(taken, max((steps-decode)/ilEff, 0))
 	}
+	if blocked == "" && speculates && own > 0 && specKnown == 0 {
+		blocked = aggBlockedSpecUnknown
+	}
+	spec, _ := medianRate(specs)
 	a.mu.Lock()
 	st := a.aggStateLocked(key)
 	st.refused += int64(refused)
@@ -380,15 +511,37 @@ func (a *SaturationAnalyzer) noteOccupancy(key, variant string, rows []domain.Re
 	if len(st.sigmas) > aggSigmaMaxReadings {
 		st.sigmas = slices.Clone(st.sigmas[len(st.sigmas)-aggSigmaMaxReadings:])
 	}
-	logNone := readable == 0 && own > 0 && !st.noOccupancyLogged && len(st.sigmas) == 0
+	if own > 0 || blocked != "" {
+		st.blocked = blocked
+	}
+	if len(specs) > 0 || !speculates {
+		st.specPerStep = spec
+	}
+	logBlocked := blocked != "" && !st.blockedLogged[blocked]
+	if logBlocked {
+		if st.blockedLogged == nil {
+			st.blockedLogged = map[string]bool{}
+		}
+		st.blockedLogged[blocked] = true
+	}
+	logNone := blocked == "" && readable == 0 && own > 0 && !st.noOccupancyLogged && len(st.sigmas) == 0
 	if logNone {
 		st.noOccupancyLogged = true
 	}
 	a.mu.Unlock()
-	if logNone {
+	switch {
+	case logBlocked && blocked == aggBlockedSGLang:
+		logger.V(logging.DEFAULT).Info(aggBlockedSGLang,
+			"variant", variant, "key", key,
+			"reason", "an SGLang variant's running-request count may leave out requests in chunked prefill, so the steps a request spends in prefill would read as about none and over-state mu; not verified, so its derived mu stays reported only")
+	case logBlocked:
+		logger.V(logging.DEFAULT).Info(aggBlockedSpecUnknown,
+			"variant", variant, "key", key,
+			"reason", "the engine speculates and no replica reports the tokens a step accepts (vllm:spec_decode_num_accepted_tokens_total), so the decode steps a request takes cannot be read: its derived mu stays reported only")
+	case logNone:
 		logger.V(logging.DEFAULT).Info("itl-aggregated-no-occupancy",
 			"variant", variant, "key", key,
-			"reason", "no replica reports both the running requests and the completion rate (vllm:num_requests_running and vllm:request_generation_tokens_count; SGLang publishes no completion rate per pod), so the steps a request spends in prefill cannot be read: the variant's derived mu stays reported only")
+			"reason", "no replica reports both the running requests and the completion rate (vllm:num_requests_running and vllm:request_generation_tokens_count), so the steps a request spends in prefill cannot be read: the variant's derived mu stays reported only")
 	}
 }
 
@@ -446,20 +599,49 @@ func (a *SaturationAnalyzer) lineShapeOf(physicsKey string) lineShape {
 // prefill steps per prompt token -- the window's, measured at the shape now,
 // else the line's.
 func (a *SaturationAnalyzer) resolveAggregated(key, physicsKey string, line itl.Model, lineG, lineSigma float64,
-	lineSigmaOK bool, g float64) *aggCycle {
+	lineSigmaOK bool, g float64, perStepLine, shapeChanging bool) *aggCycle {
 	term := a.lineShapeOf(physicsKey)
 	a.mu.Lock()
 	st := a.aggStateLocked(key)
 	sigma, ok := st.sigma()
-	lifted, refused := st.lifted, st.refused
+	ac := &aggCycle{key: key, g: g, lineG: lineG, refused: st.refused, specPerStep: st.specPerStep,
+		perStepLine: perStepLine, c: term.c, cOK: term.cOK, blocked: st.blocked,
+		lifted: st.lifted, agree: st.agree, medErr: st.medErr, medErrOK: st.medErrOK, pending: st.pendingCycles > 0}
+	disagree := st.disagree
 	a.mu.Unlock()
 	if !ok {
 		sigma, ok = lineSigma, lineSigmaOK
 	}
-	ac := &aggCycle{key: key, g: g, lineG: lineG, sigma: sigma, sigmaOK: ok, refused: refused,
-		c: term.c, cOK: term.cOK, lifted: lifted}
+	ac.sigma, ac.sigmaOK = sigma, ok
 	ac.a, ac.priceCase, ac.figure = resolveAggregatedPrice(line.A, lineG, g, term.c, term.cOK)
+	ac.liftReason = aggLiftReason(ac, disagree, shapeChanging)
 	return ac
+}
+
+// aggLiftReason says why a variant's figure sizes or does not, for the
+// derived-mu line: lifted, the block (aggBlockedSGLang,
+// aggBlockedSpecUnknown), the price case when there is no figure,
+// no-prefill-reading, shape-changing, shape-move-pending, disagreed (the last comparable cycle
+// disagreed) or checking (agreeing cycles not yet aggLiftCycles).
+func aggLiftReason(ac *aggCycle, disagree int, shapeChanging bool) string {
+	switch {
+	case ac.blocked != "":
+		return ac.blocked
+	case !ac.figure:
+		return ac.priceCase
+	case !ac.sigmaOK:
+		return "no-prefill-reading"
+	case shapeChanging:
+		return "shape-changing"
+	case ac.pending && !ac.lifted:
+		return "shape-move-pending"
+	case ac.lifted:
+		return "lifted"
+	case disagree > 0:
+		return "disagreed"
+	default:
+		return "checking"
+	}
 }
 
 // resolveAggregatedPrice is the slope an aggregated line prices the shape
@@ -467,47 +649,59 @@ func (a *SaturationAnalyzer) resolveAggregated(key, physicsKey string, line itl.
 //
 // Never extrapolated toward a better price: c >= 0, so a line fitted at a
 // higher g states the ITL of a lower one too high, and it prices a shape at
-// or below its own g (within aggShapeTolerance above it) as it is. Only a
-// higher g is moved, through c, which raises the ITL and lowers mu; an
+// or below its own g as it is. A higher g is moved through c when c is
+// identified, however small the move, which raises the ITL and lowers mu; an
 // over-estimated c then over-provisions and never under-provisions. With no
-// c, a higher g has no figure.
+// c, a shape up to aggShapeTolerance above the line's g is priced at the
+// line's slope -- up to about 8% low in ITL at a 40% prefill share, the band
+// the window is kept in -- and a heavier one has no figure.
 func resolveAggregatedPrice(lineA, lineG, g, c float64, cOK bool) (priceA float64, priceCase string, figure bool) {
 	switch {
 	case !(g > 0):
 		return 0, aggCaseShapeUnknown, false
 	case !(lineG > 0):
 		return 0, aggCaseLineShapeUnknown, false
-	case g <= lineG*(1+aggShapeTolerance):
+	case g <= lineG:
 		return lineA, aggCaseCovered, true
 	case cOK:
 		return lineA + c*(g-lineG), aggCaseShapeTerm, true
+	case g <= lineG*(1+aggShapeTolerance):
+		return lineA, aggCaseCovered, true
 	default:
 		return 0, aggCaseUnpriced, false
 	}
 }
 
-// occupancyFactor is OL/(OL + sigma*IL_eff): the share of a resident
-// sequence's steps that emit a token. A sequence being prefilled holds KV
-// and emits none, so a rate priced from k and ITL(k) alone over-states by
-// the inverse.
-func occupancyFactor(ol, ilEff, sigma float64) float64 {
-	if !(ol > 0) || !(sigma > 0) || !(ilEff > 0) {
+// occupancyFactor is D/(D + sigma*IL_eff), D the decode steps a request
+// takes: the share of a resident sequence's steps that emit tokens. A
+// sequence being prefilled holds KV and emits none, so a rate priced from k
+// and ITL(k) alone over-states by the inverse.
+func occupancyFactor(decodeSteps, ilEff, sigma float64) float64 {
+	if !(decodeSteps > 0) || !(sigma > 0) || !(ilEff > 0) {
 		return 1
 	}
-	return ol / (ol + sigma*ilEff)
+	return decodeSteps / (decodeSteps + sigma*ilEff)
 }
 
 // gpsErrorPct is the GPS check of an aggregated line with its shape term and
 // its occupancy correction, at one replica's own k: the generation tokens a
 // second the priced slope predicts there against the replica's own. ok false
 // when the replica gives no comparison (as itl.GPSErrorPct).
-func gpsErrorPct(priceA, b float64, rm domain.ReplicaMetrics, capacityTokens, kvReq, ol, ilEff, sigma float64) (float64, bool) {
+//
+// The line is per token on an engine that speculates (itl_per_token.go), so
+// its rate is already in tokens; a line in step time (perStepLine) emits
+// 1+s tokens a step and is scaled by it.
+func gpsErrorPct(ac *aggCycle, b float64, rm domain.ReplicaMetrics, capacityTokens, kvReq, ol, ilEff float64) (float64, bool) {
 	k := rm.KvUsageForITL()
-	if rm.FromWarmPool || !rm.GenerationTokenRateKnown || k < itl.DefaultGPSMinKForVerification {
+	if rm.FromWarmPool || !rm.GenerationTokenRateKnown || !(k >= itl.DefaultGPSMinKForVerification) {
 		return 0, false
 	}
 	observed := rm.GenerationTokenRate
-	pred := itl.TokenRate(itl.Model{A: priceA, B: b}, k, capacityTokens, kvReq) * occupancyFactor(ol, ilEff, sigma)
+	pred := itl.TokenRate(itl.Model{A: ac.a, B: b}, k, capacityTokens, kvReq) *
+		occupancyFactor(ac.decodeSteps(ol), ilEff, ac.sigma)
+	if ac.perStepLine {
+		pred *= 1 + ac.specPerStep
+	}
 	if !(observed > 0) || !(pred > 0) || math.IsInf(observed, 0) {
 		return 0, false
 	}
@@ -517,20 +711,24 @@ func gpsErrorPct(priceA, b float64, rm domain.ReplicaMetrics, capacityTokens, kv
 // noteAggregatedLift moves one variant's lift on this cycle's GPS check: its
 // median comparable replica within itl.DefaultGPSMismatchThresholdPct on
 // aggLiftCycles consecutive comparable cycles lifts it, outside on as many
-// drops it. A cycle with no figure, no sigma, or a shape change outstanding
-// ends the lift and the counts; a cycle with no comparable replica moves
-// nothing.
+// drops it. A cycle with no figure, no sigma, a block, or a shape change
+// outstanding ends the lift and the counts; a cycle with no comparable
+// replica, or with a shape move that has not yet held (a scale-up's cold
+// replicas moving the hit rate for a cycle), moves nothing: the move ends
+// the lift when it holds (noteAggregatedShape).
 func (a *SaturationAnalyzer) noteAggregatedLift(variant string, ac *aggCycle, shapeChanging bool, logger logr.Logger) {
 	a.mu.Lock()
 	st := a.aggStateLocked(ac.key)
 	was := st.lifted
 	var med float64
 	switch {
-	case !ac.figure || !ac.sigmaOK || shapeChanging:
+	case ac.pending:
+	case !ac.figure || !ac.sigmaOK || ac.blocked != "" || shapeChanging:
 		st.agree, st.disagree, st.lifted = 0, 0, false
 	case len(ac.errs) == 0:
 	default:
 		med, _ = medianRate(ac.errs)
+		st.medErr, st.medErrOK = med, true
 		if med <= itl.DefaultGPSMismatchThresholdPct {
 			st.agree, st.disagree = st.agree+1, 0
 			if st.agree >= aggLiftCycles {

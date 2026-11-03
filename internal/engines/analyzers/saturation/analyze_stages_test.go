@@ -31,10 +31,12 @@ import (
 //
 // Adding a field is a deliberate act: extend this list in the same commit.
 var derivedMuFields = []string{
+	"agreeCycles",
 	"avgInputTokens",
 	"avgOutputTokens",
 	"batchCap", "batchCapSource",
 	"engineRanks",
+	"gpsMedianErrPct",
 	"itlA",
 	"itlAtKPrice",
 	"itlB",
@@ -42,6 +44,7 @@ var derivedMuFields = []string{
 	"kPrice",
 	"kvReqFleet",
 	"kvReqPerSeq",
+	"liftReason",
 	"lifted",
 	"lineBorrowed", "lineBorrowedFrom", "lineHeld", "lineShapeG",
 	"maxNumActiveSeqs",

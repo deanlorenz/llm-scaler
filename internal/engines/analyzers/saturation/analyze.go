@@ -552,7 +552,8 @@ func (c *cycle) fitLines() {
 			gNow = c.aggregatedShapeNow(variant, params)
 			c.a.noteAggregatedShape(variantKey, variant, gNow, itlLogger)
 			if !c.shapeChanging {
-				c.a.noteOccupancy(variantKey, variant, rows, lo, hi, c.fleetInput, c.fleetOutput, c.fleetHitRate, itlLogger)
+				c.a.noteOccupancy(variantKey, variant, c.input.ReplicaMetrics, params, lo, hi, c.fleetInput, c.fleetOutput,
+					c.fleetHitRate, itlLogger)
 			}
 		}
 		reading := c.a.noteITL(variantKey, rows, variant, adm, c.a.now(), itlLogger)
@@ -572,6 +573,9 @@ func (c *cycle) fitLines() {
 		// is a point c is fitted from.
 		var aggG, aggSigma float64
 		var aggSigmaOK, aggPoint bool
+		// A speculating vLLM line read in step time (SwitchITLPerToken off)
+		// emits 1+s tokens a step (gpsErrorPct).
+		perStepLine := params.SpeculatesPerStep() && !c.a.itlPerToken
 		if aggOn {
 			aggG, aggSigma, aggSigmaOK, aggPoint = c.a.noteAggregatedFit(variantKey, physicsKey, reading, c.shapeChanging)
 		}
@@ -597,7 +601,8 @@ func (c *cycle) fitLines() {
 			c.itlModels[variant] = own
 			c.itlHeld[variant] = reading.SlopeHeld
 			if aggOn {
-				c.agg[variant] = c.a.resolveAggregated(variantKey, physicsKey, own, aggG, aggSigma, aggSigmaOK, gNow)
+				c.agg[variant] = c.a.resolveAggregated(variantKey, physicsKey, own, aggG, aggSigma, aggSigmaOK, gNow,
+					perStepLine, c.shapeChanging)
 			}
 			continue
 		}
@@ -630,7 +635,8 @@ func (c *cycle) fitLines() {
 		if aggOn {
 			// A borrowed line prices at the lender's shape (lineShape).
 			ls := c.a.lineShapeOf(physicsKey)
-			c.agg[variant] = c.a.resolveAggregated(variantKey, physicsKey, borrowed, ls.g, ls.sigma, ls.sigmaOK, gNow)
+			c.agg[variant] = c.a.resolveAggregated(variantKey, physicsKey, borrowed, ls.g, ls.sigma, ls.sigmaOK, gNow,
+				perStepLine, c.shapeChanging)
 		}
 		itlLogger.V(logging.DEFAULT).Info("itl-line-borrowed",
 			"variant", variant, "from", from, "physicsKey", physicsKey,
@@ -737,21 +743,22 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				derived = deriveMuAtCap(priceModel, engineParams, batchCap.perRank, rm.Ranks(), rm.TotalKvCapacityTokens,
 					muShape, kPrice, c.muDivisor)
 				if ac != nil && derived.ok && ac.sigmaOK {
-					occupancy = occupancyFactor(c.muDivisor, muShape.ILeff, ac.sigma)
+					occupancy = occupancyFactor(ac.decodeSteps(c.muDivisor), muShape.ILeff, ac.sigma)
 					derived.rate *= occupancy
 					derived.tokenSec *= occupancy
 				}
 				if ac != nil && ac.figure && ac.sigmaOK && !rm.FromWarmPool {
-					if errPct, ok := gpsErrorPct(ac.a, itlModel.B, rm,
+					if errPct, ok := gpsErrorPct(ac, itlModel.B, rm,
 						capacityTokensFor(engineParams, rm.Ranks(), rm.TotalKvCapacityTokens), fleetShape.KVreq,
-						fleetShape.AvgOutputTokens, fleetShape.ILeff, ac.sigma); ok {
+						fleetShape.AvgOutputTokens, fleetShape.ILeff); ok {
 						ac.errs = append(ac.errs, errPct)
 					}
 				}
 			}
 			// Sized from, not reported only, once lifted (noteAggregatedLift),
 			// never above a measured rate of its own (capAtMeasured).
-			if ac != nil && reportOnly && c.a.itlAggSizes && ac.lifted && ac.sigmaOK && !c.shapeChanging {
+			if ac != nil && reportOnly && c.a.itlAggSizes && ac.lifted && ac.sigmaOK && ac.blocked == "" &&
+				!c.shapeChanging {
 				reportOnly = false
 				derived.capAtMeasured = true
 			}
@@ -924,7 +931,11 @@ func (c *cycle) logDerivedMu(rm domain.ReplicaMetrics, derived derivedMu, report
 		"shapeTermC", agg.c, "shapeTermIdentified", agg.cOK,
 		"prefillStepsPerToken", agg.sigma, "prefillKnown", agg.sigmaOK, "prefillRefused", agg.refused,
 		"occupancy", occupancy,
-		"lifted", agg.lifted)
+		"lifted", agg.lifted,
+		// Every cycle, lifted or not: the last comparable cycle's median GPS
+		// error, the agreeing cycles behind the lift, and why it is or is
+		// not lifted (aggLiftReason).
+		"gpsMedianErrPct", agg.medErr, "agreeCycles", agg.agree, "liftReason", agg.liftReason)
 }
 
 // settleShape releases an outstanding shape change once the fleet has measured

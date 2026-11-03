@@ -309,6 +309,7 @@ _
 __name__
 a
 abort
+about
 above
 above-band
 aboveBand
@@ -321,6 +322,7 @@ accelerators
 accel|
 accepted
 acceptedPerStep
+accepts
 account
 across
 acting
@@ -349,6 +351,7 @@ age
 aged
 ago
 agree
+agreeCycles
 agreed
 aim
 all
@@ -538,7 +541,9 @@ charge
 charged
 cheapest
 check
+checking
 choose
+chunked
 chunked_prefill_size
 claimed
 claiming
@@ -910,6 +915,7 @@ going
 gone
 got
 gpsErrPct
+gpsMedianErrPct
 gpu-and-quota-limiter
 gpu-inventory
 gpu-limiter
@@ -950,6 +956,7 @@ health-probe-bind-address
 held
 heldAt
 heldAtFleet
+heldCycles
 heldSince
 heldUntil
 heldUntilStableOrBy
@@ -1034,9 +1041,11 @@ iteration
 itl
 itl-aggregated-lift
 itl-aggregated-no-occupancy
+itl-aggregated-sglang-unverified
 itl-aggregated-shape-moved
 itl-aggregated-shape-term
 itl-aggregated-sizes
+itl-aggregated-spec-unknown
 itl-fit
 itl-fit-declined
 itl-gps-mismatch
@@ -1193,6 +1202,7 @@ learnerStarted
 learnrec
 learnrec-
 least
+leave
 leaves
 leaving
 ledger
@@ -1206,6 +1216,7 @@ lenderDebounce
 length
 lent
 let
+liftReason
 lifted
 likely
 limit
@@ -1427,6 +1438,7 @@ no-limiter
 no-line
 no-listed-analyzer-sizes-role
 no-node-fits
+no-prefill-reading
 no-rate
 no-reading
 no-seqs
@@ -1523,6 +1535,7 @@ outputTokensWas
 outside
 outstanding
 over
+over-state
 over-stated
 overMax
 overQuotaGPUs
@@ -1668,7 +1681,6 @@ provided
 provider
 providersSkipped
 published
-publishes
 quantization
 quarter
 query
@@ -1862,6 +1874,7 @@ rows-instant-kv
 rows-ready-since
 run
 running
+running-request
 running-unknown
 runs
 s
@@ -1969,7 +1982,9 @@ sh
 shadow
 shape
 shape-change
+shape-changing
 shape-covered
+shape-move-pending
 shape-term
 shape-unknown
 shape-unpriced
@@ -2044,6 +2059,7 @@ source
 spaces
 spare
 spec
+speculates
 speculative
 speculative_
 speculative_algorithm
@@ -2314,6 +2330,7 @@ variantTimeout
 variants
 vcs.revision
 vendor
+verified
 version
 versions
 via

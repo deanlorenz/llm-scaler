@@ -48,7 +48,10 @@ shape `g` is `A_g = A + c*g`. So:
 - `c` is read off the slopes of **two or more shapes**, never from one.
 
 `g` is computed from the shape the derived mu is priced at (`IL_eff`,
-`KVreq`, `OL`), at the variant's median hit rate and KV capacity.
+`KVreq`, `OL`), at the variant's median KV capacity and its hit rate
+weighted by the prompt tokens each replica serves. A cold replica that has
+just joined serves little and barely moves it; a median over replicas
+would flip when the cold ones are the majority.
 
 ## What is fitted, from which readings
 
@@ -81,41 +84,59 @@ the line key's points through a flat period, for as long as the key lives.
 
 **The prefill steps.** By Little's law, a replica holding `n =
 RunningRequests` sequences and completing `RequestRate` keeps each for
-`n / (RequestRate * ITL)` steps, `OL` of them decode. The rest, per prompt
-token, is `sigma`. The difference of two near-equal numbers is noisy, so:
+`n / (RequestRate * ITL)` steps, `D` of them decode: `D = OL`, or
+`OL / (1 + s)` on an engine that speculates and accepts `s` draft tokens a
+step. The rest, per prompt token, is `sigma`. The difference of two
+near-equal numbers is noisy, so:
 
-- a reading whose residence is under `OL` steps is refused and counted
-  (`prefillRefused`), never read as a negative prefill;
+- a reading whose residence is under `D` steps is refused and counted
+  (`prefillRefused`), never read as a negative prefill. Refusing only that
+  side biases `sigma` up, so mu down: the safe side;
 - `sigma` is clamped at 0 and is the median of the last 20 readings, at
   least 3;
 - the readings are taken inside the ITL band, outside a shape change, and
   dropped with the window when the shape moves.
 
-No new metric is needed. A variant with no running-request count or no
-completion rate per pod (SGLang publishes none) has no `sigma`, logs
-`itl-aggregated-no-occupancy` once, and stays reported only.
+No new metric is needed. Three cases have no `sigma` and stay reported
+only, each logged once:
+
+- no running-request count or no completion rate on any replica
+  (`itl-aggregated-no-occupancy`);
+- SGLang (`itl-aggregated-sglang-unverified`). It does publish a
+  completion rate per pod, but its running count may leave out requests in
+  chunked prefill, which would read `sigma` as about 0 and over-state mu.
+  Not verified, so not sized from;
+- an engine that speculates (MTP, a draft model) with no accepted-token
+  count on any replica (`itl-aggregated-spec-unknown`): `D` is unknown.
 
 ## How the derived mu is computed
 
 For the shape priced now, `g*`, and the line's `(A_g, gFit)`:
 
-1. `g* <= gFit * 1.2`: price `A_g` as it is. A lighter shape is priced at
-   the measured slope, never extrapolated toward a better price: with
-   `c >= 0` the measured slope already states its ITL too high.
-2. `g*` heavier, `c` identified: price `A_g + c * (g* - gFit)`. This only
-   ever raises the ITL and lowers mu, so an over-estimated `c`
-   over-provisions and never under-provisions.
-3. `g*` heavier, no `c`: no figure (`priceCase=shape-unpriced`), reported or
-   priced. A line with no `gFit` (from a #432 build) has none either.
+1. `g* <= gFit`: price `A_g` as it is. A lighter shape is priced at the
+   measured slope, never extrapolated toward a better price: with `c >= 0`
+   the measured slope already states its ITL too high.
+2. `g*` heavier, `c` identified: price `A_g + c * (g* - gFit)`, however
+   small the move. This only ever raises the ITL and lowers mu, so an
+   over-estimated `c` over-provisions and never under-provisions.
+3. `g*` heavier by at most 20%, no `c`: price `A_g` as it is. This can price
+   the ITL up to about 8% low at a 40% prefill share (20% of the prefill
+   part); it is the band the window is kept in, and the GPS check reads the
+   result.
+4. `g*` heavier by more, no `c`: no figure (`priceCase=shape-unpriced`),
+   reported or priced. A line with no `gFit` (from a #432 build) has none
+   either.
 
 Then, with the occupancy correction:
 
 ```
-mu = mu(k, ITL) * OL / (OL + sigma * IL_eff)
+mu = mu(k, ITL) * D / (D + sigma * IL_eff)
 ```
 
 By Little's law a resident sequence completes once per
-`(OL + sigma * IL_eff) * ITL` seconds, not once per `OL * ITL`. With `sigma`
+`(D + sigma * IL_eff)` steps, not once per `D`. On an engine that
+speculates the line is per token (issue #274), so its rate is already in
+tokens and the GPS check compares it as it is. With `sigma`
 unknown the figure is reported uncorrected and never sizes.
 
 ## When report-only lifts
@@ -140,9 +161,12 @@ outstanding, on a change of engine arguments, and on a controller restart.
 
 ## A shape change
 
-When `g*` moves more than 20% from the shape of the variant's window, the
-window's readings and its prefill readings are dropped
-(`itl-aggregated-shape-moved`), as a change of engine arguments drops them.
+When `g*` moves more than 20% from the shape of the variant's window, and
+the move holds for 2 consecutive cycles, the window's readings and its
+prefill readings are dropped (`itl-aggregated-shape-moved`, at `--v=3`), as
+a change of engine arguments drops them. A move that has not held yet
+moves no lift: a scale-up's cold replicas moving the hit rate for a cycle
+is not a shape change.
 Kept: the intercept `B` (it does not depend on shape), the held slope with
 its `gFit`, and the line key's points. So:
 
@@ -188,7 +212,7 @@ files: `g` is priced from the KV a request holds, which #277 bounds.
   prefill stretches, so mu is a little high there.
 - A per-sequence cost (a term in `n`, not `k`) moves with `KVreq` across
   shapes, and `c` absorbs part of it.
-- The thresholds (20%, 1.5x, 3 cycles, 6 points, 3 and 20 readings) are
+- The thresholds (20%, 1.5x, 2 and 3 cycles, 6 points, 3 and 20 readings) are
   first choices, not measured.
 - The slo analyzer's line has the same shape dependence. It can reuse `c`
   later; it is out of scope here.

@@ -19,80 +19,112 @@ import (
 // through Analyze and in its parts.
 
 // shapeWorld is the physics an aggregated pod follows in these tests: a step
-// takes b + (a0 + c*g)*k at shape g = C*IL/(KVreq*OL), and a request spends
-// sigma*IL steps in prefill, holding KV and emitting no token.
+// takes b + (a0 + c*g)*k at shape g = C*IL_eff/(KVreq*OL), emits 1+spec
+// tokens per sequence, and a request spends sigma*IL_eff steps in prefill,
+// holding KV and emitting no token.
 type shapeWorld struct {
 	b, a0, c, sigma float64
 	capTokens       float64
+	spec            float64
 }
 
 // shapeTruth is the world the rig runs: a 5 ms prefill token cost per
 // thousand tokens a step, and 0.1 prefill steps per prompt token.
 var shapeTruth = shapeWorld{b: 0.006, a0: 0.02, c: 2e-5, sigma: 0.1, capTokens: 160_000}
 
-func (w shapeWorld) kvReq(il, ol float64) float64 { return il + ol/2 }
+func (w shapeWorld) kvReq(ilEff, ol float64) float64 { return ilEff + ol/2 }
 
-func (w shapeWorld) g(il, ol float64) float64 {
-	return w.capTokens * il / (w.kvReq(il, ol) * ol)
+func (w shapeWorld) g(ilEff, ol float64) float64 {
+	return w.capTokens * ilEff / (w.kvReq(ilEff, ol) * ol)
 }
 
-func (w shapeWorld) itl(k, il, ol float64) float64 {
-	return w.b + (w.a0+w.c*w.g(il, ol))*k
+// step is the time of one engine step at fill k.
+func (w shapeWorld) step(k, ilEff, ol float64) float64 {
+	return w.b + (w.a0+w.c*w.g(ilEff, ol))*k
 }
 
 // mu is the completions a second one replica sustains at fill k: by Little's
 // law, its resident sequences over the steps each spends, prefill included.
-func (w shapeWorld) mu(k, il, ol float64) float64 {
-	n := k * w.capTokens / w.kvReq(il, ol)
-	return n / ((ol + w.sigma*il) * w.itl(k, il, ol))
+func (w shapeWorld) mu(k, ilEff, ol float64) float64 {
+	n := k * w.capTokens / w.kvReq(ilEff, ol)
+	return n / ((ol/(1+w.spec) + w.sigma*ilEff) * w.step(k, ilEff, ol))
 }
 
 // aggShapeRig drives one aggregated (unlabeled) variant of shapeReplicas
 // replicas through Analyze, at fills 0.20 to 0.65 (or 0.05, below the ITL
-// band, with idle), each reporting what shapeTruth says at the rig's shape.
+// band, with idle), each reporting what its world says at the rig's shape
+// and prefix-cache hit rate. cold more replicas join below the band at
+// coldHit, completing coldLoad of what a warm replica does.
 type aggShapeRig struct {
-	a       *SaturationAnalyzer
-	clock   time.Time
-	in, out float64
-	arrival float64
-	idle    bool
-	world   shapeWorld
+	a        *SaturationAnalyzer
+	store    *capacity.Store
+	clock    time.Time
+	in, out  float64
+	hit      float64
+	arrival  float64
+	idle     bool
+	world    shapeWorld
+	cold     int
+	coldHit  float64
+	coldLoad float64
+	// specKnown is whether a speculating replica reports its accepted tokens.
+	specKnown bool
 }
 
 const shapeReplicas = 10
 
 func newAggShapeRig(t *testing.T, switches map[string]bool) *aggShapeRig {
 	t.Helper()
+	return newAggShapeRigOn(t, switches, keyParams(256))
+}
+
+func newAggShapeRigOn(t *testing.T, switches map[string]bool, params *capacity.EngineParams) *aggShapeRig {
+	t.Helper()
 	store := capacity.NewStore()
 	store.Update("test-ns", "test-model", "agg", capacity.Record{AcceleratorName: "H100", GpuCount: 1,
-		EngineParams: keyParams(256)}, propStart)
-	r := &aggShapeRig{a: NewSaturationAnalyzer(store), clock: propStart, in: 1000, out: 500, world: shapeTruth}
+		EngineParams: params}, propStart)
+	r := &aggShapeRig{a: NewSaturationAnalyzer(store), store: store, clock: propStart, in: 1000, out: 500,
+		world: shapeTruth, specKnown: true}
 	r.a.now = func() time.Time { return r.clock }
 	require.NoError(t, r.a.SetSwitchesForReplay(switches))
 	return r
 }
 
+// row is one replica at fill k and hit rate hit, its completions scaled by
+// load.
+func (r *aggShapeRig) row(name string, k, hit, load float64) domain.ReplicaMetrics {
+	w := r.world
+	ilEff := r.in * (1 - hit)
+	rm := makeReplicaMetrics(name, "agg", int64(k*w.capTokens), int64(w.capTokens), 0, r.in, r.out)
+	rm.KvUsageInstant, rm.KvUsageInstantKnown = k, true
+	rm.PrefixCacheHitRate = hit
+	stepSec := w.step(k, ilEff, r.out)
+	rm.AvgITL, rm.AvgITLKnown = stepSec, true
+	n := math.Round(k * w.capTokens / w.kvReq(ilEff, r.out))
+	rm.RunningRequests, rm.RunningRequestsKnown = int(n), true
+	rm.RequestRate, rm.RequestRateKnown = load*n/((r.out/(1+w.spec)+w.sigma*ilEff)*stepSec), true
+	rm.GenerationTokenRate, rm.GenerationTokenRateKnown = rm.RequestRate*r.out, true
+	if w.spec > 0 && r.specKnown {
+		rm.SpecAcceptedPerStep, rm.SpecAcceptedPerStepKnown = w.spec, true
+	}
+	return rm
+}
+
 func (r *aggShapeRig) step(t *testing.T) *domain.AnalyzerResult {
 	t.Helper()
-	w := r.world
-	rows := make([]domain.ReplicaMetrics, 0, shapeReplicas)
+	rows := make([]domain.ReplicaMetrics, 0, shapeReplicas+r.cold)
 	for i := range shapeReplicas {
 		k := 0.20 + 0.05*float64(i)
 		if r.idle {
 			k = 0.05
 		}
-		rm := makeReplicaMetrics(fmt.Sprintf("agg-%d", i), "agg", int64(k*w.capTokens), int64(w.capTokens), 0, r.in, r.out)
-		rm.KvUsageInstant, rm.KvUsageInstantKnown = k, true
-		itlSec := w.itl(k, r.in, r.out)
-		rm.AvgITL, rm.AvgITLKnown = itlSec, true
-		n := math.Round(k * w.capTokens / w.kvReq(r.in, r.out))
-		rm.RunningRequests, rm.RunningRequestsKnown = int(n), true
-		rm.RequestRate, rm.RequestRateKnown = n/((r.out+w.sigma*r.in)*itlSec), true
-		rm.GenerationTokenRate, rm.GenerationTokenRateKnown = rm.RequestRate*r.out, true
-		rows = append(rows, rm)
+		rows = append(rows, r.row(fmt.Sprintf("agg-%d", i), k, r.hit, 1))
+	}
+	for i := range r.cold {
+		rows = append(rows, r.row(fmt.Sprintf("agg-cold-%d", i), 0.10, r.coldHit, r.coldLoad))
 	}
 	states := []domain.VariantReplicaState{{VariantName: "agg", AcceleratorName: "H100",
-		CurrentReplicas: shapeReplicas, GPUsPerReplica: 1}}
+		CurrentReplicas: shapeReplicas + r.cold, GPUsPerReplica: 1}}
 	in := makeAnalyzerInput(rows, states)
 	in.ArrivalRate = r.arrival
 	res, err := r.a.Analyze(context.Background(), in)
@@ -122,7 +154,30 @@ func (r *aggShapeRig) shapeOf(t *testing.T) lineShape {
 	return lineShape{}
 }
 
-// pricingKOf is the fill the rig's policy prices mu at.
+// state is a copy of the variant's shape state.
+func (r *aggShapeRig) state(t *testing.T) aggState {
+	t.Helper()
+	r.a.mu.Lock()
+	defer r.a.mu.Unlock()
+	for _, st := range r.a.itlAggregated {
+		return *st
+	}
+	t.Fatal("the variant has no shape state")
+	return aggState{}
+}
+
+// lifted runs the rig to its lift, from a fresh start: 13 cycles to fit,
+// then 6 at 50 requests/s, and requires the figure to size.
+func (r *aggShapeRig) lifted(t *testing.T) *domain.AnalyzerResult {
+	t.Helper()
+	r.steps(t, 13)
+	r.arrival = 50
+	res := r.steps(t, 6)
+	require.Equal(t, domain.ServiceRateSourceDerived, signal(t, res, "agg").RateSource, "precondition: lifted")
+	return res
+}
+
+// shapePricingK is the fill the rig's policy prices mu at.
 const shapePricingK = 0.8 * 0.85
 
 // An aggregated variant whose line has held the GPS check for aggLiftCycles
@@ -212,23 +267,30 @@ func TestAggregatedShape_AHeavierShapeIsPricedThroughTheTerm(t *testing.T) {
 }
 
 // Never extrapolated toward a better price. With c identified, a shape
-// lighter than the line's own (g* < gFit) is priced at the line's slope
-// as measured -- an ITL no lower than measured -- and only a heavier one is
-// moved by c, upward. Without c a heavier shape has no figure, and a line
-// with no shape none either.
+// lighter than the line's own (g* <= gFit) is priced at the line's slope
+// as measured -- an ITL no lower than measured -- and any heavier one is
+// moved by c, upward, however small the move. Without c a shape up to 20%
+// heavier is priced at the measured slope, a heavier one has no figure, and
+// a line with no shape none either.
 func TestAggregatedShape_NeverExtrapolatesTowardABetterPrice(t *testing.T) {
 	const lineA, lineG, c = 0.03, 500.0, 2e-5
-	for _, g := range []float64{50, 250, 400, 500, 590} {
+	for _, g := range []float64{50, 250, 400, 500} {
 		a, priceCase, figure := resolveAggregatedPrice(lineA, lineG, g, c, true)
 		require.True(t, figure)
 		assert.Equal(t, aggCaseCovered, priceCase, "g=%v", g)
 		assert.Equal(t, lineA, a, "g=%v: a lighter shape was priced below the measured slope", g)
 	}
-	a, priceCase, figure := resolveAggregatedPrice(lineA, lineG, 1000, c, true)
+	for _, g := range []float64{510, 590, 1000} {
+		a, priceCase, figure := resolveAggregatedPrice(lineA, lineG, g, c, true)
+		require.True(t, figure)
+		assert.Equal(t, aggCaseShapeTerm, priceCase, "g=%v: a heavier shape inside the band skipped the term", g)
+		assert.InDelta(t, lineA+c*(g-lineG), a, 1e-12, "g=%v", g)
+		assert.Greater(t, a, lineA)
+	}
+	a, priceCase, figure := resolveAggregatedPrice(lineA, lineG, 590, 0, false)
 	require.True(t, figure)
-	assert.Equal(t, aggCaseShapeTerm, priceCase)
-	assert.InDelta(t, lineA+c*500, a, 1e-12)
-	assert.Greater(t, a, lineA)
+	assert.Equal(t, aggCaseCovered, priceCase, "no c: inside the band, the measured slope")
+	assert.Equal(t, lineA, a)
 
 	_, priceCase, figure = resolveAggregatedPrice(lineA, lineG, 1000, 0, false)
 	assert.False(t, figure)
@@ -303,7 +365,7 @@ func TestAggregatedShape_PrefillStepsSurviveANoisyReading(t *testing.T) {
 	rows[1].RequestRate = 64 / (0.9 * 500 * 0.02)
 	// A reading twenty times the rest.
 	rows[3].RequestRate = 64 / ((500 + 2*1000) * 0.02)
-	a.noteOccupancy(key, "agg", rows, 0.15, 0.80, 1000, 500, 0, logr.Discard())
+	a.noteOccupancy(key, "agg", rows, nil, 0.15, 0.80, 1000, 500, 0, logr.Discard())
 	a.mu.Lock()
 	st := *a.itlAggregated[key]
 	a.mu.Unlock()
@@ -318,7 +380,7 @@ func TestAggregatedShape_PrefillStepsSurviveANoisyReading(t *testing.T) {
 
 	// Exactly at the output's steps: zero prefill, not refused.
 	b := NewSaturationAnalyzer(capacity.NewStore())
-	b.noteOccupancy(key, "agg", sigmaRows(3, 0), 0.15, 0.80, 1000, 500, 0, logr.Discard())
+	b.noteOccupancy(key, "agg", sigmaRows(3, 0), nil, 0.15, 0.80, 1000, 500, 0, logr.Discard())
 	b.mu.Lock()
 	stb := *b.itlAggregated[key]
 	b.mu.Unlock()
@@ -328,9 +390,9 @@ func TestAggregatedShape_PrefillStepsSurviveANoisyReading(t *testing.T) {
 	assert.InDelta(t, 0, got, 1e-9)
 }
 
-// A variant whose replicas report no running requests or no completion rate
-// (SGLang publishes no completion rate per pod) has no prefill reading, so
-// its figure is never lifted: it stays reported only.
+// A vLLM variant whose replicas report no running requests and no
+// completion rate (a scrape that drops them) has no prefill reading, so its
+// figure is never lifted: it stays reported only.
 func TestAggregatedShape_NoPrefillReadingStaysReportOnly(t *testing.T) {
 	r := newAggShapeRig(t, nil)
 	var res *domain.AnalyzerResult
@@ -354,7 +416,7 @@ func (r *aggShapeRig) stepWithout(t *testing.T) *domain.AnalyzerResult {
 		k := 0.20 + 0.05*float64(i)
 		rm := makeReplicaMetrics(fmt.Sprintf("agg-%d", i), "agg", int64(k*w.capTokens), int64(w.capTokens), 0, r.in, r.out)
 		rm.KvUsageInstant, rm.KvUsageInstantKnown = k, true
-		rm.AvgITL, rm.AvgITLKnown = w.itl(k, r.in, r.out), true
+		rm.AvgITL, rm.AvgITLKnown = w.step(k, r.in, r.out), true
 		rm.GenerationTokenRate, rm.GenerationTokenRateKnown = k*w.capTokens/w.kvReq(r.in, r.out)/rm.AvgITL, true
 		rows = append(rows, rm)
 	}

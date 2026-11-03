@@ -81,6 +81,9 @@ var derivedMuMetricFields = map[string]derivedMuField{
 	"prefillKnown":         {excluded: "whether prefillStepsPerToken is read (#275), a flag, not a figure"},
 	"prefillRefused":       {excluded: "the prefill readings an aggregated variant has had refused (#275): residence under the output's own steps, a diagnostic"},
 	"occupancy":            {excluded: "the share of an aggregated replica's steps that emit a token (#275), already in rate"},
+	"gpsMedianErrPct":      {excluded: "the last comparable cycle's median GPS error of an aggregated figure (#275), a diagnostic of the lift"},
+	"agreeCycles":          {excluded: "the agreeing cycles behind an aggregated variant's lift (#275), a counter of the lift"},
+	"liftReason":           {excluded: "why an aggregated figure sizes or not (#275), a label, not a figure"},
 	"lifted":               {excluded: "an aggregated figure sizes (#275); wva_service_rate_per_replica says it by its source"},
 }
 
