@@ -159,3 +159,31 @@ func TestExportLeak_ANumericNameInAFigureSlot(t *testing.T) {
 		assert.NoError(t, err, "namespace %q: a small figure that is also a name", ns)
 	}
 }
+
+// An aggregated variant's line key (model|accelerator|GPUs|fingerprint|both,
+// issue #432) exports with its model renamed and its role kept, and is not
+// read as a variant key, whose fifth part is a GPU count: read so, "both"
+// failed the count part and the export refused every recording with an
+// aggregated line. A name in its role slot is still refused.
+func TestExport_AnAggregatedLineKeyKeepsItsRole(t *testing.T) {
+	const fp = "0123456789abcdef"
+	parts, layout, _, _ := splitComposite("mdl|H100|1|" + fp + "|both")
+	require.Len(t, parts, 5)
+	assert.Equal(t, []keyPart{partName, partAccelerator, partCount, partFingerprint, partShape}, layout)
+	_, variantLayout, _, _ := splitComposite("ns|mdl|v|H100|1")
+	assert.Equal(t, partCount, variantLayout[4], "a variant key lost its count part")
+
+	st := saturation.LearnedState{ITLLines: map[string]saturation.LineSnapshot{
+		"mdl|H100|1|" + fp + "|both": {A: 0.02, B: 0.006, FromVariant: "payrollns|mdl|v|H100|1"},
+	}}
+	out, err := exportState(t, "payrollns", st)
+	require.NoError(t, err)
+	got := string(out)
+	assert.Regexp(t, `\|H100\|1\|[0-9a-f]{16}\|both"`, got, "the line key's role or figures were not kept")
+	assert.NotContains(t, got, "mdl|H100", "the model survived the export")
+
+	x := &exporter{byCategory: map[string]map[string]bool{}}
+	x.harvestComposites([]string{"mdl|H100|1|" + fp + "|both"})
+	assert.False(t, x.byCategory["name"]["both"], "the role was harvested as a name")
+	assert.True(t, x.byCategory["name"]["mdl"], "the model, a name part, was not harvested")
+}

@@ -53,8 +53,13 @@ func (a *SaturationAnalyzer) itlLineRole(role string) bool {
 // prefill it interleaves (issue #275), so the same model on the same engine
 // configuration fits a different line on aggregated pods than on decode pods,
 // and the two must not be lent to each other.
-func itlLineKeyForRole(physicsKey, role string) string {
-	if physicsKey == "" || domain.CanonicalRole(role) != domain.RoleBoth {
+//
+// Only a key built on a fingerprint is shared, so only that one carries the
+// role. With no fingerprint (reuse off, or a configuration not fully read)
+// the physics key is the variant's own window key, which no other variant
+// reads, and it is left as it is.
+func itlLineKeyForRole(physicsKey, role, fingerprint string) string {
+	if physicsKey == "" || fingerprint == "" || domain.CanonicalRole(role) != domain.RoleBoth {
 		return physicsKey
 	}
 	return physicsKey + "|" + domain.RoleBoth

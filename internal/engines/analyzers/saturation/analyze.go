@@ -544,7 +544,7 @@ func (c *cycle) fitLines() {
 		// variants: its ITL carries the prefill it interleaves, so it is not a
 		// decode variant's line (itlLineKeyForRole).
 		physicsKey := itlLineKeyForRole(c.a.itlPhysicsKey(c.input.Namespace, c.input.ModelID, variant,
-			c.accelByVariant[variant], c.gpusByVariant[variant], c.fpByVariant[variant]), role)
+			c.accelByVariant[variant], c.gpusByVariant[variant], c.fpByVariant[variant]), role, c.fpByVariant[variant])
 
 		if !own.IsZero() {
 			// A measured line becomes the line for this engine configuration,

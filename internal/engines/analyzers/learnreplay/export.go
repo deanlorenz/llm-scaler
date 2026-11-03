@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/enginerec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
@@ -479,7 +480,10 @@ const (
 // compositeLayout is what each '|'-separated part of a composite key is,
 // by the number of parts: the variant key (namespace|model|variant|
 // accelerator|GPUs, saturation.itlWindowKey), the physics key
-// (model|accelerator|GPUs|fingerprint, capacity.LearnedStateKey), the k2
+// (model|accelerator|GPUs|fingerprint, capacity.LearnedStateKey), the
+// physics key of an aggregated variant's line (the same with |both after it,
+// saturation.itlLineKeyForRole, told apart from a variant key by its last
+// part: a role, where a variant key has a GPU count), the k2
 // window key (namespace|variant|model|accelerator|GPUs|role|output
 // bucket|qN, saturation's historyKey) and the throughput window key (the
 // same with the input bucket before the output one, throughputKey), and a
@@ -511,6 +515,9 @@ func compositeLayout(parts int) []keyPart {
 func splitComposite(s string) (parts []string, layout []keyPart, tag string, tagged bool) {
 	key, tag, tagged := strings.Cut(s, "#")
 	parts = strings.Split(key, "|")
+	if len(parts) == 5 && parts[4] == domain.RoleBoth {
+		return parts, []keyPart{partName, partAccelerator, partCount, partFingerprint, partShape}, tag, tagged
+	}
 	return parts, compositeLayout(len(parts)), tag, tagged
 }
 
