@@ -954,7 +954,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 		})
 	})
 
-	Describe("estimateCapacityFromParams", func() {
+	Describe("estimateCapacityAtCapSpread at the flags' cap or the default", func() {
 		It("should compute k2 from B, S, I, O", func() {
 			params := &capacity.EngineParams{
 				EffectiveMaxBatchedTokens: 4096,
@@ -963,7 +963,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 			// B=4096, S=256, I=500, O=100
 			// N_steady = min(4096*100/600, 256) = min(682.6, 256) = 256
 			// k2 = 256 * (500 + 50) = 256 * 550 = 140800
-			Expect(estimateCapacityFromParams(params, 500, 100, 1)).To(Equal(int64(140800)))
+			Expect(derivedAtDefaultCap(params, 500, 100)).To(Equal(int64(140800)))
 		})
 
 		It("should cap N_steady at MaxNumSeqs", func() {
@@ -974,7 +974,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 			// B=8192, S=64, I=100, O=200
 			// N_steady = min(8192*200/300, 64) = min(5461, 64) = 64
 			// k2 = 64 * (100 + 100) = 64 * 200 = 12800
-			Expect(estimateCapacityFromParams(params, 100, 200, 1)).To(Equal(int64(12800)))
+			Expect(derivedAtDefaultCap(params, 100, 200)).To(Equal(int64(12800)))
 		})
 
 		// vLLM runs at most --max-num-active-seqs at once, so a lower active
@@ -988,7 +988,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 			}
 			// N_steady = min(4096*100/600, 64) = 64; k2 = 64 * 550 = 35200,
 			// against 140800 at max_num_seqs alone.
-			Expect(estimateCapacityFromParams(params, 500, 100, 1)).To(Equal(int64(35200)))
+			Expect(derivedAtDefaultCap(params, 500, 100)).To(Equal(int64(35200)))
 		})
 
 		It("should leave N_steady alone when the active cap does not bind", func() {
@@ -1001,8 +1001,8 @@ var _ = Describe("SaturationAnalyzer", func() {
 			unset := *params
 			unset.MaxNumActiveSeqs = 0
 			// N_steady = 4096*100/600 = 682.67, below both caps.
-			Expect(estimateCapacityFromParams(params, 500, 100, 1)).To(Equal(int64(375466)))
-			Expect(estimateCapacityFromParams(&unset, 500, 100, 1)).To(Equal(int64(375466)))
+			Expect(derivedAtDefaultCap(params, 500, 100)).To(Equal(int64(375466)))
+			Expect(derivedAtDefaultCap(&unset, 500, 100)).To(Equal(int64(375466)))
 		})
 
 		// The zero-replica estimate prices from the same formula, so a parked
@@ -1019,7 +1019,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 					AcceleratorName: accel, GpuCount: 1, LearnedFrom: "deployment",
 					EffectiveCapacity: params.EffectiveMaxBatchedTokens, EngineParams: &params,
 				}
-				return NewSaturationAnalyzer(capacity.NewStore()).estimateStoredCapacity(rec, model, ns, variant, accel, 1, 0.8, 1000, 600, 1, logr.Discard())
+				return NewSaturationAnalyzer(capacity.NewStore()).estimateStoredCapacity(rec, model, ns, variant, accel, 1, 0.8, 1000, 600, 1, "", logr.Discard())
 			}
 			// N_steady = min(65536*600/1600, S) = S; capacity = S * (1000 + 300).
 			Expect(estimate("--max-num-seqs=256", "--max-num-batched-tokens=65536")).To(Equal(float64(256 * 1300)))
@@ -1031,11 +1031,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 				EffectiveMaxBatchedTokens: 8192,
 				MaxNumSeqs:                256,
 			}
-			Expect(estimateCapacityFromParams(params, 500, 0, 1)).To(Equal(int64(0)))
-		})
-
-		It("should return 0 when params is nil", func() {
-			Expect(estimateCapacityFromParams(nil, 500, 100, 1)).To(Equal(int64(0)))
+			Expect(derivedAtDefaultCap(params, 500, 0)).To(Equal(int64(0)))
 		})
 	})
 

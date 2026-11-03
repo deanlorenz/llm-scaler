@@ -118,7 +118,7 @@ they compute. The grouping falls out of the existing code with no logic moved:
 | --- | --- |
 | `analyzer.go` | `NewSaturationAnalyzer`, `Name`, `EvictStaleHistory`, `rememberDecodeSaturation`, `engineParamsFor`, `itlWindowKey` |
 | `analyze.go` | `Analyze` and its new stage functions (stage 2) |
-| `replica_capacity.go` | `computeReplicaCapacity`, `computeReplicaCapacityFallback`, `useDerived`, `computeK2`, `estimateStoredCapacity`, `estimateCapacityFromParams`, `lookupCompatibleCapacity`, `memoryBound`, `k2SourceLabel` |
+| `replica_capacity.go` | `computeReplicaCapacity`, `computeReplicaCapacityFallback`, `useDerived`, `computeK2`, `estimateStoredCapacity`, `estimateCapacityAtCapSpread`, `lookupCompatibleCapacity`, `memoryBound`, `k2SourceLabel` |
 | `keys.go` | `throughputKey`, `historyKey` |
 | `aggregate.go` | `aggregateByVariant`, `aggregateRoleDemand` |
 | `fleet_shape.go` | `computeModelWorkloadAverages`, `fleetAverage`, `fleetOutputLength`, `fleetOutputLengthRecent`, `fleetPrefixHitRate`, `withExpectedOutputTokens` |

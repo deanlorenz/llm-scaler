@@ -681,7 +681,7 @@ scenario:
           # (llm-d-benchmark's _macros.j2), well below llm-d's own reference
           # deployment (8192, see prefill's comment). As a side effect, this
           # also makes WVA's own k2-derivation formula
-          # (estimateCapacityFromParams) correct for decode for the first
+          # (estimateCapacityAtCapSpread) correct for decode for the first
           # time in this scenario: WVA's deployment parser can't read
           # $VLLM_MAX_NUM_BATCHED_TOKENS at all (no shell-variable expansion),
           # so it was already silently assuming EffectiveMaxBatchedTokens=8192
