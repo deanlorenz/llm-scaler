@@ -89,6 +89,13 @@ const SwitchBatchCapDecodeView = "batch-cap-decode-view"
 // flags' cap or the parser's default of 256.
 const SwitchBatchCapDerivedMu = "batch-cap-derived-mu"
 
+// SwitchBatchCapZeroReplica is the replay switch for the zero-replica
+// estimate's batch cap (issue #427). On, a variant at zero replicas is
+// priced at the cap the flags or the llm-d.ai/max-num-seqs annotation state
+// (zeroReplicaBatchCap). Off, as before, at the flags' cap or the parser's
+// default of 256.
+const SwitchBatchCapZeroReplica = "batch-cap-zero-replica"
+
 // Where the batch cap a derived k2 was priced at came from, as the
 // k2-decision line names it (batchCapSource).
 const (
@@ -353,6 +360,31 @@ func flagsOrDefaultBatchCap(params *capacity.EngineParams) pricedBatchCap {
 		return pricedBatchCap{perRank: d, source: batchCapDefault}
 	}
 	return pricedBatchCap{}
+}
+
+// zeroReplicaBatchCap is the batch cap one engine rank of a variant at zero
+// replicas is priced at by its derived estimate (estimateStoredCapacity),
+// and its source. With SwitchBatchCapZeroReplica on, for a decode or
+// aggregated variant, it is pricingBatchCap without learning: the cap the flags state, else, with
+// SwitchBatchCapDeclared on, the cap the llm-d.ai/max-num-seqs annotation
+// declares, else the parser's default. Off, as before issue #427, the
+// flags' cap or the default (flagsOrDefaultBatchCap): a variant that
+// declares 64 was priced at 64 per replica once a pod ran, and at 256 on its
+// way up from zero.
+//
+// The learned cap is never read, so none is stamped as used.
+//
+// A prefill variant keeps the flags' cap or the default, switch on or off.
+// P3 never prices prefill, so no live prefill replica is priced at a
+// declared cap, and the zero-replica figure for prefill is not the figure
+// its first replica will get. Moving it would change the order from zero
+// and the optimizer's cost ranking on a cap nothing else reads for prefill.
+func (a *SaturationAnalyzer) zeroReplicaBatchCap(namespace, modelID, variant, role string,
+	params *capacity.EngineParams) pricedBatchCap {
+	if a.batchCapZeroReplica && domain.CanonicalRole(role) != domain.RolePrefill {
+		return a.pricingBatchCap(namespace, modelID, variant, params, false)
+	}
+	return flagsOrDefaultBatchCap(params)
 }
 
 // sweepBatchCapsLocked drops a learned cap neither confirmed by a pod nor

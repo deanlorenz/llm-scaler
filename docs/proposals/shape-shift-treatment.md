@@ -84,7 +84,7 @@ So the model is the throughput analyzer's, made the floor's:
 ```
 ITL(k)       = A·k + B                     learned: two coefficients, A (contention) and B (hardware)
 KV_req(I,O)  = I + O/2                     the time-averaged footprint of one request in steady state (ages
-                                           uniform on [0, O]) -- what estimateCapacityFromParams and the
+                                           uniform on [0, O]) -- what estimateCapacityAtCapSpread and the
                                            throughput analyzer's KVreq already use. A synchronized batch is
                                            different: its footprint starts near I and grows together, so the
                                            engine admits more than steady state can hold and then preempts
@@ -162,7 +162,7 @@ proposal must say which:
   window as the rate, the gate can return; until then a verification that fires
   hardest on a ramp is worse than none, and the per-shape trust flag this
   proposal asks for remains unbuilt rather than built wrong.
-- **`estimateCapacityFromParams` already carries a different `N(I, O)`**
+- **`estimateCapacityAtCapSpread` already carries a different `N(I, O)`**
   (`min(S, B·O/(I+O))`, the batched-tokens bound). It is a derived-capacity
   fallback for k2; it stays, and the two bounds are reconciled by taking
   the smaller when both apply.

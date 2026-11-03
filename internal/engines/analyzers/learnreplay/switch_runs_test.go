@@ -37,7 +37,7 @@ import (
 // (switchPackage), and the golden outputs (fixture/file) it is named to move.
 //
 // Learner PR 4a moves the ITL line, and the slo analyzer's line, onto the
-// settle tracker, four switches each.
+// settle tracker, six switches each.
 //
 //   - The wait after a controller restart moves the goldens whose load
 //     reaches the line within its settle of the controller start: the
@@ -67,7 +67,8 @@ import (
 //
 // Earlier PRs' switches (learner PRs 2 and 3, #396's bands, #399's batch
 // cap, #415's mu key, #392's first k2 reading, #420's batch-cap readers,
-// #274's ITL per accepted token, #276's output spread) are not here: "all
+// #274's ITL per accepted token, #276's output spread, #427's zero-replica
+// batch cap) are not here: "all
 // off" is this PR's switches, and an earlier PR's stay at their constructor
 // default, on, as the base goldens were written (analyzer-learner.md, 2.5).
 var replaySwitches = map[string][]string{
@@ -139,6 +140,8 @@ var earlierSeams = map[string][]string{
 	slo.SwitchBatchCapAdmission:           nil,
 	slo.SwitchBatchCapPerRank:             nil,
 	saturation.SwitchITLPerToken:          nil,
+	// #427's zero-replica estimate at the declared batch cap.
+	saturation.SwitchBatchCapZeroReplica: nil,
 	// #276's spread of output lengths in the KV per request.
 	saturation.SwitchKVPerRequestOutputDispersion: nil,
 }
@@ -175,6 +178,14 @@ var heldBy = map[string][]heldTest{
 	},
 	slo.SwitchITLIdleOnEvidence: {
 		{"../slo", "TestSettle_AScrapeThatReadNothingIsNotIdle"},
+	},
+	saturation.SwitchBatchCapZeroReplica: {
+		{"../saturation", "TestBatchCapZeroReplica_TheEstimateIsPricedAtTheDeclaredCap"},
+		{"../saturation", "TestBatchCapZeroReplica_ADeclaredCapAbove256RaisesTheEstimate"},
+		{"../saturation", "TestBatchCapZeroReplica_TheFlagsWinAndTheDefaultIsNamed"},
+		{"../saturation", "TestBatchCapZeroReplica_TheSwitchPicksTheSource"},
+		{"../saturation", "TestBatchCapZeroReplica_APrefillVariantKeepsTheFlagsOrTheDefault"},
+		{"../saturation", "TestBatchCapZeroReplica_ALearnedCapIsNeverRead"},
 	},
 	saturation.SwitchITLPerToken: {
 		{"../saturation", "TestITLPerToken_TheLineIsFittedPerAcceptedToken"},
@@ -324,7 +335,8 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch names, as the base
-// commit's goldens hold it (939af5e36, main after #437), and for the
+// commit's goldens hold it (a16c161a3, main after #441, whose goldens are
+// main's after #437, 939af5e36), and for the
 // acceptance and engine goldens, taken again here, their all-off replays.
 var switchBase = map[string]string{
 	"acceptance/learned-state.csv":                 "63cbd711d50f36db5dbdfc06787571bf1c04a9e4e8fdb83c5d5b3c86438d0aa0",

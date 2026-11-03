@@ -308,18 +308,6 @@ func TestBatchCapReaders_ADeclaredCapAbove256(t *testing.T) {
 	assert.EqualValues(t, 0, fields["aboveBand"])
 }
 
-// The estimate for a variant at zero replicas still prices at the flags' cap
-// or the parser's default, not the declared cap: out of #420's scope, and
-// tracked by #427. Pinned so that changing it is a deliberate act.
-func TestBatchCapReaders_TheZeroReplicaEstimateIgnoresTheDeclaredCap(t *testing.T) {
-	assert.Equal(t,
-		estimateCapacityAtCapSpread(declaredParams(64), 256, 1000, 500, 1),
-		estimateCapacityFromParams(declaredParams(64), 1000, 500, 1))
-	assert.NotEqual(t,
-		estimateCapacityAtCapSpread(declaredParams(64), 64, 1000, 500, 1),
-		estimateCapacityFromParams(declaredParams(64), 1000, 500, 1), "the declared 64 would bind")
-}
-
 // A learned cap lowers the derived mu, as it lowers P3, where the policy
 // learns: mu is a price, and a cap below the true one only orders more
 // replicas. The cap is stamped as used.

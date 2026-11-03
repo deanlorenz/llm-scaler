@@ -120,7 +120,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 		budget := &capacity.EngineParams{Engine: "vllm", MaxNumSeqs: 256, EffectiveMaxBatchedTokens: 60}
 		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: budget}, time.Now())
 		store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: budget}, time.Now())
-		Expect(estimateCapacityFromParams(budget, 100, 50, 1)).To(Equal(int64(2500)), "precondition: the derived figure")
+		Expect(derivedAtDefaultCap(budget, 100, 50)).To(Equal(int64(2500)), "precondition: the derived figure")
 
 		cycle(4000, 6, 1000, 16000, 0)
 		result := cycle(1000, 0, 1000, 16000, 0)
@@ -477,7 +477,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			budget = &capacity.EngineParams{Engine: "vllm", MaxNumSeqs: 256, EffectiveMaxBatchedTokens: 2048}
 			store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: budget}, time.Now())
 			store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: budget}, time.Now())
-			Expect(estimateCapacityFromParams(budget, 100, 50, 1)).To(Equal(int64(32000)), "precondition: derived above k1")
+			Expect(derivedAtDefaultCap(budget, 100, 50)).To(Equal(int64(32000)), "precondition: derived above k1")
 		})
 
 		It("borrows on the derived path when the donor is below the variant's capacity", func() {

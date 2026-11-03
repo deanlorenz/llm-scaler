@@ -148,7 +148,7 @@ func holdPrefillDemand(roleDemand map[string]float64, variants []domain.VariantC
 //     inconsistent with it.
 //
 // One asymmetry is genuinely internal to this analyzer and should not be confused
-// with the above: estimateCapacityFromParams prices a *concurrent* request at
+// with the above: estimateCapacityAtCapSpread prices a *concurrent* request at
 // I + O/2 when deriving k2, so a queued request is charged more than it will
 // occupy on average, and its charge drops once it is admitted and starts being
 // measured through KvCacheUsage instead. Both effects bias this term toward

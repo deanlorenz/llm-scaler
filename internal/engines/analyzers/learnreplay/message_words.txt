@@ -429,6 +429,7 @@ batch-cap-decode-view
 batch-cap-derived-mu
 batch-cap-itl-admission
 batch-cap-learned
+batch-cap-zero-replica
 batchCap
 batchCapPlateaus
 batchCapSource

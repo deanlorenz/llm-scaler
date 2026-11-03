@@ -159,7 +159,7 @@ full cache preempts and thrashes.
 
 ### k2 — compute bound
 
-`estimateCapacityFromParams()` in `replica_capacity.go`, from the engine's own parameters
+`estimateCapacityAtCapSpread()` in `replica_capacity.go`, from the engine's own parameters
 (`capacity.EngineParams`, parsed from the deployment):
 
 ```
@@ -199,14 +199,16 @@ and the `k2-decision` line names its source (`batchCapSource`):
 
 The cap's other readers (issue #420) each sit behind their own replay
 switch. The ones that price read the declared cap, and saturation's also
-the learned one. The ones that ask whether a replica is AT its cap read the
-declared cap and never the learned one (`atCapBatchCap`):
+the learned one, except the zero-replica estimate. The ones that ask
+whether a replica is AT its cap read the declared cap and never the learned
+one (`atCapBatchCap`):
 
 | reader | reads | switch |
 |---|---|---|
 | ITL admission at the cap (`itl.Admission.MaxNumSeqs`, `fitLines`) | `atCapBatchCap`: flags, else declared (only while `SwitchBatchCapDeclared` is on too), else 0; `itl-window` logs `batchCap` and `batchCapSource` (`none` for 0) | `SwitchBatchCapITLAdmission` |
 | P/D decode view's at-cap exception (`decodeCapacityViews`, `atCapBatchCaps`) | `atCapBatchCap`, as above | `SwitchBatchCapDecodeView` |
 | derived mu's sequence cap (`deriveMuAtCap`) | `pricingBatchCap`: flags, declared, learned, default; `derived-mu` logs `batchCap` and `batchCapSource` | `SwitchBatchCapDerivedMu` |
+| zero-replica estimate (`estimateStoredCapacity`, issue #427) | `zeroReplicaBatchCap`, per engine rank: flags, else declared (only while `SwitchBatchCapDeclared` is on too), else default; never learned. A prefill variant keeps flags, else default: P3 never prices prefill. The estimate is one rank's figure, also for a data-parallel variant (#438). `zero-replica-capacity-estimate` logs `batchCap` and `batchCapSource` on its `deployment-derived` line | `SwitchBatchCapZeroReplica` |
 | `slo` analyzer's admission (`slo.admission`) | `EngineParams.StatedBatchCap`: flags, else declared (not gated by `SwitchBatchCapDeclared`, a saturation switch); `slo-variant` logs `lineBatchCap` and `lineBatchCapSource` | `slo.SwitchBatchCapAdmission` |
 | `slo` analyzer's per-rank cap (`priceVariant`) | `StatedBatchCap`, else `BatchCap`; `slo-variant` logs `batchCap` and `batchCapSource` | `slo.SwitchBatchCapPerRank` |
 
@@ -220,8 +222,7 @@ P3 a learned cap only lowers the price, so it only errs toward more
 replicas.
 
 The `slo` analyzer does not read the learned cap: it lives in the saturation
-analyzer's memory. The zero-replica estimate (`estimateCapacityFromParams`)
-still prices at `BatchCap` (#427). A capped mu is still priced at `ITL(kPrice)`,
+analyzer's memory. A capped mu is still priced at `ITL(kPrice)`,
 although a replica held by its cap runs below `kPrice` and so faster: mu
 reads low, toward more replicas (the `slo` analyzer's `reachableFill`
 accounts for this; saturation does not).

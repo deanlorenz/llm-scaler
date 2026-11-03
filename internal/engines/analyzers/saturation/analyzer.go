@@ -303,14 +303,16 @@ type SaturationAnalyzer struct {
 	// off (SetSwitchesForReplay).
 	batchCapDeclared bool
 	batchCapLearned  bool
-	// batchCapITLAdmission, batchCapDecodeView and batchCapDerivedMu are the
-	// replay switches of the batch cap's other readers (batch_cap.go, issue
-	// #420): SwitchBatchCapITLAdmission, SwitchBatchCapDecodeView and
-	// SwitchBatchCapDerivedMu. On from the constructor; a replay turns them
-	// off (SetSwitchesForReplay).
+	// batchCapITLAdmission, batchCapDecodeView, batchCapDerivedMu and
+	// batchCapZeroReplica are the replay switches of the batch cap's other
+	// readers (batch_cap.go, issues #420 and #427):
+	// SwitchBatchCapITLAdmission, SwitchBatchCapDecodeView,
+	// SwitchBatchCapDerivedMu and SwitchBatchCapZeroReplica. On from the
+	// constructor; a replay turns them off (SetSwitchesForReplay).
 	batchCapITLAdmission bool
 	batchCapDecodeView   bool
 	batchCapDerivedMu    bool
+	batchCapZeroReplica  bool
 	// kvOutputDispersion is SwitchKVPerRequestOutputDispersion (#276): on
 	// from the constructor; a replay turns it off (SetSwitchesForReplay).
 	kvOutputDispersion bool
@@ -538,6 +540,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		batchCapITLAdmission:   true,
 		batchCapDecodeView:     true,
 		batchCapDerivedMu:      true,
+		batchCapZeroReplica:    true,
 		kvOutputDispersion:     true,
 		itlReadsSettle:         true,
 		itlWaitsAfterRestart:   true,
