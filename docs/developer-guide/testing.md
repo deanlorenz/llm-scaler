@@ -1287,6 +1287,32 @@ read the `-v` output.
     A pods with `"planned": true`, raise B only after both release, and B's
     second pod must run.
 
+### Passive-mode specs (full tier)
+
+Label `passive`, 19 specs in seven containers, about 45 minutes. Run them alone
+with `FOCUS="Passive mode" make test-e2e-full USE_SIMULATOR=true
+SCALE_TO_ZERO_ENABLED=true`. They check
+[passive mode](../reference/scaling-policy.md#passive) against a real KEDA,
+HPA and controller.
+
+- **`passive_mode_test.go`**: hold controller-wide (`WVA_PASSIVE=true`) and per
+  model, hold at zero under queued requests, a `kubectl scale` that sticks,
+  a controller restart and a deleted leader, passive to active (the control)
+  and back mid scale-up, observe beside a `kubernetes-workload` trigger,
+  observe-unsafe, and two rollouts at 10 replicas.
+- **`passive_mode_pool_test.go`**: a utilization-share group holding a passive
+  donor, and a warm pool beside a passive model. Each ends by switching the
+  model to active, which must start the transfer or the borrow.
+
+Every hold is a 90 s window, three HPA syncs plus the 30 s scale-down window
+the specs set on each ScaledObject. A window fails if `spec.replicas` moves
+once (it is sampled every second), and also if `wva_desired_replicas` never
+differs from the held count, since a window where the controller wanted
+nothing proves nothing. They need Prometheus and fail, not skip, without
+it. Lines starting `PASSIVE-` in the `-v` output are the evidence: the
+replica timeline, the metrics, the HPA's own `desiredReplicas`, and the log
+lines.
+
 ### Whole-node utilization-share specs (own cluster shape)
 
 Seven specs, label `utilization-share-wholenode`, put a large model whose
