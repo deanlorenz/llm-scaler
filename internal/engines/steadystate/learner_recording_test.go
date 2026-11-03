@@ -522,10 +522,12 @@ func TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult(t *testing
 		// The run starts at a controller start with the snapshot on: the
 		// ITL line waits its settle (SwitchITLWaitsAfterRestart) through
 		// the first two minutes, and settles again after each day the
-		// clock jumps (the settle tracker's absence tolerance). One line
-		// is fitted and published, and borrowed on three cycles.
-		saturation.KindPublishLine:  1,
-		saturation.KindBorrowLine:   3,
+		// clock jumps (the settle tracker's absence tolerance). Two lines
+		// are fitted and published, a decode line and, since #432, an
+		// aggregated one under its own |both key, and each is borrowed on
+		// three cycles.
+		saturation.KindPublishLine:  2,
+		saturation.KindBorrowLine:   6,
 		slo.KindBeginCycle:          12,
 		slo.KindEvictStale:          12,
 		slo.KindNoteVariantsPresent: 28,

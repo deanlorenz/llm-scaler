@@ -57,9 +57,10 @@ func newAggregatedRig(fitsAggregated, reuse bool, variants ...aggVariant) *aggre
 	return r
 }
 
-// run drives n cycles of 10 replicas per variant, at KV fills 0.20 to 0.65
+// run drives aggregatedCycles cycles of 10 replicas per variant, at KV
+// fills 0.20 to 0.65
 // (or 0.05, below the band), and returns the last cycle's result.
-func (r *aggregatedRig) run(t *testing.T, n int) *domain.AnalyzerResult {
+func (r *aggregatedRig) run(t *testing.T) *domain.AnalyzerResult {
 	t.Helper()
 	const replicas = 10
 	states := make([]domain.VariantReplicaState, 0, len(r.variants))
@@ -68,7 +69,7 @@ func (r *aggregatedRig) run(t *testing.T, n int) *domain.AnalyzerResult {
 			AcceleratorName: "H100", CurrentReplicas: replicas, GPUsPerReplica: 1})
 	}
 	var res *domain.AnalyzerResult
-	for range n {
+	for range aggregatedCycles {
 		rows := make([]domain.ReplicaMetrics, 0, replicas*len(r.variants))
 		for _, v := range r.variants {
 			for i := range replicas {
@@ -92,6 +93,10 @@ func (r *aggregatedRig) run(t *testing.T, n int) *domain.AnalyzerResult {
 	}
 	return res
 }
+
+// aggregatedCycles is enough cycles for a variant reading inside the band
+// to fit a line of its own.
+const aggregatedCycles = 13
 
 // line is the shared line a variant published, and its key; ok false when
 // it published none.
@@ -126,7 +131,7 @@ func TestITLAggregated_AnUnlabeledVariantFitsALineAndDerivesMu(t *testing.T) {
 	for _, role := range []string{"", domain.RoleBoth} {
 		t.Run("role="+role, func(t *testing.T) {
 			r := newAggregatedRig(true, false, aggVariant{name: "agg", role: role, slope: propTrueA, inBand: true})
-			res := r.run(t, 13)
+			res := r.run(t)
 			sig := signal(t, res, "agg")
 			assert.True(t, sig.HasLine, "an aggregated variant fitted no line: %+v", sig)
 			assert.InDelta(t, propTrueA, sig.LineSlope, 0.005)
@@ -138,7 +143,7 @@ func TestITLAggregated_AnUnlabeledVariantFitsALineAndDerivesMu(t *testing.T) {
 			assert.True(t, ok, "the aggregated line was not published")
 
 			off := newAggregatedRig(false, false, aggVariant{name: "agg", role: role, slope: propTrueA, inBand: true})
-			offSig := signal(t, off.run(t, 13), "agg")
+			offSig := signal(t, off.run(t), "agg")
 			assert.False(t, offSig.HasLine, "with the switch off an aggregated variant fits no line")
 			assert.NotEqual(t, domain.ServiceRateSourceDerived, offSig.RateSource)
 			_, _, ok = off.line("agg")
@@ -152,7 +157,7 @@ func TestITLAggregated_AnUnlabeledVariantFitsALineAndDerivesMu(t *testing.T) {
 func TestITLAggregated_ADecodeVariantIsUnchanged(t *testing.T) {
 	on := newAggregatedRig(true, false, aggVariant{name: "dec", role: domain.RoleDecode, slope: propTrueA, inBand: true})
 	off := newAggregatedRig(false, false, aggVariant{name: "dec", role: domain.RoleDecode, slope: propTrueA, inBand: true})
-	resOn, resOff := on.run(t, 13), off.run(t, 13)
+	resOn, resOff := on.run(t), off.run(t)
 	assert.Equal(t, resOff.VariantCapacities, resOn.VariantCapacities)
 	assert.Equal(t, resOff.RoleDemand, resOn.RoleDemand)
 	assert.True(t, signal(t, resOn, "dec").HasLine, "the decode variant fitted no line")
@@ -170,7 +175,7 @@ func TestITLAggregated_PrefillFitsNoLine(t *testing.T) {
 	r := newAggregatedRig(true, false,
 		aggVariant{name: "pre", role: domain.RolePrefill, slope: propTrueA, inBand: true},
 		aggVariant{name: "dec", role: domain.RoleDecode, slope: propTrueA, inBand: true})
-	res := r.run(t, 13)
+	res := r.run(t)
 	pre := signal(t, res, "pre")
 	assert.False(t, pre.HasLine, "prefill fitted a line: %+v", pre)
 	assert.False(t, pre.ITLWindowed, "prefill kept an ITL window")
@@ -195,7 +200,7 @@ func TestITLAggregated_AnAggregatedAndADecodeVariantKeepSeparateLines(t *testing
 		aggVariant{name: "dec", role: domain.RoleDecode, slope: propTrueA, inBand: true},
 		aggVariant{name: "agg-idle", role: "", slope: propTrueA, inBand: false},
 		aggVariant{name: "dec-idle", role: domain.RoleDecode, slope: propTrueA, inBand: false})
-	res := r.run(t, 13)
+	res := r.run(t)
 
 	aggKey, aggLine, ok := r.line("agg")
 	require.True(t, ok, "the aggregated variant published no line")
