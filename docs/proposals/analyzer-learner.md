@@ -1704,7 +1704,7 @@ What else 4b-1 built:
   weight); known truth at `itl.DefaultKSat`, direct and on the time base;
   edges (10 readings, spread 0.30, the band at the default and at
   [0.05, 0.90], `steadyFor` at the default and at 10 min, the sequence cap);
-  and the above-band fallback against an in-band fit and the truth (below).
+  and the above-band fallback never pricing under the truth (below).
   The stale-B case's 15 % is its declared tolerance: on the tracker the
   converged B's error has mean about 0 and SD about 3.6 %, so 15 % is about
   4 SD. The mutant is the steady gate off: joiner warm-up, load step, one reading,
@@ -1715,21 +1715,32 @@ What else 4b-1 built:
   `itl.Admission.AboveBandFallback`, which only this line sets). A key with
   no line from the band and no slope it may hold -- one that never fitted,
   under load that holds every replica above the band -- fits A from its
-  readings above the band, under the same steady gate, settle stamp and
-  floors (10 readings, 3 settled), with B pinned as the band's fit pins it
-  (`Reason` `T2-above-band`). The band's first fit replaces it; it is never
-  used while the band gives a line or a slope is held, and its A is never
-  held or its B remembered. Without it, a controller restart 15 s before a
-  step into saturation left the restarted line silent for as long as the
-  load stayed up, and with throughput alone the fleet stayed at 4 against a
-  need of 9. Which side it errs on: overloaded readings sit above the line
-  and only steepen A (a lower mu); the pinned B's error enters with a lever
-  of at most 0.15 above the band (0.06 to 4.7 in it). When the pinned B is
-  at or above the true one the fallback prices no higher mu than an in-band
-  fit on the same line; when it is below (a key that never fitted pins 6
-  ms), it can price a little under the truth -- measured at most 2.7 % on
-  the property case `known-truth/throughput-itl/above-band-fallback`, inside
-  known truth's 5 %.
+  readings above the band at a k of at least `itl.DefaultKSat` (0.85), under
+  the same steady gate, settle stamp and floors (10 readings, 3 settled),
+  with B pinned at the least ITL among those readings (`Reason`
+  `T2-above-band`). The band's first fit replaces it; it is never used while
+  the band gives a line or a slope is held, and its A is never held nor its
+  B stored as the key's intercept. Without it, a controller restart 15 s
+  before a step into saturation left the restarted line silent for as long
+  as the load stayed up, and with throughput alone the fleet stayed at 4
+  against a need of 9.
+
+  It is one-sided by construction: it never prices a higher mu than the
+  truth. Every reading is ITL = B' + A k + noise with A >= 0 and k > 0, so
+  the least ITL is at or above the true B'. On readings of the true line,
+  the line through that B prices, at kSat, A kSat + B' + (B - B')(1 -
+  kSat/kbar), kbar being the readings' mean k. Both factors of the last term
+  are >= 0: the first because B >= B', the second because every reading's
+  k is at least kSat. That second condition is why readings between the
+  band's top (0.80) and 0.85 are not kept. Overloaded readings, which sit
+  above the line, only raise the price. The strict minimum is used, not a
+  low quantile: above the band the gauge's noise (about 1 ms) is small
+  against A k (40 ms or more). Measured on the property case
+  `known-truth/throughput-itl/above-band-fallback` over 100 seeds, the
+  priced ITL is at least 2.5 % over the truth at a true B of 4 ms and 2.0 %
+  over at 10 ms. Negative control: with B pinned at the 6 ms default, as the
+  band's fit pins a key that never fitted, the 10 ms case prices under the
+  truth on every seed.
 - **A shape change drops the held slope.** The clear empties the window and
   now forgets the held A too (`itl.Tracker.ForgetSlope`), on this line only:
   shorter requests have a higher A, and the old shape's A held into them
@@ -1750,7 +1761,7 @@ What else 4b-1 built:
   whose joiners carry warm-up ITL (on: peak 6, need 6; parent: peak 33); a
   restart 2 min before a step (on: settles at need; parent: peak 40, ends
   over); a restart 15 s before a step that pushes every replica above the
-  band (on: need 9, final 9, under need for 30 s, 8 cycles priced from
+  band (on: need 9, final 10, under need for 30 s, 7 cycles priced from
   above the band; with the fallback off, the negative control, final 4 and
   under need for 24m45s of the 25 min after the restart, as before the
   fallback). A replica at its cap with siblings below the band: the band
