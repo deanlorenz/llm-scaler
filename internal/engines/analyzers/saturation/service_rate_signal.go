@@ -58,6 +58,11 @@ func (c *cycle) attachServiceRates(variants []domain.VariantCapacity, caps []cap
 			sig.ITLAtPricingK = line.ITLAt(kPrice)
 		}
 		sig.Rate, sig.RateSource = variantServiceRate(name, caps)
+		// An aggregated variant sizes from its own line only once lifted
+		// (#275), and says so: its line is priced by shape, not decode's.
+		if sig.RateSource == domain.ServiceRateSourceDerived && sig.Role == domain.RoleBoth {
+			sig.RateSource = domain.ServiceRateSourceDerivedAggregated
+		}
 		// An aggregated variant priced on no rate of its own still reports
 		// the mu its line derives, under a source that says it sized nothing
 		// (itlLineReportOnly, #432).

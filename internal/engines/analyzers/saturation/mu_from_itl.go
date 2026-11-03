@@ -63,6 +63,10 @@ type derivedMu struct {
 	// point outside (0, 1]), no-seqs (no sequence fits), no-itl (the line gives
 	// no ITL there) or no-rate.
 	why string
+	// capAtMeasured says the figure may not price above a measured rate of
+	// the variant's own (an aggregated variant's lifted figure, issue #275):
+	// where one is on record, the lower of the two prices the replica.
+	capAtMeasured bool
 }
 
 // capacityTokensFor is the replica's whole KV capacity in tokens: the LIVE
@@ -300,6 +304,9 @@ func (a *SaturationAnalyzer) itlUnderArgs(key, args string) {
 		a.itlBaselineStash[stashKey(key, tag)] = b
 	}
 	a.itlTracker.Sweep(a.now(), func(k string) bool { return k == key })
+	// An aggregated variant's shape state was the dropped window's and
+	// slope's (itl_aggregated_shape.go).
+	delete(a.itlAggregated, key)
 	if b, ok := a.itlBaselineStash[stashKey(key, args)]; ok {
 		delete(a.itlBaselineStash, stashKey(key, args))
 		a.itlTracker.SetBaseline(key, b)

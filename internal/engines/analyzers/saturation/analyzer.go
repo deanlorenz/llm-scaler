@@ -322,6 +322,14 @@ type SaturationAnalyzer struct {
 	// itlFitsAggregated is SwitchITLFitsAggregated (#432): on from the
 	// constructor; a replay turns it off (SetSwitchesForReplay).
 	itlFitsAggregated bool
+	// itlAggShapeTerm is SwitchITLAggregatedShapeTerm and itlAggSizes
+	// SwitchITLAggregatedSizes (#275): on from the constructor; a replay
+	// turns them off (SetSwitchesForReplay).
+	itlAggShapeTerm bool
+	itlAggSizes     bool
+	// itlAggregated is, per ITL window key, an aggregated variant's shape
+	// state (itl_aggregated_shape.go, issue #275).
+	itlAggregated map[string]*aggState
 	// zeroReplicaDP is SwitchZeroReplicaDataParallel (#438): on from the
 	// constructor; a replay turns it off (SetSwitchesForReplay).
 	zeroReplicaDP bool
@@ -481,6 +489,9 @@ type learnedLine struct {
 	// from the step time or on any other engine. Read only for such an
 	// engine: on any other, one step is one token and the two units agree.
 	perToken bool
+	// shape is the shape the line was fitted at and the shape term's points
+	// (itl_aggregated_shape.go): an aggregated line's only, zero for decode.
+	shape lineShape
 }
 
 // acceleratorMemo is the last accelerator that resolved for a variant, with the
@@ -553,6 +564,9 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		kvOutputDispersion:     true,
 		kvHitsResident:         true,
 		itlFitsAggregated:      true,
+		itlAggShapeTerm:        true,
+		itlAggSizes:            true,
+		itlAggregated:          make(map[string]*aggState),
 		zeroReplicaDP:          true,
 		itlReadsSettle:         true,
 		itlWaitsAfterRestart:   true,
@@ -870,6 +884,12 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 			delete(a.itlWithheldLogged, key)
 		}
 	}
+	// So does an aggregated variant's shape state (itl_aggregated_shape.go).
+	for key := range a.itlAggregated {
+		if a.variantIsStale(key, now, variantTimeout) {
+			delete(a.itlAggregated, key)
+		}
+	}
 	for key := range a.itlBaselineStash {
 		if base, _, _ := strings.Cut(key, "#"); a.variantIsStale(base, now, variantTimeout) {
 			delete(a.itlBaselineStash, key)
@@ -1157,11 +1177,17 @@ func (a *SaturationAnalyzer) publishLineFor(
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// The shape term's points stay with the key: they are the engine's,
+	// gathered over every shape its lines were fitted at, and the caller
+	// stamps the new line's own shape (shapePublishedLine).
+	prev := a.itlLines[physicsKey].shape
+	prev.g, prev.sigma, prev.sigmaOK = 0, 0, false
 	a.itlLines[physicsKey] = learnedLine{
 		model:       model,
 		fromVariant: variantKey,
 		learnedAt:   now,
 		perToken:    speculates && a.itlPerToken,
+		shape:       prev,
 	}
 	if a.rec.Active() {
 		a.rec.Record(KindPublishLine, now, LineEvent{PhysicsKey: physicsKey, Variant: variantKey, A: model.A, B: model.B})

@@ -59,9 +59,16 @@ func Mean(
 		}
 		plain += v
 		n++
-		if rm.RequestRate > 0 {
-			weighted += v * rm.RequestRate
-			weights += rm.RequestRate
+		// The request rate as it always was (an infinite one is the caller's
+		// to keep out); a weight of the caller's must be finite.
+		w, weighs := rm.RequestRate, rm.RequestRate > 0
+		if cfg.weight != nil {
+			w = cfg.weight(rm)
+			weighs = w > 0 && !math.IsInf(w, 0)
+		}
+		if weighs {
+			weighted += v * w
+			weights += w
 		}
 	}
 	if weights > 0 {
@@ -96,10 +103,22 @@ func Within(lo, hi float64) Option {
 	return func(c *config) { c.lo, c.hi, c.bounded = lo, hi, true }
 }
 
+// WeightedBy weighs each replica by weight instead of its request rate. A
+// weight that is not finite and positive counts the replica in the plain
+// mean only, as a replica with no request rate does.
+//
+// For a quantity whose share of the work is not one per request: a
+// prefix-cache hit rate saves prompt tokens, so a replica serving long
+// prompts weighs more than one serving short ones at the same rate.
+func WeightedBy(weight func(domain.ReplicaMetrics) float64) Option {
+	return func(c *config) { c.weight = weight }
+}
+
 type config struct {
 	zeroIsReading bool
 	lo, hi        float64
 	bounded       bool
+	weight        func(domain.ReplicaMetrics) float64
 }
 
 // admits reports whether v is a reading at all, before include is consulted.

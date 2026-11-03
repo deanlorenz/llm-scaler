@@ -240,6 +240,7 @@ SATURATION_CONFIG_MAP_NAME
 SCALE_FROM_ZERO_ENGINE_MAX_CONCURRENCY
 SCALING
 SCALING_POLICY_CONFIG_MAP_NAME
+SGLang
 STOP
 Safety
 Saturation
@@ -308,6 +309,7 @@ _
 __name__
 a
 abort
+about
 above
 above-band
 aboveBand
@@ -320,6 +322,7 @@ accelerators
 accel|
 accepted
 acceptedPerStep
+accepts
 account
 across
 acting
@@ -347,6 +350,9 @@ against
 age
 aged
 ago
+agree
+agreeCycles
+agreed
 aim
 all
 all2all_backend
@@ -535,7 +541,9 @@ charge
 charged
 cheapest
 check
+checking
 choose
+chunked
 chunked_prefill_size
 claimed
 claiming
@@ -561,6 +569,7 @@ collecting
 combined
 comes
 commit
+comparable
 compared
 compatible
 compatible-variant-live
@@ -568,6 +577,7 @@ complete
 completed
 completely
 completes
+completion
 completions
 composite
 composite-built
@@ -594,6 +604,7 @@ configuration
 configured
 confirmCycles
 confirmedFor
+consecutive
 consecutiveFailures
 considered
 constrained
@@ -674,6 +685,7 @@ deployment-stored-fallback
 depth
 derivation
 derived
+derived-aggregated
 derived-from-args
 derived-mu
 derived-report-only
@@ -700,6 +712,8 @@ disabledBy
 disabledByPerModelEntry
 disables
 disaggregation_transfer_backend
+disagree
+disagreed
 discarded
 discarding
 discover
@@ -879,6 +893,7 @@ fresh
 freshFor
 from
 fromBucket
+fromG
 fromLastConstraintsAge
 frozen
 full
@@ -902,6 +917,8 @@ going
 gone
 got
 gpsErrPct
+gpsMedianErrOK
+gpsMedianErrPct
 gpu-and-quota-limiter
 gpu-inventory
 gpu-limiter
@@ -942,6 +959,7 @@ health-probe-bind-address
 held
 heldAt
 heldAtFleet
+heldCycles
 heldSince
 heldUntil
 heldUntilStableOrBy
@@ -1024,6 +1042,13 @@ it
 items
 iteration
 itl
+itl-aggregated-lift
+itl-aggregated-no-occupancy
+itl-aggregated-sglang-unverified
+itl-aggregated-shape-moved
+itl-aggregated-shape-term
+itl-aggregated-sizes
+itl-aggregated-spec-unknown
 itl-fit
 itl-fit-declined
 itl-gps-mismatch
@@ -1044,6 +1069,7 @@ itl-window
 itl-withheld
 itl-withheld-ended
 itlA
+itlAggregated
 itlArgs
 itlAtKPrice
 itlB
@@ -1064,6 +1090,7 @@ itlWindows
 itlWithheldLogged
 itlZero
 itl_non_positive
+itlshape|
 itlslope|
 itlstash|
 itlunit|
@@ -1178,6 +1205,7 @@ learnerStarted
 learnrec
 learnrec-
 least
+leave
 leaves
 leaving
 ledger
@@ -1191,6 +1219,8 @@ lenderDebounce
 length
 lent
 let
+liftReason
+lifted
 likely
 limit
 limited
@@ -1198,6 +1228,7 @@ limiter
 limiterTypes
 limiters
 line
+line-shape-unknown
 lineA
 lineB
 lineBatchCap
@@ -1206,6 +1237,7 @@ lineBorrowed
 lineBorrowedFrom
 lineHeld
 lineKey
+lineShapeG
 lineSlopeAge
 lineSlopeHeld
 lineTier
@@ -1236,6 +1268,7 @@ lowerBound
 lowerBounds
 lowered
 lowering
+made
 main.go
 make
 makes
@@ -1280,6 +1313,7 @@ measure
 measured
 measuredRate
 measures
+medianErrPct
 medium
 mem_fraction_static
 memory-bound
@@ -1407,6 +1441,7 @@ no-limiter
 no-line
 no-listed-analyzer-sizes-role
 no-node-fits
+no-prefill-reading
 no-rate
 no-reading
 no-seqs
@@ -1458,6 +1493,8 @@ observe
 observed
 observed/historical/derived
 observedGPS
+occupancy
+occupancy-unknown
 of
 off
 offered
@@ -1502,6 +1539,7 @@ outputTokensWas
 outside
 outstanding
 over
+over-state
 over-stated
 overMax
 overQuotaGPUs
@@ -1608,6 +1646,9 @@ prefill-required
 prefill-throughput-bound-reading
 prefillDemandAfter
 prefillDemandBefore
+prefillKnown
+prefillRefused
+prefillStepsPerToken
 prefix-cache-scorer
 prefix_caching_disabled
 preparation
@@ -1620,7 +1661,9 @@ previousB
 previousSource
 previousValue
 price
+priceCase
 priced
+pricedA
 prior
 prior-live
 priority
@@ -1835,6 +1878,7 @@ rows-instant-kv
 rows-ready-since
 run
 running
+running-request
 running-unknown
 runs
 s
@@ -1942,7 +1986,18 @@ sh
 shadow
 shape
 shape-change
+shape-changing
+shape-covered
+shape-move-pending
+shape-term
+shape-unknown
+shape-unpriced
+shape-worst-case
 shapeChangeHoldSeconds
+shapeChanging
+shapeG
+shapeTermC
+shapeTermIdentified
 share
 share-claimed
 shared
@@ -1957,6 +2012,7 @@ siblingRate
 siblingRateNow
 side
 sight
+sigmaOK
 signal
 since
 single
@@ -1990,6 +2046,7 @@ slo.EvictStale
 slo.ForgetVariant
 slo.NoteVariantsPresent
 sloEntries
+slope
 slopeAge
 slopeAgeSeconds
 slopeHeld
@@ -2007,6 +2064,7 @@ source
 spaces
 spare
 spec
+speculates
 speculative
 speculative_
 speculative_algorithm
@@ -2016,6 +2074,7 @@ speculative_eagle_topk
 speculative_num_draft_tokens
 speculative_num_steps
 spend
+spends
 spent
 spread
 stabilization.skipWaitsWhen
@@ -2055,6 +2114,7 @@ steadyHeld
 steadySpread
 steered
 step
+steps
 still
 stop
 stopped
@@ -2148,6 +2208,7 @@ tls.crt
 tls.key
 to
 toBucket
+toG
 today
 together
 token
@@ -2274,6 +2335,7 @@ variantTimeout
 variants
 vcs.revision
 vendor
+verified
 version
 versions
 via
@@ -2281,6 +2343,8 @@ victim
 vllm
 vllm.entrypoints
 vllm:cache_config_info
+vllm:num_requests_running
+vllm:request_generation_tokens_count
 vllm:spec_decode_num_accepted_tokens_total
 volume
 wait
@@ -2295,6 +2359,7 @@ warm-pool
 warm-pool-bridge-supply
 warm-pool-supply
 was
+wasLifted
 watch
 watch-namespace
 watchNamespace
@@ -2322,6 +2387,7 @@ whose
 why
 will
 window
+windowDropped
 windowSamples
 windows
 wins
