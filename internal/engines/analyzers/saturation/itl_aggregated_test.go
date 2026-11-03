@@ -58,8 +58,8 @@ func newAggregatedRig(fitsAggregated, reuse bool, variants ...aggVariant) *aggre
 }
 
 // run drives aggregatedCycles cycles of 10 replicas per variant, at KV
-// fills 0.20 to 0.65
-// (or 0.05, below the band), and returns the last cycle's result.
+// fills 0.20 to 0.65 (or 0.05, below the band), and returns the last
+// cycle's result.
 func (r *aggregatedRig) run(t *testing.T) *domain.AnalyzerResult {
 	t.Helper()
 	const replicas = 10
