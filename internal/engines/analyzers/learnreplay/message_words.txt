@@ -65,11 +65,13 @@ Analyze
 Applied
 Applying
 ArgsFingerprint
+AssumedShape
 AssumedTPOTRatio
 AvgInputTokens/AvgOutputTokens/PrefixCacheHitRate
 B
 BaseURL
 BelowFittedBand
+BorrowedLine
 Bound
 C0-agree
 C1-single
@@ -105,6 +107,7 @@ ErrImagePull
 Error
 Events
 Every
+ExtrapolatedFill
 FMA
 Failed
 Fix
@@ -125,6 +128,7 @@ HEALTH_PROBE_BIND_ADDRESS
 HPA
 HPA/KEDA
 Health
+HeldLine
 Hybrid
 ID
 INTEL
@@ -227,6 +231,7 @@ PROPSEED
 Passive
 Pending
 Physical
+PinnedDefaultB
 Please
 Pod
 PodMonitor
@@ -293,6 +298,7 @@ Target
 TargetBelowFloor
 The
 This
+TierUnstable
 TokenGapPercentile
 TooManySlots
 TriggeredScaleUp
@@ -1100,6 +1106,7 @@ instance
 instead
 int
 integer
+intercept
 interface
 interval
 into

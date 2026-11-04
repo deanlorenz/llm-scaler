@@ -1,6 +1,10 @@
 package whatif
 
-import "slices"
+import (
+	"slices"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+)
 
 // Result is what every what-if question returns: an Answer, an Unanswerable,
 // or (from DecodeAdmission) an Admission. It is sealed, so a caller reaches a
@@ -20,13 +24,18 @@ type Reason string
 
 // The reasons this package refuses with. The CLI reference's table lists the
 // planner's full set; each later PR adds the reasons its own terms can raise
-// (NoPrefillCapacity, NoRoleMap, FlowControlUnknown, PinnedDefaultB), so every
-// reason defined here has a case that produces it.
+// (NoPrefillCapacity, NoRoleMap, FlowControlUnknown), so every reason defined
+// here has a case that produces it.
 const (
 	// NoLine is no ITL line, or one the planner cannot price from: a slope
 	// or intercept that is not positive and finite, or a line that predicts no
 	// positive ITL at the bottom of the band.
 	NoLine Reason = "NoLine"
+	// PinnedDefaultB is a line whose only fit is pinned-B on the default
+	// intercept (itl.DefaultBaselineSec): the slope was fitted against a
+	// constant guessed for no card in particular, so the line describes
+	// nothing measured about this one.
+	PinnedDefaultB Reason = "PinnedDefaultB"
 	// NoCapacity is no positive, finite KV capacity reading, or one whose
 	// band top holds no whole request (floor(band.Hi*C/KVreq) < 1).
 	NoCapacity Reason = "NoCapacity"
@@ -76,7 +85,7 @@ const (
 
 // Reasons lists every Reason this package can return, in a fixed order.
 func Reasons() []Reason {
-	return []Reason{NoLine, NoCapacity, NoBatchCap, NoTraffic, TokenGapPercentile,
+	return []Reason{NoLine, PinnedDefaultB, NoCapacity, NoBatchCap, NoTraffic, TokenGapPercentile,
 		NoTPOTHistogram, TPOTQuantileUnbounded, TargetBelowFloor, Saturated,
 		NoDecodeReplicas, MalformedHistogram, TooManySlots, InvalidInput}
 }
@@ -123,7 +132,47 @@ const (
 	// band's top holds, floor(band.Hi*C/KVreq), rather than the batch cap: an
 	// approximation, since KV-bound admission is not a fixed number of slots.
 	KVBoundSlots Flag = "KVBoundSlots"
+	// BorrowedLine is an answer priced on a line another variant measured
+	// for the same engine configuration: evidence about the configuration,
+	// not about this variant's own load. It has no readings to band.
+	BorrowedLine Flag = "BorrowedLine"
+	// HeldLine is an answer priced on a slope held from an earlier fit, the
+	// window having too few readings to fit a new one.
+	HeldLine Flag = "HeldLine"
+	// TierUnstable is a band in which more than a tenth of the resamples
+	// fitted the line at another tier than the answer's.
+	TierUnstable Flag = "TierUnstable"
+	// ExtrapolatedFill is an answer whose fill lies above the highest fill
+	// the line's readings were taken at; the basis gives the distance.
+	ExtrapolatedFill Flag = "ExtrapolatedFill"
+	// AssumedShape is an answer priced at a prompt or output length the
+	// caller assumed rather than the one the fleet measured.
+	AssumedShape Flag = "AssumedShape"
 )
+
+// The line tiers a Basis names (docs/proposals/slo-capacity-planner.md,
+// "Terms"): where the ITL line came from. The first two are the itl
+// tracker's own; held and borrowed are what the analyzer does when the
+// tracker fits nothing.
+const (
+	// TierOLS is a full least-squares fit.
+	TierOLS = itl.TierOLS
+	// TierPinnedB is a fit of the slope alone with the intercept held from
+	// the last full fit, or the default.
+	TierPinnedB = itl.TierPinnedB
+	// TierHeld is the last slope kept, the window too thin to refit it.
+	TierHeld = "held"
+	// TierBorrowed is another variant's line for the same engine
+	// configuration.
+	TierBorrowed = "borrowed"
+)
+
+// Interval is an uncertainty band around a figure, Lo to Hi in the figure's
+// unit: the 10th to the 90th percentile of a block bootstrap (band.go), so it
+// need not be symmetric about the figure.
+type Interval struct {
+	Lo, Hi float64
+}
 
 // Bound names what set a rate. On a tie every bound is named, the
 // operating-point cap first.
@@ -160,15 +209,19 @@ type Basis struct {
 	Uncapped float64
 	// BoundBy names what set a rate, the operating-point cap first on a tie.
 	BoundBy []Bound
+	// Tier is the ITL line's tier (TierOLS, TierPinnedB, TierHeld,
+	// TierBorrowed), as Decode.Tier gave it; "" when the caller named none.
+	Tier string
 }
 
 // Answer is a priced figure: Value in the question's unit (requests per
-// second for a rate, seconds for a TPOT), its Basis and Flags. Uncertainty
-// bands join it with the CLI (the planner's D3 PR).
+// second for a rate, seconds for a TPOT), its Basis and Flags, and Band, its
+// uncertainty, nil until a caller bands it (BandAnswer).
 type Answer struct {
 	Value float64
 	Basis Basis
 	Flags []Flag
+	Band  *Interval
 }
 
 func (Answer) result() {}
