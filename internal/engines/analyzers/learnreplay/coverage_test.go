@@ -93,8 +93,9 @@ var reviewed = map[reflect.Type]buckets{
 	reflect.TypeFor[*throughput.ThroughputAnalyzer](): {
 		recorded: []string{"Analyze", "Observe"},
 		// StartConfig states what the builders set, for the recording's
-		// first line; it changes nothing.
-		readers: []string{"Name", "VariantState", "StartConfig"},
+		// first line; it changes nothing. PathCounts reads the per-path
+		// counters of the ITL line's fits (2.5), which only a replay reads.
+		readers: []string{"Name", "VariantState", "StartConfig", "PathCounts"},
 		// WithSettleView and WithCapacityStore hand the ITL line's admission
 		// the engine's settle tracker and store, read-only; the replay hands
 		// it its own (start.ThroughputConfig).
@@ -334,7 +335,8 @@ func TestSwitchHooks_NoProductionPathCallsThem(t *testing.T) {
 	// The walk reached the four hooks themselves, so it read the packages
 	// that define them, and the rest of the tree with them.
 	require.Equal(t, 4, defined, "the walk found %d SetSwitchesForReplay definitions in %d files", defined, files)
-	require.Equal(t, 2, namesDefined, "the walk found %d ReplaySwitchNames definitions", namesDefined)
+	// ReplaySwitchNames: saturation's, slo's and throughput's.
+	require.Equal(t, 3, namesDefined, "the walk found %d ReplaySwitchNames definitions", namesDefined)
 	assert.Empty(t, callers, "a production path calls a replay switch hook")
 }
 

@@ -175,10 +175,10 @@ func checkITLStaleBTimeBase(newL func() itlLearner) func(uint64) error {
 			ks[p], lats[p] = sampleTimeBase(k), sampleTimeBase(lat)
 		}
 		l := newL()
-		itlRun(l, len(ks[0].instant), func(i int) []domain.ReplicaMetrics {
+		itlRun(l, len(ks[0].Instant), func(i int) []domain.ReplicaMetrics {
 			rows := make([]domain.ReplicaMetrics, n)
 			for p := range n {
-				rows[p] = itlRow(fmt.Sprintf("r%d", p), ks[p].instant[i], lats[p].rate1m[i])
+				rows[p] = itlRow(fmt.Sprintf("r%d", p), ks[p].Instant[i], lats[p].Rate1m[i])
 			}
 			return rows
 		})
@@ -323,11 +323,11 @@ func knownTruthTimeBase(seed uint64, newL func() itlLearner, sigma float64, tau 
 		k[p], lat[p] = sampleTimeBase(ks), sampleTimeBase(ls)
 	}
 	l := newL()
-	readings := itlRun(l, len(k[0].instant), func(i int) []domain.ReplicaMetrics {
+	readings := itlRun(l, len(k[0].Instant), func(i int) []domain.ReplicaMetrics {
 		rows := make([]domain.ReplicaMetrics, n)
 		for p := range n {
-			rows[p] = itlRow(fmt.Sprintf("r%d", p), k[p].instant[i], lat[p].rate1m[i])
-			rows[p].KvUsageMean, rows[p].KvUsageMeanKnown = k[p].avg1m[i], true
+			rows[p] = itlRow(fmt.Sprintf("r%d", p), k[p].Instant[i], lat[p].Rate1m[i])
+			rows[p].KvUsageMean, rows[p].KvUsageMeanKnown = k[p].Avg1m[i], true
 			if edit != nil {
 				edit(&rows[p])
 			}

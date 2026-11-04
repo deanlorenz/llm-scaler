@@ -46,14 +46,14 @@ var _ = Describe("Throughput analyzer - warm pool bridges", func() {
 		bridge.TotalKvCapacityTokens = 32768
 		bridge.FromWarmPool = true
 
-		withoutBridge, err := NewThroughputAnalyzer().Analyze(ctx, domain.AnalyzerInput{
+		withoutBridge, err := newParentLineAnalyzer().Analyze(ctx, domain.AnalyzerInput{
 			ModelID:        bridgeModelID,
 			Namespace:      bridgeNamespace,
 			ReplicaMetrics: own,
 		})
 		Expect(err).NotTo(HaveOccurred())
 
-		withBridge, err := NewThroughputAnalyzer().Analyze(ctx, domain.AnalyzerInput{
+		withBridge, err := newParentLineAnalyzer().Analyze(ctx, domain.AnalyzerInput{
 			ModelID:        bridgeModelID,
 			Namespace:      bridgeNamespace,
 			ReplicaMetrics: append(append([]domain.ReplicaMetrics{}, own...), bridge),

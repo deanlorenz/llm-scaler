@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/internal/learnertest"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
@@ -17,25 +18,18 @@ import (
 )
 
 // The closed-loop probe (analyzer-learner.md, 2.5): the saturation analyzer
-// driven by a fleet simulator that turns its order into replicas. The open
-// loop replays recorded inputs that do not depend on outputs; holds,
-// latches, the sibling yield and a self-sealing low mu are closed-loop
+// driven by a fleet simulator that turns its order into replicas
+// (learnertest.Fleet, which the throughput analyzer's probe runs on too).
+// Holds, latches, the sibling yield and a self-sealing low mu are closed-loop
 // behaviours -- the order changes the load each replica sees, and so what the
 // analyzer is next shown -- and only a loop sees them.
 //
-// The simulator, one 15 s cycle at a time:
+// What the saturation analyzer is shown, one 15 s cycle at a time:
 //
-//   - Arrivals split over the Ready replicas by weight (equal by default).
-//   - Each replica serves up to its true mu; what it cannot serve queues on
-//     it, and its queue drains when its share falls under its mu. A replica
-//     serving under its mu holds KV in proportion (0.95 at its limit); one at
-//     its limit, or queued, holds 0.95.
+//   - A replica serving under its mu holds KV in proportion (0.95 at its
+//     limit); one at its limit, or queued, holds 0.95.
 //   - The analyzer prices the Ready replicas' rows; its order is the demand
 //     over the per-replica capacity at the scale-up target, rounded up.
-//   - An order above the fleet starts replicas, Ready after the start time
-//     S. An order below it removes replicas, newest first, once the highest
-//     order of the last 5 min (the default scale-down stabilization) is
-//     below the fleet, and no replica is starting.
 //   - A replica just Ready is first seen by the analyzer then, and waits its
 //     settle as any joined replica does.
 //
@@ -43,35 +37,11 @@ import (
 // arrival rate once every replica serves the fleet's mean mu. At that point
 // no replica queues, and the order is occupancy's: each replica holds 0.95
 // lambda / (n mu) of its KV, priced against k1 (0.8 of it) at the target
-// (0.85), so need is ceil(0.95 lambda / (0.68 mu)) whatever n is.
-//
-// Two verdicts. Over-ordered: the fleet ends more than probeOverTolerance
-// plus one replica over need at the horizon. Under-ordered: the fleet --
-// replicas starting included -- sits below need at the arrival rate of the
-// moment for longer than probeUnderFor in one run, at any point of the run,
-// or ends more than one replica under it. A shorter dip, while an order is
-// starting and settling, is the start time, not a verdict.
+// (0.85), so need is ceil(0.95 lambda / (0.68 mu)) whatever n is. The two
+// verdicts, over- and under-ordered, are learnertest.Result.Verdict's.
 
-const (
-	// probeStart is S, from an order to the replica Ready.
-	probeStart = 90 * time.Second
-	// probeStabilization is the scale-down stabilization window.
-	probeStabilization = 5 * time.Minute
-	// probeOverTolerance is how far over need the fleet may settle, as a
-	// fraction, plus one replica of rounding.
-	probeOverTolerance = 0.15
-	// probeUnderFor is how long the fleet may sit below need in one run:
-	// the start time, the joined replica's settle, and a cycle or two of
-	// ordering on either side of them.
-	probeUnderFor = 5 * time.Minute
-)
-
-// probePod is one simulated replica.
-type probePod struct {
-	name    string
-	readyAt time.Time
-	backlog float64
-}
+// probeStart is S, from an order to the replica Ready.
+const probeStart = learnertest.DefaultStartTime
 
 // probeCase is one closed-loop scenario.
 type probeCase struct {
@@ -100,7 +70,8 @@ type probeCase struct {
 	// exported is restored into the new one; without it nothing is.
 	restartAt time.Duration
 	snapshot  bool
-	// stabilization replaces probeStabilization when set.
+	// stabilization replaces the default scale-down stabilization window
+	// (learnertest.DefaultStabilization, 5 min) when set.
 	stabilization time.Duration
 	// switches are set on every process (SetSwitchesForReplay).
 	switches map[string]bool
@@ -140,46 +111,27 @@ type probeResult struct {
 	muCounts map[learn.Reason]int64
 	muSource learn.Source
 	trace    []int
+	// fleet is the simulator's result, whose verdict this is.
+	fleet learnertest.Result
 }
 
 // runProbe drives the case to its horizon and returns what the fleet did.
 func runProbe(t *testing.T, pc probeCase) probeResult {
 	t.Helper()
 	rig := newPropRig()
-	start := rig.clock
-	pods := make([]*probePod, 0, len(pc.pods))
-	for i := range pc.pods {
-		pods = append(pods, &probePod{name: fmt.Sprintf("r%02d", i), readyAt: start.Add(-time.Hour)})
-	}
-	trueMu := func(i int, elapsed time.Duration) float64 {
-		if pc.mu != nil {
-			return pc.mu(i, elapsed)
-		}
-		if i < len(pc.pods) {
-			return pc.pods[i]
-		}
-		return pc.addedMu
-	}
-	type order struct {
-		at time.Time
-		n  int
-	}
-	var orders []order
-	needAt := func(lambda float64) int { return int(math.Ceil(0.95*lambda/(0.68*pc.meanMu) - 1e-9)) }
-	res := probeResult{need: needAt(pc.lambda(pc.horizon)), muCounts: map[learn.Reason]int64{}}
-	bound := float64(res.need)*(1+probeOverTolerance) + 1
-	stabilization := probeStabilization
-	if pc.stabilization > 0 {
-		stabilization = pc.stabilization
-	}
+	res := probeResult{muCounts: map[learn.Reason]int64{}}
 	var st *settle.Tracker
 	if pc.decode {
 		st = probeProcess(t, rig, pc.switches)
 	}
 	restarted := false
-	var overFrom, underFrom time.Time
-	for rig.clock.Sub(start) < pc.horizon {
-		elapsed := rig.clock.Sub(start)
+	fleet := learnertest.Fleet{
+		Pods: pc.pods, AddedMu: pc.addedMu, Mu: pc.mu, Lambda: pc.lambda, Horizon: pc.horizon,
+		Need:  func(lambda float64) int { return int(math.Ceil(0.95*lambda/(0.68*pc.meanMu) - 1e-9)) },
+		Start: rig.clock, StartTime: probeStart, Stabilization: pc.stabilization,
+	}
+	out := fleet.Run(func(now time.Time, elapsed time.Duration, lambda float64, ready []learnertest.Replica) int {
+		require.Equal(t, now, rig.clock, "the rig's clock and the fleet's")
 		if pc.restartAt > 0 && !restarted && elapsed >= pc.restartAt {
 			restarted = true
 			doc := rig.a.ExportLearnedState()
@@ -192,32 +144,20 @@ func runProbe(t *testing.T, pc probeCase) probeResult {
 				rig.a.RestoreLearnedState(back)
 			}
 		}
-		lambda := pc.lambda(elapsed)
-		var ready []int
-		for i, p := range pods {
-			if !p.readyAt.After(rig.clock) {
-				ready = append(ready, i)
-			}
-		}
 		rows := make([]domain.ReplicaMetrics, 0, len(ready))
-		dt := propCycle.Seconds()
-		for _, i := range ready {
-			p, mu := pods[i], trueMu(i, elapsed)
-			offered := lambda / float64(len(ready))
-			p.backlog = max(p.backlog+(offered-mu)*dt, 0)
-			served, kv := offered, 0.95*offered/mu
-			if p.backlog > 0 || offered >= mu {
-				served, kv = mu, 0.95
+		for _, r := range ready {
+			kv := 0.95 * r.Offered / r.Mu
+			if r.Saturated {
+				kv = 0.95
 			}
-			rm := imbRow(p.name, "v", kv, int(math.Round(p.backlog)), 1000, 1000, served)
+			rm := imbRow(r.Name, "v", kv, int(math.Round(r.Backlog)), 1000, 1000, r.Served)
 			if pc.decode {
 				rm.KvCacheUsageKnown, rm.GenerationTokenRateKnown, rm.RequestRateKnown = true, true, true
 				rm.AvgITL, rm.AvgITLKnown = probeITL(kv), true
-				rm.ReadySince = p.readyAt
+				rm.ReadySince = r.ReadyAt
 			}
 			rows = append(rows, rm)
 		}
-		now := rig.clock
 		states := aggStates(len(rows))
 		if pc.decode {
 			states = decodeStates(len(rows))
@@ -236,69 +176,17 @@ func runProbe(t *testing.T, pc probeCase) probeResult {
 				res.muSource = r.Source
 			}
 		}
-		ordered := int(math.Ceil(impliedReplicas(out) - 1e-9))
-		if math.IsNaN(impliedReplicas(out)) || ordered < 1 {
-			ordered = 1
-		}
-		orders = append(orders, order{at: rig.clock, n: ordered})
-		for len(orders) > 0 && rig.clock.Sub(orders[0].at) > stabilization {
-			orders = orders[1:]
-		}
-		starting := len(pods) - len(ready)
-		switch {
-		case ordered > len(pods):
-			for range ordered - len(pods) {
-				pods = append(pods, &probePod{name: fmt.Sprintf("r%02d", len(pods)), readyAt: rig.clock.Add(probeStart)})
-			}
-		case starting == 0:
-			keep := 0
-			for _, o := range orders {
-				keep = max(keep, o.n)
-			}
-			if keep < len(pods) {
-				pods = pods[:keep]
-			}
-		}
-		res.trace = append(res.trace, len(pods))
-		res.peak = max(res.peak, len(pods))
-		if len(pods) < needAt(lambda) {
-			if underFrom.IsZero() {
-				underFrom = now
-			}
-			res.underFor = max(res.underFor, rig.clock.Sub(underFrom))
-		} else {
-			underFrom = time.Time{}
-		}
-		if float64(len(pods)) > bound {
-			if overFrom.IsZero() {
-				overFrom = rig.clock
-			}
-		} else {
-			overFrom = time.Time{}
-		}
-	}
-	res.final = len(pods)
-	if !overFrom.IsZero() {
-		res.overSince = rig.clock.Sub(overFrom)
-	}
+		return learnertest.Ceil(impliedReplicas(out))
+	})
+	res.fleet = out
+	res.need, res.final, res.peak = out.Need, out.Final, out.Peak
+	res.overSince, res.underFor, res.trace = out.OverSince, out.UnderFor, out.Trace
 	return res
 }
 
-// verdict is "" when the fleet ends within tolerance of need, else why not.
-func (r probeResult) verdict() string {
-	bound := float64(r.need)*(1+probeOverTolerance) + 1
-	switch {
-	case float64(r.final) > bound:
-		return fmt.Sprintf("over-ordered: %d replicas against a need of %d (bound %.1f), over it for the last %s",
-			r.final, r.need, bound, r.overSince)
-	case r.final < r.need-1:
-		return fmt.Sprintf("under-ordered: %d replicas against a need of %d", r.final, r.need)
-	case r.underFor > probeUnderFor:
-		return fmt.Sprintf("under-ordered mid-run: below need for %s, over the %s a start and a settle take",
-			r.underFor, probeUnderFor)
-	}
-	return ""
-}
+// verdict is "" when the fleet ends within tolerance of need, else why not
+// (learnertest.Result.Verdict).
+func (r probeResult) verdict() string { return r.fleet.Verdict() }
 
 // stepTo is an arrival rate of from until at, then to.
 func stepTo(from, to float64, at time.Duration) func(time.Duration) float64 {

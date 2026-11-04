@@ -2,6 +2,7 @@ package itl
 
 import (
 	"maps"
+	"math"
 	"sync"
 	"time"
 
@@ -41,6 +42,11 @@ type Tracker struct {
 	// or the window too few readings at all; with when it was fitted and
 	// under which engine arguments, which bound the hold (Admission).
 	slopes map[string]heldSlope
+	// above and aboveSteady hold, per key, the readings above the band that
+	// were not admitted, and the steady ones among them, for the fallback
+	// line (Admission.AboveBandFallback). Empty for a key whose admission
+	// never asked for it.
+	above, aboveSteady map[string]*Window
 }
 
 // heldSlope is a key's last fitted A, when it was fitted, and the engine
@@ -54,11 +60,13 @@ type heldSlope struct {
 // NewTracker returns an empty Tracker.
 func NewTracker() *Tracker {
 	return &Tracker{
-		windows:   map[string]*Window{},
-		baselines: map[string]float64{},
-		steady:    map[string]*Window{},
-		traces:    map[string]*keyTraces{},
-		slopes:    map[string]heldSlope{},
+		windows:     map[string]*Window{},
+		baselines:   map[string]float64{},
+		steady:      map[string]*Window{},
+		traces:      map[string]*keyTraces{},
+		slopes:      map[string]heldSlope{},
+		above:       map[string]*Window{},
+		aboveSteady: map[string]*Window{},
 	}
 }
 
@@ -96,6 +104,16 @@ type Reading struct {
 	SlopeHeld bool
 	// SlopeFittedAt is when the held A was fitted; zero unless SlopeHeld.
 	SlopeFittedAt time.Time
+	// AboveBandFit is set when Model is the above-band fallback
+	// (Admission.AboveBandFallback): the band gave no line, the key held no
+	// slope it may hold, and A was fitted from the readings above the band.
+	AboveBandFit bool
+	// AboveBandHeld is the above-band window's size after pruning; zero
+	// without the fallback.
+	AboveBandHeld int
+	// AboveBandUnderKSat counts the AboveBand readings at a k under
+	// DefaultKSat: above the band, and too low for the fallback to keep.
+	AboveBandUnderKSat int
 	// Held is the window's size after pruning.
 	Held int
 	// SteadyHeld is how many steady readings the full fit may use, and Ready
@@ -179,20 +197,22 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 	if !ok {
 		// The windows span the whole cache: the band is the Admission's,
 		// applied below, where a capped replica's reading may pass it.
-		w = NewWindow(DefaultWindowMaxSize, DefaultObservationMaxAge, DefaultMinSamples,
-			DefaultMinKSpread, 0, 1)
+		w = newKeyWindow(DefaultWindowMaxSize)
 		t.windows[key] = w
 	}
 	sw, ok := t.steady[key]
 	if !ok {
-		sw = NewWindow(DefaultSteadyWindowMaxSize, DefaultObservationMaxAge, DefaultMinSamples,
-			DefaultMinKSpread, 0, 1)
+		sw = newKeyWindow(DefaultSteadyWindowMaxSize)
 		t.steady[key] = sw
 	}
 	traces, ok := t.traces[key]
 	if !ok {
 		traces = &keyTraces{since: now, replicas: map[string]*replicaTrace{}}
 		t.traces[key] = traces
+	}
+	var aw, asw *Window
+	if adm.AboveBandFallback {
+		aw, asw = t.aboveWindows(key)
 	}
 	seen := make(map[string]bool, len(rows))
 	for _, rm := range rows {
@@ -253,6 +273,19 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 			r.BelowBand++
 		case k > hi && !adm.atSequenceCap(rm):
 			r.AboveBand++
+			if k < DefaultKSat {
+				r.AboveBandUnderKSat++
+			}
+			// Kept for the fallback only, stamped as a reading in the band
+			// is, and only at a k of at least the one the line is priced at
+			// (fitAboveBand: what makes the fallback one-sided).
+			if aw == nil || k < DefaultKSat {
+				break
+			}
+			dropped := aw.add(Observation{K: k, ITLSec: rm.AvgITL, Timestamp: now, settling: settling})
+			if !dropped && steady {
+				asw.Add(k, rm.AvgITL, now)
+			}
 		default:
 			// Add drops nothing the cases above let through but a k above a
 			// full cache, which the collector never reports; counted as
@@ -300,20 +333,12 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 			rt.missed = true
 		}
 	}
-	w.Prune(now)
-	obs := w.Observations()
-	// A steady reading outlives the main window's oldest by at most
-	// DefaultSteadyCarry: long enough for the old level to still be there
-	// when a step's new level settles, and no longer, because A moves with
-	// the workload and a steady window kept for its own sake would keep
-	// fitting a line the fleet has since moved off.
-	sw.Prune(now)
-	cutoff := now.Add(-s.Carry)
-	if len(obs) > 0 && obs[0].Timestamp.Before(cutoff) {
-		cutoff = obs[0].Timestamp
+	obs, steadyObs := pruneWithCarry(w, sw, now, s.Carry)
+	var aboveObs, aboveSteadyObs []Observation
+	if aw != nil {
+		aboveObs, aboveSteadyObs = pruneWithCarry(aw, asw, now, s.Carry)
+		r.AboveBandHeld = len(aboveObs)
 	}
-	sw.dropBefore(cutoff)
-	steadyObs := sw.Observations()
 	r.Held, r.Ready, r.SteadyHeld, r.SteadySpread = len(obs), sw.Ready(), len(steadyObs), sw.KSpread()
 	baseline, stored := t.baselines[key]
 	t.mu.Unlock()
@@ -365,8 +390,10 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 		// there is -- the mu derived from it is still priced at the shape
 		// arriving now -- and a fresh fit replaces it as soon as the window
 		// holds DefaultMinSamples again. A key that never fitted has no A
-		// and still gets no line. The same holds above the band: a replica
-		// there that is not at its sequence cap offers no reading either.
+		// and still gets no line, unless the admission asks for the
+		// above-band fallback (aboveBandLine). The same holds above the
+		// band: a replica there that is not at its sequence cap offers no
+		// reading to the band either.
 		//
 		// Not for ever. An A fitted longer ago than adm.SlopeHoldFor, or
 		// under other engine arguments than adm.Args, is not held: the hold
@@ -376,7 +403,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 		held, have := t.slopes[key]
 		t.mu.Unlock()
 		if !have || !adm.mayHold(held, now) {
-			return r
+			return aboveBandLine(r, aboveObs, aboveSteadyObs, s)
 		}
 		r.Model, r.Tier, r.SlopeHeld = Model{A: held.a, B: baseline}, TierPinnedB, true
 		r.SlopeFittedAt = held.fittedAt
@@ -392,6 +419,143 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 	t.mu.Unlock()
 	r.Model, r.Tier = m, TierPinnedB
 	return r
+}
+
+// pruneWithCarry prunes a window and its steady one, and returns what each
+// then holds. A steady reading outlives the main window's oldest by at most
+// carry (DefaultSteadyCarry): long enough for the old level to still be
+// there when a step's new level settles, and no longer, because A moves with
+// the workload and a steady window kept for its own sake would keep fitting
+// a line the fleet has since moved off.
+func pruneWithCarry(w, sw *Window, now time.Time, carry time.Duration) (obs, steady []Observation) {
+	w.Prune(now)
+	obs = w.Observations()
+	sw.Prune(now)
+	cutoff := now.Add(-carry)
+	if len(obs) > 0 && obs[0].Timestamp.Before(cutoff) {
+		cutoff = obs[0].Timestamp
+	}
+	sw.dropBefore(cutoff)
+	return obs, sw.Observations()
+}
+
+// aboveWindows is the key's above-band window and its steady one, made on
+// first use. Called with t.mu held.
+func (t *Tracker) aboveWindows(key string) (all, steady *Window) {
+	all, ok := t.above[key]
+	if !ok {
+		// The band is the Admission's: these windows take what lies above it.
+		all = newKeyWindow(DefaultWindowMaxSize)
+		t.above[key] = all
+	}
+	steady, ok = t.aboveSteady[key]
+	if !ok {
+		steady = newKeyWindow(DefaultSteadyWindowMaxSize)
+		t.aboveSteady[key] = steady
+	}
+	return all, steady
+}
+
+// newKeyWindow is one of a key's windows, holding up to size readings. It
+// spans the whole cache, [0, 1]: the band is the Admission's, applied in
+// Observe, where a capped replica's reading may pass it and a reading above
+// it may go to the above-band window.
+func newKeyWindow(size int) *Window {
+	return NewWindow(size, DefaultObservationMaxAge, DefaultMinSamples, DefaultMinKSpread, 0, 1)
+}
+
+// aboveBandLine is r with the above-band fallback's line, when obs and
+// steady -- the key's readings above the band at a k of at least
+// DefaultKSat, and the steady ones among them -- give one by the pinned
+// fit's own rules: pinnedReadings, at least DefaultMinSamples readings and
+// s.MinSettledSamples past their settle. Observe calls it only when the band
+// gave no line and the key holds no slope it may hold, so it never replaces
+// an in-band fit or a held slope, and the first in-band fit replaces it. Its
+// A is not remembered, and its B never becomes the key's intercept: a later
+// hold holds only a slope fitted in the band, and a later pinned fit pins
+// only a B a full fit measured.
+//
+// The case it is for: a key that has never fitted, under load that holds
+// every replica above the band -- a controller restart into saturation, or a
+// variant that starts there. The band then never gets its readings, and the
+// line was silent for as long as the load stayed up; with the throughput
+// analyzer alone, nothing ordered the scale-up that would bring the fleet
+// back into the band.
+//
+// It errs on one side only, by construction: see fitAboveBand.
+func aboveBandLine(r Reading, obs, steady []Observation, s Steadiness) Reading {
+	pinned, settled := pinnedReadings(obs, steady)
+	if !settled || len(pinned) < s.MinSettledSamples {
+		return r
+	}
+	m, ok := fitAboveBand(pinned, aboveBandB(pinned))
+	if !ok {
+		return r
+	}
+	r.Model, r.Tier, r.AboveBandFit = m, TierPinnedB, true
+	return r
+}
+
+// aboveBandB is the B the above-band fallback pins: the least ITL among its
+// readings, the strict minimum. Zero when there is no finite positive one.
+//
+// Every reading is ITL = B' + A k + noise, with A >= 0 and k > 0, so the
+// least ITL is at least the true B' up to the noise -- and above the band the
+// noise is small against A k (a 2 % gauge on 50 ms is 1 ms, A k is 40 ms or
+// more), so one low reading does not bring it under B'. A low quantile would
+// guard against an outlier the gauge does not produce, at the cost of a B
+// nearer B'; the strict minimum is kept.
+func aboveBandB(obs []Observation) float64 {
+	b := math.Inf(1)
+	for _, o := range obs {
+		if o.ITLSec > 0 && !math.IsInf(o.ITLSec, 0) && o.K > 0 && !math.IsInf(o.K, 0) {
+			b = min(b, o.ITLSec)
+		}
+	}
+	if math.IsInf(b, 1) {
+		return 0
+	}
+	return b
+}
+
+// fitAboveBand is the above-band fallback's line through b: A = sum(ITL_i -
+// b) / sum(k_i), the pinned fit's k-weighted slope (FitPinnedB). Unlike
+// FitPinnedB it takes A = 0: with b the least ITL, readings that all share
+// one ITL give a flat line at that ITL, which is still a price (see below),
+// where FitPinnedB refuses a flat fit as noise.
+//
+// Why it errs on one side only. With b at or above the true B' (aboveBandB)
+// and every reading at k_i >= DefaultKSat (Observe keeps no other), the line
+// priced at kSat = DefaultKSat is, on readings of the true line ITL = A' k +
+// B',
+//
+//	b + kSat (ITLbar - b) / kbar = A' kSat + B' + (b - B')(1 - kSat/kbar)
+//
+// with kbar the readings' mean k and ITLbar their mean ITL. Both factors of
+// the last term are >= 0, so the priced ITL is at least the true line's at
+// kSat: never a higher mu than the truth. A replica pushed past the band reads
+// above the line (it queues; its batch is past where the line was fitted),
+// which raises ITLbar and the price with it. The k floor is what makes the
+// second factor >= 0: the band's top, 0.80 by default, lies under kSat (0.85),
+// and a reading between them would turn the term against the truth.
+//
+// The term is also the margin that absorbs the gauge's noise: b, the least
+// ITL, sits far above B' (about 48 ms against 4 or 10 on the throughput
+// property case, which measured the priced ITL at least 2 % over the truth).
+// Pinned at DefaultBaselineSec instead, as the band's fit pins a key that
+// never fitted, b is below a true B' of 10 ms and the term goes negative:
+// that case then prices under the truth on every seed.
+//
+// No clamp on A is needed: with b the least ITL, every ITL_i - b is >= 0,
+// and a sum of non-negative floats is non-negative. A b passed below that
+// (the tests' negative control pins DefaultBaselineSec) still gives A >= 0
+// on a fleet above the band; a negative A is refused all the same.
+func fitAboveBand(obs []Observation, b float64) (Model, bool) {
+	a, ok := pinnedSlope(obs, b)
+	if !ok || !(a >= 0) {
+		return Model{}, false
+	}
+	return Model{A: a, B: b}, true
 }
 
 // DefaultMinSettledSamples is the fewest readings, from replicas past their
@@ -458,8 +622,10 @@ func (t *Tracker) Sweep(now time.Time, stale func(key string) bool) (windows, ba
 	for _, w := range t.windows {
 		w.Prune(now)
 	}
-	for _, w := range t.steady {
-		w.Prune(now)
+	for _, m := range []map[string]*Window{t.steady, t.above, t.aboveSteady} {
+		for _, w := range m {
+			w.Prune(now)
+		}
 	}
 	for key := range t.windows {
 		if stale(key) {
@@ -484,6 +650,12 @@ func (t *Tracker) Sweep(now time.Time, stale func(key string) bool) (windows, ba
 			delete(t.slopes, key)
 		}
 	}
+	for key := range t.above {
+		if stale(key) {
+			delete(t.above, key)
+			delete(t.aboveSteady, key)
+		}
+	}
 	// Apart from the windows: a key can hold an intercept with no window, one
 	// restored from a snapshot before the variant was seen again.
 	for key := range t.baselines {
@@ -495,24 +667,31 @@ func (t *Tracker) Sweep(now time.Time, stale func(key string) bool) (windows, ba
 	return windows, baselines
 }
 
-// ClearWindow drops the readings filed under key, the steady ones too, and
-// keeps the key's intercept, its held slope and its replicas' settle
-// traces: the next fit is made from new readings only, and until there are
-// enough the held slope is the line, as on light load. It reports whether
-// the key held any readings.
+// ClearWindow drops the readings filed under key, the steady ones and those
+// above the band too, and keeps the key's intercept, its held slope and its
+// replicas' settle traces: the next fit is made from new readings only, and
+// until there are enough the held slope is the line, as on light load. It
+// reports whether the key held any readings.
 func (t *Tracker) ClearWindow(key string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	had := false
-	if w, ok := t.windows[key]; ok {
-		had = w.Len() > 0
-		w.Clear()
-	}
-	if w, ok := t.steady[key]; ok {
-		had = had || w.Len() > 0
-		w.Clear()
+	for _, m := range []map[string]*Window{t.windows, t.steady, t.above, t.aboveSteady} {
+		if w, ok := m[key]; ok {
+			had = had || w.Len() > 0
+			w.Clear()
+		}
 	}
 	return had
+}
+
+// ForgetSlope drops the key's last A, so no slope is held for it until a
+// new one is fitted, and keeps its windows and intercept: ForgetSlopes for
+// one key.
+func (t *Tracker) ForgetSlope(key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.slopes, key)
 }
 
 // Baselines returns a copy of every key's remembered intercept.

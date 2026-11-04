@@ -50,6 +50,22 @@ type ThroughputAnalyzer struct {
 	settleInterval time.Duration
 	slopeHoldFor   time.Duration
 	store          *capacity.Store
+
+	// lines is the ITL line's tracker, the analyzer's own (itl_line.go):
+	// one key per variant, as the window was.
+	lines *itl.Tracker
+	// itlLogged is what learner-write last logged of each variant's line.
+	itlLogged map[string]itlLogged
+	// itlSteadyGate and itlKeepsOnGPSMismatch are the replay switches of
+	// learner PR 4b-1 (itl_line.go): SwitchITLSteadyGate and
+	// SwitchITLKeepsWindowOnGPSMismatch. On by the constructor.
+	itlSteadyGate, itlKeepsOnGPSMismatch bool
+	// noAboveBandFallback turns the line's above-band fallback off
+	// (itl.Admission.AboveBandFallback), for the tests' negative controls
+	// only: set by withoutAboveBandFallback, which only tests define.
+	noAboveBandFallback bool
+	// paths counts the line's fits by path, for the replay (path_counts.go).
+	paths pathCounters
 }
 
 // variantState holds the cross-cycle calibration state for a single variant.
@@ -77,13 +93,35 @@ type variantState struct {
 	lastPerReplicaSupply float64
 	lastTotalSupply      float64
 	lastDemand           float64
+	// reading is what the line's tracker read this cycle (itl_line.go),
+	// with SwitchITLSteadyGate on; hasReading is set when it read this
+	// cycle, and cleared on a cycle with no healthy row, which reads
+	// nothing: such a cycle has no line, not the last cycle's.
+	reading    itl.Reading
+	hasReading bool
+	// shapeChanged is set by a shape change and cleared when the line is
+	// next live, and everLive once the line has been live: what names the
+	// cause of a silent line (silenceCause). SwitchITLSteadyGate only.
+	shapeChanged, everLive bool
+	// gpsMismatched is whether the variant's last GPS check found a
+	// mismatch, so its summary line logs only when that changes
+	// (SwitchITLKeepsWindowOnGPSMismatch).
+	gpsMismatched bool
+	// lineSilent is whether the variant's line was silent (no line) on the
+	// last cycle it was read, so its summary line logs only when that
+	// changes (SwitchITLSteadyGate).
+	lineSilent bool
 }
 
 // NewThroughputAnalyzer creates a ThroughputAnalyzer with default configuration.
 func NewThroughputAnalyzer() *ThroughputAnalyzer {
 	return &ThroughputAnalyzer{
-		variantStates: make(map[string]*variantState),
-		clock:         clock.RealClock{},
+		variantStates:         make(map[string]*variantState),
+		clock:                 clock.RealClock{},
+		lines:                 itl.NewTracker(),
+		itlLogged:             make(map[string]itlLogged),
+		itlSteadyGate:         true,
+		itlKeepsOnGPSMismatch: true,
 	}
 }
 
@@ -151,6 +189,9 @@ func (a *ThroughputAnalyzer) observe(
 		state := a.getOrCreateVariantState(key)
 		state.lastSanityReport = report
 		state.lastObservedAt = now
+		// Read again below, or not at all this cycle: a cycle that skips
+		// the variant keeps no reading from the last.
+		state.reading, state.hasReading = itl.Reading{}, false
 
 		if report.Has(SanityIssueNoReplicas) {
 			ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("throughput analyzer: no replicas, skipping variant",
@@ -193,11 +234,30 @@ func (a *ThroughputAnalyzer) observe(
 			)
 			state.observationWindow.Clear()
 			state.consecutiveGPSMismatches = 0
+			if a.itlSteadyGate {
+				// The held slope goes with the window: a shape change moves
+				// A (shorter requests, a higher A), and the old shape's A,
+				// held until the new shape's readings fit, priced a lower
+				// ITL, so fewer replicas. Until the new shape fits, the line
+				// is the above-band fallback or silent.
+				a.lines.ClearWindow(key)
+				a.lines.ForgetSlope(key)
+				state.shapeChanged = true
+			}
+		}
+
+		adm := admissionFor(variantName)
+		// On the shared tracker (SwitchITLSteadyGate, itl_line.go) the
+		// tracker judges each row; the window below is left as it was.
+		if a.itlSteadyGate {
+			state.reading = a.lines.Observe(key, variantName, freshRows(variantMetrics), adm, now)
+			a.paths.count(state.reading)
+			state.hasReading = true
+			continue
 		}
 
 		// Collect one (k*, ITL) observation per healthy replica. Per-replica variation
 		// in k* provides the k-spread needed for a reliable OLS fit.
-		adm := admissionFor(variantName)
 		lo, hi := adm.MinK, adm.MaxK
 		for _, m := range healthyMetrics {
 			// The k paired with the replica's ITL: the KV fill averaged over
@@ -222,7 +282,17 @@ func (a *ThroughputAnalyzer) observe(
 	for key, state := range a.variantStates {
 		if now.Sub(state.lastObservedAt) > 2*itl.DefaultObservationMaxAge {
 			delete(a.variantStates, key)
+			delete(a.itlLogged, key)
 		}
+	}
+	// The tracker's keys go with their variant state, as its window did. The
+	// tracker never calls back into the analyzer, so its lock under a.mu is
+	// safe.
+	if a.itlSteadyGate {
+		a.lines.Sweep(now, func(key string) bool {
+			_, live := a.variantStates[key]
+			return !live
+		})
 	}
 
 	return reports
@@ -314,7 +384,9 @@ func (a *ThroughputAnalyzer) analyze(
 	// One admission for the model's variants until the line reads each
 	// variant's engine parameters (admission).
 	adm := a.admission(itlPolicyOf(input.Config), input.Namespace, input.ModelID)
-	a.observe(ctx, now, input.ModelID, input.Namespace, ownMetrics, func(string) itl.Admission { return adm })
+	a.observe(ctx, now, input.ModelID, input.Namespace, ownMetrics, func(variant string) itl.Admission {
+		return a.lineAdmission(adm, input.Namespace, input.ModelID, variant)
+	})
 
 	byVariant := groupByVariant(ownMetrics)
 
@@ -379,13 +451,24 @@ func (a *ThroughputAnalyzer) analyze(
 		// upward → systematic under-provisioning. Supply counting (computeVariantSupply,
 		// computeDemand) uses the unfiltered variantMetrics to include booting replicas.
 		healthyMetrics := filterHealthyForShape(variantMetrics)
-		model, reason, ok := a.resolveITLModel(ctx, state, healthyMetrics, input.Namespace, input.ModelID, variantName)
+		var (
+			model  itl.Model
+			reason string
+		)
+		if a.itlSteadyGate {
+			model, reason, ok = a.lineModel(ctx, key, state, input.Namespace, input.ModelID, variantName, now)
+		} else {
+			model, reason, ok = a.resolveITLModel(ctx, state, healthyMetrics, input.Namespace, input.ModelID, variantName)
+		}
 		if !ok {
 			ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("throughput analyzer: no ITL model available, skipping variant",
 				"namespace", input.Namespace,
 				"modelID", input.ModelID,
 				"variant", variantName,
 			)
+			if a.itlKeepsOnGPSMismatch {
+				endGPSMismatch(ctx, state, input.Namespace, input.ModelID, variantName)
+			}
 			continue
 		}
 
@@ -438,11 +521,20 @@ func (a *ThroughputAnalyzer) analyze(
 			nDecodeVariants++
 		}
 
-		if checkVariantGPSMismatch(ctx, healthyMetrics, shape, model, input.Namespace, input.ModelID, variantName) {
+		switch {
+		case a.itlKeepsOnGPSMismatch:
+			// A diagnostic only: the window keeps its readings (itl_line.go).
+			if a.noteGPSMismatch(ctx, state, healthyMetrics, shape, model, input.Namespace, input.ModelID, variantName) {
+				anyGPSMismatch = true
+			}
+		case checkVariantGPSMismatch(ctx, healthyMetrics, shape, model, input.Namespace, input.ModelID, variantName):
 			anyGPSMismatch = true
 			state.consecutiveGPSMismatches++
 			if state.consecutiveGPSMismatches >= DefaultGPSMismatchClearThreshold {
 				state.observationWindow.Clear()
+				if a.itlSteadyGate {
+					a.lines.ClearWindow(key)
+				}
 				state.consecutiveGPSMismatches = 0
 				ctrl.LoggerFrom(ctx).Info("throughput analyzer: GPS mismatch persisted, clearing observation window for recalibration",
 					"namespace", input.Namespace,
@@ -451,7 +543,7 @@ func (a *ThroughputAnalyzer) analyze(
 					"threshold", DefaultGPSMismatchClearThreshold,
 				)
 			}
-		} else {
+		default:
 			state.consecutiveGPSMismatches = 0
 		}
 
@@ -556,6 +648,9 @@ func (a *ThroughputAnalyzer) VariantState(modelID, namespace, variantName string
 	}
 
 	shape, _ := state.shapeTracker.Current()
+	if a.itlSteadyGate {
+		return a.lineVariantState(key, state, shape), true
+	}
 	return ThroughputVariantState{
 		Shape:            shape,
 		ObservationReady: state.observationWindow.Ready(),

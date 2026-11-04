@@ -21,6 +21,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/learnreplay"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/steadystate"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
@@ -210,7 +211,17 @@ func TestRun_AddCheckUpdate(t *testing.T) {
 	}
 	require.Len(t, unrunSLO, 2, "the head recording leaves these slo paths unrun: %v. "+
 		"It never analyzes slo, so both; check the list and update the 2", unrunSLO)
+	// The throughput line's required paths: the head recording never
+	// analyzes throughput. Settling is not required, so it is not listed.
+	var unrunThroughput []string
+	for _, p := range []string{throughput.PathITLOLS, throughput.PathITLPinned, throughput.PathITLHeld} {
+		if rep.Paths[p] == 0 {
+			unrunThroughput = append(unrunThroughput, p)
+		}
+	}
+	require.Len(t, unrunThroughput, 3, "the head recording leaves these throughput paths unrun: %v. "+
+		"It never analyzes throughput, so all three; check the list and update the 3", unrunThroughput)
 	out, err = runOut("check", "-dir", dir)
 	require.ErrorContains(t, err, fmt.Sprintf("%d learner paths no golden runs",
-		len(unrun)+len(unrunSettle)+len(unrunSLO)+len(steadystate.LearnerReplayPathNames())), out)
+		len(unrun)+len(unrunSettle)+len(unrunSLO)+len(unrunThroughput)+len(steadystate.LearnerReplayPathNames())), out)
 }

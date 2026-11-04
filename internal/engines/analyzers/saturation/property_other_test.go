@@ -87,11 +87,11 @@ func checkIdleEdge(verdict idleVerdict) func(uint64) error {
 			path[i] = 1 + path[i]
 		}
 		tb := sampleTimeBase(path)
-		med := append([]float64(nil), tb.peak1m...)
+		med := append([]float64(nil), tb.Peak1m...)
 		sort.Float64s(med)
 		a := NewSaturationAnalyzer(capacity.NewStore())
-		v := make([]bool, len(tb.peak1m))
-		for i, k := range tb.peak1m {
+		v := make([]bool, len(tb.Peak1m))
+		for i, k := range tb.Peak1m {
 			v[i] = verdict(a, k*0.30/med[len(med)/2], propStart.Add(time.Duration(i)*propCycle))
 		}
 		return holds(reversals(v) <= 1, kindFlipped, "peak KV on the 0.30 line: the idle verdict reversed %d times in %d cycles", reversals(v), len(v))

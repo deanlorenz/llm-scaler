@@ -52,8 +52,25 @@ const DefaultBaselineSec = 0.006
 // cache in use cannot make a replica faster, and a fit that says so is
 // measurement noise, not a model.
 func FitPinnedB(obs []Observation, b float64) (Model, bool) {
-	if len(obs) == 0 || !(b > 0) {
+	a, ok := pinnedSlope(obs, b)
+	if !ok || !(a >= 0) {
 		return Model{}, false
+	}
+	m := Model{A: a, B: b}
+	if !ValidModel(m.A, m.B) {
+		return Model{}, false
+	}
+	return m, true
+}
+
+// pinnedSlope is the pinned fit's slope through b, sum(ITL_i - b) /
+// sum(k_i), over the readings with a finite positive k and ITL: the kernel
+// FitPinnedB and the above-band fallback (fitAboveBand) share, each with
+// its own rule for which slopes are a line. ok is false when b is not
+// positive or no reading is usable.
+func pinnedSlope(obs []Observation, b float64) (a float64, ok bool) {
+	if !(b > 0) {
+		return 0, false
 	}
 	var above, load float64
 	for _, o := range obs {
@@ -64,15 +81,7 @@ func FitPinnedB(obs []Observation, b float64) (Model, bool) {
 		load += o.K
 	}
 	if !(load > 0) {
-		return Model{}, false
+		return 0, false
 	}
-	a := above / load
-	if !(a >= 0) {
-		return Model{}, false
-	}
-	m := Model{A: a, B: b}
-	if !ValidModel(m.A, m.B) {
-		return Model{}, false
-	}
-	return m, true
+	return above / load, true
 }

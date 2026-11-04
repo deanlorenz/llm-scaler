@@ -103,6 +103,7 @@ Events
 Every
 FMA
 Failed
+Fix
 Found
 GLOBAL_OPT_INTERVAL
 GPS
@@ -193,6 +194,7 @@ P2-prior
 P3-k2
 P4-k1
 POD_NAMESPACE
+PR
 PROMETHEUS_ALLOW_HTTP
 PROMETHEUS_BASE_URL
 PROMETHEUS_BEARER_TOKEN
@@ -208,6 +210,7 @@ PROMETHEUS_METRICS_CACHE_UNAVAILABLE_THRESHOLD
 PROMETHEUS_SERVER_NAME
 PROMETHEUS_TLS_INSECURE_SKIP_VERIFY
 PROMETHEUS_TOKEN_PATH
+PROPSEED
 Passive
 Pending
 Physical
@@ -264,8 +267,10 @@ Skipping
 StartOptimizeLoop
 Successfully
 T1-ols
+T2-above-band
 T2-default
 T2-failed
+T2-held
 T2-pinned
 Target
 The
@@ -318,6 +323,7 @@ about
 above
 above-band
 aboveBand
+aboveBandHeld
 absent
 accType
 accelerator
@@ -349,6 +355,7 @@ admission.siblingMuTolerance
 admit
 admits
 admitted
+adopted-raw
 affectedPods
 after
 again
@@ -361,6 +368,7 @@ agreeCycles
 agreed
 aim
 all
+all-above-band-below-ksat
 all2all_backend
 allMark
 allMarkAt
@@ -452,6 +460,7 @@ batchCaps
 be
 because
 become
+becomes
 been
 before
 behavior
@@ -464,6 +473,7 @@ beside
 best-effort
 better
 between
+biased
 bind
 blip
 block
@@ -537,6 +547,8 @@ capped
 caps
 carries
 carry
+case
+cases
 cause
 ceiling
 certificate
@@ -624,6 +636,7 @@ constrains
 constraint
 constraints
 contains
+contamination-heterogeneity
 context_length
 continues
 contributors
@@ -681,6 +694,7 @@ deeper
 default
 defaultPolicy
 defaults
+defect
 definition
 delay
 deleted
@@ -708,6 +722,7 @@ derivedRate
 desiredReplicas
 detected
 did
+differ
 differences
 differs
 dir
@@ -731,6 +746,7 @@ discarding
 discover
 discovery
 do
+docs/developer-guide/testing.md
 docs/reference/operations.md
 document
 documents
@@ -761,6 +777,7 @@ dwell
 e.g
 each
 earlier
+edges
 effect
 effective
 effectiveCapacity
@@ -834,7 +851,9 @@ exclude
 excluded
 exclusive
 exists
+expect
 expected
+expects
 expert_parallel
 expert_parallel_size
 exported
@@ -845,6 +864,8 @@ factor
 factory
 failed
 failing
+fails
+failure
 failureThreshold
 fair-share
 fall
@@ -852,6 +873,7 @@ fallback
 fallback.replicas
 fallbackSource
 false
+fell
 fewer
 field
 fields
@@ -864,12 +886,15 @@ filling
 finding
 finite
 first
+first-sample
 firstDroppedSeq
 firstWrite
 fit
+fit-declined
 fitted
 fitting
 fix
+fixed
 flags
 flappingWindow
 flavor
@@ -880,6 +905,7 @@ fleetOutputTokens
 fleetShape
 fleetShapes
 flight
+flipped
 float
 floor
 floorExcessGPUs
@@ -1028,6 +1054,7 @@ implausible
 important
 in
 in-flight
+inBand
 inactive
 included
 incomplete
@@ -1161,8 +1188,11 @@ keeps
 kept
 key
 keyOutputTokens
+kind
 know
 known
+known-failures
+known-truth
 kueue
 kueue-gate
 kueue-lender-release
@@ -1227,6 +1257,7 @@ leave
 leaves
 leaving
 ledger
+ledgered
 left
 legacy
 lender
@@ -1263,6 +1294,7 @@ lines
 list
 listed
 live
+liveness
 llm-d.ai/role
 llm-d.ai/utilization-share-transfer
 llm_d_epp_flow_control_queue_size
@@ -1346,6 +1378,7 @@ metrics-cert-path
 metrics-secure
 metricsCount
 mid-rollout
+mid-run
 minKSpread
 minReplicas
 minSamples
@@ -1356,7 +1389,9 @@ minute
 minutes
 misconfigured
 mismatch
+mismatched
 missing
+missing-duplicated
 missing_kv_capacity
 missing_shape_metrics
 mode
@@ -1375,6 +1410,7 @@ model_unresolved
 models
 modelsProcessed
 moe_a2a_backend
+monotonicity
 more
 most
 mount
@@ -1410,6 +1446,8 @@ muSource
 muWindows
 must
 mutually
+n-dependence
+n-dependent
 n/a
 nDecErrPct
 nDecGPS
@@ -1453,6 +1491,7 @@ no-change
 no-compatible-donor
 no-data
 no-decode-candidate
+no-healthy-rows
 no-hit
 no-itl
 no-k
@@ -1492,6 +1531,8 @@ noout
 nor
 not
 not-actionable
+not-detected
+not-learned
 not-ready
 not-serving
 notReady
@@ -1558,6 +1599,8 @@ outputTokensWas
 outside
 outstanding
 over
+over-ordered
+over-priced
 over-state
 over-stated
 overMax
@@ -1570,7 +1613,9 @@ ownPerReplicaCapacity
 ownPriority
 ownReplicas
 ownSettled
+owner
 ownerReferences
+owning
 p
 page_size
 panic
@@ -1704,6 +1749,7 @@ prometheus
 promised
 promisedOnNodes
 promisedUnplaced
+property
 provided
 provider
 providersSkipped
@@ -1727,6 +1773,7 @@ quiet
 quota
 quota-limiter
 quotas
+r
 raise
 raised
 raisedByRole
@@ -1776,6 +1823,7 @@ recording
 recordings
 recovered
 redirected
+redistribution
 refilled
 refresh
 refreshInterval
@@ -1898,6 +1946,7 @@ round
 routed
 router
 row
+rows
 rows-instant-kv
 rows-ready-since
 run
@@ -1940,6 +1989,7 @@ saturation.TakeRestoreOutcomes
 saturation.borrowLine
 saturation.publishLine
 saturation/capacity
+says
 sc
 scale
 scale-down
@@ -1978,6 +2028,7 @@ scraped
 second
 see
 seed
+seeds
 seen
 seen|
 selected
@@ -2039,6 +2090,7 @@ side
 sight
 sigmaOK
 signal
+silent
 since
 single
 single-accelerator
@@ -2085,6 +2137,7 @@ snapshotAge
 so
 some
 something
+sorted
 source
 spaces
 spare
@@ -2107,6 +2160,7 @@ stabilization.skipWaitsWhen
 stable
 stableCycles
 stale
+stale-value
 stale_metrics
 staleness
 stalled
@@ -2209,6 +2263,13 @@ thresholdPct
 throughput
 throughput-demand-floor
 throughput-demand-floor-total
+throughput-itl-above-band
+throughput-itl-held
+throughput-itl-keeps-the-window-on-gps-mismatch
+throughput-itl-ols
+throughput-itl-pinned
+throughput-itl-settling
+throughput-itl-steady-gate
 throughput.Analyze
 throughput.Observe
 throughputHeld
@@ -2225,6 +2286,7 @@ tier-1
 tier-2
 tiers
 time
+time-base
 timeBase
 timeout
 timeouts
@@ -2244,6 +2306,7 @@ tokens
 tokensInUse
 tolerance
 too
+too-few-readings
 took
 totalAvail
 totalDecisions
@@ -2263,6 +2326,8 @@ tpotExcluded
 traffic
 transfer
 transfers
+transient
+transient-admitted
 transients
 transitional
 treated
@@ -2287,8 +2352,10 @@ unassigned
 unattributable
 unattributedGPUs
 unavailable
+unbounded
 uncovered
 under
+under-ordered
 underKeys
 undispatched
 undone
@@ -2434,6 +2501,8 @@ workload-variant-autoscaler
 workload-variant-autoscaler-system
 workload/
 works
+worstErrPct
+worstPod
 would
 wouldBe
 write
@@ -2446,6 +2515,7 @@ writtenAt
 writtenBy
 writtenBytes
 wrong
+wrong-side
 wva-learned-state
 wva-manager-config
 wva-policy

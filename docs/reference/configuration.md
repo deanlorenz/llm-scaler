@@ -1064,6 +1064,36 @@ reports it as an optional prerequisite. See
 [troubleshooting](troubleshooting.md#capacity-priced-high-after-a-restart) for
 what the log lines mean when it does not work, and how to flush the store.
 
+### The throughput analyzer's line
+
+Read this before you list `throughput` in a scaling policy without
+`saturation`.
+
+The throughput analyzer prices each variant from its ITL line. While the
+line is silent (`T2-failed`), the analyzer orders no scale-up and leaves the
+scale-down vote. The `throughput analyzer: ITL line` log line says when the
+line goes silent and why: see [the cycle log](cycle-log.md#reason-values-reason-field)
+and [troubleshooting](troubleshooting.md#symptom-index).
+
+- **A policy that lists `throughput` alone has no saturation floor.** With
+  `saturation` listed, a silent throughput line leaves the role to
+  saturation. Without it, nothing else sizes the role, so a silent line
+  holds the role where it is: it neither grows nor shrinks until the line
+  comes back.
+- **The line is silent after a controller restart and after a shape
+  change.** The learned-state snapshot (`LEARNED_STATE_SNAPSHOT`) does not
+  carry this line, and a shape change empties its window and drops its held
+  slope. It comes back once its window holds 10
+  readings, 3 of them settled: about 4 cycles with 3 replicas inside the
+  band, 10 cycles with one. Replicas below the band add no readings, so a
+  lightly loaded fleet stays silent longer.
+- **A variant that starts above the band is priced from above it.** With no
+  line from the band and no slope to hold, the line is fitted from readings
+  at k of at least 0.85 (`T2-above-band`). It errs one way only: it prices a
+  higher ITL than the true line, so it orders more replicas, never fewer.
+  The band's first fit replaces it. A fleet that sits above the band but
+  under k 0.85 gets no line at all (`cause` `all-above-band-below-ksat`).
+
 ## Optional: scaling band after `make deploy-e2e-infra`
 
 If `SCALE_UP_THRESHOLD` and/or `SCALE_DOWN_BOUNDARY` are set in the environment, the Makefile patches the `wva-scaling-policy-config` ConfigMap after install. Note the patch replaces the whole `default` entry, so it writes `analyzerName: saturation` alongside the band.

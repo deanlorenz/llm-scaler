@@ -9,8 +9,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 )
 
 // The per-path counters (docs/proposals/analyzer-learner.md, 2.5): the
@@ -51,7 +49,7 @@ func TestGoldens_APathNoGoldenRunsIsAProblem(t *testing.T) {
 	// The paths named are exactly those the other goldens ran on no cycle,
 	// by their own counts.
 	var zero []string
-	for _, p := range saturation.PathNames() {
+	for _, p := range requiredPaths() {
 		if c.Paths[p] == 0 {
 			zero = append(zero, p)
 		}

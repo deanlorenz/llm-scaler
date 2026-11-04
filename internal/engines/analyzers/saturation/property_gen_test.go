@@ -2,7 +2,6 @@ package saturation
 
 import (
 	"context"
-	"math"
 	"math/rand/v2"
 	"sort"
 	"strings"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/internal/learnertest"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
@@ -17,69 +17,29 @@ import (
 )
 
 // Generators and learner adapters for the property tests. Every generator
-// takes a seeded *rand.Rand, so a seed reproduces a case.
+// takes a seeded *rand.Rand, so a seed reproduces a case. The generators the
+// analyzers share are learnertest's (the throughput analyzer's property cases
+// run on them too); these names are theirs.
 
 // propCycle is the controller's cycle: inputs are sampled at it.
-const propCycle = 15 * time.Second
+const propCycle = learnertest.Cycle
 
 // propStart is the synthetic clock's origin.
-var propStart = time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+var propStart = learnertest.Start
 
-func propRand(seed uint64) *rand.Rand { return rand.New(rand.NewPCG(seed, 0x0b3)) }
+func propRand(seed uint64) *rand.Rand { return learnertest.Rand(seed) }
 
-// arNoise is n relative deviations of an AR(1) process with standard
-// deviation sigma and lag-one correlation rho: the gauges' noise is
-// autocorrelated (one-minute windows share 45 s), and iid noise over-counts
-// flips (3.5).
+// arNoise is learnertest.ARNoise: autocorrelated relative noise.
 func arNoise(r *rand.Rand, n int, sigma, rho float64) []float64 {
-	out := make([]float64, n)
-	innov := sigma * math.Sqrt(1-rho*rho)
-	x := r.NormFloat64() * sigma
-	for i := range out {
-		out[i] = x
-		x = rho*x + innov*r.NormFloat64()
-	}
-	return out
+	return learnertest.ARNoise(r, n, sigma, rho)
 }
 
-// timeBase is the time-base input family: a per-second path, sampled at a
-// propCycle cycle as Prometheus serves it to the collector.
-type timeBase struct {
-	// instant is the path at the cycle's instant; rate1m its mean over the
-	// minute before (rate[1m]); peak1m its max over that minute
-	// (max_over_time[1m]); avg1m the mean of the samples Prometheus scraped
-	// of it in that minute, one every propScrape (avg_over_time[1m] of a
-	// gauge). Consecutive cycles' minutes share 45 s.
-	instant, rate1m, peak1m, avg1m []float64
-}
+// timeBase is the time-base input family (learnertest.TimeBase).
+type timeBase = learnertest.TimeBase
 
-// propScrape is Prometheus's scrape interval: a gauge's avg_over_time[1m]
-// averages the four samples it took in the minute, not every second of it.
-const propScrape = 15 * time.Second
-
-// sampleTimeBase samples path, one value per second over seconds, at every
+// sampleTimeBase is learnertest.SampleTimeBase: path sampled at every
 // propCycle from the first full minute.
-func sampleTimeBase(path []float64) timeBase {
-	var tb timeBase
-	step := int(propCycle / time.Second)
-	for t := 60; t < len(path); t += step {
-		sum, peak := 0.0, math.Inf(-1)
-		for s := t - 59; s <= t; s++ {
-			sum += path[s]
-			peak = math.Max(peak, path[s])
-		}
-		scraped, n := 0.0, 0
-		for s := t; s > t-60; s -= int(propScrape / time.Second) {
-			scraped += path[s]
-			n++
-		}
-		tb.instant = append(tb.instant, path[t])
-		tb.rate1m = append(tb.rate1m, sum/60)
-		tb.peak1m = append(tb.peak1m, peak)
-		tb.avg1m = append(tb.avg1m, scraped/float64(n))
-	}
-	return tb
-}
+func sampleTimeBase(path []float64) timeBase { return learnertest.SampleTimeBase(path) }
 
 // --- ITL ---
 
@@ -304,28 +264,12 @@ func aggStates(n int) []domain.VariantReplicaState {
 	}
 }
 
-// relErr is |got - want| / |want|, and +Inf when either is NaN, so a NaN never
+// relErr is learnertest.RelErr: +Inf when either side is NaN, so a NaN never
 // passes a tolerance.
-func relErr(got, want float64) float64 {
-	if math.IsNaN(got) || math.IsNaN(want) {
-		return math.Inf(1)
-	}
-	if want == 0 {
-		return math.Abs(got)
-	}
-	return math.Abs(got-want) / math.Abs(want)
-}
+func relErr(got, want float64) float64 { return learnertest.RelErr(got, want) }
 
-// reversals counts how often a boolean verdict changed along a trajectory.
-func reversals(v []bool) int {
-	n := 0
-	for i := 1; i < len(v); i++ {
-		if v[i] != v[i-1] {
-			n++
-		}
-	}
-	return n
-}
+// reversals is learnertest.Reversals.
+func reversals(v []bool) int { return learnertest.Reversals(v) }
 
 // Declared estimands and tolerances (2.6). A class has no target without its
 // learner's estimand:
