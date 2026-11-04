@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -148,21 +149,33 @@ func reasonsExcept(skip Reason) []Result {
 }
 
 // pageOnlyReasons are on the page's reasons table for terms later PRs build
-// (prefill, the standalone role map, flow control, the pinned-B line); this
-// package does not raise them yet.
-var pageOnlyReasons = []string{"NoRoleMap", "NoPrefillCapacity", "FlowControlUnknown", "PinnedDefaultB"}
+// (the standalone role map, the pinned-B line); this package does not raise
+// them yet.
+var pageOnlyReasons = []string{"NoRoleMap", "PinnedDefaultB"}
 
 // Every exported Reason constant is in Reasons(), every one of them is on the
 // page's reasons table, and the page lists no reason this package neither
 // raises nor names as a later PR's.
 func TestReasonsAreListedAndDocumented(t *testing.T) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "result.go", nil, 0)
+	// Every non-test file: the TTFT model declares its reasons beside it.
+	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
+	var decls []ast.Decl
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decls = append(decls, f.Decls...)
+	}
 	var declared []string
-	for _, decl := range f.Decls {
+	for _, decl := range decls {
 		g, ok := decl.(*ast.GenDecl)
 		if !ok || g.Tok != token.CONST {
 			continue
@@ -180,8 +193,8 @@ func TestReasonsAreListedAndDocumented(t *testing.T) {
 	for _, r := range Reasons() {
 		listed = append(listed, string(r))
 	}
-	if len(declared) < 10 {
-		t.Fatalf("parsed only %d Reason constants from result.go: %v", len(declared), declared)
+	if len(declared) < 19 {
+		t.Fatalf("parsed only %d Reason constants from the package: %v", len(declared), declared)
 	}
 	slices.Sort(declared)
 	sortedListed := slices.Sorted(slices.Values(listed))

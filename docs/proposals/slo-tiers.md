@@ -543,6 +543,12 @@ Two PRs, under [the learner rules](analyzer-learner.md):
 | S1 (2b) | Price each prefill and aggregated variant against the TTFT target in shadow: the rate per replica at which the bounded TTFT meets it. Published as `wva_slo_*` series and in the cycle log; no replica count changes. Switch `slo-ttft-price` | `slo-published.csv` moves with the switch on | the what-if P3; a golden with router TTFT and the [recorder fields](analyzer-learner.md#29-recorder-fields-for-ttft-and-capture), which the prefill-stress recording provides |
 | S2 (2c) | Enforce, once S1's shadow predictions pass their gate | moves | S1; the what-if staircase run itself, not the per-bucket PR that precedes it in that plan |
 
+**What S1 calls.** P3 is built, and is UNVALIDATED until P2
+([as built](slo-capacity-planner-ttft.md#as-built-p3)). S1 builds a
+`whatif.TTFTFleet` from P1's estimate (`whatif.PrefillFromEstimate`), with the
+decode role when it is known, or with none (flagged `DecodeSideOmitted`).
+The rate per replica is `whatif.RateForTTFT` divided by `N_p`.
+
 `ols-sweep-slo` gives S1 router TTFT, `AvgTTFT`, `AvgServiceTime` and the
 arrival rate: enough to fit `a` and check a low-load mean, not to fit `V_P` (no
 queue), the router queue (flow control off) or a tail (no histograms).

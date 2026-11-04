@@ -20,8 +20,8 @@ type Reason string
 
 // The reasons this package refuses with. The CLI reference's table lists the
 // planner's full set; each later PR adds the reasons its own terms can raise
-// (NoPrefillCapacity, NoRoleMap, FlowControlUnknown, PinnedDefaultB), so every
-// reason defined here has a case that produces it.
+// (NoRoleMap, PinnedDefaultB), so every reason defined here has a case that
+// produces it. The TTFT model's are in ttft_result.go.
 const (
 	// NoLine is no ITL line, or one the planner cannot price from: a slope
 	// or intercept that is not positive and finite, or a line that predicts no
@@ -76,9 +76,10 @@ const (
 
 // Reasons lists every Reason this package can return, in a fixed order.
 func Reasons() []Reason {
-	return []Reason{NoLine, NoCapacity, NoBatchCap, NoTraffic, TokenGapPercentile,
+	r := []Reason{NoLine, NoCapacity, NoBatchCap, NoTraffic, TokenGapPercentile,
 		NoTPOTHistogram, TPOTQuantileUnbounded, TargetBelowFloor, Saturated,
 		NoDecodeReplicas, MalformedHistogram, TooManySlots, InvalidInput}
+	return append(r, ttftReasons()...)
 }
 
 // Unanswerable is a refused question: the Reason, and a Detail naming the

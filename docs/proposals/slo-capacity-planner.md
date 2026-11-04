@@ -469,7 +469,7 @@ is made.**
 | D4 | Standalone answers from `--prometheus`; no switch (adapter only) | none | D3, R2 |
 | P1 | `internal/signals/prefill`, observing: `V_P`, `a`, `f`; logs only; switch `prefill-capacity-observe`. On `ols-sweep` it fits `a` and refuses `V_P` and `f` | none | — |
 | P2 | The prefill-stress recording as a golden | adds one | P1, R1, the run |
-| P3 | The TTFT model in `whatif`; UNVALIDATED; no switch | none | P2, D2 |
+| P3 | The TTFT model in `whatif`; UNVALIDATED; no switch. Built before P2, against closed-form and synthetic cases, because the prefill-stress run is blocked on cluster access: [as built](slo-capacity-planner-ttft.md#as-built-p3) | none | P2 (to validate), D2 |
 | S1, S2 | The SLO analyzer prices TTFT, shadow then enforce, on the same `prefill` and `whatif` library: [SLO tiers, phase 2](slo-tiers.md#phase-2-ttft) | with its switch | P3 |
 | M1 | Per-bucket and mix answers; aggregated TTFT | none | P3, R1, #276 |
 | M2 | The staircase run; an operator page in `docs/reference/`; drops UNVALIDATED if it passes | — | D4, P3 |
@@ -573,12 +573,16 @@ Every answer is an `Answer{Value, Band, Basis, Flags}` or an
 | `NoRoleMap` | Standalone with neither a kubeconfig nor `--role-of` |
 | `NoTraffic` | No traffic in the window: an output length or KV footprint per request that is not positive |
 | `NoPrefillCapacity` | No `V_P` from a conservative source (always on SGLang) |
+| `NoFixedLatency` | No `a`: P1 refused its low-load fit, or the reading is not positive |
+| `NoImbalance` | More than one prefill pod and no `f`, learned or assumed (`f` = 1 is never assumed silently: it over-promises) |
+| `NoPrefillReplicas` | A TTFT question with no prefill pod to price |
 | `TokenGapPercentile` | A percentile over token gaps (ITL); per-request TPOT percentiles are supported |
 | `NoTPOTHistogram` | A per-request TPOT percentile with no router or engine TPOT histogram (the router's needs `usage` on responses) and no `--assume-tpot-ratio` |
 | `TPOTQuantileUnbounded` | The TPOT `q` quantile falls in the histogram's `+Inf` bucket |
 | `TargetBelowFloor` | The target is below what any number of replicas reaches |
 | `FlowControlUnknown` | Flow control on and the detector's thresholds unknown |
-| `Saturated` | Question 2's operating rate (`--rate`) or the decode admission chain at or above the knee, where no fill or admission wait exists; both saturate at the same rate |
+| `AboveDecodeOnset` | A TTFT asked at or above the decode gate's onset with flow control on, where the gate is not work conserving and TTFT is not priced |
+| `Saturated` | Question 2's operating rate (`--rate`) or the decode admission chain at or above the knee, where no fill or admission wait exists; both saturate at the same rate. A TTFT at or above the prefill knee too |
 | `NoDecodeReplicas` | No decode replica read from the fleet |
 | `MalformedHistogram` | A TPOT histogram whose data cannot be read: a NaN, non-positive or falling edge, a negative or non-finite count, observations with no sum. Counts that dip, as `rate()` leaves them, are made monotone, not refused |
 | `TooManySlots` | More than 1,000,000 slots on one replica (a cap or capacity read wrongly); the chain holds one state per slot |
@@ -593,7 +597,9 @@ flow-control onset, several priority bands, and UNVALIDATED on TTFT. The decode
 library's flags today: `AssumedTPOTRatio`, `CoarseTPOTBucket`,
 `BelowFittedBand` (a fill, or the knee, read at the band's bottom because it
 sits below the band the line was fitted over) and `KVBoundSlots` (admission
-slots set by the requests the band's top holds rather than the batch cap).
+slots set by the requests the band's top holds rather than the batch cap). The
+TTFT model's (P3) are listed in
+[its as-built section](slo-capacity-planner-ttft.md#as-built-p3).
 
 Exit codes: `0` every role answered; `3` a role refused (output still printed);
 `2` usage or input error; `1` internal error. `whatif.ExitCode` applies them:

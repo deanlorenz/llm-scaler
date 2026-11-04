@@ -1,6 +1,7 @@
 package whatif
 
 import (
+	"maps"
 	"math"
 	"math/rand/v2"
 	"slices"
@@ -386,6 +387,7 @@ func TestProperty_EveryReasonHasACase(t *testing.T) {
 		TooManySlots: DecodeAdmission(with(func(c *Decode) { c.ReplicaCap, c.CapacityTokens = 1e10, 1e16 }), 1),
 		InvalidInput: rateFor(d, TPOTTarget{Seconds: 0.004}, 1.5),
 	}
+	maps.Copy(cases, ttftReasonCases(t))
 	for _, reason := range Reasons() {
 		res, ok := cases[reason]
 		if !ok {
