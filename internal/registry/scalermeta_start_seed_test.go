@@ -31,6 +31,14 @@ func TestReplicaStartSecondsIsParsedAndABadValueIgnored(t *testing.T) {
 		{name: "a trailing space", raw: "120 ", set: true, ignored: true},
 		{name: "hex", raw: "0x1p6", set: true, ignored: true},
 		{name: "an underscore", raw: "1_20", set: true, ignored: true},
+		{name: "a trailing newline", raw: "120\n", set: true, ignored: true},
+		{name: "a trailing CRLF", raw: "120\r\n", set: true, ignored: true},
+		{name: "a leading tab", raw: "\t120", set: true, ignored: true},
+		{name: "out of float range", raw: "1e400", set: true, ignored: true},
+		// Plain decimals still, so accepted: a trailing point, and a fraction
+		// with no integer part and an exponent.
+		{name: "a trailing point", raw: "5.", set: true, want: 5},
+		{name: "no integer part, an exponent", raw: ".5e1", set: true, want: 5},
 		{name: "negative", raw: "-30", set: true, ignored: true},
 		{name: "NaN", raw: "NaN", set: true, ignored: true},
 		{name: "infinite", raw: "+Inf", set: true, ignored: true},
@@ -72,5 +80,23 @@ func TestAPoolTriggerCarriesNoStartSeed(t *testing.T) {
 	}
 	if m.ReplicaStartSeconds != 0 || m.ReplicaStartSecondsIgnored != "" {
 		t.Errorf("a pool trigger must carry no start seed, have %v / %q", m.ReplicaStartSeconds, m.ReplicaStartSecondsIgnored)
+	}
+}
+
+// TestPlainDecimalMatchesTheWholeValue pins the pattern itself. Through
+// ParseMeta a pattern that also matched before a newline would pass
+// unnoticed, since strconv.ParseFloat refuses any newline as well; the
+// pattern is the guard for what ParseFloat accepts and an operator does not
+// mean (hex, underscores, NaN), so it must hold on its own.
+func TestPlainDecimalMatchesTheWholeValue(t *testing.T) {
+	for _, raw := range []string{"120\n", "120\r\n", "\n120", "120\n0x1p6", "0x1p6\n120", "\t120", "120 ", "0x1p6", "1_20", "NaN", "Inf"} {
+		if plainDecimal.MatchString(raw) {
+			t.Errorf("%q matched as a plain decimal", raw)
+		}
+	}
+	for _, raw := range []string{"120", "+120", "15.5", "1e2", "5.", ".5e1", "1E-1"} {
+		if !plainDecimal.MatchString(raw) {
+			t.Errorf("%q did not match as a plain decimal", raw)
+		}
 	}
 }

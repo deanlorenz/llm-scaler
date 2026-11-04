@@ -2328,11 +2328,13 @@ above are f82a55480's.
   tagged `learnrec:"omitzero"` (R1's tag), so a recording carries the seed
   in `Input.VariantStates` and an unseeded state is written as before.
   `ChangeReporter.ReportIgnoredStartSeed` logs "A variant's
-  replicaStartSeconds was ignored" once each time the written value changes,
-  and again if a fixed value turns bad again.
+  replicaStartSeconds was ignored" at Info, per variant, once each time the
+  written value changes, and again if a fixed value turns bad again. The
+  value is quoted and cut at 64 bytes. The log is the only place it shows.
   `TestPrepareModelData_CarriesTheStartSeed` drives `prepareModelData` with
-  a fake client and a stub metrics source, so the call is tested where it
-  sits.
+  a fake client and a stub metrics source for a P/D model whose unseeded
+  prefill comes first and whose two decode variants seed different figures,
+  so the call is tested where it sits and a seed on the wrong variant fails.
 - **Zero golden diff.** Every variant state in the nine goldens (4256) reads
   back and is written again byte for byte
   (`learnrec.TestStartSeed_APre5aRecordingIsWrittenAgainByteForByte`).

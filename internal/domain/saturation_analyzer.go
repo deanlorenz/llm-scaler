@@ -317,15 +317,10 @@ type VariantReplicaState struct {
 	// MaxReplicas is the maximum number of replicas for this variant (from VA spec field).
 	// nil means not set (default: 0, no cap).
 	MaxReplicas *int
-	// StartSeedSeconds is the replica start time the variant's ScaledObject
-	// seeds (replicaStartSeconds), read only when StartSeedSet. The engine
-	// sets both from the trigger metadata on cycles where the model has
-	// replica rows (the cycles that build an analyzer input); a value the trigger
-	// parse ignored leaves them unset. Carried so a learner recording holds
-	// it; no analyzer reads it yet (step 5c of
-	// docs/proposals/analyzer-learner.md). Both are left out of a recording
-	// while unset, so a recording made before them is written again byte for
-	// byte.
+	// StartSeedSeconds is the replicaStartSeconds the variant's ScaledObject
+	// seeds, set on cycles where the model has replica rows. Read by no
+	// analyzer yet. Left out of a recording while zero (omitzero).
 	StartSeedSeconds float64 `learnrec:"omitzero"`
-	StartSeedSet     bool    `learnrec:"omitzero"`
+	// StartSeedSet says StartSeedSeconds holds a seed.
+	StartSeedSet bool `learnrec:"omitzero"`
 }
