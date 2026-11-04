@@ -1,0 +1,5 @@
+knee            29.34 r/s   decode, batch cap binds at fill 0.672
+operating rate  24.94 r/s   0.85 x knee (scaleUpThreshold)
+mean TPOT       3.37 ms     [3.31 .. 3.43]   line pinned-B, observed fill up to 0.57
+flags: ExtrapolatedFill (fill 0.672, 0.106 above the readings)
+estimate from cycles 1-100, not a guarantee; see basis (-o json)

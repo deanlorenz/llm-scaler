@@ -1,0 +1,5 @@
+knee            1.69 r/s    decode, band top binds at fill 0.779
+operating rate  1.44 r/s    0.85 x knee (scaleUpThreshold)
+mean TPOT       3.76 ms     [3.75 .. 3.80]   line ols, observed fill up to 0.50
+flags: ExtrapolatedFill (fill 0.779, 0.278 above the readings)
+estimate from cycles 1-226, not a guarantee; see basis (-o json)

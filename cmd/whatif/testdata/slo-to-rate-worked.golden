@@ -1,0 +1,4 @@
+role     est. rate at SLO   bound by                                 basis
+decode   11.32 r/s          operating-point cap (TPOT alone: 12.03)  ols [11.2 .. 11.4]
+flags: AssumedShape (IL 1000, OL 1000)
+estimate from cycles 1-226, not a guarantee; see basis (-o json)

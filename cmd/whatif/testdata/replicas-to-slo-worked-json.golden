@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 1,
+  "question": "replicas-to-slo",
+  "source": {
+    "recording": "../../internal/engines/analyzers/learnreplay/testdata/goldens/ols-sweep/recording.jsonl.gz",
+    "namespace": "ns-01",
+    "model": "model-02",
+    "firstCycle": 1,
+    "lastCycle": 226,
+    "firstAt": "2026-11-01T21:54:30.377845609Z",
+    "lastAt": "2026-11-01T22:50:53.616794067Z"
+  },
+  "bands": {
+    "method": "block bootstrap",
+    "blockCycles": 4,
+    "resamples": 200,
+    "seed": 1,
+    "loPercent": 10,
+    "hiPercent": 90
+  },
+  "roles": [
+    {
+      "role": "decode",
+      "variant": "variant-01",
+      "inputs": {
+        "line": {
+          "a": 0.004437632383842851,
+          "b": 0.0015568837184686396,
+          "tier": "ols",
+          "readings": 15,
+          "observedFillMax": 0.501466275659824
+        },
+        "fillBand": {
+          "lo": 0.15,
+          "hi": 0.8
+        },
+        "capacityTokens": 131072,
+        "kvPerRequest": 1500,
+        "inputTokens": 1000,
+        "outputTokens": 1000,
+        "prefixHitRate": 0,
+        "shapeAssumed": true,
+        "batchCap": 64,
+        "batchCapSource": "flags",
+        "ranks": 1,
+        "replicas": 1,
+        "replicasFrom": "recording",
+        "headroom": 0.85,
+        "tpot": {
+          "percentile": 0.9,
+          "ratio": 1.3,
+          "ratioSource": "assumed",
+          "windows": 0
+        }
+      },
+      "results": {
+        "knee": {
+          "answer": {
+            "value": 13.313632625239457,
+            "unit": "r/s",
+            "band": {
+              "lo": 13.213107139026688,
+              "hi": 13.380214392174715
+            },
+            "basis": {
+              "fill": 0.732421875,
+              "kneeRate": 13.313632625239457,
+              "floor": 0,
+              "uncapped": 0,
+              "boundBy": [
+                "batch cap"
+              ],
+              "tier": "ols"
+            },
+            "flags": [
+              "AssumedShape",
+              "ExtrapolatedFill"
+            ]
+          }
+        },
+        "operatingRate": {
+          "answer": {
+            "value": 11.316587731453538,
+            "unit": "r/s",
+            "band": {
+              "lo": 11.231141068172684,
+              "hi": 11.373182233348507
+            },
+            "basis": {
+              "fill": 0.4740967917873882,
+              "kneeRate": 13.313632625239457,
+              "floor": 0,
+              "uncapped": 0,
+              "boundBy": [
+                "operating-point cap"
+              ],
+              "tier": "ols"
+            },
+            "flags": [
+              "AssumedShape"
+            ]
+          }
+        },
+        "meanTPOT": {
+          "answer": {
+            "value": 0.0036607509947803553,
+            "unit": "s",
+            "band": {
+              "lo": 0.0036449299737118107,
+              "hi": 0.0036945047047049753
+            },
+            "basis": {
+              "fill": 0.4740967917873882,
+              "kneeRate": 13.313632625239457,
+              "floor": 0.002222528576045067,
+              "uncapped": 0,
+              "boundBy": [],
+              "tier": "ols"
+            },
+            "flags": [
+              "AssumedShape"
+            ]
+          }
+        },
+        "percentileTPOT": {
+          "answer": {
+            "value": 0.004758976293214462,
+            "unit": "s",
+            "band": {
+              "lo": 0.004738408965825354,
+              "hi": 0.004802856116116468
+            },
+            "basis": {
+              "fill": 0.4740967917873882,
+              "kneeRate": 13.313632625239457,
+              "floor": 0.0028892871488585873,
+              "uncapped": 0,
+              "boundBy": [],
+              "tier": "ols"
+            },
+            "flags": [
+              "AssumedTPOTRatio",
+              "AssumedShape"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "exitCode": 0,
+  "note": "estimate from cycles 1-226, not a guarantee; see basis (-o json)"
+}

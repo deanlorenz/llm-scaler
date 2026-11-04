@@ -1,0 +1,3 @@
+role     est. rate at SLO   bound by                                 basis
+decode   refused: TargetBelowFloor (target 0.002 s at or below the floor 0.002222528576045067 s)
+estimate from cycles 1-226, not a guarantee; see basis (-o json)
