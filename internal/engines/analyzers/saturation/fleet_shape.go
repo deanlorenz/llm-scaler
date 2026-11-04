@@ -204,7 +204,7 @@ func (a *SaturationAnalyzer) replicaOutputDispersion(rm domain.ReplicaMetrics, h
 }
 
 // fleetOutputLengthRecent is fleetOutputLength over the SHORT window, and is
-// the derived mu's divisor (deriveMuAtCap) WHILE A SHAPE CHANGE IS OUTSTANDING only.
+// the derived mu's divisor (whatif.DeriveMuAtCap) WHILE A SHAPE CHANGE IS OUTSTANDING only.
 //
 // Zero when no generating replica reports the short-window figure -- an engine
 // that does not publish the counter, or a fleet that completed nothing in the

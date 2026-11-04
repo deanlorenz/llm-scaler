@@ -16,6 +16,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 var _ = Describe("Analyzer state and inputs", func() {
@@ -246,13 +247,13 @@ var _ = Describe("Analyzer state and inputs", func() {
 			// k = 0.6 implies 120 sequences; the engine admits 64, so the cache
 			// never fills past 64 * 500 / 100000 = 0.32, and 64 sequences
 			// advance at ITL(0.32) = 32.8 ms, not ITL(0.6).
-			Expect(res.VariantCapacities[0].PerReplicaCapacity).To(BeNumerically("~", 64/line.ITLAt(0.32), 1e-6))
+			Expect(res.VariantCapacities[0].PerReplicaCapacity).To(BeNumerically("~", 64/testLine.ITLAt(0.32), 1e-6))
 		})
 
 		It("reads a replica that says it runs one rank exactly as one that says nothing", func() {
 			res := warmWith(newAt(store(capacity.EngineParams{MaxNumSeqs: 64})),
 				func(rm *domain.ReplicaMetrics) { rm.EngineRanks = 1 })
-			Expect(res.VariantCapacities[0].PerReplicaCapacity).To(BeNumerically("~", 64/line.ITLAt(0.32), 1e-6))
+			Expect(res.VariantCapacities[0].PerReplicaCapacity).To(BeNumerically("~", 64/testLine.ITLAt(0.32), 1e-6))
 		})
 
 		// Issue #150: max_num_seqs bounds one engine. A replica of eight
@@ -272,7 +273,7 @@ var _ = Describe("Analyzer state and inputs", func() {
 		// fill is capped at the lower of it and max_num_seqs, per rank. k = 0.6
 		// implies 120 sequences, so 64 binds and 120 is the target's.
 		Describe("the active-sequence cap", func() {
-			capped := 64 / line.ITLAt(0.32)
+			capped := 64 / testLine.ITLAt(0.32)
 			targetLimited := 120 / 0.044
 			priced := func(p capacity.EngineParams, ranks int) float64 {
 				res := warmWith(newAt(store(p)), func(rm *domain.ReplicaMetrics) { rm.EngineRanks = ranks })
@@ -501,7 +502,7 @@ var _ = Describe("Analyzer state and inputs", func() {
 		bad.AvgInputTokens = math.NaN()
 		f := readFleet(domain.AnalyzerInput{VariantStates: []domain.VariantReplicaState{agg},
 			ReplicaMetrics: []domain.ReplicaMetrics{good, bad}})
-		Expect(finite(f.shape.AvgInputTokens)).To(BeTrue(), "one NaN row must not make the fleet's shape NaN")
+		Expect(whatif.Finite(f.shape.AvgInputTokens)).To(BeTrue(), "one NaN row must not make the fleet's shape NaN")
 		Expect(f.shape.AvgOutputTokens).To(Equal(good.AvgOutputTokens))
 	})
 

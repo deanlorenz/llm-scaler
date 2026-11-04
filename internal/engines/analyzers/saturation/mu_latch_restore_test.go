@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // Mu's latch is not persisted: a window restored with no choice on record
@@ -38,7 +39,7 @@ func restoredMuRig(t *testing.T, on bool, rate float64) (*SaturationAnalyzer, *t
 func yields(a *SaturationAnalyzer, now time.Time, ratio, served float64) bool {
 	reading := throughputReading{rate: ratio, samples: 3, sampledAt: a.throughputSampledAt[muRepeatKey],
 		writtenAt: a.saturatedThroughput[muRepeatKey].LastWritten()}
-	return a.measuredYieldsToDerived(muRepeatKey, reading, derivedMu{ok: true, rate: 1.0}, served, tuningOf(nil), now)
+	return a.measuredYieldsToDerived(muRepeatKey, reading, whatif.DerivedMu{OK: true, Rate: 1.0}, served, tuningOf(nil), now)
 }
 
 // A stale measurement 1.8x the derived figure, between the return ratio and
@@ -94,7 +95,7 @@ func TestMuLatch_AWindowSeenFromItsFirstSampleIsKnown(t *testing.T) {
 	a.recordSaturatedThroughputFrom(muRepeatKey, "pod-a", 1.8)
 	now = now.Add(MeasuredMuFreshFor + time.Minute)
 	reading := a.saturatedThroughputReading(muRepeatKey)
-	assert.False(t, a.measuredYieldsToDerived(muRepeatKey, reading, derivedMu{ok: true, rate: 1.0}, 0, tn, now))
+	assert.False(t, a.measuredYieldsToDerived(muRepeatKey, reading, whatif.DerivedMu{OK: true, Rate: 1.0}, 0, tn, now))
 }
 
 // A window installed through the real restore path after a refused reading
@@ -123,7 +124,7 @@ func TestMuLatch_AWindowRestoredAfterARefusedReadingComesBackLatched(t *testing.
 		require.True(t, done, "premise: the restore installs")
 		reading := a.saturatedThroughputReading(key)
 		require.InDelta(t, 1.8, reading.rate, 1e-9, "premise: the restored window prices")
-		got := a.measuredYieldsToDerived(key, reading, derivedMu{ok: true, rate: 1.0}, 0, tuningOf(nil), *clock)
+		got := a.measuredYieldsToDerived(key, reading, whatif.DerivedMu{OK: true, Rate: 1.0}, 0, tuningOf(nil), *clock)
 		assert.Equal(t, on, got, "switch %v", on)
 	}
 }
@@ -148,7 +149,7 @@ func TestMuLatch_AWindowBroughtBackFromTheStashComesBackLatched(t *testing.T) {
 		a.mu.Unlock()
 		reading := a.saturatedThroughputReading(muRepeatKey)
 		require.InDelta(t, 1.8, reading.rate, 1e-9, "premise: the window is back")
-		got := a.measuredYieldsToDerived(muRepeatKey, reading, derivedMu{ok: true, rate: 1.0}, 0, tuningOf(nil), now)
+		got := a.measuredYieldsToDerived(muRepeatKey, reading, whatif.DerivedMu{OK: true, Rate: 1.0}, 0, tuningOf(nil), now)
 		assert.Equal(t, on, got, "switch %v", on)
 	}
 }
@@ -178,7 +179,7 @@ func TestMuLatch_AWindowRestoredAsAPriorAfterARefusedReadingComesBackLatched(t *
 		require.Equal(t, 1, r.Throughput, "premise: the throughput window is installed")
 		reading := a.saturatedThroughputReading(key)
 		require.InDelta(t, 1.8, reading.rate, 1e-9)
-		got := a.measuredYieldsToDerived(key, reading, derivedMu{ok: true, rate: 1.0}, 0, tuningOf(nil), *clock)
+		got := a.measuredYieldsToDerived(key, reading, whatif.DerivedMu{OK: true, Rate: 1.0}, 0, tuningOf(nil), *clock)
 		assert.Equal(t, on, got, "switch %v", on)
 	}
 }

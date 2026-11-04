@@ -12,6 +12,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // Review round 2 of the aggregated line by shape (issue #275).
@@ -173,8 +174,8 @@ func TestAggregatedShape_ANaNReadingTakesNoPrefillReadingAndLiftsNothing(t *test
 	rm := makeReplicaMetrics("agg-0", "agg", 80_000, 160_000, 0, 1000, 500)
 	s := shape.New(1000, 500, 0)
 	p := c.priceAggregated(ac, rm, itl.Model{A: 0.03, B: 0.006}, keyParams(256), 256, s, s, shapePricingK)
-	assert.False(t, p.derived.ok, "a NaN sigma priced a figure")
-	assert.Equal(t, aggCaseOccupancyUnknown, p.derived.why)
+	assert.False(t, p.derived.OK, "a NaN sigma priced a figure")
+	assert.Equal(t, aggCaseOccupancyUnknown, p.derived.Why)
 }
 
 // B5: with the shape term off, the lift switch on lifts nothing: the lift
@@ -188,7 +189,7 @@ func TestAggregatedShape_TheLiftNeedsTheShapeTerm(t *testing.T) {
 }
 
 // B6: an aggregated variant whose pods run eight engine ranks (data
-// parallel) is checked and priced on the whole pod's KV (capacityTokensFor),
+// parallel) is checked and priced on the whole pod's KV (whatif.CapacityTokens),
 // its sequences capped at eight ranks' batch: it lifts, at the physics' rate.
 func TestAggregatedShape_AnEightRankVariantIsPricedOnTheWholePod(t *testing.T) {
 	r := newAggShapeRig(t, nil)
@@ -201,7 +202,7 @@ func TestAggregatedShape_AnEightRankVariantIsPricedOnTheWholePod(t *testing.T) {
 	rm := makeReplicaMetrics("agg-0", "agg", int64(0.5*r.world.capTokens), int64(r.world.capTokens), 0, r.in, r.out)
 	rm.EngineRanks = 8
 	require.Equal(t, 8, rm.Ranks())
-	assert.Equal(t, r.world.capTokens, capacityTokensFor(keyParams(256), rm.Ranks(), rm.TotalKvCapacityTokens))
+	assert.Equal(t, r.world.capTokens, whatif.CapacityTokens(keyParams(256), rm.Ranks(), rm.TotalKvCapacityTokens))
 }
 
 // The derived-mu line says when there has been no comparable cycle yet,

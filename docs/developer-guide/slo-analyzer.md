@@ -17,7 +17,8 @@ hands the optimizer `namedResults[0]`, saturation's.
 | --- | --- |
 | `internal/config` (`slo.go`) | `SLOPolicy`, `SLOObjective`, `SLODuration`, `SLOPercentile`; `Validate`, `SLOSummary`, `SLOMisconfiguration` |
 | `internal/collector` (`router_latency.go`), `registration/slo.go` | `CollectRouterLatency`: the router's TTFT histogram and TPOT `_sum`/`_count`, per model, over 5 minutes, for each model whose policy lists the analyzer. While a learner recording is on, the engine also calls it for every model every cycle, and it adds the router's TPOT histogram and the flow-control wait histogram (`registration/flow_control_pools.go`), which only the recording reads |
-| `internal/engines/analyzers/slo` | the analyzer: `analyzer.go` (cycle, fleet, line, judging, state), `price.go` (TPOT pricing), `histogram.go` (quantile, attainment, sample minimum), `transient.go` (exclusion) |
+| `internal/engines/analyzers/slo` | the analyzer: `analyzer.go` (cycle, fleet, line, judging, state), `histogram.go` (quantile, attainment, sample minimum), `transient.go` (exclusion) |
+| `internal/signals/whatif` (`decode.go`) | the TPOT pricing: `PriceTPOT`, `ReachableFill`, `ReplicaTokenRate`, `RealisedFill`, `FillBand`; shared with the saturation analyzer's derived mu (`mu.go`) |
 | `internal/signals/itl` (`tracker.go`) | `Tracker`: the ITL windows and intercepts, shared with the saturation analyzer |
 | `internal/metrics` (`slo_metrics.go`) | `PublishSLO`, `SweepSLO`, `DeleteSLOModel` |
 | `internal/engines/steadystate` | the engine's calls into it (below) |
@@ -58,14 +59,16 @@ the analyzer treats it as the nil it was before they existed.
      - `variantKey` keys the line on `windowKey` with `stableAccelerator`;
      - `fitLine` calls `Tracker.Observe` and names the source: `own`,
        `pinned`, `pinned-default`, or with no line `declined` or `no-line`;
-     - `priceTPOT` inverts `ITL = A·k + B` at the target, clamps to
-       the policy's band (`fillBand`, `[0.15, 0.80]` by default), or says
-       `infeasible` when the ITL at its bottom already reaches it;
-     - `reachableFill` caps the fill where the replica's batch cap binds:
-       `max_num_seqs` times the data-parallel ranks the rows report
+     - the pricing is `internal/signals/whatif`'s (`decode.go`), shared with
+       the saturation analyzer's derived mu and with the what-if planner;
+     - `whatif.PriceTPOT` inverts `ITL = A·k + B` at the target, clamps to
+       the policy's band (`whatif.FillBand`, `[0.15, 0.80]` by default), or
+       says `infeasible` when the ITL at its bottom already reaches it;
+     - `whatif.ReachableFill` caps the fill where the replica's batch cap
+       binds: `max_num_seqs` times the data-parallel ranks the rows report
        (`fleetReading.engineRanks`),
-       `replicaTokenRate` is the per-replica capacity there, and
-       `realisedFill` the fill the fleet would run at after `scaleUpThreshold`
+       `whatif.ReplicaTokenRate` is the per-replica capacity there, and
+       `whatif.RealisedFill` the fill the fleet would run at after `scaleUpThreshold`
        headroom, where `PredictedITL` is read.
    - `judge` reads the router: the TPOT mean as `_sum ÷ _count` (both or
      nothing); the TTFT percentile and attainment from `newHistogram`, only

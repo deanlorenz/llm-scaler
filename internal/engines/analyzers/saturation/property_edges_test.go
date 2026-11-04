@@ -13,6 +13,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // Edges by enumeration (2.6): the operating point on each threshold of 2.6's
@@ -513,7 +514,7 @@ func probeServed(tn config.AnalyzerTuning) probe {
 	return func(r *rand.Rand, x float64) (bool, error) {
 		served := 1 + r.Float64()
 		mu := served * x
-		return tuning{AnalyzerTuning: tn.WithDefaults()}.throughputRefusal(1, mu, derivedMu{}, served, false) == "", nil
+		return tuning{AnalyzerTuning: tn.WithDefaults()}.throughputRefusal(1, mu, whatif.DerivedMu{}, served, false) == "", nil
 	}
 }
 
@@ -522,7 +523,7 @@ func probeServed(tn config.AnalyzerTuning) probe {
 func probeDerived(tn config.AnalyzerTuning) probe {
 	return func(r *rand.Rand, x float64) (bool, error) {
 		d := 1 + r.Float64()
-		return tuning{AnalyzerTuning: tn.WithDefaults()}.throughputRefusal(1, x*d, derivedMu{rate: d, ok: true}, 0, false) == "", nil
+		return tuning{AnalyzerTuning: tn.WithDefaults()}.throughputRefusal(1, x*d, whatif.DerivedMu{Rate: d, OK: true}, 0, false) == "", nil
 	}
 }
 
@@ -570,7 +571,7 @@ func probeStale(tn config.AnalyzerTuning, ratio float64) probe {
 		d := 1 + r.Float64()
 		now := propStart.Add(time.Hour)
 		at := now.Add(-time.Duration(m * float64(time.Minute)))
-		return a.measuredYieldsToDerived(propMuKey, throughputReading{rate: ratio * d, sampledAt: at}, derivedMu{rate: d, ok: true}, 0,
+		return a.measuredYieldsToDerived(propMuKey, throughputReading{rate: ratio * d, sampledAt: at}, whatif.DerivedMu{Rate: d, OK: true}, 0,
 			tuning{AnalyzerTuning: tn.WithDefaults()}, now), nil
 	}
 }
@@ -582,12 +583,12 @@ func probeLatch(tn config.AnalyzerTuning) probe {
 		a := NewSaturationAnalyzer(capacity.NewStore())
 		t := tuning{AnalyzerTuning: tn.WithDefaults()}
 		// A derived mu of 1, so the measured rate is the ratio exactly.
-		d := derivedMu{rate: 1, ok: true}
+		d := whatif.DerivedMu{Rate: 1, OK: true}
 		now := propStart.Add(time.Duration(r.IntN(60)) * time.Minute)
-		if !a.measuredYieldsToDerived(propMuKey, throughputReading{rate: 2.5 * d.rate}, d, 0, t, now) {
+		if !a.measuredYieldsToDerived(propMuKey, throughputReading{rate: 2.5 * d.Rate}, d, 0, t, now) {
 			return false, errors.New("precondition: a stale measurement at 2.5x did not yield")
 		}
-		return a.measuredYieldsToDerived(propMuKey, throughputReading{rate: x * d.rate}, d, 0, t, now.Add(propCycle)), nil
+		return a.measuredYieldsToDerived(propMuKey, throughputReading{rate: x * d.Rate}, d, 0, t, now.Add(propCycle)), nil
 	}
 }
 
@@ -784,7 +785,7 @@ func probePricingK(center float64) probe {
 	derived := func(scaleUp float64) float64 {
 		cfg := &config.ScalingPolicy{KvCacheThreshold: config.DefaultKvCacheThreshold, ScaleUpThreshold: scaleUp}
 		return deriveMu(tracedModel, &capacity.EngineParams{MaxNumSeqs: 4096}, 1, tracedKv,
-			shape.New(1000, 500, 0), pricingK(cfg), 500).rate
+			shape.New(1000, 500, 0), pricingK(cfg), 500).Rate
 	}
 	return func(_ *rand.Rand, x float64) (bool, error) {
 		d := derived(x)
@@ -793,6 +794,6 @@ func probePricingK(center float64) probe {
 		}
 		measured := 0.5 * derived(center)
 		t := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
-		return t.throughputRefusal(1, measured, derivedMu{rate: d, ok: true}, 0, false) == "", nil
+		return t.throughputRefusal(1, measured, whatif.DerivedMu{Rate: d, OK: true}, 0, false) == "", nil
 	}
 }
