@@ -37,11 +37,12 @@ const SwitchPrefillCapacityObserve = "prefill-capacity-observe"
 // observation with the pods whose KV is full (prefillKVFull), and a minute
 // whose queue never emptied, on a pod whose KV was not full, is a busy
 // minute. Off, neither goes, and V_P comes only from the two lower-bound
-// sources, as P1 shipped. It moves no golden output: the observation writes no state any
-// output reads, and no committed recording carries a queue minimum. The
-// collector reads the queue minimum only while a learner recording is on
-// (collector SetRecordTTFTInputs); with none on, no row carries one and the
-// switch changes nothing.
+// sources, as P1 shipped. It moves no golden output: the observation writes
+// no state any output reads, and no committed recording carries a queue
+// minimum. The collector reads the queue minimum only while a learner
+// recording is on (collector SetRecordTTFTInputs); with none on, no row
+// carries one and no new busy minute is read, though those already read
+// stay V_P's source for prefill.BusyWindow.
 const SwitchPrefillBusyMinutes = "prefill-busy-minutes"
 
 // prefillKVFull is the pods of rows whose KV cache is full (kvFull at

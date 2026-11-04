@@ -107,6 +107,11 @@ type BoundReason string
 // than one data-parallel rank: its queue minimum is the ranks' least summed,
 // so the pod held work every sample of the minute but one rank may have
 // idled, and the minute reads under the pod's capacity.
+//
+// One such minute flags the whole median, however many single-rank minutes
+// stand beside it: the median cannot say which minutes it rests on, and
+// for an observe-only signal flagging too often under-promises, the
+// conservative side.
 const DataParallelRanks BoundReason = "DataParallelRanks"
 
 // Row refusals, counted per cycle in Estimate.Refused.
@@ -176,25 +181,32 @@ type Estimate struct {
 	//
 	// VPLowerBound says the source is a lower bound (sources 2 and 3, and
 	// busy minutes of a data-parallel pod): the true V_P is at or above VP.
-	// VPLowerBoundReason says why for busy minutes (DataParallelRanks), and
-	// is empty for sources 2 and 3, which are bounds by their source. For
-	// the peak under a queue it is a bound
-	// only up to the noise of a one-minute rate(): the peak is the max of
-	// many runs' least minutes, so it can read above V_P by about that
-	// noise (capacity.go). The name is kept, not softened, because the
-	// direction is what a reader acts on: a lower bound under-promises, and
-	// the noise is a stated limit of it, not a different kind of figure.
-	VP                 float64
-	VPSource           Source
-	VPLowerBound       bool
+	// For the peak under a queue it is a bound only up to the noise of a
+	// one-minute rate(): the peak is the max of many runs' least minutes,
+	// so it can read above V_P by about that noise (capacity.go). The name
+	// is kept, not softened, because the direction is what a reader acts
+	// on: a lower bound under-promises, and the noise is a stated limit of
+	// it, not a different kind of figure.
+	VP           float64
+	VPSource     Source
+	VPLowerBound bool
+	// VPLowerBoundReason says why busy minutes are a lower bound
+	// (DataParallelRanks). Empty otherwise: sources 2 and 3 are bounds by
+	// their source, and single-rank busy minutes are not one.
 	VPLowerBoundReason BoundReason
 	VPRefused          Refusal
 	VPSamples          int
 	// VPQueuedMinutes, VPLongestQueuedRun and VPBusyMinutes say why V_P was
 	// refused or where it stands: the samples kept that held a queue on
 	// some sample, the longest run of them (a peak needs PeakRun), and the
-	// busy minutes within BusyWindow (which need Cycle.QueueMin; V_P from
-	// them needs MinBusyMinutes). Read over every replica of the key.
+	// busy minutes (which need Cycle.QueueMin; V_P from them needs
+	// MinBusyMinutes). Read over every replica of the key.
+	//
+	// They are read over different windows: the queued minutes over every
+	// sample kept (Retention), as the peak is; the busy minutes over the
+	// last BusyWindow only. So a busy-minute count above the queued count
+	// is impossible, but the two are not a ratio, and nothing compares them:
+	// the only reader is the saturation analyzer's log line.
 	VPQueuedMinutes    int
 	VPLongestQueuedRun int
 	VPBusyMinutes      int
@@ -375,9 +387,9 @@ func (o *Observer) Observe(c Cycle) Estimate {
 		s := sample{at: c.Now}
 		s.rate, s.rateOK = computedRate(rm, sglang)
 		s.queued = rm.QueueLength > 0
-		if qmin, ok := c.QueueMin[rm.PodName]; ok {
-			s.busy = finitePositive(qmin) && s.queued && !c.DownstreamSaturated && !c.KVFull[rm.PodName]
-		}
+		// A pod QueueMin does not name reads zero, which is not busy.
+		qmin := c.QueueMin[rm.PodName]
+		s.busy = finitePositive(qmin) && s.queued && !c.DownstreamSaturated && !c.KVFull[rm.PodName]
 		s.multiRank = rm.Ranks() > 1
 		svc := rm.AvgServiceTime
 		rr, rrOK := requestRate(rm)

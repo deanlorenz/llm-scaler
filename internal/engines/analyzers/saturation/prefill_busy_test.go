@@ -180,6 +180,16 @@ func TestPrefillBusy_AKVFullMinuteIsNotBusy(t *testing.T) {
 	assert.Contains(t, last, `"busyMinutes"=4`)
 	assert.Contains(t, last, `"vpSource"="peak-under-queue"`)
 
+	// Exactly at the threshold is full (kvFull is at or over k1): 12800 of
+	// 16000 at 0.8.
+	at := busyMinutes()
+	for i := range at {
+		at[i].kvTokens = 12800
+	}
+	last = busyRun(t, true, at)
+	assert.Contains(t, last, `"busyMinutes"=0`)
+	assert.Contains(t, last, `"kvFullPods"=1`)
+
 	// Just under the threshold is not full: 12799 of 16000.
 	under := busyMinutes()
 	for i := range under {
@@ -218,4 +228,37 @@ func TestPrefillBusy_ADataParallelPodIsALowerBound(t *testing.T) {
 	assert.Contains(t, last, fmt.Sprintf(`"vp"=%v`, busyVP))
 	assert.Contains(t, last, `"vpLowerBound"=true`)
 	assert.Contains(t, last, `"vpLowerBoundReason"="DataParallelRanks"`)
+}
+
+// After a recording stops, the collector reads no queue minimum
+// (queueMinPods=0), but the busy minutes already read stay V_P's source
+// until the window passes: five busy minutes, then minutes still queued with
+// no minimum read. Thirty minutes after the first busy one, all five count;
+// a minute later the first has left, four are not a source, and V_P falls
+// back to the peak under a queue.
+func TestPrefillBusy_BusyMinutesOutliveARecordingForTheWindow(t *testing.T) {
+	h := newObserveHarness(t, &capacity.EngineParams{Engine: inferenceengine.EngineVLLM,
+		MaxNumBatchedTokens: 8192, EffectiveMaxBatchedTokens: 8192})
+	for range busyWarmup {
+		h.cycleWith(busyMinute{rate: 1000})
+	}
+	for _, m := range busyMinutes() {
+		h.cycleWith(m)
+	}
+	stopped := busyMinute{rate: busyVP}
+	var last string
+	// The busy minutes ran at minutes 0 to 4; minutes 5 to 30 read none.
+	for range 26 {
+		last = h.cycleWith(stopped)
+	}
+	assert.Contains(t, last, `"queueMinPods"=0`)
+	assert.Contains(t, last, `"busyMinutesOn"=true`)
+	assert.Contains(t, last, `"busyMinutes"=5`)
+	assert.Contains(t, last, `"vpSource"="busy-minutes"`)
+	assert.Contains(t, last, fmt.Sprintf(`"vp"=%v`, busyVP))
+
+	last = h.cycleWith(stopped)
+	assert.Contains(t, last, `"queueMinPods"=0`)
+	assert.Contains(t, last, `"busyMinutes"=4`)
+	assert.Contains(t, last, `"vpSource"="peak-under-queue"`)
 }

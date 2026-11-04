@@ -19,9 +19,12 @@ import (
 //     rows' QueueMin by QueueMins) read and above zero: a pod whose queue
 //     min was not read has none. A busy minute reads at or below V_P: at it
 //     when the pod ran flat out, under it when a data-parallel rank idled
-//     (flagged, DataParallelRanks) or the pod stalled on something the
-//     tests above miss (decode back-pressure that its saturation test does
-//     not catch, say).
+//     (flagged, DataParallelRanks: one multi-rank minute in the window
+//     flags the whole median, the conservative side) or the pod stalled on
+//     something the tests above miss (decode back-pressure that its
+//     saturation test does not catch, say). The busy minutes are counted
+//     over BusyWindow and the queued minutes over Retention, so the two
+//     counts are not compared (Estimate).
 //  2. The peak under a queue: the highest rate sustained over PeakRun
 //     minutes, each with a queue on some sample. A lower bound. A peak with
 //     no queue is the offered load, not capacity, and is not used.

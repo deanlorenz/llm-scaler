@@ -513,6 +513,11 @@ The window exists because `V_P` depends on the prompt lengths a pod is fed,
 and a median over the observation's six hours would keep a load long gone
 and win over the fresher sources. Thirty minutes is six times the 5 busy
 minutes needed, so a pod saturated one minute in six keeps its source.
+`busyMinutes` is counted over this window and `queuedMinutes` over the six
+hours kept, so the two are not comparable; nothing compares them, and the
+log line is their only reader. One busy minute from a multi-rank pod flags
+the whole median a lower bound: the conservative side for an observe-only
+signal.
 
 The observation log carries:
 
