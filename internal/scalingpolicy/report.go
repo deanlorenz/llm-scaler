@@ -11,6 +11,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 )
 
 // ChangeReporter reports which named policy tier each model resolved to, and
@@ -121,6 +122,25 @@ func (p *ChangeReporter) ReportOutputSeedConflict(ctx context.Context, namespace
 			"or set it on one and leave the others out.",
 		"namespace", namespace, "modelID", modelID,
 		"seeded", seeds, "using", chosen)
+}
+
+// ReportIgnoredStartSeed warns that a variant's replicaStartSeconds was
+// ignored, once each time the value written changes. raw is the value as
+// written (registry.Meta.ReplicaStartSecondsIgnored), or "" when the variant
+// has a usable seed or none: that is recorded too, so the same bad value
+// written again after a fix is reported again.
+//
+// Ignored rather than refused: a refused trigger freezes the model, and the
+// seed is a starting figure, not a setting.
+func (p *ChangeReporter) ReportIgnoredStartSeed(ctx context.Context, namespace, variant, raw string) {
+	if !p.changed("startSeed|"+namespace+"/"+variant, raw) || raw == "" {
+		return
+	}
+	ctrl.LoggerFrom(ctx).Info(
+		"A variant's replicaStartSeconds was ignored: it must be a number of seconds above 0 and at "+
+			"most maxSeconds. The variant is treated as having no seed.",
+		"namespace", namespace, "variant", variant, "replicaStartSeconds", raw,
+		"maxSeconds", registry.MaxReplicaStartSeconds)
 }
 
 // joinInts renders a deterministic list, so the same set reported in a different

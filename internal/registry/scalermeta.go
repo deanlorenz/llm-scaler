@@ -100,7 +100,8 @@ const (
 	ScalerAddressKey = "scalerAddress"
 
 	// ReplicaStartSecondsKey seeds how long one replica of this variant takes to
-	// become Ready. NOT READ YET -- see the note at the end of this comment.
+	// become Ready. Parsed and recorded, NOT READ YET -- see the note at the
+	// end of this comment.
 	//
 	// The demand floor projects the arriving queue forward over that time, so
 	// the figure decides how much backlog a scale-up is sized for. A 0.6B model
@@ -112,12 +113,13 @@ const (
 	// it with a measurement, and wva_replica_start_seconds_estimate carries a
 	// source label saying which is in force.
 	//
-	// Nothing reads it yet, deliberately. The only path from here to the
-	// analyzer runs through the synthetic VariantAutoscaling that
-	// utils.VariantsFromRegistry builds, and that CR is being removed -- adding
-	// a spec field to it would be dead on arrival. The key is declared now
-	// because it is the operator-facing contract the proposal commits to, and it
-	// is wired when the KEDA-driven path replaces that hop. Until then the
+	// ParseMeta reads it as seconds in (0, MaxReplicaStartSeconds]. Any other
+	// value is ignored, as if unset, and never rejects the trigger: before it
+	// was parsed any value was accepted, and a rejected trigger freezes the
+	// model. The engine puts it on the analyzer input
+	// (domain.VariantReplicaState.StartSeedSeconds), so a learner recording
+	// carries it, but no analyzer reads it yet: the start-time learner does
+	// from step 5c of docs/proposals/analyzer-learner.md. Until then the
 	// analyzer uses its own default, replaced by the first measurement.
 	ReplicaStartSecondsKey = "replicaStartSeconds"
 
@@ -155,6 +157,11 @@ const (
 // a trigger that omits variantCost ranks exactly where an unset one always has.
 const DefaultVariantCost = "10.0"
 
+// MaxReplicaStartSeconds is the longest replicaStartSeconds seed ParseMeta
+// accepts: an hour, the same bound the collector puts on a measured start
+// (a Ready transition later than that is not read as a start).
+const MaxReplicaStartSeconds = 3600.0
+
 // Meta is the validated trigger metadata for one variant.
 type Meta struct {
 	// ModelID is the model this variant serves.
@@ -181,6 +188,28 @@ type Meta struct {
 	// there is no sense in which a request generates no tokens, so there is
 	// nothing for an explicit 0 to express that absence does not.
 	DefaultOutputTokens int
+	// ReplicaStartSeconds is the seeded replica start time, in seconds, or 0
+	// when the trigger carries none or one ParseMeta ignored. Zero is never a
+	// seed: no replica becomes Ready in no time.
+	ReplicaStartSeconds float64
+	// ReplicaStartSecondsIgnored is the replicaStartSeconds value as written
+	// when ParseMeta ignored it -- not a number, not finite, not above zero,
+	// or over MaxReplicaStartSeconds -- and empty otherwise. A bad seed is not
+	// a trigger error (see ReplicaStartSecondsKey); this is what lets the
+	// caller say it was ignored.
+	ReplicaStartSecondsIgnored string
+}
+
+// parseReplicaStartSeconds reads a replicaStartSeconds value: the seed, or 0
+// and false when raw is not seconds in (0, MaxReplicaStartSeconds].
+func parseReplicaStartSeconds(raw string) (float64, bool) {
+	v, err := strconv.ParseFloat(raw, 64)
+	// NaN fails every comparison, so it is refused by the first clause rather
+	// than admitted by a negated one.
+	if err != nil || !(v > 0 && v <= MaxReplicaStartSeconds) {
+		return 0, false
+	}
+	return v, true
 }
 
 // ParseMeta validates a trigger's metadata.
@@ -241,13 +270,28 @@ func ParseMeta(metadata map[string]string) (Meta, error) {
 		outputTokens = n
 	}
 
+	// Ignored, never refused, unlike the keys above: before it was parsed any
+	// value was accepted, and refusing the trigger now would freeze a model
+	// over a figure nothing reads yet.
+	var startSeconds float64
+	var startIgnored string
+	if raw := metadata[ReplicaStartSecondsKey]; raw != "" {
+		if v, valid := parseReplicaStartSeconds(raw); valid {
+			startSeconds = v
+		} else {
+			startIgnored = raw
+		}
+	}
+
 	return Meta{
-		ModelID:             modelID,
-		VariantCost:         cost,
-		ScalingPolicy:       metadata[ScalingPolicyKey],
-		WarmPool:            metadata[WarmPoolKey],
-		WarmPoolCopies:      copies,
-		DefaultOutputTokens: outputTokens,
+		ModelID:                    modelID,
+		VariantCost:                cost,
+		ScalingPolicy:              metadata[ScalingPolicyKey],
+		WarmPool:                   metadata[WarmPoolKey],
+		WarmPoolCopies:             copies,
+		DefaultOutputTokens:        outputTokens,
+		ReplicaStartSeconds:        startSeconds,
+		ReplicaStartSecondsIgnored: startIgnored,
 	}, nil
 }
 
