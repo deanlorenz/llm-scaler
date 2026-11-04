@@ -2,8 +2,6 @@ package collector
 
 import (
 	"context"
-	"math"
-	"strconv"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/registration"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
@@ -26,7 +24,19 @@ import (
 // the histogram.
 func (c *ReplicaMetricsCollector) extractOutputBuckets(ctx context.Context, modelID, namespace string,
 	results map[string]*source.MetricResult, podData map[string]*podMetricData) {
-	result := results[registration.QueryOutputTokensBuckets]
+	c.extractBuckets(ctx, modelID, namespace, results[registration.QueryOutputTokensBuckets], podData,
+		func(d *podMetricData) *map[float64]float64 { return &d.outputTokensBuckets })
+}
+
+// extractBuckets reads one per-instance histogram query into the map field
+// returns, for the instances the model-scoped queries already found, by
+// bucket bound. The rules are extractOutputBuckets': this model's series
+// only, a bound that parses, a finite non-negative rate. The map stays nil
+// until one bucket is read, so a missing series, a failed query and a
+// histogram of NaNs all leave the instance without one: absent, never a
+// histogram of zeros.
+func (c *ReplicaMetricsCollector) extractBuckets(ctx context.Context, modelID, namespace string,
+	result *source.MetricResult, podData map[string]*podMetricData, field func(*podMetricData) *map[float64]float64) {
 	if result == nil || result.HasError() {
 		return
 	}
@@ -34,24 +44,21 @@ func (c *ReplicaMetricsCollector) extractOutputBuckets(ctx context.Context, mode
 		if value.Labels[seriesModelLabel] != modelID {
 			continue
 		}
-		le, err := strconv.ParseFloat(value.Labels["le"], 64)
-		if err != nil || math.IsNaN(le) {
-			continue
-		}
-		if !value.Finite() || !(value.Value >= 0) || math.IsInf(value.Value, 0) {
+		le, ok := bucketBound(value)
+		if !ok {
 			continue
 		}
 		instanceKey, _, _ := c.buildInstanceKey(ctx, namespace, value.Labels)
 		if instanceKey == "" || podData[instanceKey] == nil {
 			continue
 		}
-		d := podData[instanceKey]
-		if d.outputTokensBuckets == nil {
-			d.outputTokensBuckets = make(map[float64]float64)
+		buckets := field(podData[instanceKey])
+		if *buckets == nil {
+			*buckets = make(map[float64]float64)
 		}
 		// Two series with one bound (a model reached under two label
 		// sets) are one bucket.
-		d.outputTokensBuckets[le] += value.Value
+		(*buckets)[le] += value.Value
 	}
 }
 

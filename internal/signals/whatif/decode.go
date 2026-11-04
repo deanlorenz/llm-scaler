@@ -33,7 +33,10 @@ import (
 // Precondition: 0 < Lo < Hi < 1, the rule the policy's validation applies
 // (config.ScalingPolicy.ITLBand returns only such a band). The functions here
 // do not check it, except PricingK, which falls back to DefaultBand rather
-// than let the result depend on the order its two clamps are applied in.
+// than let the result depend on the order its two clamps are applied in;
+// PriceTPOT, which refuses such a band (OK false) rather than return a NaN fill
+// marked OK; and the planner's questions (Decode), which refuse it with
+// InvalidInput.
 type FillBand struct{ Lo, Hi float64 }
 
 // DefaultBand is the band of a policy that sets neither edge.
@@ -70,8 +73,14 @@ type Pricing struct {
 // TPOT is a MEAN, and the line is fitted on the mean inter-token latency
 // (vllm:inter_token_latency_seconds, sum over count), so no tail model stands
 // between the two.
+//
+// A band that breaks FillBand's precondition is an unusable input like the
+// others: OK false. With a NaN edge the clamp returned NaN as the fill, and an
+// inverted band returned whichever edge the last clamp applied, both marked OK.
+// The slo analyzer cannot pass either: it takes its band from
+// config.ScalingPolicy.ITLBand, which resets such a band to the defaults.
 func PriceTPOT(band FillBand, line itl.Model, targetSeconds float64) Pricing {
-	if !Finite(line.A) || !Finite(line.B) || !Finite(targetSeconds) {
+	if !band.valid() || !Finite(line.A) || !Finite(line.B) || !Finite(targetSeconds) {
 		return Pricing{}
 	}
 	if !(line.A > 0) || !(targetSeconds > 0) {

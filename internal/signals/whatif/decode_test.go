@@ -51,6 +51,19 @@ var _ = Describe("PriceTPOT", func() {
 		Entry("a zero target", line, 0.0),
 	)
 
+	// It used to clamp into the band unchecked: a NaN edge priced OK with a
+	// NaN fill, and an inverted band OK at whichever edge clamped last.
+	DescribeTable("refuses a band that breaks FillBand's precondition",
+		func(b FillBand) {
+			Expect(PriceTPOT(b, line, 0.044).OK).To(BeFalse())
+		},
+		Entry("a NaN bottom", FillBand{Lo: math.NaN(), Hi: 0.8}),
+		Entry("a NaN top", FillBand{Lo: 0.15, Hi: math.NaN()}),
+		Entry("an infinite top", FillBand{Lo: 0.15, Hi: math.Inf(1)}),
+		Entry("an inverted band", FillBand{Lo: 0.8, Hi: 0.15}),
+		Entry("a zero bottom", FillBand{Lo: 0, Hi: 0.8}),
+	)
+
 	// The negative control for the bound this replaced. A fill capped at the
 	// highest fill observed plus a step ratchets down, because the fleet runs
 	// below the fill it is priced at. The fill here depends on the line and the

@@ -72,8 +72,10 @@ const (
 
 	// VLLMRequestPrefillTimeSeconds is the time a request spent in the PREFILL
 	// phase, queue wait excluded (vLLM counts waiting separately, as
-	// request_queue_time_seconds). Not queried by the collector today; named
-	// here for the what-if proposal (docs/proposals/slo-capacity-planner.md).
+	// request_queue_time_seconds). Collected per pod as a [1m] mean
+	// (registration.QueryAvgPrefillTime, ReplicaMetrics.AvgPrefillTime) and
+	// recorded for the TTFT model of the what-if proposal
+	// (docs/proposals/slo-capacity-planner-ttft.md); no analyzer reads it yet.
 	// It is not a capacity: with batching, concurrent requests each report
 	// their own prefill duration, so the sum over-counts wall-clock and a
 	// per-request figure understates what the replica does.
@@ -1279,6 +1281,11 @@ const (
 	QueryTypePodList = "pod_list"
 	// QueryTypeRouterLatency is the router TTFT/TPOT read by the slo analyzer.
 	QueryTypeRouterLatency = "router_latency"
+	// QueryTypeLearnerRecording is every query only a learner recording
+	// reads (the TTFT model's inputs: per pod, the router's TPOT and
+	// flow-control wait histograms, the flow-control pools). They run only
+	// while recording is on, so a failure here never touches scaling.
+	QueryTypeLearnerRecording = "learner_recording"
 )
 
 // Value for the LabelUnit Prometheus label: the metric carries an absolute

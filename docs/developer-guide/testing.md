@@ -253,11 +253,21 @@ What it writes:
   cap does not fit, it takes what is left, down to 64Ki, and deletes no
   recording with data. Only when less than 64Ki would be left do the older
   recordings with data go, oldest first, and the newest of them last.
-- Measured on the in-process acceptance run: about 1.7 KB per replica per
-  cycle for each analyzer a model lists (each `Analyze` carries its input).
-  At a 15 s cycle, with saturation alone, 8 replicas fill 256Mi in about 3.4
-  days and 100 replicas in about 6.5 hours; with saturation, slo and
-  throughput listed, in about 27 hours and 2.1 hours.
+- How long a recording lasts. The in-process acceptance run measured about
+  1.7 KB per replica per cycle for each analyzer a model lists (each
+  `Analyze` carries its input), before the TTFT inputs
+  ([analyzer-learner, 2.9](../proposals/analyzer-learner.md#29-recorder-fields-for-ttft-and-capture))
+  were recorded. They add an estimated 4 KB, not yet measured, for about
+  5.6 KB per replica per `Analyze`. With vLLM, a 15 s cycle and that
+  estimate, the default 256Mi cap fills in:
+
+  | replicas | saturation alone | saturation, slo and throughput |
+  | --- | --- | --- |
+  | 8 | about 25 hours | about 8 hours |
+  | 100 | about 2 hours | about 40 minutes |
+
+  Recording also turns on the queries only it reads: up to 16 more per vLLM
+  namespace per cycle, more with SGLang.
 
 ### Copy the recordings out
 

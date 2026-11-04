@@ -107,7 +107,24 @@ type ReplicaMetricsCollector struct {
 	// cyclePods is namespace -> pod name -> serving state, listed once per
 	// namespace per cycle. Nil outside a cycle, like cycleResults.
 	cyclePods map[string]namespacePods
-	cycleMu   sync.Mutex
+	// cycleRecord is whether this cycle issues the queries only a learner
+	// recording reads (BeginRecordingCycle). Part of the cycle: false outside
+	// one, and cleared by EndCycle, so it can never outlive the recording
+	// that asked for it.
+	cycleRecord bool
+	cycleMu     sync.Mutex
+}
+
+// RecordsTTFTInputs reports whether the open cycle issues the queries whose
+// results only a learner recording reads (docs/proposals/analyzer-learner.md,
+// 2.9): the per-pod TTFT inputs (recordOnlyReplicaQueries), the router's TPOT
+// and flow-control wait histograms, and the flow-control pools. False outside
+// a cycle and in a cycle opened by BeginCycle: none of them is issued, and the
+// rows, the router latency and the pools carry none of their fields.
+func (c *ReplicaMetricsCollector) RecordsTTFTInputs() bool {
+	c.cycleMu.Lock()
+	defer c.cycleMu.Unlock()
+	return c.cycleRecord
 }
 
 // NewReplicaMetricsCollector creates a new replica metrics collector.
@@ -158,10 +175,19 @@ func (c *ReplicaMetricsCollector) bridgeFor(namespace, pod string) (string, time
 // leaves the memo nil and refreshes independently every time — correct, just
 // without the sharing.
 func (c *ReplicaMetricsCollector) BeginCycle() {
+	c.BeginRecordingCycle(false)
+}
+
+// BeginRecordingCycle is BeginCycle, with the queries only a learner
+// recording reads on for this cycle when record is set (RecordsTTFTInputs).
+// The engine passes whether its recorder is writing this cycle
+// (Engine.beginCollectorCycle); EndCycle turns them off again.
+func (c *ReplicaMetricsCollector) BeginRecordingCycle(record bool) {
 	c.cycleMu.Lock()
 	defer c.cycleMu.Unlock()
 	c.cycleResults = make(map[source.CacheKey]*source.MetricResult)
 	c.cyclePods = make(map[string]namespacePods)
+	c.cycleRecord = record
 }
 
 // EndCycle closes the cycle opened by BeginCycle and releases the memoized
@@ -169,6 +195,7 @@ func (c *ReplicaMetricsCollector) BeginCycle() {
 func (c *ReplicaMetricsCollector) EndCycle() {
 	c.cycleMu.Lock()
 	defer c.cycleMu.Unlock()
+	c.cycleRecord = false
 	c.cycleResults = nil
 	c.cyclePods = nil
 }

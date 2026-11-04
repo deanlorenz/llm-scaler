@@ -133,13 +133,15 @@ A decode pod holding `n` requests completes them at
 
     μ_n = m / ( OL · ITL(m·KVreq/C) ),   m = min(n, c),   c = batchCap·ranks
 
-a birth-death chain using the line at each state's own fill. Above `c` the chain
+a birth-death chain using the line at each state's own fill, clamped to the
+fitted band (a fill below it reads the band's bottom). Above `c` the chain
 is geometric, so the wait of a request that waits is exactly
 `Exp(μ_c − λ_rep)`, and the wait probability is the chain's mass at `n ≥ c`. A
 constant ITL (Erlang C at the mean fill) under-states the wait near the knee: in
-the worked example 0.0007 against 0.032 at 0.85 of the knee. When KV binds
-before the cap, `c = C/KVreq` at a full cache, flagged approximate. Residence is
-treated as exponential.
+the worked example 0.0007 against 0.032 at 0.85 of the knee. When the band's
+top holds fewer requests than the cap, `c = floor(band.Hi·C/KVreq)`, flagged
+approximate. Either way `μ_c` is the decode knee per replica, so the chain and
+the knee saturate at the same rate. Residence is treated as exponential.
 
 **One rule, flow control on or off:** `W_decode` is this chain, on the decode
 pods. With the batch cap binding (the worked example's cap fill is 0.732), the

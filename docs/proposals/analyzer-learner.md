@@ -930,10 +930,24 @@ made before R1 replays unchanged:
 | Per pod | Queue-time mean and histogram | `request_queue_time_seconds` (`queue_time_seconds`) |
 | Per pod | Prefill-time mean | `request_prefill_time_seconds` (vLLM only) |
 | Per pod | KV transfer time mean | `nixl_xfer_time_seconds` (vLLM only) |
-| Per model | Router TTFT and TPOT every cycle | a new `AnalyzerInput.RouterLatency`, collected by the engine every cycle: one more query per model per cycle |
+| Per model | Router TTFT and TPOT every cycle | a new `AnalyzerInput.RouterLatency`, collected by the engine every cycle while recording is on |
 | Per model | Router per-request TPOT histogram | `llm_d_epp_request_streaming_tpot_seconds_bucket`, as bucket rates beside the TTFT ones. `RouterLatency` keeps only the TPOT `_sum` and `_count` rates today, and the collector queries only those |
 | Per pod | Engine per-request TPOT histogram | `vllm:request_time_per_output_token_seconds_bucket`, the fallback source for the TPOT ratio (vLLM only) |
-| Per pool | Flow-control wait histogram, pool saturation by stage, outcomes | `flow_control_request_queue_duration_seconds`, `flow_control_pool_saturation`, `flow_control_requests_total`. They carry `inference_pool`, not a model, so they are recorded per pool and joined to a model only when the pool serves one |
+| Per pod | Queue minimum over the minute, `QueueMin` with `QueueMinKnown`: above zero, the engine had work waiting the whole minute (the busy minutes TTFT P1 reads its `V_P` from) | `min_over_time(num_requests_waiting[1m])` (`num_queue_reqs`). Each rank's least is summed over the pod's ranks, as the queue length sums their peaks: a floor under the pod's own least, and tighter than the largest rank's |
+| Per model | Flow-control wait histogram, dispatched requests only (`outcome="Dispatched"`): only a dispatched request's wait is part of a TTFT | `flow_control_request_queue_duration_seconds`, which carries `model_name` and `target_model_name` as well as the pool, so it is read per model with the router latency (`RouterLatency.FlowControlWaitBuckets`), not through the pool join |
+| Per pool | Pool saturation by stage, outcomes | `flow_control_pool_saturation` (stages `prefill`, `decode` and `effective`, the larger of the two, which gates dispatch; a pool with no endpoint reads 1.0) and `flow_control_requests_total`. They carry `inference_pool`, not a model, so they are recorded per pool and joined to a model only when the pool serves one |
+
+**Cost.** Every query above runs only while a learner recording is on: the
+engine tells the collector at the start of each cycle whether its recorder
+is writing (`Engine.beginCollectorCycle`, collector `SetRecordTTFTInputs`),
+and with recording off a cycle issues exactly the queries it issued before
+R1, the slo analyzer's router queries included, for the models that list it.
+With recording on, a namespace of vLLM models costs up to 16 more queries
+per cycle: 8 per pod, 5 router queries (the slo analyzer's 3, for models
+that do not list it, and the 2 histograms) and 3 per-pool queries. An SGLang
+or mixed namespace adds the SGLang variants of the 5 engine-specific per-pod
+queries. Each runs once per namespace, shared through the cycle memo, and a
+failed one is counted once, under `query_type="learner_recording"`.
 
 `learnrec.Input` mirrors `domain.AnalyzerInput`, so the router field is new on
 both. Replay keeps serving `AnalyzeEvent.RouterLatency` to the SLO analyzer, for
@@ -946,6 +960,17 @@ goldens are regenerated with `learnergolden update`: values unchanged, new
 fields absent. No switch: nothing reads the fields in R1. R1 also updates the
 comment on `constants.VLLMRequestPrefillTimeSeconds`, which then becomes
 collected.
+
+**Later: write each cycle's input once.** Each `Analyze` event carries its
+whole input, so a model listing three analyzers writes its rows three times
+a cycle. With R1's fields that is an estimated 4 KB more per replica per
+`Analyze`, about 3.3 times the measured 1.7 KB: at a 15 s cycle with 100
+replicas and three analyzers listed, the 256Mi cap fills in about 40 minutes
+instead of 2.1 hours. A later PR writes each model's cycle input once, as its
+own event, and has each `Analyze` event name that event's sequence number
+instead of carrying a copy; replay resolves the reference. That brings the
+cost back to one input per model per cycle, whatever the policy lists, and
+needs no change to what a replay reads.
 
 **R2: `whatif capture` and a `Generate` replay mode.**
 
