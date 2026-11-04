@@ -1,0 +1,113 @@
+// Command whatif is the what-if capacity planner's command line
+// (docs/proposals/slo-capacity-planner.md, "CLI reference"). It answers the
+// planner's two questions for decode from a learner recording, replayed
+// through the analyzers to the cycle asked for:
+//
+//	whatif replicas-to-slo --recording FILE [--cycle N|last] [--model M] [--decode N]
+//	                       [--headroom H | --rate R] [--tpot-percentile P [--assume-tpot-ratio R]] [-o json]
+//	whatif slo-to-rate     --recording FILE [--cycle N|last] [--model M] [--decode N]
+//	                       --tpot 4ms[@p90] [--assume-tpot-ratio R] [--headroom H] [-o json]
+//
+// Exit codes: 0 every role answered; 3 a role refused (the output is still
+// printed); 2 a usage or input error; 1 anything else.
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/signal"
+	"syscall"
+)
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	err := run(ctx, os.Args[1:], os.Stdout)
+	stop()
+	if err != nil {
+		var s exitStatus
+		if !errors.As(err, &s) {
+			fmt.Fprintln(os.Stderr, "whatif:", err)
+		}
+		os.Exit(exitCode(err))
+	}
+}
+
+// usageError is a usage or input error: exit 2.
+type usageError struct{ error }
+
+func (e usageError) Unwrap() error { return e.error }
+
+func usagef(format string, args ...any) error {
+	return usageError{fmt.Errorf(format, args...)}
+}
+
+// exitStatus ends a command whose output is already printed with a code
+// other than 0 (whatif.ExitCode): nothing more is printed.
+type exitStatus int
+
+func (s exitStatus) Error() string { return fmt.Sprintf("exit %d", int(s)) }
+
+// exitCode is the exit code for err: an exitStatus's own, 2 for a usage or
+// input error, 1 for anything else.
+func exitCode(err error) int {
+	var s exitStatus
+	if errors.As(err, &s) {
+		return int(s)
+	}
+	var u usageError
+	if errors.As(err, &u) {
+		return 2
+	}
+	return 1
+}
+
+const usage = "usage: whatif replicas-to-slo|slo-to-rate [flags]; -h after a command lists its flags"
+
+// command is one subcommand: it parses its own flags from args and writes
+// what it reports to out.
+type command func(ctx context.Context, args []string, out io.Writer) error
+
+// commands is every subcommand, by name.
+var commands = map[string]command{
+	"replicas-to-slo": runReplicasToSLO,
+	"slo-to-rate":     runSLOToRate,
+}
+
+// run runs one command. Asking for help is not an error.
+func run(ctx context.Context, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return usageError{errors.New(usage)}
+	}
+	cmd, ok := commands[args[0]]
+	if !ok {
+		return usagef("unknown command %q; %s", args[0], usage)
+	}
+	return cmd(ctx, args[1:], out)
+}
+
+// newFlags is a flag set for one command that reports its errors as usage
+// errors and writes its help to out.
+func newFlags(name string, out io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("whatif "+name, flag.ContinueOnError)
+	fs.SetOutput(out)
+	return fs
+}
+
+// parse parses args; ok is false when the caller should stop: help was
+// asked for (err nil) or the flags were wrong (a usage error).
+func parse(fs *flag.FlagSet, args []string) (bool, error) {
+	err := fs.Parse(args)
+	switch {
+	case errors.Is(err, flag.ErrHelp):
+		return false, nil
+	case err != nil:
+		return false, usageError{err}
+	case fs.NArg() > 0:
+		return false, usagef("unexpected argument %q", fs.Arg(0))
+	}
+	return true, nil
+}

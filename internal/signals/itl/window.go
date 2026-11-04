@@ -151,11 +151,16 @@ func (w *Window) Prune(now time.Time) {
 // KSpread returns max_k − min_k over the current observations.
 // Returns 0 when the window is empty.
 func (w *Window) KSpread() float64 {
-	if len(w.observations) == 0 {
+	return kSpread(w.observations)
+}
+
+// kSpread is max_k − min_k over obs, 0 when there are none.
+func kSpread(obs []Observation) float64 {
+	if len(obs) == 0 {
 		return 0
 	}
-	minK, maxK := w.observations[0].K, w.observations[0].K
-	for _, o := range w.observations[1:] {
+	minK, maxK := obs[0].K, obs[0].K
+	for _, o := range obs[1:] {
 		if o.K < minK {
 			minK = o.K
 		}
@@ -170,7 +175,13 @@ func (w *Window) KSpread() float64 {
 // AND the k-spread is at least minKSpread. Both conditions must hold before the
 // window is suitable for OLS fitting.
 func (w *Window) Ready() bool {
-	return len(w.observations) >= w.minSamples && w.KSpread() >= w.minKSpread
+	return ready(w.observations, w.minSamples, w.minKSpread)
+}
+
+// ready is Window.Ready over obs: at least minSamples of them, spread at
+// least minKSpread in k.
+func ready(obs []Observation, minSamples int, minKSpread float64) bool {
+	return len(obs) >= minSamples && kSpread(obs) >= minKSpread
 }
 
 // Observations returns a copy of the current window contents.
