@@ -317,4 +317,10 @@ type VariantReplicaState struct {
 	// MaxReplicas is the maximum number of replicas for this variant (from VA spec field).
 	// nil means not set (default: 0, no cap).
 	MaxReplicas *int
+	// StartSeedSeconds is the replicaStartSeconds the variant's ScaledObject
+	// seeds, set on cycles where the model has replica rows. Read by no
+	// analyzer yet. Left out of a recording while zero (omitzero).
+	StartSeedSeconds float64 `learnrec:"omitzero"`
+	// StartSeedSet says StartSeedSeconds holds a seed.
+	StartSeedSet bool `learnrec:"omitzero"`
 }

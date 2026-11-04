@@ -1175,6 +1175,35 @@ func (e *Engine) modelOutputSeed(
 	return best, named
 }
 
+// applyStartSeeds puts each variant's replicaStartSeconds seed on its state,
+// from its trigger metadata, as modelOutputSeed reads defaultOutputTokens: the
+// ScaledObject names the variant, so the variant name is the registry key. A
+// seed the parse ignored leaves the state unset and is reported once per
+// change; it is never a trigger error. A variant the registry does not hold,
+// or whose metadata ParseMeta refuses, gets no seed.
+//
+// Carried in the analyzer input so a learner recording holds it. No analyzer
+// reads it yet (step 5c of docs/proposals/analyzer-learner.md).
+func (e *Engine) applyStartSeeds(ctx context.Context, namespace string, states []domain.VariantReplicaState) {
+	if e.Variants == nil {
+		return
+	}
+	for i := range states {
+		entry, ok := e.Variants.Get(namespace, states[i].VariantName)
+		if !ok {
+			continue
+		}
+		meta, err := registry.ParseMeta(entry.Metadata)
+		if err != nil {
+			continue
+		}
+		e.policies.ReportIgnoredStartSeed(ctx, namespace, states[i].VariantName, meta.ReplicaStartSecondsIgnored)
+		if meta.ReplicaStartSeconds > 0 {
+			states[i].StartSeedSeconds, states[i].StartSeedSet = meta.ReplicaStartSeconds, true
+		}
+	}
+}
+
 // modelPolicy returns the policy tier a model scales under, plus every distinct
 // tier its variants named when they disagree.
 //
@@ -2176,6 +2205,7 @@ func (e *Engine) prepareModelData(
 	for _, m := range variantMetadata {
 		variantStates = append(variantStates, m.ToReplicaState())
 	}
+	e.applyStartSeeds(ctx, namespace, variantStates)
 	schedulerQueue := e.ReplicaMetricsCollector.CollectSchedulerQueueMetrics(ctx, modelID, namespace)
 	arrivalRate := e.ReplicaMetricsCollector.CollectModelArrivalRate(ctx, modelID, namespace)
 
