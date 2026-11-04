@@ -358,28 +358,23 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 		baseline = DefaultBaselineSec
 	}
 	// The fits run outside the lock: they read a copy of the window.
-	if r.Ready {
-		if m, ok := Fit(steadyObs); ok {
-			// B is what is remembered as the key's: B is the hardware floor,
-			// A the contention that moves with the workload, kept only for
-			// the pinned fit to hold through a settle. And only a physical,
-			// positive floor -- a negative B pinned into the next fit would
-			// be worse than the constant it replaced.
-			t.mu.Lock()
-			if m.B > 0 {
-				t.baselines[key] = m.B
-			}
-			t.slopes[key] = heldSlope{a: m.A, fittedAt: now, args: adm.Args}
-			t.mu.Unlock()
-			r.Model, r.Tier = m, TierOLS
-			return r
+	c := chooseFit(obs, steadyObs, r.Ready, baseline, s.MinSettledSamples)
+	if c.tier == TierOLS {
+		// B is what is remembered as the key's: B is the hardware floor,
+		// A the contention that moves with the workload, kept only for
+		// the pinned fit to hold through a settle. And only a physical,
+		// positive floor -- a negative B pinned into the next fit would
+		// be worse than the constant it replaced.
+		t.mu.Lock()
+		if c.model.B > 0 {
+			t.baselines[key] = c.model.B
 		}
+		t.slopes[key] = heldSlope{a: c.model.A, fittedAt: now, args: adm.Args}
+		t.mu.Unlock()
+		r.Model, r.Tier = c.model, TierOLS
+		return r
 	}
-	// The sample floor still applies when the spread is waived: the pinned
-	// fit answers from a single pair, and a line should not rest on one
-	// reading from one replica on one cycle.
-	pinned, settled := pinnedReadings(obs, steadyObs)
-	if !settled || len(pinned) < s.MinSettledSamples {
+	if c.hold {
 		// Too few readings to fit, for one of two reasons, and the last A
 		// holds through both.
 		//
@@ -418,16 +413,94 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 		r.SlopeFittedAt = held.fittedAt
 		return r
 	}
-	m, ok := FitPinnedB(pinned, baseline)
-	if !ok {
+	if c.declined {
 		r.Declined = true
 		return r
 	}
 	t.mu.Lock()
-	t.slopes[key] = heldSlope{a: m.A, fittedAt: now, args: adm.Args}
+	t.slopes[key] = heldSlope{a: c.model.A, fittedAt: now, args: adm.Args}
 	t.mu.Unlock()
-	r.Model, r.Tier = m, TierPinnedB
+	r.Model, r.Tier = c.model, TierPinnedB
 	return r
+}
+
+// fitChoice is chooseFit's outcome: a line at a tier, or hold (too few
+// settled readings: Observe holds the key's last slope, or tries the
+// above-band fallback), or declined (the pinned fit refused its readings).
+// read is the readings the fit was taken from.
+type fitChoice struct {
+	model          Model
+	tier           string
+	hold, declined bool
+	read           []Observation
+}
+
+// chooseFit is Observe's choice of fit over a key's readings, in one place
+// so that a refit of the same readings (Refit) makes the same choice: the
+// full fit on the steady readings when they are ready, and otherwise, or
+// when the full fit fails, the pinned fit at baseline on pinnedReadings.
+//
+// The sample floor still applies when the spread is waived: the pinned fit
+// answers from a single pair, and a line should not rest on one reading
+// from one replica on one cycle.
+func chooseFit(obs, steady []Observation, ready bool, baseline float64, minSettled int) fitChoice {
+	if ready {
+		if m, ok := Fit(steady); ok {
+			return fitChoice{model: m, tier: TierOLS, read: steady}
+		}
+	}
+	pinned, settled := pinnedReadings(obs, steady)
+	if !settled || len(pinned) < minSettled {
+		return fitChoice{hold: true}
+	}
+	m, ok := FitPinnedB(pinned, baseline)
+	if !ok {
+		return fitChoice{declined: true, read: pinned}
+	}
+	return fitChoice{model: m, tier: TierPinnedB, read: pinned}
+}
+
+// Refitted is a line fitted again from readings a key's windows held, by the
+// tracker's own choice of fit (Refit, RefitAboveBand).
+type Refitted struct {
+	// Model is the line, zero with none.
+	Model Model
+	// Tier is TierOLS or TierPinnedB, "" with no line.
+	Tier string
+	// Hold is set where Observe would hold the key's last slope: too few
+	// settled readings to fit.
+	Hold bool
+	// Read is the readings the line was fitted from.
+	Read []Observation
+}
+
+// Refit reruns Observe's choice of fit (chooseFit) on readings a key's
+// windows held: obs the main window's and steady the steady window's, each
+// in time order, as Readings returns them. baseline is the intercept the
+// pinned fit pins, and minSettled the steady gate's MinSettledSamples (0 is
+// the default). The steady readings are ready as the steady window judges
+// them: DefaultMinSamples of them, spread DefaultMinKSpread. Nothing is
+// remembered: the what-if planner bands a line by refitting resamples of
+// its readings (internal/signals/whatif, BootstrapLines).
+func Refit(obs, steady []Observation, baseline float64, minSettled int) Refitted {
+	if minSettled <= 0 {
+		minSettled = DefaultMinSettledSamples
+	}
+	c := chooseFit(obs, steady, ready(steady, DefaultMinSamples, DefaultMinKSpread), baseline, minSettled)
+	return Refitted{Model: c.model, Tier: c.tier, Hold: c.hold, Read: c.read}
+}
+
+// RefitAboveBand reruns the above-band fallback (aboveBandLine) on the
+// readings the above-band windows held. Tier is TierPinnedB when it fits.
+func RefitAboveBand(obs, steady []Observation, minSettled int) Refitted {
+	if minSettled <= 0 {
+		minSettled = DefaultMinSettledSamples
+	}
+	m, read, ok := aboveBandFit(obs, steady, minSettled)
+	if !ok {
+		return Refitted{}
+	}
+	return Refitted{Model: m, Tier: TierPinnedB, Read: read}
 }
 
 // pruneWithCarry prunes a window and its steady one, and returns what each
@@ -493,16 +566,26 @@ func newKeyWindow(size int) *Window {
 //
 // It errs on one side only, by construction: see fitAboveBand.
 func aboveBandLine(r Reading, obs, steady []Observation, s Steadiness) Reading {
-	pinned, settled := pinnedReadings(obs, steady)
-	if !settled || len(pinned) < s.MinSettledSamples {
-		return r
-	}
-	m, ok := fitAboveBand(pinned, aboveBandB(pinned))
+	m, _, ok := aboveBandFit(obs, steady, s.MinSettledSamples)
 	if !ok {
 		return r
 	}
 	r.Model, r.Tier, r.AboveBandFit = m, TierPinnedB, true
 	return r
+}
+
+// aboveBandFit is the above-band fallback's line and the readings it read,
+// ok false when there is none.
+func aboveBandFit(obs, steady []Observation, minSettled int) (Model, []Observation, bool) {
+	pinned, settled := pinnedReadings(obs, steady)
+	if !settled || len(pinned) < minSettled {
+		return Model{}, nil, false
+	}
+	m, ok := fitAboveBand(pinned, aboveBandB(pinned))
+	if !ok {
+		return Model{}, nil, false
+	}
+	return m, pinned, true
 }
 
 // aboveBandB is the B the above-band fallback pins: the least ITL among its
@@ -815,6 +898,38 @@ func (t *Tracker) Newest(key string) time.Time {
 		return w.observations[len(w.observations)-1].Timestamp
 	}
 	return time.Time{}
+}
+
+// KeyReadings is a copy of the readings filed under one key, each window in
+// time order: what Refit and RefitAboveBand refit a line from.
+type KeyReadings struct {
+	// All is every reading the main window holds, and Steady the steady
+	// ones the full fit is taken from (a steady reading may outlive the main
+	// window by up to DefaultSteadyCarry).
+	All, Steady []Observation
+	// Above and AboveSteady are the above-band fallback's windows: empty for
+	// a key whose admission never asked for it.
+	Above, AboveSteady []Observation
+}
+
+// Readings is a copy of the readings filed under key; every window is nil
+// for a key that has none. Read-only: the what-if planner bands a line by
+// refitting it from these (internal/signals/whatif, BootstrapLines).
+func (t *Tracker) Readings(key string) KeyReadings {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return KeyReadings{
+		All: observationsOf(t.windows[key]), Steady: observationsOf(t.steady[key]),
+		Above: observationsOf(t.above[key]), AboveSteady: observationsOf(t.aboveSteady[key]),
+	}
+}
+
+// observationsOf is a copy of w's readings, nil for no window.
+func observationsOf(w *Window) []Observation {
+	if w == nil {
+		return nil
+	}
+	return w.Observations()
 }
 
 // WindowLens returns, for every key holding a window, how many readings it

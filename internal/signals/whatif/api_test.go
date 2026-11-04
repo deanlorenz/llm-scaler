@@ -148,9 +148,9 @@ func reasonsExcept(skip Reason) []Result {
 }
 
 // pageOnlyReasons are on the page's reasons table for terms later PRs build
-// (prefill, the standalone role map, flow control, the pinned-B line); this
-// package does not raise them yet.
-var pageOnlyReasons = []string{"NoRoleMap", "NoPrefillCapacity", "FlowControlUnknown", "PinnedDefaultB"}
+// (prefill, the standalone role map, flow control); this package does not
+// raise them yet.
+var pageOnlyReasons = []string{"NoRoleMap", "NoPrefillCapacity", "FlowControlUnknown"}
 
 // Every exported Reason constant is in Reasons(), every one of them is on the
 // page's reasons table, and the page lists no reason this package neither

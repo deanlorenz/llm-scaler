@@ -28,8 +28,8 @@ type Admission struct {
 	// where that is fewer (flagged KVBoundSlots).
 	Slots int
 	// Basis carries the mean KV fill the chain spends its time at (Fill), the
-	// knee it saturates at (KneeRate) and what set the slots (BoundBy). The
-	// ITL line's tier joins it with the basis of the planner's D3 PR.
+	// knee it saturates at (KneeRate), what set the slots (BoundBy) and the
+	// ITL line's tier (Tier).
 	Basis Basis
 	Flags []Flag
 }
@@ -119,7 +119,7 @@ func DecodeAdmission(d Decode, rate float64) Result {
 	}
 	return Admission{
 		WaitProbability: ch.wait, Decay: ch.decay, Slots: c, Flags: flags,
-		Basis: Basis{Fill: ch.seqs * d.KVPerRequest / d.CapacityTokens, KneeRate: knee, BoundBy: []Bound{p.by}},
+		Basis: Basis{Fill: ch.seqs * d.KVPerRequest / d.CapacityTokens, KneeRate: knee, BoundBy: []Bound{p.by}, Tier: d.Tier},
 	}
 }
 
