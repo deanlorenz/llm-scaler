@@ -1776,6 +1776,10 @@ long-context:
 | `maxObservableK` | `0.80` | (0, 1) | Highest KV fill at which the latency teaches the line. Above it an engine short of memory preempts and its latency leaves the line. It judges the fill averaged over the latency's minute when the collector has it, else the instant fill, so a replica that bursts above it for part of a minute can still teach the line. If the merged policy leaves it at or below `minObservableK`, both edges go back to their defaults, and the controller logs a `WARNING: tuning figure not used` line when it reads the ConfigMap. |
 | `capMaxPreemptionRate` | `0` | >= 0 | A replica above `maxObservableK` still teaches the line when it is at its sequence cap: its running batch is exactly `--max-num-seqs` (set on the engine or declared with the `llm-d.ai/max-num-seqs` annotation, not defaulted) times its ranks, and requests are waiting. With `--max-num-active-seqs` set (vLLM v0.31+), the cap is the lower of the two. This is the most preemptions per second it may show over the ITL window. An explicit `0` overrides a tier that raised it. vLLM only: SGLang publishes no preemption counter. |
 
+The saturation, slo and throughput analyzers' ITL lines all read these three
+keys, and each takes a replica at its sequence cap into its line the same
+way.
+
 These three were top-level keys (`itlMinObservableK`, `itlMaxObservableK`,
 `itlCapMaxPreemptionRate`) before any release shipped them; the top-level
 spelling is reported as an unknown key and ignored.

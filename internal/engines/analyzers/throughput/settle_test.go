@@ -558,7 +558,7 @@ func TestITLSettle_APodWithAnAbsentRankIsNoReading(t *testing.T) {
 // SwitchITLSteadyGate off the parent's window reads none of them.
 func TestITLSettle_TheParentsWindowReadsNoSettle(t *testing.T) {
 	a := newParentLineAnalyzer().WithSettleView(settle.NewTracker())
-	adm := a.lineAdmission(a.admission(itlPolicy{}, "ns", "m"), "ns", "m", "v1")
+	adm := a.lineAdmission(a.admission(itlPolicy{}, "ns", "m"), "ns", "m", variantEngine{})
 	assert.Nil(t, adm.Settle)
 	assert.False(t, adm.WaitsAfterRestart || adm.KeepsThroughMissingRow || adm.FiniteOnly ||
 		adm.RestartUnderName || adm.IdleOnEvidence)

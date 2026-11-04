@@ -74,10 +74,11 @@ func neutralRows(start time.Time, i int) []domain.ReplicaMetrics {
 // a capacity store stating the capped replica's cap, the optimize interval
 // and a slope hold reads the scripted fleet exactly as a bare one does --
 // the same window and line every cycle, and the same result, with the
-// settle switches of PR 4b-2 off: until the line reads the cap (PR 4b-3),
-// the store, the interval and the hold may change nothing it admits. The
-// run must reach a full fit, so the equality is not one of two empty
-// windows.
+// settle switches of PR 4b-2 and the cap admission of PR 4b-3 off: beyond
+// those named changes, the store, the interval and the hold may change
+// nothing it admits. The run must reach a full fit, so the equality is not
+// one of two empty windows. With the cap admission on, the wired line
+// admits pod-cap and the two differ (TestITLCap_TheWiredLineAdmitsTheCappedReplica).
 func TestTheWiredAnalyzerReadsTheFleetAsABareOneDoes(t *testing.T) {
 	start := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 	bareClock, wiredClock := clocktesting.NewFakePassiveClock(start), clocktesting.NewFakePassiveClock(start)
@@ -93,7 +94,7 @@ func TestTheWiredAnalyzerReadsTheFleetAsABareOneDoes(t *testing.T) {
 	// (settle.go, settle_test.go): off on both here, each line judges the
 	// settle from its own trace, and the rest of the wiring is what the
 	// equality holds.
-	off := map[string]bool{}
+	off := map[string]bool{SwitchITLAdmitsAtSequenceCap: false}
 	for _, name := range settleSwitches {
 		off[name] = false
 	}

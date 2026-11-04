@@ -93,6 +93,16 @@ type Admission struct {
 	// DefaultKSat (fitAboveBand), and never sets the held slope or the
 	// intercept. Without it, as before, such a reading is only counted.
 	AboveBandFallback bool
+	// OneSidedAboveKSat keeps the pinned fit from pricing under the true line
+	// at DefaultKSat while the key has no learned B: when the window holds
+	// readings at a k of at least DefaultKSat (a replica at its sequence
+	// cap), the fit through DefaultBaselineSec is set against a line pinned
+	// at the least ITL of those readings, and the higher at DefaultKSat is
+	// the line (atLeastITLLine; Reading.PinnedAtLeastITL). A learned B ends
+	// it: the pinned fit then pins that. Without it, as before, the fit
+	// through DefaultBaselineSec is the line. Only the throughput analyzer
+	// sets it, with its cap admission.
+	OneSidedAboveKSat bool
 	// AboveBandWaitsAfterRestart stamps the above-band window's readings
 	// with the restart's wait too (WaitsAfterRestart), as learner PR 4b-2
 	// first built it, before its review exempted them (aboveBandSettling).

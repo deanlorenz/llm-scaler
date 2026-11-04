@@ -1114,9 +1114,14 @@ and [troubleshooting](troubleshooting.md#symptom-index).
   during the silence.
 - **A variant that starts above the band is priced from above it.** With no
   line from the band and no slope to hold, the line is fitted from readings
-  at k of at least 0.85 (`T2-above-band`). It errs one way only: it prices a
-  higher ITL than the true line, so it orders more replicas, never fewer.
-  The band's first fit replaces it. A fleet that sits above the band but
+  at k of at least 0.85 (`T2-above-band`), with B at the least ITL among
+  them. Without noise it errs one way only: it prices a higher ITL than the
+  true line, so it orders more replicas, never fewer. With 2 % gauge noise
+  it was at most 0.5 % under in simulation, within the 5 % known-truth
+  bound. The band's first fit replaces it, and a replica at its sequence
+  cap teaches the band's line instead, priced the same one-sided way until
+  the variant learns its intercept B (see
+  [the cycle log](cycle-log.md#reason-values-reason-field)). A fleet that sits above the band but
   under k 0.85 gets no line at all (`cause` `all-above-band-below-ksat`).
 
 ## Optional: scaling band after `make deploy-e2e-infra`
