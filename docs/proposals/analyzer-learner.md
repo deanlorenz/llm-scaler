@@ -1586,8 +1586,11 @@ What can move the fleet size, and which way:
 - **Up (live again).** Cap admission, and +Inf no longer blanking the line.
 
 TA only drives a scale-up where it is the highest order; saturation still
-votes. A policy that lists throughput alone has no such floor, and the PR
-says so in `configuration.md`.
+votes. A policy that lists throughput alone has no such floor: a silent line
+holds the role. 4b-1 says so in
+[configuration.md](../reference/configuration.md#the-throughput-analyzers-line),
+with how long the line is silent after a restart or a shape change, and the
+above-band fallback's one-sided error.
 
 #### Recordings
 
@@ -1749,8 +1752,16 @@ What else 4b-1 built:
   The saturation analyzer's clear is unchanged.
 - **One summary line when the line goes silent or comes back,** at the
   default level, as the GPS summary: `throughput analyzer: ITL line` with
-  `silent`, the `source`, and the cycle's rows in the band, above it, below
-  it and settling, and what the band's and the above-band windows hold. A
+  `silent`, the `cause` of a silence (`no-healthy-rows`, `fit-declined`,
+  `shape-change`, `all-above-band-below-ksat`, `restart`,
+  `too-few-readings`, judged in that order), the `source`, and the cycle's
+  rows in the band, above it, below it and settling, and what the band's
+  and the above-band windows hold. A cycle with no healthy row reads
+  nothing and has no line; before the round-2 review it priced from the last
+  cycle's reading, for as long as the rows stayed unhealthy. The reference
+  pages say what each `cause` means and what to do
+  ([cycle log](../reference/cycle-log.md#reason-values-reason-field),
+  [troubleshooting](../reference/troubleshooting.md#symptom-index)). A
   GPS mismatch the log opened is closed when the line goes silent or the
   variant has no shape, and a NaN GPS error (an infinite observed rate) is
   no mismatch.
