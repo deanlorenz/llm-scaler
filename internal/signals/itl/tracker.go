@@ -918,16 +918,18 @@ type KeyReadings struct {
 func (t *Tracker) Readings(key string) KeyReadings {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	var out KeyReadings
-	for _, w := range []struct {
-		m   map[string]*Window
-		dst *[]Observation
-	}{{t.windows, &out.All}, {t.steady, &out.Steady}, {t.above, &out.Above}, {t.aboveSteady, &out.AboveSteady}} {
-		if win, ok := w.m[key]; ok {
-			*w.dst = win.Observations()
-		}
+	return KeyReadings{
+		All: observationsOf(t.windows[key]), Steady: observationsOf(t.steady[key]),
+		Above: observationsOf(t.above[key]), AboveSteady: observationsOf(t.aboveSteady[key]),
 	}
-	return out
+}
+
+// observationsOf is a copy of w's readings, nil for no window.
+func observationsOf(w *Window) []Observation {
+	if w == nil {
+		return nil
+	}
+	return w.Observations()
 }
 
 // WindowLens returns, for every key holding a window, how many readings it

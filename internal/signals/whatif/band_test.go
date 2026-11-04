@@ -2,6 +2,7 @@ package whatif
 
 import (
 	"math"
+	"math/rand/v2"
 	"testing"
 	"time"
 
@@ -201,21 +202,98 @@ func TestBandAnswerPercentiles(t *testing.T) {
 	}
 }
 
-// Above a tenth of the resamples changing tier, and only above it, the band
-// is flagged.
-func TestTierUnstableThreshold(t *testing.T) {
+// tierCase is 200 resamples, changed of them at another tier, each pricing
+// figure 1 when unchanged and moved when changed.
+func tierCase(changed int, moved float64) Answer {
+	rs := LineResamples{Drawn: 200}
+	for i := range 200 {
+		rs.Lines = append(rs.Lines, Resample{Line: itl.Model{A: 1}, TierChanged: i < changed})
+		if i < changed {
+			rs.Lines[i].Line.A = moved
+		}
+	}
+	return BandAnswer(Answer{Value: 1}, rs, func(m itl.Model) (float64, bool) { return m.A, true })
+}
+
+// Above a tenth of the resamples changing tier, and only above it, the
+// answer is flagged; whether TierUnstable or LineNearGate turns on whether
+// the changed resamples' median figure lies more than 5% from the answer.
+func TestTierChangeFlags(t *testing.T) {
 	for _, c := range []struct {
-		changed int
-		want    bool
-	}{{20, false}, {21, true}} {
-		rs := LineResamples{Drawn: 200}
-		for i := range 200 {
-			rs.Lines = append(rs.Lines, Resample{Line: itl.Model{A: 1}, TierChanged: i < c.changed})
+		changed  int
+		moved    float64
+		unstable bool
+		nearGate bool
+	}{
+		{20, 2, false, false},     // a tenth exactly: no flag, whatever the move
+		{21, 2, true, false},      // the change moves the figure 100%
+		{21, 1.06, true, false},   // 6%: moves it
+		{21, 1.04, false, true},   // 4%: near the gate only
+		{21, 0.94, true, false},   // 6% the other way
+		{200, 1.04, false, true},  // every resample changed, and the figure did not move
+		{200, 1.051, true, false}, // just past 5%
+	} {
+		got := tierCase(c.changed, c.moved)
+		if got.HasFlag(TierUnstable) != c.unstable || got.HasFlag(LineNearGate) != c.nearGate {
+			t.Errorf("%d changed, figure %g: flags %v, want TierUnstable %v, LineNearGate %v",
+				c.changed, c.moved, got.Flags, c.unstable, c.nearGate)
 		}
-		got := BandAnswer(Answer{Value: 1}, rs, func(itl.Model) (float64, bool) { return 1, true })
-		if got.HasFlag(TierUnstable) != c.want {
-			t.Errorf("%d of 200 changed: TierUnstable %v, want %v", c.changed, got.HasFlag(TierUnstable), c.want)
+	}
+}
+
+// A resample that fitted no line has changed tier: it counts.
+func TestTierChangesCountsWhatFittedNothing(t *testing.T) {
+	rs := LineResamples{Drawn: 10}
+	for range 5 {
+		rs.Lines = append(rs.Lines, Resample{Line: itl.Model{A: 1}})
+	}
+	if got := rs.TierChanges(); got != 5 {
+		t.Errorf("10 drawn, 5 fitted unchanged: %d changes, want the 5 that fitted nothing", got)
+	}
+	rs.Lines[0].TierChanged = true
+	if got := rs.TierChanges(); got != 6 {
+		t.Errorf("one fitted at another tier too: %d, want 6", got)
+	}
+}
+
+// Every resample holds exactly the steady readings the steady window does,
+// and the cycles without steady readings come back in as many readings, so
+// a main window larger than the steady one stays larger by the same count.
+func TestBootstrapKeepsTheSteadyCount(t *testing.T) {
+	steady := readingsOn(worked, 15, 0.2, 0.52, 0.05)
+	// Unsteady readings in cycles of their own, after the steady ones: the
+	// main window holds 16 more readings than the steady window.
+	extra := readingsOn(worked, 8, 0.3, 0.4, 0.08)
+	for i := range extra.All {
+		extra.All[i].Timestamp = extra.All[i].Timestamp.Add(time.Hour)
+	}
+	rs := itl.KeyReadings{All: append(append([]itl.Observation{}, steady.All...), extra.All...), Steady: steady.Steady}
+	if len(rs.All) <= len(rs.Steady) {
+		t.Fatalf("main %d, steady %d: the case tests nothing", len(rs.All), len(rs.Steady))
+	}
+	r := newResampler(rs.All, rs.Steady, 4)
+	rng := rand.New(rand.NewPCG(1, 2))
+	for i := range 200 {
+		all, st := r.draw(rng)
+		if len(st) != len(rs.Steady) || len(all) != len(rs.All) {
+			t.Fatalf("draw %d: main %d, steady %d; want %d and %d", i, len(all), len(st), len(rs.All), len(rs.Steady))
 		}
+		for j := 1; j < len(all); j++ {
+			if all[j].Timestamp.Before(all[j-1].Timestamp) {
+				t.Fatalf("draw %d: the main window is out of time order at %d", i, j)
+			}
+		}
+		// Stamped again in order, the cycles must be in the order they were
+		// read in too, or the stamps order a shuffle.
+		for j := 1; j < len(r.picked); j++ {
+			if r.picked[j].at.Before(r.picked[j-1].at) {
+				t.Fatalf("draw %d: cycle %d was read before cycle %d", i, j, j-1)
+			}
+		}
+	}
+	got := BootstrapLines(rs, Refit{Tier: TierOLS, Line: worked, Baseline: worked.B}, DefaultResampling())
+	if got.Drawn != 200 || len(got.Lines) != 200 {
+		t.Errorf("drew %d, fitted %d", got.Drawn, len(got.Lines))
 	}
 }
 

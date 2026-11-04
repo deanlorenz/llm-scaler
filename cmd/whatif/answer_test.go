@@ -381,6 +381,8 @@ func TestJSONUsageError(t *testing.T) {
 	}{
 		{[]string{"replicas-to-slo", "-o", "json"}, 2},
 		{[]string{"slo-to-rate", "--recording", olsSweep, "-o=json"}, 2},
+		{[]string{"slo-to-rate", "--recording", olsSweep, "--output", "json"}, 2},
+		{[]string{"replicas-to-slo", "--recording", olsSweep, "--cycle", "first", "-o", "json"}, 2},
 		{[]string{"replicas-to-slo", "--recording", olsSweep, "--bogus", "-o", "json"}, 2},
 		{[]string{"replicas-to-slo", "--recording", olsSweep, "--cycle", "100000", "-o", "json"}, 2},
 	} {
@@ -396,6 +398,39 @@ func TestJSONUsageError(t *testing.T) {
 	}
 	if out, _ := runCmd(t, "replicas-to-slo"); strings.HasPrefix(strings.TrimSpace(out), "{") {
 		t.Errorf("a usage error without -o json wrote JSON:\n%s", out)
+	}
+}
+
+// JSON is asked for in every form the flag package reads -o and --output
+// in, wherever among the other flags, an unknown flag before it included;
+// the last one wins, as it does for the command.
+func TestWantsJSON(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"-o", "json"}, true},
+		{[]string{"-o=json"}, true},
+		{[]string{"--o=json"}, true},
+		{[]string{"--output", "json"}, true},
+		{[]string{"--output=json"}, true},
+		{[]string{"--recording", "r.jsonl", "--cycle", "3", "-o", "json"}, true},
+		{[]string{"--bogus", "x", "-o", "json"}, true},
+		{[]string{"-o", "json", "-o", "text"}, false},
+		{[]string{"-o", "text", "--output", "json"}, true},
+		{[]string{"-o", "text"}, false},
+		{[]string{"--recording", "json"}, false},
+		{[]string{"--", "-o", "json"}, false},
+		{nil, false},
+	} {
+		if got := wantsJSON(c.args); got != c.want {
+			t.Errorf("%q: %v, want %v", c.args, got, c.want)
+		}
+	}
+	// And the command reads --output as it reads -o.
+	out, code := runCmd(t, slices.Concat([]string{"slo-to-rate", "--recording", olsSweep, "--tpot", "4ms", "--output", "json"}, workedShape)...)
+	if code != 0 || decodeOutput(t, out).SchemaVersion != schemaVersion {
+		t.Errorf("--output json: exit %d\n%s", code, out)
 	}
 }
 

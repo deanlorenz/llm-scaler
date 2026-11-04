@@ -141,8 +141,15 @@ const (
 	// window having too few readings to fit a new one.
 	HeldLine Flag = "HeldLine"
 	// TierUnstable is a band in which more than a tenth of the resamples
-	// fitted the line at another tier than the answer's.
+	// fitted the line at another tier than the answer's, and those that did
+	// price the figure more than 5% away from it: which tier the tracker
+	// lands at moves the answer.
 	TierUnstable Flag = "TierUnstable"
+	// LineNearGate is informational: more than a tenth of the resamples
+	// fitted the line at another tier, but their figures stay within 5% of
+	// the answer. The line sits near the tracker's gate (the steady
+	// readings' count or spread), and the answer does not care which side.
+	LineNearGate Flag = "LineNearGate"
 	// ExtrapolatedFill is an answer whose fill lies above the highest fill
 	// the line's readings were taken at; the basis gives the distance.
 	ExtrapolatedFill Flag = "ExtrapolatedFill"

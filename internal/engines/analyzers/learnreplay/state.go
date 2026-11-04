@@ -2,6 +2,7 @@ package learnreplay
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"slices"
@@ -50,8 +51,9 @@ func queryErrorf(format string, args ...any) error {
 // stopped.
 type State struct {
 	Namespace, ModelID string
-	// Cycle is the model's cycle the replay stopped after.
-	Cycle int
+	// Cycle is the model's cycle the replay stopped after, and Cycles how
+	// many the recording holds.
+	Cycle, Cycles int
 	// FirstAt is the clock of the model's first cycle and At that of Cycle.
 	FirstAt, At time.Time
 	// Policy is the scaling policy the cycle was analyzed under; nil when
@@ -104,6 +106,9 @@ type VariantState struct {
 	Ranks          int
 	// Shape is the traffic the variant served (shapeOf).
 	Shape MeasuredShape
+	// ReadingsFrom and ReadingsTo are the first and the last cycle of the
+	// LineReadings, 0 with none.
+	ReadingsFrom, ReadingsTo int
 }
 
 // MeasuredShape is the shape a variant served over the cycles it had
@@ -132,23 +137,38 @@ type shapeSample struct {
 // cycle. A *QueryError is a model the recording does not hold or names
 // ambiguously, or a cycle past its last; any other error is a recording
 // that does not replay.
+//
+// The model and its cycle are resolved first, from the recording's
+// saturation Analyze events alone, so the last cycle is a cycle number like
+// any other: the replay stops there and the state is read once.
 func StateAt(ctx context.Context, recording []byte, opts Options, q StateQuery) (*State, error) {
 	if q.Cycle < 0 {
 		return nil, queryErrorf("cycle %d, want 1 or more, or 0 for the last", q.Cycle)
 	}
-	opts.Mode = Normal
-	type seen struct {
-		state   *State
-		cycles  int
-		firstAt time.Time
-		windows []whatif.TPOTWindow
-		shapes  map[string][]shapeSample
+	ns, model, total, err := resolveModel(recording, q)
+	if err != nil {
+		return nil, err
 	}
-	models := map[string]*seen{}
-	var stateErr error
+	cycle := q.Cycle
+	if cycle == 0 {
+		cycle = total
+	}
+	if cycle > total {
+		return nil, queryErrorf("cycle %d asked for, and the recording holds %d of %s/%s", cycle, total, ns, model)
+	}
+	opts.Mode = Normal
+	var (
+		st       *State
+		stateErr error
+		n        int
+		firstAt  time.Time
+		windows  []whatif.TPOTWindow
+		shapes   = map[string][]shapeSample{}
+		cycleAt  = map[time.Time]int{}
+	)
 	opts.stop = func(r *replayer, ev learnrec.RawEvent) bool {
-		if ev.Kind != saturation.KindAnalyze || stateErr != nil {
-			return stateErr != nil
+		if ev.Kind != saturation.KindAnalyze {
+			return false
 		}
 		var d saturation.AnalyzeEvent
 		if err := ev.DecodeData(&d); err != nil {
@@ -160,28 +180,23 @@ func StateAt(ctx context.Context, recording []byte, opts Options, q StateQuery) 
 			stateErr = err
 			return true
 		}
-		if q.ModelID != "" && in.ModelID != q.ModelID || q.Namespace != "" && in.Namespace != q.Namespace {
+		if in.Namespace != ns || in.ModelID != model {
 			return false
 		}
-		key := in.Namespace + "/" + in.ModelID
-		m := models[key]
-		if m == nil {
-			m = &seen{firstAt: ev.Now, shapes: map[string][]shapeSample{}}
-			models[key] = m
+		n++
+		if n == 1 {
+			firstAt = ev.Now
 		}
-		if q.Cycle != 0 && m.cycles >= q.Cycle {
-			return false
-		}
-		m.cycles++
+		cycleAt[ev.Now] = n
 		if w, ok := tpotWindow(in.RouterLatency); ok {
-			m.windows = append(m.windows, w)
+			windows = append(windows, w)
 		}
-		noteShapes(m.shapes, in.ReplicaMetrics, m.cycles)
-		if q.Cycle == 0 || m.cycles == q.Cycle {
-			m.state = r.stateOf(in, m.cycles, ev.Now, m.shapes)
+		noteShapes(shapes, in.ReplicaMetrics, n)
+		if n == cycle {
+			st = r.stateOf(in, n, ev.Now, shapes)
+			return true
 		}
-		// Stop once the one model asked for has reached its cycle.
-		return q.Cycle != 0 && q.ModelID != "" && q.Namespace != "" && m.cycles == q.Cycle
+		return false
 	}
 	if _, err := Replay(ctx, recording, opts); err != nil {
 		return nil, err
@@ -189,26 +204,75 @@ func StateAt(ctx context.Context, recording []byte, opts Options, q StateQuery) 
 	if stateErr != nil {
 		return nil, fmt.Errorf("learnreplay: %w", stateErr)
 	}
-	keys := make([]string, 0, len(models))
-	for k := range models {
-		keys = append(keys, k)
+	if st == nil {
+		return nil, fmt.Errorf("learnreplay: the replay ended after %d of the %d cycles of %s/%s", n, cycle, ns, model)
+	}
+	st.FirstAt, st.TPOTWindows, st.Cycles = firstAt, windows, total
+	for i := range st.Variants {
+		st.Variants[i].ReadingsFrom, st.Variants[i].ReadingsTo = cyclesSpanned(st.Variants[i].LineReadings, cycleAt)
+	}
+	return st, nil
+}
+
+// resolveModel is the model q names and how many saturation cycles the
+// recording holds of it, read from its Analyze events without replaying
+// them.
+func resolveModel(recording []byte, q StateQuery) (ns, model string, cycles int, err error) {
+	read, err := learnrec.Read(recording)
+	if err != nil {
+		return "", "", 0, err
+	}
+	counts := map[[2]string]int{}
+	for _, ev := range read.Events {
+		if ev.Kind != saturation.KindAnalyze {
+			continue
+		}
+		// Two fields of the input are all the scan reads: encoding/json skips
+		// the rest, where learnrec's own decoder would hold every field to
+		// the type (the replay decodes the event in full).
+		var d struct {
+			Input struct{ Namespace, ModelID string }
+		}
+		if err := json.Unmarshal(ev.Data, &d); err != nil {
+			return "", "", 0, fmt.Errorf("learnreplay: seq %d %s: %w", ev.Seq, ev.Kind, err)
+		}
+		id := d.Input
+		if q.ModelID != "" && id.ModelID != q.ModelID || q.Namespace != "" && id.Namespace != q.Namespace {
+			continue
+		}
+		counts[[2]string{id.Namespace, id.ModelID}]++
+	}
+	keys := make([]string, 0, len(counts))
+	for k, c := range counts {
+		ns, model, cycles = k[0], k[1], c
+		keys = append(keys, k[0]+"/"+k[1])
 	}
 	slices.Sort(keys)
 	switch {
 	case len(keys) == 0 && q.ModelID == "":
-		return nil, queryErrorf("the recording holds no saturation cycle")
+		return "", "", 0, queryErrorf("the recording holds no saturation cycle")
 	case len(keys) == 0:
-		return nil, queryErrorf("the recording holds no cycle of model %q", q.ModelID)
+		return "", "", 0, queryErrorf("the recording holds no cycle of model %q", q.ModelID)
 	case len(keys) > 1:
-		return nil, queryErrorf("the recording holds %s; name one with its namespace and model", strings.Join(keys, ", "))
+		return "", "", 0, queryErrorf("the recording holds %s; name one with its namespace and model", strings.Join(keys, ", "))
 	}
-	m := models[keys[0]]
-	if m.state == nil {
-		return nil, queryErrorf("cycle %d asked for, and the recording holds %d of %s", q.Cycle, m.cycles, keys[0])
+	return ns, model, cycles, nil
+}
+
+// cyclesSpanned is the first and the last cycle readings were taken at: a
+// reading is stamped with the clock of the Analyze that offered it.
+func cyclesSpanned(readings []itl.Observation, cycleAt map[time.Time]int) (from, to int) {
+	for _, o := range readings {
+		c, ok := cycleAt[o.Timestamp]
+		if !ok {
+			continue
+		}
+		if from == 0 || c < from {
+			from = c
+		}
+		to = max(to, c)
 	}
-	m.state.FirstAt = m.firstAt
-	m.state.TPOTWindows = m.windows
-	return m.state, nil
+	return from, to
 }
 
 // noteShapes keeps, per variant, the shape of each of its latest

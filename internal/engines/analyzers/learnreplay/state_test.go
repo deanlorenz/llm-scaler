@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -169,4 +170,47 @@ func TestRefitFindsAnAboveBandLine(t *testing.T) {
 	if other.Refitted || other.Tier != whatif.TierPinnedB || other.LineReadings != nil {
 		t.Errorf("%+v, want it as it was, with no readings", other)
 	}
+}
+
+// The measured shape weights each cycle with traffic by its request rate,
+// and every cycle alike when none read a rate.
+func TestShapeOfWeightsByRequestRate(t *testing.T) {
+	samples := []shapeSample{
+		{cycle: 7, il: 1000, ol: 100, hit: 0.2, req: 1},
+		{cycle: 9, il: 2000, ol: 500, hit: 0.6, req: 3},
+	}
+	got := shapeOf(samples)
+	if got.InputTokens != 1750 || got.OutputTokens != 400 || math.Abs(got.PrefixHitRate-0.5) > 1e-12 ||
+		got.FromCycle != 7 || got.ToCycle != 9 || got.Cycles != 2 {
+		t.Errorf("%+v, want IL 1750, OL 400, hit 0.5 over cycles 7-9", got)
+	}
+	samples[0].req, samples[1].req = 0, 0
+	if got := shapeOf(samples); got.InputTokens != 1500 || got.OutputTokens != 300 {
+		t.Errorf("no rate read: %+v, want the plain mean IL 1500, OL 300", got)
+	}
+	if got := shapeOf(nil); got != (MeasuredShape{}) {
+		t.Errorf("no traffic: %+v, want zero", got)
+	}
+}
+
+// The last cycle is a cycle number like any other: asking for it by number
+// gives the same state, and the readings' cycles fall inside the replay.
+func TestStateAt_LastIsTheLastCycle(t *testing.T) {
+	rec := olsSweepRecording(t)
+	last, err := StateAt(context.Background(), rec, Options{}, StateQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byNumber, err := StateAt(context.Background(), rec, Options{}, StateQuery{Namespace: "ns-01", ModelID: "model-02", Cycle: 226})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(last, byNumber) {
+		t.Errorf("the last cycle and cycle 226 differ:\n%+v\n%+v", last, byNumber)
+	}
+	d := last.Variants[0]
+	if last.Cycles != 226 || d.ReadingsFrom < 1 || d.ReadingsTo > 226 || d.ReadingsFrom > d.ReadingsTo {
+		t.Errorf("%d cycles, readings over cycles %d-%d", last.Cycles, d.ReadingsFrom, d.ReadingsTo)
+	}
+	t.Logf("line readings %d over cycles %d-%d", len(d.LineReadings), d.ReadingsFrom, d.ReadingsTo)
 }

@@ -25,11 +25,15 @@ roles[].inputs.line object
 roles[].inputs.line.a number
 roles[].inputs.line.b number
 roles[].inputs.line.borrowedFrom string
-roles[].inputs.line.observedFillMax number
+roles[].inputs.line.fromCycle number
+roles[].inputs.line.observedFill object
+roles[].inputs.line.observedFill.hi number
+roles[].inputs.line.observedFill.lo number
 roles[].inputs.line.readings number
 roles[].inputs.line.resamples number
 roles[].inputs.line.tier string
 roles[].inputs.line.tierChanges number
+roles[].inputs.line.toCycle number
 roles[].inputs.ranks number
 roles[].inputs.rate number
 roles[].inputs.replicas number
@@ -161,3 +165,4 @@ source.lastCycle number
 source.model string
 source.namespace string
 source.recording string
+source.totalCycles number

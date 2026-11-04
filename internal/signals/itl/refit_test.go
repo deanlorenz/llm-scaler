@@ -62,6 +62,25 @@ func TestRefitPinnedReadsWhatTheTrackerReads(t *testing.T) {
 	}
 }
 
+// The pinned fit's floor on settled readings: one under minSettled holds
+// the slope, minSettled itself fits.
+func TestRefitSettledFloor(t *testing.T) {
+	line := Model{A: 0.004, B: 0.0015}
+	for _, minSettled := range []int{DefaultMinSettledSamples, 5} {
+		for _, settled := range []int{minSettled - 1, minSettled} {
+			obs := spanReadings(line, DefaultMinSamples, 0.4, 0.5)
+			for i := range len(obs) - settled {
+				obs[i].settling = true
+			}
+			got := Refit(obs, nil, line.B, minSettled)
+			wantFit := settled >= minSettled
+			if (got.Tier == TierPinnedB) != wantFit || got.Hold == wantFit {
+				t.Errorf("minSettled %d, %d settled: %+v, want a fit %v", minSettled, settled, got, wantFit)
+			}
+		}
+	}
+}
+
 // RefitAboveBand is the above-band fallback's own fit, on its own readings.
 func TestRefitAboveBand(t *testing.T) {
 	line := Model{A: 0.05, B: 0.01}

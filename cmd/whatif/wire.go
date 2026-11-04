@@ -39,13 +39,16 @@ type wireError struct {
 
 // wireSource is what the answer was read from.
 type wireSource struct {
-	Recording  string    `json:"recording"`
-	Namespace  string    `json:"namespace"`
-	Model      string    `json:"model"`
-	FirstCycle int       `json:"firstCycle"`
-	LastCycle  int       `json:"lastCycle"`
-	FirstAt    time.Time `json:"firstAt"`
-	LastAt     time.Time `json:"lastAt"`
+	Recording  string `json:"recording"`
+	Namespace  string `json:"namespace"`
+	Model      string `json:"model"`
+	FirstCycle int    `json:"firstCycle"`
+	LastCycle  int    `json:"lastCycle"`
+	// TotalCycles is how many cycles of the model the recording holds;
+	// LastCycle is the one the answer was read at.
+	TotalCycles int       `json:"totalCycles"`
+	FirstAt     time.Time `json:"firstAt"`
+	LastAt      time.Time `json:"lastAt"`
 }
 
 // wireBands is how the bands were drawn.
@@ -105,12 +108,16 @@ const (
 
 // wireLine is the ITL line and its readings.
 type wireLine struct {
-	A               float64  `json:"a"`
-	B               float64  `json:"b"`
-	Tier            string   `json:"tier"`
-	BorrowedFrom    string   `json:"borrowedFrom,omitempty"`
-	Readings        int      `json:"readings"`
-	ObservedFillMax *float64 `json:"observedFillMax,omitempty"`
+	A            float64 `json:"a"`
+	B            float64 `json:"b"`
+	Tier         string  `json:"tier"`
+	BorrowedFrom string  `json:"borrowedFrom,omitempty"`
+	Readings     int     `json:"readings"`
+	// ObservedFill is the range of fill the readings were taken at, absent
+	// with no readings; FromCycle and ToCycle are the cycles they span.
+	ObservedFill *wireInterval `json:"observedFill,omitempty"`
+	FromCycle    int           `json:"fromCycle"`
+	ToCycle      int           `json:"toCycle"`
 	// Resamples is how many bootstrap resamples were drawn, and
 	// TierChanges how many of them the tracker's choice of fit put at
 	// another tier (TierUnstable above a tenth).
@@ -210,7 +217,7 @@ func newWireOutput(question string, f *answerFlags, st *learnreplay.State, varia
 	return wireOutput{
 		SchemaVersion: schemaVersion, Question: question, ExitCode: code, Roles: []wireRole{},
 		Source: &wireSource{Recording: f.recording, Namespace: st.Namespace, Model: st.ModelID,
-			FirstCycle: 1, LastCycle: st.Cycle, FirstAt: st.FirstAt, LastAt: st.At},
+			FirstCycle: 1, LastCycle: st.Cycle, TotalCycles: st.Cycles, FirstAt: st.FirstAt, LastAt: st.At},
 		Bands: &wireBands{Method: "block bootstrap", BlockCycles: r.Block, Resamples: r.Resamples, Seed: r.Seed,
 			LoPercent: 10, HiPercent: 90},
 		Note: footer(st, variants),
@@ -222,13 +229,14 @@ func inputsOf(f *answerFlags, pv pricedVariant) *wireInputs {
 	in := &wireInputs{
 		Line: wireLine{A: pv.decode.Line.A, B: pv.decode.Line.B, Tier: pv.state.Tier,
 			BorrowedFrom: pv.state.BorrowedFrom, Readings: len(pv.state.LineReadings),
-			Resamples: pv.lines.Drawn, TierChanges: pv.lines.TierChanges()},
+			Resamples: pv.lines.Drawn, TierChanges: pv.lines.TierChanges(),
+			FromCycle: pv.state.ReadingsFrom, ToCycle: pv.state.ReadingsTo},
 		FillBand:       wireInterval{Lo: pv.decode.Band.Lo, Hi: pv.decode.Band.Hi},
 		CapacityTokens: pv.decode.CapacityTokens, KVPerRequest: pv.decode.KVPerRequest,
 		Shape: wireShape{InputTokens: pv.shape.AvgInputTokens, InputSource: shapeMeasured,
 			OutputTokens: pv.shape.AvgOutputTokens, OutputSource: shapeMeasured, PrefixHitRate: pv.shape.PrefixHitRate,
 			FromCycle: pv.state.Shape.FromCycle, ToCycle: pv.state.Shape.ToCycle, Cycles: pv.state.Shape.Cycles},
-		BatchCap: pv.decode.ReplicaCap / int64(max(pv.state.Ranks, 1)), BatchCapSource: pv.state.BatchCapSource,
+		BatchCap: pv.perRank, BatchCapSource: pv.state.BatchCapSource,
 		Ranks: max(pv.state.Ranks, 1), Replicas: pv.decode.Replicas, ReplicasFrom: "recording",
 	}
 	if pv.assumedIL {
@@ -243,8 +251,8 @@ func inputsOf(f *answerFlags, pv pricedVariant) *wireInputs {
 	if f.decode > 0 {
 		in.ReplicasFrom = "--decode"
 	}
-	if top, ok := pv.observedFillMax(); ok {
-		in.Line.ObservedFillMax = &top
+	if lo, hi, ok := pv.observedFill(); ok {
+		in.Line.ObservedFill = &wireInterval{Lo: lo, Hi: hi}
 	}
 	return in
 }

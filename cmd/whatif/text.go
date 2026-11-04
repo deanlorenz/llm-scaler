@@ -81,6 +81,10 @@ func flagsLine(b *strings.Builder, pv pricedVariant, results ...whatif.Result) {
 			parts = append(parts, fmt.Sprintf("%s (fill %.3f, %.3f above the readings)", f, fill, fill-top))
 		case whatif.BorrowedLine:
 			parts = append(parts, fmt.Sprintf("%s (from %s)", f, pv.state.BorrowedFrom))
+		case whatif.TierUnstable:
+			parts = append(parts, fmt.Sprintf("%s (%d/%d resamples changed tier)", f, pv.lines.TierChanges(), pv.lines.Drawn))
+		case whatif.LineNearGate:
+			parts = append(parts, fmt.Sprintf("%s (%d/%d)", f, pv.lines.TierChanges(), pv.lines.Drawn))
 		default:
 			parts = append(parts, string(f))
 		}

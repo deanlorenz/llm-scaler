@@ -590,18 +590,162 @@ are not supported in this build: `--ttft`, `--ttft-percentile`,
 - **Bands.** Each resample is refitted by the tracker's own choice of fit
   (`itl.Refit`): the full fit only on steady readings that are ready, else
   pinned-B on the readings the pinned fit reads, else the held slope. An
-  above-band line is refitted on the above-band readings. A resample at
-  another tier, either way, counts toward `TierUnstable`. `--seed` sets the
-  bootstrap's seed; the JSON names it.
-- **Exit 1** also covers a recording that fails inside the analyzers, and a
-  cancelled run.
+  above-band line is refitted on the above-band readings. The bootstrap is
+  stratified: cycles holding steady readings are drawn among themselves
+  until the resample holds exactly the steady window's count, and the other
+  cycles among themselves. Whether the tracker takes the full fit turns on
+  that count as much as on the spread; drawn freely, a 15-reading window
+  gave resamples of 8 to 20, windows the tracker never had. `--seed` sets
+  the bootstrap's seed; the JSON names it.
+- **Tier flags.** When more than 10% of the resamples land at another tier
+  (either way, a hold or no fit included), the answer is flagged:
+  `TierUnstable` when those resamples' median figure lies more than 5% from
+  the answer, the tier moving the figure; `LineNearGate`, informational,
+  when it does not. Neither changes the exit code. The text gives the count:
+  `TierUnstable (n/200 resamples changed tier)`, `LineNearGate (n/200)`.
+- **The worked example is flagged `LineNearGate (22/200)`.** Its line rests on
+  15 steady readings spanning 0.322 of fill, against the tracker's 0.30
+  gate, so a resample that narrows below the gate refits pinned-B; the
+  figures those resamples price stay within 5% of the answer, and the mean
+  TPOT's whole band, [3.65 .. 3.70] ms, is under 2% wide. Nothing to do: the flag
+  says the line sits near the gate, not that the answer is in doubt.
+- **Exit codes.** A recording file that is missing or unreadable, or is not
+  a learner recording, is an input error: exit `2`, like a model or cycle
+  the recording does not hold. A recording that fails inside the analyzers,
+  or a cancelled run, is exit `1`.
 
 ### JSON output
 
-`-o json` writes one object. An error met before any answer is an object
-holding `schemaVersion`, `question`, `exitCode` and `error.message` alone.
-Every key path, with its JSON type, for `schemaVersion` 1 (the
-`cmd/whatif` tests hold the wire types to this list):
+`-o json` (or `--output json`) writes one object. Abridged from the worked
+example (`cmd/whatif/testdata/replicas-to-slo-worked-json.golden`; of its
+four results only `meanTPOT` is kept here):
+
+```json
+{
+  "schemaVersion": 1,
+  "question": "replicas-to-slo",
+  "source": {
+    "recording": "../../internal/engines/analyzers/learnreplay/testdata/goldens/ols-sweep/recording.jsonl.gz",
+    "namespace": "ns-01",
+    "model": "model-02",
+    "firstCycle": 1,
+    "lastCycle": 226,
+    "totalCycles": 226,
+    "firstAt": "2026-11-01T21:54:30.377845609Z",
+    "lastAt": "2026-11-01T22:50:53.616794067Z"
+  },
+  "bands": {
+    "method": "block bootstrap",
+    "blockCycles": 4,
+    "resamples": 200,
+    "seed": 1,
+    "loPercent": 10,
+    "hiPercent": 90
+  },
+  "roles": [
+    {
+      "role": "decode",
+      "variant": "variant-01",
+      "inputs": {
+        "line": {
+          "a": 0.004437632383842851,
+          "b": 0.0015568837184686396,
+          "tier": "ols",
+          "readings": 15,
+          "observedFill": {
+            "lo": 0.17953730856956665,
+            "hi": 0.501466275659824
+          },
+          "fromCycle": 197,
+          "toCycle": 220,
+          "resamples": 200,
+          "tierChanges": 22
+        },
+        "fillBand": {
+          "lo": 0.15,
+          "hi": 0.8
+        },
+        "capacityTokens": 131072,
+        "kvPerRequest": 1500,
+        "shape": {
+          "inputTokens": 1000,
+          "inputSource": "assumed",
+          "outputTokens": 1000,
+          "outputSource": "assumed",
+          "prefixHitRate": 0,
+          "fromCycle": 204,
+          "toCycle": 223,
+          "cycles": 20
+        },
+        "batchCap": 64,
+        "batchCapSource": "flags",
+        "ranks": 1,
+        "replicas": 1,
+        "replicasFrom": "recording",
+        "headroom": 0.85,
+        "tpot": {
+          "percentile": 0.9,
+          "ratio": 1.3,
+          "ratioSource": "assumed",
+          "windows": 0
+        }
+      },
+      "results": {
+        "meanTPOT": {
+          "answer": {
+            "value": 0.0036607509947803553,
+            "unit": "s",
+            "band": {
+              "lo": 0.003646523903932082,
+              "hi": 0.0036965490906630907
+            },
+            "basis": {
+              "fill": 0.4740967917873882,
+              "kneeRate": 13.313632625239457,
+              "floor": 0.002222528576045067,
+              "uncapped": 0,
+              "boundBy": [],
+              "tier": "ols"
+            },
+            "flags": [
+              "LineNearGate",
+              "AssumedShape"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "exitCode": 0,
+  "note": "estimate from 15 readings (cycles 197-220) of a 226-cycle recording, not a guarantee; see basis (-o json)"
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `schemaVersion` | The schema below; a change to any key is a new version. |
+| `question` | `replicas-to-slo` or `slo-to-rate`. |
+| `source` | The recording, the model, `firstCycle` (1), `lastCycle` (the cycle answered at) and `totalCycles` (the recording's), with their clocks. Absent on an error object. |
+| `bands` | How the bands were drawn: block bootstrap, `blockCycles`, `resamples`, `seed`, the percentiles. Absent on an error object. |
+| `roles[]` | One per decode variant priced: `inputs` (what it was priced from) and `results`. |
+| `inputs.line` | The ITL line (`a` in seconds per unit of fill, `b` in seconds), its `tier`, the `readings` it was fitted from, their `observedFill` range and `fromCycle`-`toCycle`, and of the bootstrap's `resamples` how many (`tierChanges`) landed at another tier. |
+| `inputs.shape` | Lengths in tokens, each with its source, `measured` (over `fromCycle`-`toCycle`) or `assumed`. |
+| `results` | `knee`, `operatingRate`, `meanTPOT`, `percentileTPOT` for question 2; `rate` for question 1. A question not asked has no key. |
+| a result | Exactly one of `answer` and `refused`. |
+| `answer` | `value` in `unit`: `r/s` (requests per second over the fleet) for a rate, `s` for a TPOT. `band`, when present, is in the same unit. `basis` is what it rests on (`fill`, `kneeRate` in r/s, `floor` in s, `uncapped` in r/s, `boundBy`, `tier`; a field that does not apply is 0). `flags` is always an array. |
+| `refused` | `reason`, one of the reasons table above, and `detail`. |
+| `inputs.tpot` | `targetSeconds` (question 1, seconds), `percentile` (0 to 1), `ratio` (R_q) and where it came from. |
+| `exitCode` | The process's exit code, as above. |
+| `error` | Present only when no answer was reached (exit `2` or `1`): `message`; the object then holds `schemaVersion`, `question`, `roles` (empty) and `exitCode` alone. |
+
+To read a figure, for example the mean TPOT in milliseconds:
+
+```
+whatif replicas-to-slo --recording run.jsonl.gz -o json | jq '.roles[0].results.meanTPOT.answer.value * 1000'
+```
+
+Every key path, with its JSON type, for `schemaVersion` 1 (the `cmd/whatif`
+tests hold the wire types to this list):
 
 <!-- whatif-json-schema-v1: begin -->
 ```
@@ -632,11 +776,15 @@ roles[].inputs.line object
 roles[].inputs.line.a number
 roles[].inputs.line.b number
 roles[].inputs.line.borrowedFrom string
-roles[].inputs.line.observedFillMax number
+roles[].inputs.line.fromCycle number
+roles[].inputs.line.observedFill object
+roles[].inputs.line.observedFill.hi number
+roles[].inputs.line.observedFill.lo number
 roles[].inputs.line.readings number
 roles[].inputs.line.resamples number
 roles[].inputs.line.tier string
 roles[].inputs.line.tierChanges number
+roles[].inputs.line.toCycle number
 roles[].inputs.ranks number
 roles[].inputs.rate number
 roles[].inputs.replicas number
@@ -768,6 +916,7 @@ source.lastCycle number
 source.model string
 source.namespace string
 source.recording string
+source.totalCycles number
 ```
 <!-- whatif-json-schema-v1: end -->
 

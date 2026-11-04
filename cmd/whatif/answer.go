@@ -59,6 +59,7 @@ func (f *answerFlags) register(fs *flag.FlagSet) {
 	fs.Float64Var(&f.tpotRatio, "assume-tpot-ratio", 0, "R_q, a TPOT percentile over its mean, assumed rather than learned (flagged)")
 	fs.Uint64Var(&f.seed, "seed", whatif.DefaultResampling().Seed, "the seed of the bands' bootstrap")
 	fs.StringVar(&f.output, "o", outputText, "output: text or json")
+	fs.StringVar(&f.output, "output", outputText, "output: text or json (the same as -o)")
 	fs.StringVar(&f.ttft, "ttft", "", "TTFT target: not supported in this build")
 	fs.StringVar(&f.ttftPercentile, "ttft-percentile", "", "TTFT percentile: not supported in this build")
 	fs.StringVar(&f.assumeVP, "assume-vp", "", "prefill token throughput: not supported in this build")
@@ -144,10 +145,13 @@ func (f *answerFlags) readState(ctx context.Context) (*learnreplay.State, error)
 // read from the recording, the Decode built from it, and the flags every
 // answer on it carries.
 type pricedVariant struct {
-	state  learnreplay.VariantState
-	cycle  int
-	decode whatif.Decode
-	shape  shape.Shape
+	state learnreplay.VariantState
+	// perRank is the batch cap per engine rank priced at: --batch-cap, or
+	// the analyzer's.
+	perRank int64
+	cycle   int
+	decode  whatif.Decode
+	shape   shape.Shape
 	// assumedIL and assumedOL say which lengths the flags assumed.
 	assumedIL, assumedOL bool
 	flags                []whatif.Flag
@@ -184,10 +188,11 @@ func (f *answerFlags) decodeVariants(st *learnreplay.State) ([]pricedVariant, er
 		if f.decode > 0 {
 			replicas = f.decode
 		}
-		perRank := vs.BatchCap
+		pv.perRank = vs.BatchCap
 		if f.batchCap > 0 {
-			perRank = f.batchCap
+			pv.perRank = f.batchCap
 		}
+		perRank := pv.perRank
 		pv.decode = whatif.Decode{
 			Line: vs.Line, Band: band, CapacityTokens: vs.CapacityTokens,
 			KVPerRequest: pv.shape.KVreq, OutputTokens: pv.shape.AvgOutputTokens,
@@ -221,18 +226,24 @@ func (f *answerFlags) resampling() whatif.Resampling {
 	return r
 }
 
-// observedFillMax is the highest fill among the readings the line was
-// fitted from (VariantState.LineReadings), ok false with none.
-func (pv pricedVariant) observedFillMax() (float64, bool) {
+// observedFill is the range of fill among the readings the line was fitted
+// from (VariantState.LineReadings), ok false with none.
+func (pv pricedVariant) observedFill() (lo, hi float64, ok bool) {
 	rs := pv.state.LineReadings
 	if len(rs) == 0 {
-		return 0, false
+		return 0, 0, false
 	}
-	m := rs[0].K
+	lo, hi = rs[0].K, rs[0].K
 	for _, o := range rs[1:] {
-		m = max(m, o.K)
+		lo, hi = min(lo, o.K), max(hi, o.K)
 	}
-	return m, true
+	return lo, hi, true
+}
+
+// observedFillMax is the top of observedFill.
+func (pv pricedVariant) observedFillMax() (float64, bool) {
+	_, hi, ok := pv.observedFill()
+	return hi, ok
 }
 
 // qualify adds the variant's own flags to an answer, and ExtrapolatedFill
@@ -345,14 +356,27 @@ func parsePercent(s string) (float64, error) {
 	return p / 100, nil
 }
 
-// footer is the line every human answer ends with: the cycles and the
-// readings the answer rests on.
+// footer is the line every human answer ends with: the readings the answer
+// rests on, the cycles they were taken at, and the recording they came
+// from, read to which cycle when not to its last.
 func footer(st *learnreplay.State, variants []pricedVariant) string {
-	n := 0
+	n, from, to := 0, 0, 0
 	for _, pv := range variants {
 		n += len(pv.state.LineReadings)
+		if f := pv.state.ReadingsFrom; f > 0 && (from == 0 || f < from) {
+			from = f
+		}
+		to = max(to, pv.state.ReadingsTo)
 	}
-	return fmt.Sprintf("estimate from cycles 1-%d and %d readings, not a guarantee; see basis (-o json)", st.Cycle, n)
+	readings := fmt.Sprintf("%d readings (cycles %d-%d)", n, from, to)
+	if n == 0 {
+		readings = "no readings of the line's own"
+	}
+	of := fmt.Sprintf("a %d-cycle recording", st.Cycles)
+	if st.Cycle != st.Cycles {
+		of += fmt.Sprintf(" read to cycle %d", st.Cycle)
+	}
+	return fmt.Sprintf("estimate from %s of %s, not a guarantee; see basis (-o json)", readings, of)
 }
 
 // shapeText is the shape a variant was priced at and where each length came
@@ -391,20 +415,32 @@ func newAnswerFlags(name string, args []string, out io.Writer) *flag.FlagSet {
 	return fs
 }
 
-// wantsJSON reports whether args ask for -o json, read before the flags are
-// parsed, so that a usage error is written as JSON too.
+// wantsJSON reports whether args ask for JSON output, read before the
+// command's flags are parsed so that a usage error is written as JSON too.
+// The flag package reads -o and --output itself, in every form it accepts
+// (-o json, -o=json, --output json, ...): a flag set of those two alone
+// parses each argument that looks like a flag with the one after it, and an
+// argument it does not know is skipped rather than stopping the scan. The
+// last -o wins, as it does for the command.
 func wantsJSON(args []string) bool {
+	want := false
 	for i, a := range args {
-		switch a {
-		case "-o", "--o":
-			if i+1 < len(args) && args[i+1] == outputJSON {
-				return true
-			}
-		case "-o=" + outputJSON, "--o=" + outputJSON:
-			return true
+		if a == "--" {
+			break
+		}
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		fs := flag.NewFlagSet("", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		var o string
+		fs.StringVar(&o, "o", "", "")
+		fs.StringVar(&o, "output", "", "")
+		if fs.Parse(args[i:min(i+2, len(args))]) == nil && o != "" {
+			want = o == outputJSON
 		}
 	}
-	return false
+	return want
 }
 
 // asJSONError writes err, a command's error before any answer was written,
