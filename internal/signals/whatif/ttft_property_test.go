@@ -210,6 +210,29 @@ func TestProperty_TTFTNonFiniteIsRefused(t *testing.T) {
 	}
 }
 
+// TTFT never falls as the prompt spread rises, over cv 0 to 3 in steps of
+// 0.1 (across the boundary at 1, where the tail changes form), at p90, p95
+// and p99 and at 0.3 to 0.85 of the prefill knee. Above cv 3 the gamma's
+// p90 can fall at very low load (most of its mass sits below the mean);
+// S1's design caps an assumed cv at 3, and so does this property.
+func TestProperty_TTFTMonotoneInPromptSpread(t *testing.T) {
+	for _, q := range []float64{0.9, 0.95, 0.99} {
+		for _, frac := range []float64{0.3, 0.5, 0.7, 0.85} {
+			prev := 0.0
+			for i := 0; i <= 30; i++ {
+				cv := float64(i) / 10
+				fl := prefillOnly(cv)
+				rate := frac * mustAnswer(t, PrefillKnee(fl.Prefill)).Value
+				got := mustTTFT(t, ttftAt(t, fl, rate, q)).Seconds
+				if !(got >= prev*(1-1e-9)) {
+					t.Errorf("q %g at %.2f of the knee: TTFT %g at cv %.1f, after %g", q, frac, got, cv, prev)
+				}
+				prev = got
+			}
+		}
+	}
+}
+
 // The union bound's split: with no decode wait the decode share is 0 and the
 // answer is block 1's own quantile; with one, the share never exceeds the
 // decode wait probability or 1 - q.

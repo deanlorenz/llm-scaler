@@ -163,7 +163,9 @@ func (p Prefill) check() (prefillPlan, *Unanswerable) {
 	case !Finite(p.PromptTokens) || !(p.PromptTokens > 0):
 		u = refuse(NoTraffic, fmt.Sprintf("prompt %g tokens", p.PromptTokens))
 	case !(p.PromptCV >= 0 && p.PromptCV <= maxPromptCV):
-		u = refuse(NoTraffic, fmt.Sprintf("prompt cv %g, want 0 <= cv <= %d", p.PromptCV, maxPromptCV))
+		// The spread is assumed or read from a histogram; a value outside
+		// [0, 10] is the caller's mistake, not the traffic's.
+		u = refuse(InvalidInput, fmt.Sprintf("prompt cv %g, want 0 <= cv <= %d", p.PromptCV, maxPromptCV))
 	case !Finite(p.ArrivalCV2) || p.ArrivalCV2 < 0:
 		u = refuse(InvalidInput, fmt.Sprintf("Ca^2 %g, want a finite value of at least 0 (0 is Poisson)", p.ArrivalCV2))
 	case !Finite(p.TransferSecondsPerToken) || p.TransferSecondsPerToken < 0:
@@ -228,22 +230,34 @@ func (pl prefillPlan) own() ownTime {
 //     are equal (mu - lambda) and the tail is exact (M/M/1). Above 1 the root
 //     is the smaller: 1/theta alone read a p99 up to 10% short of a Lindley
 //     simulation.
-//   - Poisson arrivals, cv < 1: min(rho, exp(-gamma t)), the Lundberg
-//     inequality, which bounds every M/G/1 wait from above. An exponential
-//     body behind the atom under-states the wait of light-tailed work just
-//     past the atom: against Erlang's exact M/D/1 wait it read a p90
-//     sojourn 10% short at rho 0.2.
+//   - Poisson arrivals, cv < 1: min(rho, C exp(-gamma t)), Taylor's upper
+//     bound on an M/G/1 wait: C = sup_x P(S > x) / E[exp(gamma (S - x)); S > x].
+//     Gamma work at cv <= 1 has an increasing failure rate, so the ratio
+//     rises with x and its sup is the limit, C = 1 - gamma/b with b the
+//     gamma's rate k/E[S] (1 for constant work, which is the Lundberg
+//     inequality). At cv 1, C = rho, so the bound meets the exact M/M/1 tail
+//     and TTFT does not jump at the boundary. An exponential body behind the
+//     atom under-states the wait of light-tailed work just past the atom:
+//     against Erlang's exact M/D/1 wait it read a p90 sojourn 10% short at
+//     rho 0.2.
 //   - Otherwise (Kingman's Ca^2 + Cs^2): rho * exp(-r t), r = 1/theta, never
 //     above the work's own tail rate b = 1/(cv^2 E[S]): a wait cannot thin
 //     out faster than one request's work does. Not checked against a
 //     simulation; bursty arrivals lengthen the tail, so Kingman's 1/theta is
 //     the conservative side of it.
+//
+// A rate that is not finite (no Cramer-Lundberg root) comes back as such;
+// price refuses it.
 func (pl prefillPlan) engineWait(rho float64) (waitTail, float64) {
 	r := 1 / pl.waitScale(rho)
 	if pl.ca2 == 1 {
 		g := lundbergRoot(rho/pl.work, pl.work, pl.cv)
 		if pl.cv < 1 {
-			return lundbergWait(rho, g), g
+			c := 1.0
+			if pl.cv > 0 {
+				c = 1 - g*pl.cv*pl.cv*pl.work // 1 - g/b, b = 1/(cv^2 E[S])
+			}
+			return boundWait(rho, c, g), g
 		}
 		r = min(r, g)
 		return expWait(rho, r), r
@@ -364,13 +378,22 @@ func decodeScore(d Decode, rate, qt, kt float64) float64 {
 // onset is the least rate in [0, knee) at which score reaches 1, or knee if
 // it never does there. score is non-decreasing in the rate.
 func onset(knee float64, score func(float64) float64) float64 {
-	if score(knee*(1-1e-12)) < 1 {
-		return knee
+	_, hi := bisectRate(knee, func(r float64) bool { return score(r) < 1 })
+	return hi
+}
+
+// bisectRate brackets the edge of a predicate that holds below some rate in
+// [0, limit) and fails above it: lo is the largest rate found where it holds
+// and hi the least where it fails, within a relative 1e-12. When it holds
+// just under limit, both are limit.
+func bisectRate(limit float64, holds func(float64) bool) (lo, hi float64) {
+	if holds(limit * (1 - 1e-12)) {
+		return limit, limit
 	}
-	lo, hi := 0.0, knee
+	lo, hi = 0, limit
 	for range 200 {
 		mid := lo + (hi-lo)/2
-		if score(mid) < 1 {
+		if holds(mid) {
 			lo = mid
 		} else {
 			hi = mid
@@ -379,7 +402,7 @@ func onset(knee float64, score func(float64) float64) float64 {
 			break
 		}
 	}
-	return hi
+	return lo, hi
 }
 
 // PrefillKnee is the prefill knee, N_p * V_P / (f * E[I_eff]), in requests
@@ -445,6 +468,10 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 	rho := pl.pf.utilization(rate)
 	theta := pl.pf.waitScale(rho)
 	wait, tail := pl.pf.engineWait(rho)
+	if rho > 0 && (!Finite(tail) || !(tail > 0)) {
+		u := refuse(Saturated, fmt.Sprintf("no finite wait tail at %g r/s (decay rate %g)", rate, tail))
+		return priced{u: &u}
+	}
 	own := pl.pf.own()
 	a := pl.pf.p.FixedLatency
 	b1 := block{wait: wait, own: own}
@@ -460,10 +487,18 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 	if pl.d != nil {
 		d := *pl.d
 		out.DecodeKnee, out.Tier = d.kneeRate(), d.Tier
-		adm, ok := DecodeAdmission(d, rate).(Admission)
-		if !ok {
-			r := DecodeAdmission(d, rate).(Unanswerable)
-			return priced{u: &r}
+		// The admission chain is the costly part, and the prefill side
+		// alone (withDecodeWait false, RateForTTFT's second bisection)
+		// needs none of it: its first step comes from the closed-form fill,
+		// which refuses past the knee as the chain does.
+		var adm Admission
+		if withDecodeWait || extras {
+			switch v := DecodeAdmission(d, rate).(type) {
+			case Admission:
+				adm = v
+			case Unanswerable:
+				return priced{u: &v}
+			}
 		}
 		k, ok := d.fillAtReplicaRate(rate / float64(d.Replicas))
 		if !ok {
@@ -486,6 +521,10 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 
 	if q == 0 {
 		mean := out.Parts.EngineWait + out.Parts.OwnPrefill + out.Parts.DecodeWait + first
+		if !Finite(mean) {
+			u := refuse(Saturated, fmt.Sprintf("no finite mean TTFT at %g r/s", rate))
+			return priced{u: &u}
+		}
 		out.Seconds, out.Independent = mean, mean
 		out.Floor = a + own.mean + floorStep
 		if extras {
@@ -503,8 +542,11 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 	out.Floor = a + own.quantile(q) + floorStep
 	out.Independent = out.Seconds
 	if extras {
-		if len(dec.w) > 0 {
-			out.Independent = a + block{wait: b1.wait.sum(dec), own: own}.quantile(1-q) + first
+		// The two waits always sum (a single-piece wait and the decode
+		// chain's unshifted one); were they ever not to, the union bound
+		// stands for the independent figure, which it never undercuts.
+		if both, ok := b1.wait.sum(dec); ok && len(dec.w) > 0 {
+			out.Independent = a + block{wait: both, own: own}.quantile(1-q) + first
 		}
 		pv, _ := split(block{wait: pl.pooledWait(rate), own: own}, dec, q)
 		out.Pooled = a + pv + first
@@ -541,14 +583,16 @@ func checkPercentile(q float64) *Unanswerable {
 // on, at or above the decode gate's onset (AboveDecodeOnset); at or above the
 // prefill gate's onset it answers, flagged AboveFlowControlOnset.
 func TTFTAt(fl TTFTFleet, rate, q float64) Result {
-	pl, u := fl.plan()
-	if u != nil {
-		return *u
-	}
+	// The question first: a usage error outranks what the fleet's data says,
+	// and placing the onsets is not free.
 	if u := checkRate(rate); u != nil {
 		return *u
 	}
 	if u := checkPercentile(q); u != nil {
+		return *u
+	}
+	pl, u := fl.plan()
+	if u != nil {
 		return *u
 	}
 	p := pl.price(rate, q, true, true)
@@ -583,14 +627,14 @@ func TTFTAt(fl TTFTFleet, rate, q float64) Result {
 // MEAN endpoint score reaches 1, while the gate reads the current score, and
 // E[max] >= max E, so the gate closes for part of the time below it.
 func RateForTTFT(fl TTFTFleet, t TTFTTarget) Result {
-	pl, u := fl.plan()
-	if u != nil {
-		return *u
-	}
 	if !Finite(t.Seconds) || !(t.Seconds > 0) {
 		return refuse(InvalidInput, fmt.Sprintf("TTFT target %g s", t.Seconds))
 	}
 	if u := checkPercentile(t.Percentile); u != nil {
+		return *u
+	}
+	pl, u := fl.plan()
+	if u != nil {
 		return *u
 	}
 	zero := pl.price(0, t.Percentile, true, false)
@@ -606,6 +650,11 @@ func RateForTTFT(fl TTFTFleet, t TTFTTarget) Result {
 		limit, limitBy = pl.onsets.Decode, BoundDecodeOnset
 	}
 	full := pl.bisect(t, limit, true)
+	if !(full > 0) {
+		// The floor is under the target, but by less than the bisection
+		// resolves: no positive rate is known to meet it.
+		return refuse(TargetBelowFloor, fmt.Sprintf("target %g s: no positive rate meets it (TTFT floor %g s)", t.Seconds, floor))
+	}
 	alone := pl.bisect(t, limit, false)
 
 	var by []Bound
@@ -646,25 +695,10 @@ func RateForTTFT(fl TTFTFleet, t TTFTTarget) Result {
 // limit itself when the TTFT just under it still does (only an onset: at a
 // knee the TTFT is unbounded).
 func (pl ttftPlan) bisect(t TTFTTarget, limit float64, withDecodeWait bool) float64 {
-	meets := func(rate float64) bool {
+	lo, _ := bisectRate(limit, func(rate float64) bool {
 		p := pl.price(rate, t.Percentile, withDecodeWait, false)
 		return p.u == nil && p.out.Seconds <= t.Seconds
-	}
-	if meets(limit * (1 - 1e-12)) {
-		return limit
-	}
-	lo, hi := 0.0, limit
-	for range 200 {
-		mid := lo + (hi-lo)/2
-		if meets(mid) {
-			lo = mid
-		} else {
-			hi = mid
-		}
-		if hi-lo <= 1e-12*hi {
-			break
-		}
-	}
+	})
 	return lo
 }
 

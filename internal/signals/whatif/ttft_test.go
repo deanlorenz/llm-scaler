@@ -237,43 +237,57 @@ func TestEngineWaitIsPollaczekKhinchine(t *testing.T) {
 
 // erlangMD1 is P(W <= t) for M/D/1 with unit service at utilization rho,
 // Erlang's formula (1 - rho) sum_{k <= t} (-x_k)^k e^(x_k) / k!, x_k =
-// rho (t - k). Its terms alternate and reach about e^(rho t) (rho t)^k / k!,
-// so it is summed in 600-bit floats, e^x by its own series.
+// rho (t - k). Its terms alternate and reach about e^(2 rho t), 1e106 at
+// t = 128 and rho 0.95, against a sum near 1e-3, so it is summed in 1024-bit
+// floats (about 300 digits) with x_k exact in them: a float64 x_k carries a
+// 1e-16 error that e^x x^k carries into digits the sum needs. e^(x_k) is
+// e^(rho t) e^(-rho k), one product a term.
 func erlangMD1(t, rho float64) float64 {
-	const prec = 600
-	sum := new(big.Float).SetPrec(prec)
+	const prec = 1024
+	nf := func(v float64) *big.Float { return new(big.Float).SetPrec(prec).SetFloat64(v) }
+	r := nf(rho)
+	ex := bigExp(new(big.Float).SetPrec(prec).Mul(r, nf(t)), prec)
+	down := new(big.Float).SetPrec(prec).Quo(nf(1), bigExp(r, prec)) // e^(-rho)
+	sum := nf(0)
 	for k := 0; float64(k) <= t; k++ {
-		// x in 600 bits too: a float64 x carries a 1e-16 error that the
-		// terms' e^x x^k carry into digits the sum needs.
-		x := new(big.Float).SetPrec(prec).SetFloat64(t)
-		x.Sub(x, new(big.Float).SetPrec(prec).SetInt64(int64(k)))
-		x.Mul(x, new(big.Float).SetPrec(prec).SetFloat64(rho))
-		term := bigExp(x, prec)
+		x := new(big.Float).SetPrec(prec).Sub(nf(t), nf(float64(k)))
+		x.Mul(x, r)
+		term := new(big.Float).SetPrec(prec).Set(ex)
 		for i := 1; i <= k; i++ {
 			term.Mul(term, x)
-			term.Quo(term, new(big.Float).SetPrec(prec).SetInt64(int64(i)))
+			term.Quo(term, nf(float64(i)))
 		}
 		if k%2 == 1 {
 			term.Neg(term)
 		}
 		sum.Add(sum, term)
+		ex.Mul(ex, down)
 	}
 	f, _ := sum.Float64()
 	return (1 - rho) * f
 }
 
-// bigExp is e^x for x >= 0 by its Taylor series, to the precision given.
+// bigExp is e^x for x >= 0: the Taylor series at x/2^m < 1, squared m times.
 func bigExp(x *big.Float, prec uint) *big.Float {
+	m := 0
+	y := new(big.Float).SetPrec(prec).Set(x)
+	for y.Cmp(big.NewFloat(1)) > 0 {
+		y.Quo(y, big.NewFloat(2))
+		m++
+	}
 	sum := new(big.Float).SetPrec(prec).SetInt64(1)
 	term := new(big.Float).SetPrec(prec).SetInt64(1)
 	eps := new(big.Float).SetPrec(prec).SetMantExp(big.NewFloat(1), -int(prec))
 	for n := int64(1); n < 10000; n++ {
-		term.Mul(term, x)
+		term.Mul(term, y)
 		term.Quo(term, new(big.Float).SetPrec(prec).SetInt64(n))
 		sum.Add(sum, term)
 		if new(big.Float).Abs(term).Cmp(new(big.Float).Mul(eps, sum)) < 0 {
 			break
 		}
+	}
+	for range m {
+		sum.Mul(sum, sum)
 	}
 	return sum
 }
@@ -281,7 +295,7 @@ func bigExp(x *big.Float, prec uint) *big.Float {
 // At cv 0 the pod is M/D/1, whose exact wait is Erlang's. The model's TTFT,
 // less a and the constant own time, is the wait's quantile, and must never be
 // below the exact one: an under-stated wait is too few replicas. The case
-// that set the Lundberg body at cv < 1: an exponential body behind the atom
+// that set a bounded body (Taylor's) at cv < 1: an exponential body behind the atom
 // read the p90 wait at rho 0.2 as 0.43 of a service time, exact 0.59.
 func TestMD1AgainstErlang(t *testing.T) {
 	// The formula's own closed points: P(W = 0) = 1 - rho, P(W <= 1) =
@@ -291,19 +305,19 @@ func TestMD1AgainstErlang(t *testing.T) {
 	relNear(t, "P(W <= 2)", erlangMD1(2, 0.5), 0.5*(math.Exp(1)-0.5*math.Exp(0.5)), 1e-12)
 	fl := prefillOnly(0)
 	es := fl.Prefill.PromptTokens / fl.Prefill.VP
-	for _, rho := range []float64{0.1, 0.2, 0.3, 0.5, 0.7, 0.8, 0.9} {
+	// rho 0.95 at p999 waits about 70 service times: the bracket runs to 128,
+	// where the 1024-bit sum still holds the terms' e^(2 rho t).
+	for _, rho := range []float64{0.1, 0.2, 0.3, 0.5, 0.7, 0.8, 0.9, 0.95} {
 		for _, q := range []float64{0.9, 0.99, 0.999} {
 			exact := 0.0
 			if rho > 1-q {
-				// Bracket by doubling, never past 64 service times, where
-				// the 600-bit sum still holds the terms' e^(2 rho t).
 				lo, hi := 0.0, 1.0
 				for erlangMD1(hi, rho) < q {
-					if lo, hi = hi, 2*hi; hi > 64 {
-						t.Fatalf("rho %g q %g: no bracket below 64 service times", rho, q)
+					if lo, hi = hi, 2*hi; hi > 128 {
+						t.Fatalf("rho %g q %g: no bracket below 128 service times", rho, q)
 					}
 				}
-				for range 60 {
+				for range 50 {
 					mid := (lo + hi) / 2
 					if erlangMD1(mid, rho) < q {
 						lo = mid
@@ -323,34 +337,49 @@ func TestMD1AgainstErlang(t *testing.T) {
 	}
 }
 
-// lindleyP99 are sojourn (wait plus own work) p99s of M/G/1 with gamma work
-// of mean 1 and Poisson arrivals, from a Lindley simulation outside the code
-// (3M arrivals after 100k of warm-up, seed 20261104, numpy; three seeds
-// spread at most 1.75% at p99). The tolerance is the seed spread rounded up.
-var lindleyP99 = []struct{ cv, rho, p99 float64 }{
-	{2, 0.3, 15.876903}, {2, 0.6, 28.774202},
-	{3, 0.3, 30.779964}, {3, 0.6, 58.326169},
-	{1, 0.6, 11.477355}, {0.5, 0.6, 7.028987},
-	// Light-tailed work, where the Lundberg body sets the tail (cv < 1).
-	{0.5, 0.2, 3.33298}, {0.5, 0.3, 3.87596},
-	{0, 0.2, 2.43244}, {0, 0.3, 2.89387}, {0, 0.6, 5.53005},
+// lindleyRef are sojourn (wait plus own work) quantiles, p90 / p99 / p999, of
+// M/G/1 with gamma work of mean 1 and Poisson arrivals, from a Lindley
+// simulation outside the code (numpy; 3M arrivals after 100k of warm-up; seeds
+// 20261104, 7, 99 and 4242). Each figure is the least of the four seeds; the
+// comment is the spread across them, (max - min)/min. The widest is 6.5%, at
+// cv 3, rho 0.6, p999; the model must reach the least seed less 1%.
+var lindleyRef = []struct {
+	cv, rho float64
+	q       [3]float64
+}{
+	{2, 0.3, [3]float64{6.124896, 15.876903, 25.727312}},  // spread p90 0.71% p99 0.62% p999 0.40%
+	{2, 0.6, [3]float64{12.865078, 28.673734, 43.635434}}, // spread p90 1.61% p99 0.81% p999 1.90%
+	{3, 0.3, [3]float64{10.104518, 30.387253, 51.565322}}, // spread p90 0.82% p99 1.29% p999 0.69%
+	{3, 0.6, [3]float64{24.624507, 57.303451, 90.211524}}, // spread p90 0.79% p99 1.78% p999 6.48%
+	{1, 0.6, [3]float64{5.747450, 11.477355, 17.195630}},  // spread p90 0.24% p99 0.41% p999 0.89%
+	{0.5, 0.2, [3]float64{2.006231, 3.332983, 4.653273}},  // spread p90 0.20% p99 0.45% p999 0.71%
+	{0.5, 0.3, [3]float64{2.256146, 3.875959, 5.502411}},  // spread p90 0.33% p99 0.71% p999 0.60%
+	{0.5, 0.6, [3]float64{3.788792, 7.028987, 10.200655}}, // spread p90 0.70% p99 0.67% p999 3.37%
+	{0, 0.2, [3]float64{1.587076, 2.430570, 3.269501}},    // spread p90 0.12% p99 0.31% p999 0.63%
+	{0, 0.3, [3]float64{1.836400, 2.884717, 4.005296}},    // spread p90 0.10% p99 0.40% p999 0.59%
+	{0, 0.6, [3]float64{3.094491, 5.512832, 7.854190}},    // spread p90 0.17% p99 0.31% p999 1.70%
 }
 
-// The model's prefill sojourn at p99 is never below the simulation's, less
-// the simulation's own noise: at cv above 1 Kingman's exponential decay alone
-// read 0.94/0.94 (cv 2, rho 0.3/0.6) and 0.89/0.91 (cv 3) of it, too few
-// replicas by up to 10%.
+// lindleyQuantiles are the quantiles lindleyRef holds.
+var lindleyQuantiles = [3]float64{0.9, 0.99, 0.999}
+
+// The model's prefill sojourn is never below the simulation's at p90, p99 or
+// p999. Before round 1 of #471, at cv above 1, Kingman's exponential decay
+// alone read the p99 at 0.94/0.94 (cv 2, rho 0.3/0.6) and 0.89/0.91 (cv 3) of
+// the simulation, too few replicas by up to 10%.
 func TestTailNotBelowLindleySimulation(t *testing.T) {
-	const tol = 0.03
-	for _, c := range lindleyP99 {
+	const tol = 0.01
+	for _, c := range lindleyRef {
 		fl := prefillOnly(c.cv)
 		es := fl.Prefill.PromptTokens / fl.Prefill.VP
-		v := mustTTFT(t, ttftAt(t, fl, c.rho/es, 0.99))
-		model := (v.Seconds - fl.Prefill.FixedLatency) / es
-		if !(model >= c.p99*(1-tol)) {
-			t.Errorf("cv %g rho %g: p99 sojourn %.4f mean works, simulation %.4f (ratio %.4f)", c.cv, c.rho, model, c.p99, model/c.p99)
+		for i, q := range lindleyQuantiles {
+			v := mustTTFT(t, ttftAt(t, fl, c.rho/es, q))
+			model := (v.Seconds - fl.Prefill.FixedLatency) / es
+			if !(model >= c.q[i]*(1-tol)) {
+				t.Errorf("cv %g rho %g q %g: sojourn %.4f mean works, simulation's least seed %.4f (ratio %.4f)", c.cv, c.rho, q, model, c.q[i], model/c.q[i])
+			}
+			t.Logf("cv %g rho %g q %g: model/sim %.4f", c.cv, c.rho, q, model/c.q[i])
 		}
-		t.Logf("cv %g rho %g: model/sim p99 %.4f", c.cv, c.rho, model/c.p99)
 	}
 }
 
@@ -371,16 +400,73 @@ func TestLundbergRoot(t *testing.T) {
 			}
 		}
 	}
+	// Near the knee the root falls toward 0 like 2(1 - rho)/(E[S](1 + cv^2))
+	// (heavy traffic); it must stay positive, solve the equation, and fall as
+	// rho rises.
+	for _, cv := range []float64{0, 0.5, 1, 2} {
+		prev := math.Inf(1)
+		for _, lam := range []float64{0.95, 0.99, 0.999, 0.9999} {
+			g := lundbergRoot(lam, 1, cv)
+			m := math.Exp(g)
+			if cv > 0 {
+				m = math.Pow(1-g*cv*cv, -1/(cv*cv))
+			}
+			ht := 2 * (1 - lam) / (1 + cv*cv)
+			if !(g > 0) || !(g < prev) || math.Abs(lam*(m-1)-g) > 1e-6*g || math.Abs(g-ht) > 0.2*ht {
+				t.Errorf("rho %g cv %g: root %g (heavy traffic %g), residual %g", lam, cv, g, ht, lam*(m-1)-g)
+			}
+			prev = g
+		}
+	}
 	if !math.IsInf(lundbergRoot(0, 1, 0.5), 1) {
 		t.Error("a root with no arrivals")
+	}
+	// No root to find: NaN, never a number.
+	for name, g := range map[string]float64{
+		"rho 1": lundbergRoot(1, 1, 0.5), "rho above 1": lundbergRoot(2, 1, 0),
+		"no work": lundbergRoot(0.5, 0, 1), "NaN work": lundbergRoot(0.5, math.NaN(), 1),
+	} {
+		if !math.IsNaN(g) {
+			t.Errorf("%s: root %g, want NaN", name, g)
+		}
+	}
+}
+
+// The special functions never hand back a partial sum: no bracket or no
+// convergence is NaN.
+func TestSpecialFunctionsRefuseWithNaN(t *testing.T) {
+	for name, v := range map[string]float64{
+		"gammaQuantile at NaN shape": gammaQuantile(math.NaN(), 0.9),
+		"logSeries at +Inf":          logSeries(1, math.Inf(1)),
+		"lnGammaPSeries at NaN":      lnGammaPSeries(1, math.NaN()),
+		// P(k, x) never reaches 1.5: no bracket, NaN rather than the last
+		// doubling.
+		"gammaQuantile above 1": gammaQuantile(1, 1.5),
+		// The terms still rise at n = 1e6 (they peak near n = y), so the
+		// series is cut before it converges: NaN, not the partial sum.
+		"logSeries cut before it converges": logSeries(1, 1e7),
+	} {
+		if !math.IsNaN(v) {
+			t.Errorf("%s: %g, want NaN", name, v)
+		}
+	}
+	// And a sum of shapes it does not take is refused, not a panic.
+	two, _ := expWait(0.3, 2).sum(expWait(0.2, 3))
+	if _, ok := two.sum(expWait(0.1, 4)); ok {
+		t.Error("summed a three-piece wait")
+	}
+	if _, ok := expWait(0.3, 2).sum(boundWait(0.2, 0.5, 3)); ok {
+		t.Error("summed a shifted second wait")
 	}
 }
 
 // Away from Poisson arrivals the wait decays at Kingman's 1/theta, but never
-// faster than one request's work does, 1/(cv^2 E[S]); and the Lundberg body
+// faster than one request's work does, 1/(cv^2 E[S]); and the bounded (shifted) body
 // is only for Poisson arrivals.
 func TestKingmanTailNeverOutrunsTheWork(t *testing.T) {
-	for _, c := range []struct{ cv, ca2, rho float64 }{{3, 1.5, 0.1}, {3, 0.5, 0.3}, {2, 2, 0.2}, {0.5, 2, 0.5}} {
+	// cv 0.7 with Ca^2 0.1 is the cap binding below cv 1: Kingman's scale
+	// E[S](0.1 + 0.49)/1.8 = 0.33 E[S] is under the work's 0.49 E[S].
+	for _, c := range []struct{ cv, ca2, rho float64 }{{3, 1.5, 0.1}, {3, 0.5, 0.3}, {2, 2, 0.2}, {0.5, 2, 0.5}, {0.7, 0.1, 0.1}} {
 		fl := prefillOnly(c.cv)
 		fl.Prefill.ArrivalCV2 = c.ca2
 		es := fl.Prefill.PromptTokens / fl.Prefill.VP
@@ -436,6 +522,76 @@ func TestDecodeOnsetUnchecked(t *testing.T) {
 	}
 }
 
+// One pod with no f is priced exactly as one pod with f = 1.
+func TestOnePodNeedsNoImbalance(t *testing.T) {
+	none, one := prefillOnly(1), prefillOnly(1)
+	one.Prefill.Imbalance = 1
+	for _, q := range []float64{0, 0.9, 0.99} {
+		a, b := mustTTFT(t, ttftAt(t, none, 20, q)), mustTTFT(t, ttftAt(t, one, 20, q))
+		if a.Seconds != b.Seconds || a.PrefillKnee != b.PrefillKnee || a.PrefillUtilization != b.PrefillUtilization {
+			t.Errorf("q %g: no f %+v, f 1 %+v", q, a, b)
+		}
+	}
+	ra := mustAnswer(t, rateForTTFT(t, none, TTFTTarget{Seconds: 0.2, Percentile: 0.9}))
+	rb := mustAnswer(t, rateForTTFT(t, one, TTFTTarget{Seconds: 0.2, Percentile: 0.9}))
+	if ra.Value != rb.Value {
+		t.Errorf("rate: no f %g, f 1 %g", ra.Value, rb.Value)
+	}
+}
+
+// Just above minPromptCV the gamma is priced, and it agrees with the constant
+// prompt to within the spread itself: no step at the threshold.
+func TestPromptCVThresholdBoundary(t *testing.T) {
+	for _, q := range []float64{0, 0.9, 0.99} {
+		for _, rate := range []float64{0, 10, 25} {
+			c := mustTTFT(t, ttftAt(t, prefillOnly(0), rate, q))
+			for _, cv := range []float64{2e-4, 5e-3} {
+				v := mustTTFT(t, ttftAt(t, prefillOnly(cv), rate, q))
+				relNear(t, "TTFT just above the threshold", v.Seconds, c.Seconds, 1e-2)
+				relNear(t, "floor just above the threshold", v.Floor, c.Floor, 1e-2)
+			}
+		}
+	}
+}
+
+// Above minPromptCV the own time really is the gamma, and accurate: its
+// p99 sits z_0.99 * cv above the mean (normal to first order, the gamma's
+// skew 2 cv adding (z^2 - 1) cv^2 / 3), not at the mean as a constant would.
+func TestSmallPromptCVIsPricedAsGamma(t *testing.T) {
+	const z = 2.3263478740408408 // the standard normal's 0.99 quantile
+	for _, cv := range []float64{2e-4, 5e-3} {
+		fl := prefillOnly(cv)
+		pl, u := fl.plan()
+		if u != nil {
+			t.Fatal(u)
+		}
+		own := pl.pf.own()
+		if own.det {
+			t.Fatalf("cv %g priced as constant", cv)
+		}
+		want := z*cv + (z*z-1)*cv*cv/3
+		relNear(t, "own-time p99 above its mean", own.quantile(0.99)/own.mean-1, want, 1e-2)
+	}
+}
+
+// The wait-tail guard in price: a plan whose work no longer matches its knee
+// (only a tampered plan; the knee check stands in front of it on every real
+// one) puts rho at 2, where no Cramer-Lundberg root exists. Kingman's mean
+// there is negative and finite, so without the guard the mean would be
+// priced; it is refused.
+func TestPriceRefusesAnUnreadableWaitTail(t *testing.T) {
+	pl, u := prefillOnly(1).plan()
+	if u != nil {
+		t.Fatal(u)
+	}
+	pl.pf.work = 2 // one pod, f 1: rho = rate * work = 2 at 1 r/s
+	for _, q := range []float64{0, 0.9} {
+		if p := pl.price(1, q, true, false); p.u == nil || p.u.Reason != Saturated {
+			t.Errorf("q %g: priced %+v, want Saturated", q, p.out)
+		}
+	}
+}
+
 // A prompt spread below minPromptCV prices as constant: cv 1e-7 read 8% high
 // as a gamma (its shape 1e14 cancels in the incomplete gamma).
 func TestTinyPromptCVIsConstant(t *testing.T) {
@@ -453,7 +609,7 @@ func TestTinyPromptCVIsConstant(t *testing.T) {
 
 // Cases with no closed form, against the independent reference (scipy quad,
 // with the engineWait rule written again in Python: the Cramer-Lundberg root
-// by brentq, the Lundberg body at cv < 1 as a shifted exponential) over
+// by brentq, Taylor's body at cv < 1 as a shifted exponential) over
 // P(W+S>t) = (1-p) sf(t) + p [exp(-rt) + int r exp(-ru) sf(t-u) du], a
 // different form from the code's incomplete-gamma closed form): prompt
 // spreads either side of 1, bursty arrivals with an imbalance across four
@@ -467,10 +623,10 @@ func TestTTFTAgainstReference(t *testing.T) {
 		np, nd                      int
 		xfer, wantSeconds, wantMean float64
 	}{
-		{"cv0.5", 9, 0.9, 0.011, 30000, 1000, 0.5, 1, 1, 1, 1, 0, 0.10685067374304469, 0.0561332049162314},
+		{"cv0.5", 9, 0.9, 0.011, 30000, 1000, 0.5, 1, 1, 1, 1, 0, 0.09770488035635884, 0.0561332049162314},
 		{"cv2", 9, 0.95, 0.011, 30000, 1000, 2, 1, 1, 1, 1, 0, 0.35241177380978406, 0.08291891920194568},
 		{"bursty-imbalanced", 20, 0.9, 0.011, 30000, 1000, 1, 2, 1.5, 4, 2, 0, 0.13239144522086338, 0.06437997302707862},
-		{"transfer", 8, 0.99, 0.02, 20000, 2000, 0.8, 1, 1, 1, 1, 2e-6, 1.9938770498026501, 0.45462260548736116},
+		{"transfer", 8, 0.99, 0.02, 20000, 2000, 0.8, 1, 1, 1, 1, 2e-6, 1.9241895307941992, 0.45462260548736116},
 		{"prefill-only", 25, 0.9, 0.011, 30000, 1000, 1, 1, 1, 1, 0, 0, 0.47151701859880935, 0.21100000000000005},
 		{"constant-prompt", 25, 0.9, 0.011, 30000, 1000, 0, 1, 1, 1, 0, 0, 0.2610272810764572, 0.12766666666666668},
 	}
@@ -708,6 +864,11 @@ func TestPrefillFromEstimate(t *testing.T) {
 	if u != nil {
 		t.Fatal(u)
 	}
+	above := est
+	above.VPAboveSlopeBound = true
+	if pa, _ := PrefillFromEstimate(above); !pa.VPAboveSlopeBound || p.VPAboveSlopeBound {
+		t.Errorf("VPAboveSlopeBound not carried: %v from %v, %v from %v", pa.VPAboveSlopeBound, true, p.VPAboveSlopeBound, false)
+	}
 	if p.VP != 30000 || !p.VPLowerBound || p.FixedLatency != 0.011 || p.Imbalance != 1.4 || p.VPAssumed {
 		t.Errorf("mapped %+v", p)
 	}
@@ -778,8 +939,8 @@ func TestTTFTRefusals(t *testing.T) {
 		"f below 1":              {func(fl *TTFTFleet) { fl.Prefill.Imbalance = 0.5 }, InvalidInput},
 		"f above the pods":       {func(fl *TTFTFleet) { fl.Prefill.Imbalance = 1.5 }, InvalidInput},
 		"no prompt":              {func(fl *TTFTFleet) { fl.Prefill.PromptTokens = 0 }, NoTraffic},
-		"negative cv":            {func(fl *TTFTFleet) { fl.Prefill.PromptCV = -1 }, NoTraffic},
-		"cv above 10":            {func(fl *TTFTFleet) { fl.Prefill.PromptCV = 11 }, NoTraffic},
+		"negative cv":            {func(fl *TTFTFleet) { fl.Prefill.PromptCV = -1 }, InvalidInput},
+		"cv above 10":            {func(fl *TTFTFleet) { fl.Prefill.PromptCV = 11 }, InvalidInput},
 		"negative Ca^2":          {func(fl *TTFTFleet) { fl.Prefill.ArrivalCV2 = -1 }, InvalidInput},
 		"negative transfer":      {func(fl *TTFTFleet) { fl.Prefill.TransferSecondsPerToken = -1 }, InvalidInput},
 		"bad flow-control state": {func(fl *TTFTFleet) { fl.FlowControl.State = 7 }, InvalidInput},
@@ -808,6 +969,39 @@ func TestTTFTRefusals(t *testing.T) {
 	} {
 		if !isInvalid(r) {
 			t.Errorf("%s: %#v, want InvalidInput", name, r)
+		}
+	}
+	// A question asked wrongly is a usage error even on a fleet the data
+	// refuses: the question is checked first (exit 2 outranks exit 3).
+	bad := workedFleet()
+	bad.Prefill.VP = 0
+	for name, r := range map[string]Result{
+		"TTFTAt, bad rate":            ttftAt(t, bad, math.NaN(), 0.9),
+		"TTFTAt, bad percentile":      ttftAt(t, bad, 1, 2),
+		"RateForTTFT, bad target":     rateForTTFT(t, bad, TTFTTarget{Seconds: -1, Percentile: 0.9}),
+		"RateForTTFT, bad percentile": rateForTTFT(t, bad, TTFTTarget{Seconds: 0.2, Percentile: 2}),
+	} {
+		if !isInvalid(r) {
+			t.Errorf("%s on a refused fleet: %#v, want InvalidInput", name, r)
+		}
+	}
+}
+
+// A target above the floor by less than the bisection resolves has no
+// positive rate known to meet it: refused, never answered with 0 r/s.
+func TestRateForTTFTNeverAnswersZero(t *testing.T) {
+	fl := prefillOnly(1)
+	floor := mustTTFT(t, ttftAt(t, fl, 0, 0.9)).Floor
+	for _, above := range []float64{1e-15, 1e-14} {
+		switch r := rateForTTFT(t, fl, TTFTTarget{Seconds: floor * (1 + above), Percentile: 0.9}).(type) {
+		case Answer:
+			if !(r.Value > 0) {
+				t.Errorf("floor x (1 + %g): answered %g r/s", above, r.Value)
+			}
+		case Unanswerable:
+			if r.Reason != TargetBelowFloor {
+				t.Errorf("floor x (1 + %g): %v", above, r)
+			}
 		}
 	}
 }

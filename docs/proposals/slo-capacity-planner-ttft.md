@@ -268,8 +268,9 @@ that is itself wrong (the exponential tail, Poisson arrivals, an omitted
 
 | Limit | Direction |
 | --- | --- |
-| Wait tail at prompt cv above 1: `ρ_w·e^(−γt)`, `γ` the Cramér-Lundberg root ([as built](#the-model-as-built)) | Under-promises at p99 by 3–15% against a Lindley simulation (cv 2 and 3, `ρ` 0.3 and 0.6); not a proven bound. Kingman's `1/θ` alone over-promised by up to 10% here |
-| Wait tail at prompt cv below 1: the Lundberg bound `min(ρ_w, e^(−γt))` | Under-promises, provably: by 11–24% at p90 and 6–18% at p99 against a simulation (cv 0 and 0.5), and 1–17% against Erlang's exact M/D/1 wait. The exponential body it replaced read an M/D/1 p90 sojourn 10% short at `ρ` 0.2 |
+| Wait tail at prompt cv above 1: `ρ_w·e^(−γt)`, `γ` the Cramér-Lundberg root ([as built](#the-model-as-built)) | Under-promises against a Lindley simulation (cv 2 and 3, `ρ` 0.3 and 0.6): by 3–28% at p90, 4–16% at p99 and 3–12% at p999; not a proven bound. Kingman's `1/θ` alone over-promised by up to 10% here |
+| Wait tail at prompt cv below 1: Taylor's bound `min(ρ_w, C·e^(−γt))` | Under-promises, provably: by 8–18% at p90, 4–12% at p99 and 4–10% at p999 against a simulation (cv 0 and 0.5), and 1–17% against Erlang's exact M/D/1 wait. The exponential body it replaced read an M/D/1 p90 sojourn 10% short at `ρ` 0.2 |
+| Prompt cv above 3 | Either way, and not monotone: the gamma's p90 can fall as cv rises at very low load, since most of its mass sits below the mean. S1 caps an assumed cv at 3; nothing here is tested above it |
 | Wait tail with bursty arrivals (`Ca²` ≠ 1): Kingman's `1/θ`, never above the work's own tail rate | Not checked against a simulation; burstiness lengthens the tail, and Kingman's decay is taken as its conservative side |
 | Poisson arrivals on bursty traffic | Over-promises |
 | Per-pod model above the flow-control onset | Either way; the pooled bound printed beside it over-promises |
@@ -361,7 +362,7 @@ roles' rates.
     θ     = (E[I]/V_P)·(Ca² + Cs²) / (2(1 − ρ_w))          Cs² = cv²
     γ     : λ_w·(M_S(γ) − 1) = γ        (Cramér-Lundberg root; M_S the work's MGF)
     P(W_engine > t) = ρ_w·e^(−rt),  r = min(1/θ, γ)          Poisson arrivals, cv ≥ 1
-                    = min(ρ_w, e^(−γt))                     Poisson arrivals, cv < 1 (Lundberg bound)
+                    = min(ρ_w, C·e^(−γt)),  C = 1 − γ·cv²·E[S]  Poisson arrivals, cv < 1 (Taylor's bound)
                     = ρ_w·e^(−rt),  r = min(1/θ, 1/(cv²·E[S]))  bursty arrivals (Kingman)
     own   = a + I·(1/V_P + κ/BW),   I ~ Gamma(mean E[I], cv); constant below cv 1e-4
     block 1 = W_engine + own        (convolved exactly, closed form via the incomplete gamma)
@@ -372,10 +373,14 @@ roles' rates.
 - **The wait tail errs only toward more replicas.** At cv 1 the two decays
   agree and the tail is exact (M/M/1). Above 1, the Cramér-Lundberg root is
   the slower decay: Kingman's `1/θ` alone read a p99 6–11% short of a
-  Lindley simulation (cv 2, 3), and the root now reads it 3–15% long. Below 1,
-  an exponential body behind the atom under-states the wait just past it,
-  so the tail is the Lundberg inequality's bound, which holds for every
-  M/G/1 queue. For bursty arrivals there is no root without the arrival
+  Lindley simulation (cv 2, 3), and the root now reads it 4–16% long. Below 1,
+  an exponential body behind the atom under-states the wait just past it.
+  The tail there is Taylor's bound on an M/G/1 wait,
+  `C = sup_x P(S > x)/E[e^(γ(S−x)); S > x]`. For gamma work at cv ≤ 1 (an
+  increasing failure rate) the sup is the limit, `C = 1 − γ/b`. That is 1
+  for constant work, which is the Lundberg inequality, and `ρ` at cv 1, so
+  the tail meets the exact M/M/1 one there and TTFT does not jump as cv
+  crosses 1. For bursty arrivals there is no root without the arrival
   law, so the tail keeps Kingman's decay and never decays faster than one
   request's work. The mean wait stays Pollaczek-Khinchine's (Kingman's)
   `ρ_w·θ`, exact for M/G/1, rather than the tail's own mean.
@@ -436,22 +441,35 @@ roles' rates.
   against its closed forms.
 - **Never below the truth.**
   - At cv 0 the wait's quantiles are compared with Erlang's exact M/D/1
-    waiting-time distribution (summed in 600-bit floats). The model is at
-    or above it at every `ρ` from 0.1 to 0.9 and `q` of 0.9, 0.99 and 0.999.
-  - At p99 the sojourn is compared with frozen figures from a Lindley
-    simulation outside the code (3M arrivals, numpy, seed 20261104). The
-    cases are cv 0, 0.5, 1, 2 and 3 at several `ρ`. The model must reach
-    the simulation less 3%, the spread across seeds.
-  - The model/simulation p99 ratios are:
+    waiting-time distribution, summed in 1024-bit floats. The model is at
+    or above it at every `ρ` from 0.1 to 0.95 and `q` of 0.9, 0.99 and 0.999.
+  - The sojourn at p90, p99 and p999 is compared with frozen figures from a
+    Lindley simulation outside the code (numpy; 3M arrivals; seeds 20261104,
+    7, 99 and 4242). Each figure is the least of the four seeds, and the
+    model must reach it less 1%. The seeds spread up to 1.8% at p99 and
+    6.5% at p999 (cv 3, `ρ` 0.6). The cases are cv 0, 0.5, 1, 2 and 3 at
+    several `ρ`.
+  - The model over the least seed:
 
-    | cv | `ρ` 0.3 | `ρ` 0.6 |
-    | --- | --- | --- |
-    | 2 | 1.099 | 1.036 |
-    | 3 | 1.145 | 1.031 |
+    | cv | `ρ` | p90 | p99 | p999 |
+    | --- | --- | --- | --- | --- |
+    | 2 | 0.3 | 1.150 | 1.099 | 1.083 |
+    | 2 | 0.6 | 1.076 | 1.039 | 1.048 |
+    | 3 | 0.3 | 1.278 | 1.159 | 1.118 |
+    | 3 | 0.6 | 1.102 | 1.050 | 1.032 |
+    | 1 | 0.6 | 1.002 | 1.003 | 1.004 |
+    | 0.5 | 0.2 | 1.106 | 1.089 | 1.069 |
+    | 0.5 | 0.3 | 1.115 | 1.080 | 1.057 |
+    | 0.5 | 0.6 | 1.076 | 1.042 | 1.037 |
+    | 0 | 0.2 | 1.175 | 1.124 | 1.100 |
+    | 0 | 0.3 | 1.152 | 1.120 | 1.085 |
+    | 0 | 0.6 | 1.109 | 1.063 | 1.056 |
 
-    The old tail read 0.937 / 0.944 and 0.895 / 0.907, and fails this
-    test. The worked example
-  is reproduced to 1e-6: 160 / 154 ms at p90, 231 / 210 ms at p95, floor
+    The pre-round-1 tail read the cv 2 / 3 p99s at 0.937 / 0.944 and
+    0.895 / 0.907, and fails this test.
+  - TTFT never falls as the prompt cv rises from 0 to 3 (p90, p95 and p99,
+    at 0.3 to 0.85 of the knee), across the change of form at cv 1.
+- **The worked example** is reproduced to 1e-6: 160 / 154 ms at p90, 231 / 210 ms at p95, floor
   91.6 ms, 11.64 / 11.10 r/s for 200 ms, onsets 12.50 and 25.6 r/s. Six
   cases with no closed form (cv 0.5 and 2, bursty arrivals with `f` 1.5
   over four pods, a transfer term, prefill alone, constant prompts) are

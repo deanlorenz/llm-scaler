@@ -9,8 +9,9 @@ import "math"
 // and decode sides. It holds no fleet: ttft.go builds these from one.
 //
 // UNVALIDATED. Every figure here is checked against closed-form queueing
-// values (M/M/1, M/D/1, Pollaczek-Khinchine, Erlang C) and an independent
-// numerical integration, not against a measured TTFT. The prefill-stress
+// values (M/M/1, Erlang's exact M/D/1, Pollaczek-Khinchine, Erlang C), an
+// independent numerical integration and a Lindley simulation, not against a
+// measured TTFT. The prefill-stress
 // recording (P2) is what will check the model against a real pod.
 
 // ownTime is a request's own prefill time, a + I*c, less the constant a:
@@ -97,24 +98,24 @@ func logSeries(k, y float64) float64 {
 		return -math.Log(k)
 	}
 	ly := math.Log(y)
-	// The terms rise to about n = y, then fall faster than geometrically;
-	// sum in logs from the largest.
-	var terms []float64
-	top := math.Inf(-1)
+	// The terms rise to about n = y, then fall faster than geometrically.
+	// They are summed in logs against a running maximum, rescaling the sum
+	// whenever a larger term arrives, so nothing is stored.
+	top, sum := math.Inf(-1), 0.0
 	for n := 0; n < maxSeriesTerms; n++ {
 		lg, _ := math.Lgamma(float64(n + 1))
 		lt := float64(n)*ly - lg - math.Log(float64(n)+k)
-		terms = append(terms, lt)
-		top = max(top, lt)
+		if lt > top {
+			sum = sum*math.Exp(top-lt) + 1
+			top = lt
+		} else {
+			sum += math.Exp(lt - top)
+		}
 		if float64(n) > y && lt < top-40 {
-			break
+			return top + math.Log(sum)
 		}
 	}
-	var s float64
-	for _, lt := range terms {
-		s += math.Exp(lt - top)
-	}
-	return top + math.Log(s)
+	return math.NaN() // did not converge: never a partial sum
 }
 
 // maxSeriesTerms bounds every series and continued fraction here. The
@@ -141,14 +142,15 @@ func expWait(p, r float64) waitTail {
 	return waitTail{w: []float64{p}, r: []float64{r}, s: []float64{0}}
 }
 
-// lundbergWait is P(W > u) = min(p, exp(-g u)): the Lundberg inequality's
-// bound on an M/G/1 wait, g the Cramer-Lundberg root, capped at P(W > 0) = p.
-// It is the wait p exp(-g (u - s)) shifted by s = ln(1/p)/g, flat at p before.
-func lundbergWait(p, g float64) waitTail {
+// boundWait is P(W > u) = min(p, c exp(-g u)), c >= p: an upper bound of the
+// form Taylor's bound on an M/G/1 wait takes, g the Cramer-Lundberg root,
+// capped at P(W > 0) = p. It is the wait p exp(-g (u - s)) shifted by
+// s = ln(c/p)/g, flat at p before; at c = p it is the unshifted exponential.
+func boundWait(p, c, g float64) waitTail {
 	if p == 0 {
 		return waitTail{}
 	}
-	return waitTail{w: []float64{p}, r: []float64{g}, s: []float64{math.Log(1/p) / g}}
+	return waitTail{w: []float64{p}, r: []float64{g}, s: []float64{math.Log(max(c, p)/p) / g}}
 }
 
 // sum is the wait of the two waits in sequence, taken independent: the
@@ -156,15 +158,18 @@ func lundbergWait(p, g float64) waitTail {
 // Rates within a relative 1e-6 of each other are parted by that much, which
 // moves the figure by about as much: the hypoexponential's coefficients are
 // r2/(r2-r1) and -r1/(r2-r1).
-func (a waitTail) sum(b waitTail) waitTail {
+//
+// ok is false for shapes it does not sum: anything but a single-piece wait
+// and an unshifted single-piece one (or an empty one).
+func (a waitTail) sum(b waitTail) (_ waitTail, ok bool) {
 	if len(a.w) == 0 {
-		return b
+		return b, true
 	}
 	if len(b.w) == 0 {
-		return a
+		return a, true
 	}
 	if len(a.w) != 1 || len(b.w) != 1 || b.s[0] != 0 {
-		panic("whatif: only a single-piece wait and an unshifted one are summed")
+		return waitTail{}, false
 	}
 	p1, r1, s1, p2, r2 := a.w[0], a.r[0], a.s[0], b.w[0], b.r[0]
 	if math.Abs(r2-r1) <= 1e-6*max(r1, r2) {
@@ -177,7 +182,7 @@ func (a waitTail) sum(b waitTail) waitTail {
 		w: []float64{p1*(1-p2) + p1*p2*c1, p1 * p2 * c2, p2 * (1 - p1)},
 		r: []float64{r1, r2, r2},
 		s: []float64{s1, s1, 0},
-	}
+	}, true
 }
 
 // mean is E[W].
@@ -280,11 +285,10 @@ func split(b1 block, dec waitTail, q float64) (value, beta float64) {
 	}
 	const grid = 48
 	best, bestX := math.Inf(1), 0.0
-	xs := make([]float64, grid+1)
-	for i := range xs {
-		xs[i] = math.Log(lo) + (math.Log(hi)-math.Log(lo))*float64(i)/grid
-		if v := f(math.Exp(xs[i])); v < best {
-			best, bestX = v, xs[i]
+	for i := 0; i <= grid; i++ {
+		x := math.Log(lo) + (math.Log(hi)-math.Log(lo))*float64(i)/grid
+		if v := f(math.Exp(x)); v < best {
+			best, bestX = v, x
 		}
 	}
 	// Golden section in log(beta) over the best grid point's neighbours.
@@ -323,9 +327,15 @@ func split(b1 block, dec waitTail, q float64) (value, beta float64) {
 // side less the right is convex, 0 at 0 with slope rho - 1 < 0, and grows
 // without bound toward the pole of M (or forever), so the root is the one
 // sign change, found by bisection. At cv 1 it is 1/es - lam.
+//
+// NaN when there is no root to find: a work mean that is not positive and
+// finite, or rho = lam*es at or above 1 (the queue is unstable).
 func lundbergRoot(lam, es, cv float64) float64 {
 	if !(lam > 0) {
 		return math.Inf(1) // no arrivals, no wait: nothing to bound
+	}
+	if !Finite(es) || !(es > 0) || !Finite(lam) || !(lam*es < 1) {
+		return math.NaN()
 	}
 	k, pole := 0.0, math.Inf(1)
 	if cv > 0 {
@@ -343,7 +353,14 @@ func lundbergRoot(lam, es, cv float64) float64 {
 	}
 	hi := pole
 	if math.IsInf(pole, 1) {
-		for hi = 1 / es; phi(hi) <= 0; hi *= 2 {
+		// Constant work: phi grows like exp(g es), so a root lies within
+		// a few hundred doublings of 1/es; past that there is none.
+		hi = 1 / es
+		for i := 0; !(phi(hi) > 0); i++ {
+			if i >= 2000 || math.IsInf(hi, 1) {
+				return math.NaN()
+			}
+			hi *= 2
 		}
 	}
 	lo := 0.0
@@ -404,6 +421,8 @@ func lnGammaP(k, x float64) float64 {
 	return math.Log1p(-math.Exp(lnGammaQFraction(k, x)))
 }
 
+// lnGammaPSeries is ln P(k, x) by its series; NaN when the series does not
+// converge within maxSeriesTerms, never a partial sum.
 func lnGammaPSeries(k, x float64) float64 {
 	term := 1 / k
 	sum := term
@@ -411,13 +430,15 @@ func lnGammaPSeries(k, x float64) float64 {
 		term *= x / (k + float64(n))
 		sum += term
 		if term < sum*1e-17 {
-			break
+			lgk, _ := math.Lgamma(k)
+			return -x + k*math.Log(x) - lgk + math.Log(sum)
 		}
 	}
-	lgk, _ := math.Lgamma(k)
-	return -x + k*math.Log(x) - lgk + math.Log(sum)
+	return math.NaN()
 }
 
+// lnGammaQFraction is ln Q(k, x) by its continued fraction (modified Lentz);
+// NaN when it does not converge within maxSeriesTerms, never a partial value.
 func lnGammaQFraction(k, x float64) float64 {
 	const tiny = 1e-300
 	b := x + 1 - k
@@ -438,26 +459,37 @@ func lnGammaQFraction(k, x float64) float64 {
 		d = 1 / d
 		del := d * c
 		h *= del
-		if math.Abs(del-1) < 1e-16 {
-			break
+		// Within a few units in the last place of 1: 1e-16 alone is below
+		// float64's spacing above 1 and would be met only by del == 1.
+		if math.Abs(del-1) < 4e-16 {
+			lgk, _ := math.Lgamma(k)
+			return -x + k*math.Log(x) - lgk + math.Log(h)
 		}
 	}
-	lgk, _ := math.Lgamma(k)
-	return -x + k*math.Log(x) - lgk + math.Log(h)
+	return math.NaN()
 }
 
-// gammaQuantile is the x with P(k, x) = q, by bisection.
+// gammaQuantile is the x with P(k, x) = q, by bisection; NaN when no
+// bracket is found (P never reaches q, or reads NaN).
 func gammaQuantile(k, q float64) float64 {
 	lo, hi := 0.0, max(k, 1)
-	for i := 0; i < 2000; i++ {
-		if p, _ := gammaPQ(k, hi); p >= q {
+	for i := 0; ; i++ {
+		p, _ := gammaPQ(k, hi)
+		if p >= q {
 			break
+		}
+		if i >= 2000 || math.IsNaN(p) {
+			return math.NaN()
 		}
 		lo, hi = hi, 2*hi
 	}
 	for range 200 {
 		mid := lo + (hi-lo)/2
-		if p, _ := gammaPQ(k, mid); p < q {
+		p, _ := gammaPQ(k, mid)
+		if math.IsNaN(p) {
+			return math.NaN()
+		}
+		if p < q {
 			lo = mid
 		} else {
 			hi = mid

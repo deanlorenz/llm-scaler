@@ -228,6 +228,9 @@ type Basis struct {
 	// TTFT is the basis of a TTFT answer (RateForTTFT, PrefillKnee); nil on
 	// every decode answer. A TTFT answer leaves the TPOT fields above
 	// (KneeRate, Floor, Uncapped) at 0, so none of them changes meaning.
+	// Basis carries no JSON tags and none is needed: cmd/whatif writes its
+	// own wire types (wireBasis), field by field, so this field reaches the
+	// wire only when the CLI maps it (TestJSONSchemaIsPinned holds it out).
 	TTFT *TTFTBasis
 }
 
