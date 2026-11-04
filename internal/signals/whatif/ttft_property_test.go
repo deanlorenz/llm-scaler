@@ -112,8 +112,8 @@ func TestProperty_RateForTTFT(t *testing.T) {
 		if !(a.Value < pl.lowestKnee()) || !(a.Value > 0) {
 			t.Errorf("rate %g, knee %g", a.Value, pl.lowestKnee())
 		}
-		if !(a.Basis.Uncapped >= a.Value*(1-1e-9)) {
-			t.Errorf("prefill side alone %g below the answer %g", a.Basis.Uncapped, a.Value)
+		if !(a.Basis.TTFT.PrefillOnlyRate >= a.Value*(1-1e-9)) {
+			t.Errorf("prefill side alone %g below the answer %g", a.Basis.TTFT.PrefillOnlyRate, a.Value)
 		}
 		back := mustTTFT(t, ttftAt(t, fl, a.Value, q))
 		relNear(t, "TTFT at the answer", back.Seconds, target.Seconds, 1e-6)

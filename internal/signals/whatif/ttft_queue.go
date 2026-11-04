@@ -123,21 +123,32 @@ func logSeries(k, y float64) float64 {
 // stops a reading error from spinning.
 const maxSeriesTerms = 1_000_000
 
-// waitTail is a wait with an atom at 0 and, past it, a tail that is a sum of
-// exponentials: P(W > u) = sum_i w_i exp(-r_i u) for u >= 0. The weights of
-// a hypoexponential part are signed; their sum is P(W > 0).
+// waitTail is a wait with an atom at 0 and, past it, a sum of shifted
+// exponential pieces: piece i adds w_i to P(W > u) for u < s_i and
+// w_i exp(-r_i (u - s_i)) from s_i on. The weights of a hypoexponential part
+// are signed (its pieces share a shift); their sum is P(W > 0).
 type waitTail struct {
-	w, r []float64
+	w, r, s []float64
 }
 
 // expWait is a wait that is 0 with probability 1 - p and otherwise
-// exponential at rate r: P(W > u) = p exp(-r u). Both the worst pod's
-// wait and the decode admission wait take this form.
+// exponential at rate r: P(W > u) = p exp(-r u). The decode admission wait
+// takes this form, and so does the worst pod's at cv >= 1.
 func expWait(p, r float64) waitTail {
 	if p == 0 {
 		return waitTail{}
 	}
-	return waitTail{w: []float64{p}, r: []float64{r}}
+	return waitTail{w: []float64{p}, r: []float64{r}, s: []float64{0}}
+}
+
+// lundbergWait is P(W > u) = min(p, exp(-g u)): the Lundberg inequality's
+// bound on an M/G/1 wait, g the Cramer-Lundberg root, capped at P(W > 0) = p.
+// It is the wait p exp(-g (u - s)) shifted by s = ln(1/p)/g, flat at p before.
+func lundbergWait(p, g float64) waitTail {
+	if p == 0 {
+		return waitTail{}
+	}
+	return waitTail{w: []float64{p}, r: []float64{g}, s: []float64{math.Log(1/p) / g}}
 }
 
 // sum is the wait of the two waits in sequence, taken independent: the
@@ -152,17 +163,20 @@ func (a waitTail) sum(b waitTail) waitTail {
 	if len(b.w) == 0 {
 		return a
 	}
-	if len(a.w) != 1 || len(b.w) != 1 {
-		panic("whatif: only two single-exponential waits are summed")
+	if len(a.w) != 1 || len(b.w) != 1 || b.s[0] != 0 {
+		panic("whatif: only a single-piece wait and an unshifted one are summed")
 	}
-	p1, r1, p2, r2 := a.w[0], a.r[0], b.w[0], b.r[0]
+	p1, r1, s1, p2, r2 := a.w[0], a.r[0], a.s[0], b.w[0], b.r[0]
 	if math.Abs(r2-r1) <= 1e-6*max(r1, r2) {
 		r2 = r1 * (1 + 1e-6)
 	}
 	c1, c2 := r2/(r2-r1), -r1/(r2-r1)
+	// Only the first waits: its own piece. Only the second: its piece,
+	// unshifted. Both: s1 + Exp(r1) + Exp(r2), a hypoexponential at s1.
 	return waitTail{
-		w: []float64{p1*(1-p2) + p1*p2*c1, p2*(1-p1) + p1*p2*c2},
-		r: []float64{r1, r2},
+		w: []float64{p1*(1-p2) + p1*p2*c1, p1 * p2 * c2, p2 * (1 - p1)},
+		r: []float64{r1, r2, r2},
+		s: []float64{s1, s1, 0},
 	}
 }
 
@@ -170,7 +184,7 @@ func (a waitTail) sum(b waitTail) waitTail {
 func (a waitTail) mean() float64 {
 	var m float64
 	for i, w := range a.w {
-		m += w / a.r[i]
+		m += w * (a.s[i] + 1/a.r[i])
 	}
 	return m
 }
@@ -179,7 +193,10 @@ func (a waitTail) mean() float64 {
 // exact for independent parts (first-come service with Poisson arrivals
 // makes a request's wait independent of its own work):
 //
-//	P(W + own > t) = P(own > t) + sum_i w_i conv_{r_i}(t)
+//	P(W + own > t) = P(own > t) + sum_i w_i [P(t - s_i < own <= t) + conv_{r_i}(t - s_i)]
+//
+// with P(own > x) = 1 and conv = 0 for x <= 0; at s_i = 0 the first term in
+// the brackets is 0.
 type block struct {
 	wait waitTail
 	own  ownTime
@@ -189,9 +206,11 @@ func (bl block) exceeds(t float64) float64 {
 	if t <= 0 {
 		return 1
 	}
-	p := bl.own.sf(t)
+	sf := bl.own.sf(t)
+	p := sf
 	for i, w := range bl.wait.w {
-		p += w * bl.own.conv(bl.wait.r[i], t)
+		x := t - bl.wait.s[i]
+		p += w * (bl.own.sf(x) - sf + bl.own.conv(bl.wait.r[i], x))
 	}
 	if math.IsNaN(p) {
 		// Never a quantile of 0 from a tail that could not be read: the
@@ -295,6 +314,53 @@ func split(b1 block, dec waitTail, q float64) (value, beta float64) {
 		best, beta = v, eps/2
 	}
 	return best, beta
+}
+
+// lundbergRoot is the Cramer-Lundberg root of an M/G/1 queue with Poisson
+// arrivals at lam and gamma work of mean es and coefficient of variation cv
+// (constant at cv 0): the gamma > 0 with lam (M(gamma) - 1) = gamma, where
+// M(g) = (1 - g cv^2 es)^(-1/cv^2), or exp(g es) for constant work. The left
+// side less the right is convex, 0 at 0 with slope rho - 1 < 0, and grows
+// without bound toward the pole of M (or forever), so the root is the one
+// sign change, found by bisection. At cv 1 it is 1/es - lam.
+func lundbergRoot(lam, es, cv float64) float64 {
+	if !(lam > 0) {
+		return math.Inf(1) // no arrivals, no wait: nothing to bound
+	}
+	k, pole := 0.0, math.Inf(1)
+	if cv > 0 {
+		k = 1 / (cv * cv)
+		pole = k / es
+	}
+	phi := func(g float64) float64 {
+		var m float64
+		if cv > 0 {
+			m = math.Exp(-k * math.Log1p(-g/pole))
+		} else {
+			m = math.Exp(g * es)
+		}
+		return lam*(m-1) - g
+	}
+	hi := pole
+	if math.IsInf(pole, 1) {
+		for hi = 1 / es; phi(hi) <= 0; hi *= 2 {
+		}
+	}
+	lo := 0.0
+	for range 200 {
+		mid := lo + (hi-lo)/2
+		// lo is kept below the root, so the decay returned is never the
+		// faster side of it.
+		if phi(mid) < 0 {
+			lo = mid
+		} else {
+			hi = mid
+		}
+		if hi-lo <= 1e-14*hi {
+			break
+		}
+	}
+	return lo
 }
 
 // erlangCProb is Erlang C, the probability an arrival waits in an M/M/c

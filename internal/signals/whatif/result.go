@@ -225,6 +225,10 @@ type Basis struct {
 	// Tier is the ITL line's tier (TierOLS, TierPinnedB, TierHeld,
 	// TierBorrowed), as Decode.Tier gave it; "" when the caller named none.
 	Tier string
+	// TTFT is the basis of a TTFT answer (RateForTTFT, PrefillKnee); nil on
+	// every decode answer. A TTFT answer leaves the TPOT fields above
+	// (KneeRate, Floor, Uncapped) at 0, so none of them changes meaning.
+	TTFT *TTFTBasis
 }
 
 // Answer is a priced figure: Value in the question's unit (requests per

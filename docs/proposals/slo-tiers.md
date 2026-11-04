@@ -545,9 +545,19 @@ Two PRs, under [the learner rules](analyzer-learner.md):
 
 **What S1 calls.** P3 is built, and is UNVALIDATED until P2
 ([as built](slo-capacity-planner-ttft.md#as-built-p3)). S1 builds a
-`whatif.TTFTFleet` from P1's estimate (`whatif.PrefillFromEstimate`), with the
-decode role when it is known, or with none (flagged `DecodeSideOmitted`).
-The rate per replica is `whatif.RateForTTFT` divided by `N_p`.
+`whatif.TTFTFleet` from P1's estimate (`whatif.PrefillFromEstimate`) and calls
+`whatif.RateForTTFT`:
+
+- **Fleet size.** Price at the variant's actual `N_p`, with `f` held as
+  learned. The rate per replica is `RateForTTFT` divided by `N_p`.
+- **Decode role.** Pass the decode role when it is known; with none the
+  answer is flagged `DecodeSideOmitted`. With flow control on, S1 must pass
+  it. Without it the decode onset cannot be placed, and the answer is
+  flagged `DecodeOnsetUnchecked` and may stand above that onset.
+- **Open question for S1: an assumed-`f` policy.** `NoImbalance` will be
+  common: P1 learns `f` only from busy minutes, with at least 100 requests
+  a pod. S1 must decide what `f` to assume, and how to flag it, before it
+  prices a multi-pod variant. P3 does not choose it.
 
 `ols-sweep-slo` gives S1 router TTFT, `AvgTTFT`, `AvgServiceTime` and the
 arrival rate: enough to fit `a` and check a low-load mean, not to fit `V_P` (no

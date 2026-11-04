@@ -104,6 +104,7 @@ CreateContainerConfigError
 CreateContainerError
 D
 Datastore
+DecodeOnsetUnchecked
 DecodeSideOmitted
 Deleted
 Discarding
@@ -2206,7 +2207,7 @@ silent
 since
 single
 single-accelerator
-single-exponential
+single-piece
 single-sample
 sit
 size
@@ -2501,6 +2502,7 @@ unread
 unreadable
 unresolved
 unservable
+unshifted
 unsigned
 unsizable
 unsteady

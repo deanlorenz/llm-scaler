@@ -2,6 +2,7 @@ package whatif
 
 import (
 	"math"
+	"math/big"
 	"slices"
 	"testing"
 	"time"
@@ -12,7 +13,7 @@ import (
 // The TTFT model's known-truth cases. None of them is a measurement: P2, the
 // prefill-stress recording, is what will check the model against a real pod.
 // What they pin is the arithmetic, against values computed without it:
-// closed-form queues (M/M/1, M/D/1, Pollaczek-Khinchine, Erlang C, the
+// closed-form queues (M/M/1, Erlang's exact M/D/1, Pollaczek-Khinchine, Erlang C, the
 // incomplete gamma's closed forms) and an independent numerical reference
 // (scipy quad over a different form of the convolution) for the worked example
 // and the cases with no closed form.
@@ -84,11 +85,11 @@ func TestTTFTWorkedExample_RateForTTFT(t *testing.T) {
 		relNear(t, "rate for 200 ms", a.Value, c.want, 1e-5)
 		// The decode wait takes the tail's first share, so the prefill side
 		// alone would carry more.
-		if !(a.Basis.Uncapped > a.Value) || !a.HasFlag(HeldByDecodeAdmission) ||
+		if !(a.Basis.TTFT.PrefillOnlyRate > a.Value) || !a.HasFlag(HeldByDecodeAdmission) ||
 			!slices.Equal(a.Basis.BoundBy, []Bound{BoundTTFT, BoundDecodeAdmission}) {
-			t.Errorf("q %g: uncapped %g, bound %v, flags %v", c.q, a.Basis.Uncapped, a.Basis.BoundBy, a.Flags)
+			t.Errorf("q %g: prefill alone %g, bound %v, flags %v", c.q, a.Basis.TTFT.PrefillOnlyRate, a.Basis.BoundBy, a.Flags)
 		}
-		relNear(t, "knee", a.Basis.KneeRate, 13.312564951975148, 1e-9)
+		relNear(t, "knee", a.Basis.TTFT.KneeRate, 13.312564951975148, 1e-9)
 		back := mustTTFT(t, ttftAt(t, fl, a.Value, c.q))
 		relNear(t, "TTFT back at the rate", back.Seconds, 0.2, 1e-6)
 	}
@@ -217,9 +218,10 @@ func TestTTFTIsMM1Sojourn(t *testing.T) {
 }
 
 // With f = 1 and one pod the mean engine wait is Pollaczek-Khinchine,
-// lambda E[S^2] / (2(1 - rho)), with E[S^2] = E[S]^2 (1 + cv^2); at cv 0 the
-// pod is M/D/1, whose wait (the model's exponential tail behind the atom)
-// gives TTFT_q = a + S + theta ln(rho/(1-q)) when rho > 1 - q.
+// lambda E[S^2] / (2(1 - rho)), with E[S^2] = E[S]^2 (1 + cv^2). The
+// quantiles are checked against Erlang's exact M/D/1 wait (TestMD1AgainstErlang)
+// and a Lindley simulation (TestTailNotBelowLindleySimulation), not against the
+// model's own tail formula.
 func TestEngineWaitIsPollaczekKhinchine(t *testing.T) {
 	for _, cv := range []float64{0, 0.3, 1, 2.5} {
 		fl := prefillOnly(cv)
@@ -231,20 +233,228 @@ func TestEngineWaitIsPollaczekKhinchine(t *testing.T) {
 			relNear(t, "mean", v.Seconds, fl.Prefill.FixedLatency+es+v.Parts.EngineWait, 1e-12)
 		}
 	}
+}
+
+// erlangMD1 is P(W <= t) for M/D/1 with unit service at utilization rho,
+// Erlang's formula (1 - rho) sum_{k <= t} (-x_k)^k e^(x_k) / k!, x_k =
+// rho (t - k). Its terms alternate and reach about e^(rho t) (rho t)^k / k!,
+// so it is summed in 600-bit floats, e^x by its own series.
+func erlangMD1(t, rho float64) float64 {
+	const prec = 600
+	sum := new(big.Float).SetPrec(prec)
+	for k := 0; float64(k) <= t; k++ {
+		// x in 600 bits too: a float64 x carries a 1e-16 error that the
+		// terms' e^x x^k carry into digits the sum needs.
+		x := new(big.Float).SetPrec(prec).SetFloat64(t)
+		x.Sub(x, new(big.Float).SetPrec(prec).SetInt64(int64(k)))
+		x.Mul(x, new(big.Float).SetPrec(prec).SetFloat64(rho))
+		term := bigExp(x, prec)
+		for i := 1; i <= k; i++ {
+			term.Mul(term, x)
+			term.Quo(term, new(big.Float).SetPrec(prec).SetInt64(int64(i)))
+		}
+		if k%2 == 1 {
+			term.Neg(term)
+		}
+		sum.Add(sum, term)
+	}
+	f, _ := sum.Float64()
+	return (1 - rho) * f
+}
+
+// bigExp is e^x for x >= 0 by its Taylor series, to the precision given.
+func bigExp(x *big.Float, prec uint) *big.Float {
+	sum := new(big.Float).SetPrec(prec).SetInt64(1)
+	term := new(big.Float).SetPrec(prec).SetInt64(1)
+	eps := new(big.Float).SetPrec(prec).SetMantExp(big.NewFloat(1), -int(prec))
+	for n := int64(1); n < 10000; n++ {
+		term.Mul(term, x)
+		term.Quo(term, new(big.Float).SetPrec(prec).SetInt64(n))
+		sum.Add(sum, term)
+		if new(big.Float).Abs(term).Cmp(new(big.Float).Mul(eps, sum)) < 0 {
+			break
+		}
+	}
+	return sum
+}
+
+// At cv 0 the pod is M/D/1, whose exact wait is Erlang's. The model's TTFT,
+// less a and the constant own time, is the wait's quantile, and must never be
+// below the exact one: an under-stated wait is too few replicas. The case
+// that set the Lundberg body at cv < 1: an exponential body behind the atom
+// read the p90 wait at rho 0.2 as 0.43 of a service time, exact 0.59.
+func TestMD1AgainstErlang(t *testing.T) {
+	// The formula's own closed points: P(W = 0) = 1 - rho, P(W <= 1) =
+	// (1 - rho) e^rho, P(W <= 2) = (1 - rho)(e^(2 rho) - rho e^rho).
+	relNear(t, "P(W <= 0)", erlangMD1(0, 0.5), 0.5, 1e-15)
+	relNear(t, "P(W <= 1)", erlangMD1(1, 0.5), 0.5*math.Exp(0.5), 1e-12)
+	relNear(t, "P(W <= 2)", erlangMD1(2, 0.5), 0.5*(math.Exp(1)-0.5*math.Exp(0.5)), 1e-12)
 	fl := prefillOnly(0)
 	es := fl.Prefill.PromptTokens / fl.Prefill.VP
-	for _, lam := range []float64{15, 25, 29} {
-		rho := lam * es
-		theta := es / (2 * (1 - rho))
-		for _, q := range []float64{0.9, 0.99} {
-			v := mustTTFT(t, ttftAt(t, fl, lam, q))
-			relNear(t, "M/D/1 quantile", v.Seconds, fl.Prefill.FixedLatency+es+theta*math.Log(rho/(1-q)), 1e-9)
+	for _, rho := range []float64{0.1, 0.2, 0.3, 0.5, 0.7, 0.8, 0.9} {
+		for _, q := range []float64{0.9, 0.99, 0.999} {
+			exact := 0.0
+			if rho > 1-q {
+				// Bracket by doubling, never past 64 service times, where
+				// the 600-bit sum still holds the terms' e^(2 rho t).
+				lo, hi := 0.0, 1.0
+				for erlangMD1(hi, rho) < q {
+					if lo, hi = hi, 2*hi; hi > 64 {
+						t.Fatalf("rho %g q %g: no bracket below 64 service times", rho, q)
+					}
+				}
+				for range 60 {
+					mid := (lo + hi) / 2
+					if erlangMD1(mid, rho) < q {
+						lo = mid
+					} else {
+						hi = mid
+					}
+				}
+				exact = hi
+			}
+			v := mustTTFT(t, ttftAt(t, fl, rho/es, q))
+			model := (v.Seconds - fl.Prefill.FixedLatency - es) / es
+			if !(model >= exact*(1-1e-9)) {
+				t.Errorf("rho %g q %g: wait %.6f service times, Erlang's exact %.6f", rho, q, model, exact)
+			}
+			t.Logf("rho %g q %g: model wait %.4f, exact %.4f, sojourn ratio %.4f", rho, q, model, exact, (model+1)/(exact+1))
 		}
 	}
 }
 
-// Cases with no closed form, against the independent reference (scipy quad
-// over P(W+S>t) = (1-p) sf(t) + p [exp(-rt) + int r exp(-ru) sf(t-u) du], a
+// lindleyP99 are sojourn (wait plus own work) p99s of M/G/1 with gamma work
+// of mean 1 and Poisson arrivals, from a Lindley simulation outside the code
+// (3M arrivals after 100k of warm-up, seed 20261104, numpy; three seeds
+// spread at most 1.75% at p99). The tolerance is the seed spread rounded up.
+var lindleyP99 = []struct{ cv, rho, p99 float64 }{
+	{2, 0.3, 15.876903}, {2, 0.6, 28.774202},
+	{3, 0.3, 30.779964}, {3, 0.6, 58.326169},
+	{1, 0.6, 11.477355}, {0.5, 0.6, 7.028987},
+	// Light-tailed work, where the Lundberg body sets the tail (cv < 1).
+	{0.5, 0.2, 3.33298}, {0.5, 0.3, 3.87596},
+	{0, 0.2, 2.43244}, {0, 0.3, 2.89387}, {0, 0.6, 5.53005},
+}
+
+// The model's prefill sojourn at p99 is never below the simulation's, less
+// the simulation's own noise: at cv above 1 Kingman's exponential decay alone
+// read 0.94/0.94 (cv 2, rho 0.3/0.6) and 0.89/0.91 (cv 3) of it, too few
+// replicas by up to 10%.
+func TestTailNotBelowLindleySimulation(t *testing.T) {
+	const tol = 0.03
+	for _, c := range lindleyP99 {
+		fl := prefillOnly(c.cv)
+		es := fl.Prefill.PromptTokens / fl.Prefill.VP
+		v := mustTTFT(t, ttftAt(t, fl, c.rho/es, 0.99))
+		model := (v.Seconds - fl.Prefill.FixedLatency) / es
+		if !(model >= c.p99*(1-tol)) {
+			t.Errorf("cv %g rho %g: p99 sojourn %.4f mean works, simulation %.4f (ratio %.4f)", c.cv, c.rho, model, c.p99, model/c.p99)
+		}
+		t.Logf("cv %g rho %g: model/sim p99 %.4f", c.cv, c.rho, model/c.p99)
+	}
+}
+
+// The Cramer-Lundberg root: mu - lambda at cv 1 (M/M/1), and otherwise the
+// root of lambda (M(g) - 1) = g, checked by the equation itself; none with no
+// arrivals.
+func TestLundbergRoot(t *testing.T) {
+	for _, lam := range []float64{0.1, 0.5, 0.9} {
+		relNear(t, "M/M/1 root", lundbergRoot(lam, 1, 1), 1-lam, 1e-12)
+		for _, cv := range []float64{0, 0.3, 0.5, 2, 3} {
+			g := lundbergRoot(lam, 1, cv)
+			m := math.Exp(g)
+			if cv > 0 {
+				m = math.Pow(1-g*cv*cv, -1/(cv*cv))
+			}
+			if !(g > 0) || math.Abs(lam*(m-1)-g) > 1e-9*g {
+				t.Errorf("lam %g cv %g: root %g leaves %g", lam, cv, g, lam*(m-1)-g)
+			}
+		}
+	}
+	if !math.IsInf(lundbergRoot(0, 1, 0.5), 1) {
+		t.Error("a root with no arrivals")
+	}
+}
+
+// Away from Poisson arrivals the wait decays at Kingman's 1/theta, but never
+// faster than one request's work does, 1/(cv^2 E[S]); and the Lundberg body
+// is only for Poisson arrivals.
+func TestKingmanTailNeverOutrunsTheWork(t *testing.T) {
+	for _, c := range []struct{ cv, ca2, rho float64 }{{3, 1.5, 0.1}, {3, 0.5, 0.3}, {2, 2, 0.2}, {0.5, 2, 0.5}} {
+		fl := prefillOnly(c.cv)
+		fl.Prefill.ArrivalCV2 = c.ca2
+		es := fl.Prefill.PromptTokens / fl.Prefill.VP
+		v := mustTTFT(t, ttftAt(t, fl, c.rho/es, 0.99))
+		kingman := es * (c.ca2 + c.cv*c.cv) / (2 * (1 - c.rho))
+		relNear(t, "wait scale", v.WaitScale, max(kingman, c.cv*c.cv*es), 1e-12)
+		if v.WaitOffset != 0 {
+			t.Errorf("cv %g Ca^2 %g: a Lundberg offset %g away from Poisson arrivals", c.cv, c.ca2, v.WaitOffset)
+		}
+	}
+}
+
+// A TTFT answer leaves the TPOT fields of Basis at 0 and carries its own.
+func TestRateForTTFTLeavesTPOTFieldsZero(t *testing.T) {
+	for _, fl := range []TTFTFleet{workedFleet(), prefillOnly(1)} {
+		a := mustAnswer(t, rateForTTFT(t, fl, TTFTTarget{Seconds: 0.2, Percentile: 0.9}))
+		if a.Basis.KneeRate != 0 || a.Basis.Floor != 0 || a.Basis.Uncapped != 0 {
+			t.Errorf("TPOT fields set: %+v", a.Basis)
+		}
+		if a.Basis.TTFT == nil || !(a.Basis.TTFT.Floor > 0) || !(a.Basis.TTFT.KneeRate > a.Value) || !(a.Basis.TTFT.PrefillOnlyRate >= a.Value) {
+			t.Errorf("TTFT basis %+v at %g r/s", a.Basis.TTFT, a.Value)
+		}
+	}
+	k := mustAnswer(t, PrefillKnee(workedPrefill()))
+	if k.Basis.KneeRate != 0 || k.Basis.TTFT == nil || k.Basis.TTFT.KneeRate != k.Value {
+		t.Errorf("prefill knee basis %+v", k.Basis)
+	}
+	// A decode answer has no TTFT basis.
+	if b := mustAnswer(t, KneeRate(olsSweep())); b.Basis.TTFT != nil {
+		t.Errorf("decode knee carries a TTFT basis: %+v", b.Basis.TTFT)
+	}
+}
+
+// The prefill side alone with flow control on cannot place the decode onset:
+// it answers, flagged, and does not refuse.
+func TestDecodeOnsetUnchecked(t *testing.T) {
+	fl := prefillOnly(1)
+	fl.FlowControl = FlowControl{State: FlowControlOn, QueueThreshold: 5, KVThreshold: 0.8}
+	v := mustTTFT(t, ttftAt(t, fl, 10, 0.9))
+	a := mustAnswer(t, rateForTTFT(t, fl, TTFTTarget{Seconds: 0.2, Percentile: 0.9}))
+	if !v.HasFlag(DecodeOnsetUnchecked) || !a.HasFlag(DecodeOnsetUnchecked) {
+		t.Errorf("not flagged: %v / %v", v.Flags, a.Flags)
+	}
+	// With the decode side, or with flow control off, it is not raised.
+	for name, f := range map[string]TTFTFleet{"decode given": func() TTFTFleet {
+		w := workedFleet()
+		w.FlowControl = fl.FlowControl
+		return w
+	}(), "flow control off": prefillOnly(1)} {
+		if v := mustTTFT(t, ttftAt(t, f, 5, 0.9)); v.HasFlag(DecodeOnsetUnchecked) {
+			t.Errorf("%s: flagged %v", name, v.Flags)
+		}
+	}
+}
+
+// A prompt spread below minPromptCV prices as constant: cv 1e-7 read 8% high
+// as a gamma (its shape 1e14 cancels in the incomplete gamma).
+func TestTinyPromptCVIsConstant(t *testing.T) {
+	for _, q := range []float64{0, 0.9, 0.99} {
+		for _, rate := range []float64{0, 10, 25} {
+			c := mustTTFT(t, ttftAt(t, prefillOnly(0), rate, q))
+			for _, cv := range []float64{1e-7, 5e-5} {
+				v := mustTTFT(t, ttftAt(t, prefillOnly(cv), rate, q))
+				relNear(t, "TTFT at a tiny cv", v.Seconds, c.Seconds, 1e-3)
+				relNear(t, "floor at a tiny cv", v.Floor, c.Floor, 1e-3)
+			}
+		}
+	}
+}
+
+// Cases with no closed form, against the independent reference (scipy quad,
+// with the engineWait rule written again in Python: the Cramer-Lundberg root
+// by brentq, the Lundberg body at cv < 1 as a shifted exponential) over
+// P(W+S>t) = (1-p) sf(t) + p [exp(-rt) + int r exp(-ru) sf(t-u) du], a
 // different form from the code's incomplete-gamma closed form): prompt
 // spreads either side of 1, bursty arrivals with an imbalance across four
 // pods and two decode replicas, a KV transfer term, and the prefill side
@@ -257,12 +467,12 @@ func TestTTFTAgainstReference(t *testing.T) {
 		np, nd                      int
 		xfer, wantSeconds, wantMean float64
 	}{
-		{"cv0.5", 9, 0.9, 0.011, 30000, 1000, 0.5, 1, 1, 1, 1, 0, 0.08909511332775925, 0.0561332049162314},
-		{"cv2", 9, 0.95, 0.011, 30000, 1000, 2, 1, 1, 1, 1, 0, 0.30636124808950277, 0.08291891920194568},
+		{"cv0.5", 9, 0.9, 0.011, 30000, 1000, 0.5, 1, 1, 1, 1, 0, 0.10685067374304469, 0.0561332049162314},
+		{"cv2", 9, 0.95, 0.011, 30000, 1000, 2, 1, 1, 1, 1, 0, 0.35241177380978406, 0.08291891920194568},
 		{"bursty-imbalanced", 20, 0.9, 0.011, 30000, 1000, 1, 2, 1.5, 4, 2, 0, 0.13239144522086338, 0.06437997302707862},
-		{"transfer", 8, 0.99, 0.02, 20000, 2000, 0.8, 1, 1, 1, 1, 2e-6, 1.932741231477786, 0.45462260548736116},
+		{"transfer", 8, 0.99, 0.02, 20000, 2000, 0.8, 1, 1, 1, 1, 2e-6, 1.9938770498026501, 0.45462260548736116},
 		{"prefill-only", 25, 0.9, 0.011, 30000, 1000, 1, 1, 1, 1, 0, 0, 0.47151701859880935, 0.21100000000000005},
-		{"constant-prompt", 25, 0.9, 0.011, 30000, 1000, 0, 1, 1, 1, 0, 0, 0.25635968695334327, 0.12766666666666668},
+		{"constant-prompt", 25, 0.9, 0.011, 30000, 1000, 0, 1, 1, 1, 0, 0, 0.2610272810764572, 0.12766666666666668},
 	}
 	for _, c := range cases {
 		fl := TTFTFleet{Prefill: Prefill{VP: c.vp, FixedLatency: c.a, Imbalance: c.f, Replicas: c.np,
@@ -412,8 +622,8 @@ func TestTTFTSaturates(t *testing.T) {
 		a := mustAnswer(t, within(t, "RateForTTFT", func() Result {
 			return RateForTTFT(fl, TTFTTarget{Seconds: 100, Percentile: q})
 		}))
-		if !(a.Value < pk.Value) || a.Basis.KneeRate != pk.Value {
-			t.Errorf("q %g: rate %g, knee %g; want below the prefill knee %g", q, a.Value, a.Basis.KneeRate, pk.Value)
+		if !(a.Value < pk.Value) || a.Basis.TTFT.KneeRate != pk.Value {
+			t.Errorf("q %g: rate %g, knee %g; want below the prefill knee %g", q, a.Value, a.Basis.TTFT.KneeRate, pk.Value)
 		}
 	}
 }
@@ -480,7 +690,8 @@ func TestUnionBoundAgainstIndependentAndEvenSplit(t *testing.T) {
 			}
 			pl, _ := fl.plan()
 			rho := pl.pf.utilization(rate)
-			b1 := block{wait: expWait(rho, 1/pl.pf.waitScale(rho)), own: pl.pf.own()}
+			wait, _ := pl.pf.engineWait(rho)
+			b1 := block{wait: wait, own: pl.pf.own()}
 			adm := DecodeAdmission(d, rate).(Admission)
 			even := 0.0126 + b1.quantile((1-q)/2) + adm.WaitQuantile(1-(1-q)/2) + v.Parts.FirstStep
 			if !(v.Seconds <= even*(1+1e-12)) {

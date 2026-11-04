@@ -84,6 +84,11 @@ const (
 	// HeldByDecodeAdmission is a TTFT rate the prefill side alone would
 	// set higher: decode admission's wait holds it down.
 	HeldByDecodeAdmission Flag = "HeldByDecodeAdmission"
+	// DecodeOnsetUnchecked is a TTFT priced on the prefill side alone with
+	// flow control on: the decode gate's onset, above which TTFT is not
+	// priced, could not be placed, so the answer may stand above it. Pass
+	// the decode role to check it.
+	DecodeOnsetUnchecked Flag = "DecodeOnsetUnchecked"
 )
 
 // The bounds a TTFT rate or a prefill knee can be set by.
@@ -100,6 +105,21 @@ const (
 	BoundPrefillKnee Bound = "prefill knee"
 )
 
+// TTFTBasis is what a TTFT rate rests on, beside the decode fields of Basis
+// (Fill, BoundBy, Tier), which keep their meanings.
+type TTFTBasis struct {
+	// Floor is the TTFT floor at the target's percentile (or the mean):
+	// a + I_q*(1/V_P + kappa/BW) + ITL(band.Lo), in seconds.
+	Floor float64
+	// KneeRate is the lower of the roles' knees, in requests per second over
+	// the fleet: the prefill knee, or decode's where that is lower.
+	KneeRate float64
+	// PrefillOnlyRate is the rate the prefill side alone allows, the decode
+	// admission wait left out; above the answer when decode admission holds
+	// it down (HeldByDecodeAdmission).
+	PrefillOnlyRate float64
+}
+
 // TTFT is an end-to-end TTFT priced at one rate: the answer (Seconds) and
 // what it is made of (docs/proposals/slo-capacity-planner-ttft.md). Every
 // TTFT carries UnvalidatedTTFT.
@@ -114,7 +134,10 @@ type TTFT struct {
 	Independent float64
 	// Pooled is the optimistic figure: the union bound with the prefill
 	// pods pooled into one M/G/N_p queue (Allen-Cunneen) and no imbalance,
-	// in place of the worst pod's M/G/1. Never above Seconds.
+	// in place of the worst pod's M/G/1. Never above Seconds. It describes a
+	// router that holds requests and sends each to the first free pod, which
+	// is what flow control does only above the prefill onset; below it, each
+	// pod queues for itself and Pooled is a bound, not an estimate.
 	Pooled float64
 	// Floor is the lowest TTFT any number of replicas reaches at this
 	// percentile: a + I_q * (1/V_P + T_xfer per token) + ITL(band.Lo), the
@@ -130,10 +153,12 @@ type TTFT struct {
 	// f * rate * E[I_eff] / (N_p * V_P); it is also the probability a request
 	// waits on that pod.
 	PrefillUtilization float64
-	// WaitScale is theta, in seconds: the worst pod's wait, given that a
-	// request waits, is exponential with this mean (Kingman's
-	// E[S](Ca^2 + Cs^2) / (2(1 - rho_w))).
-	WaitScale float64
+	// WaitScale is 1/r and WaitOffset s, in seconds: the worst pod's wait
+	// tail is rho_w * exp(-r (t - s)) from s on, and rho_w before it
+	// (engineWait: s is 0 except under the Lundberg bound, at cv < 1). The
+	// mean wait in Parts is Pollaczek-Khinchine's (Kingman's) rho_w * theta,
+	// not this tail's mean.
+	WaitScale, WaitOffset float64
 	// DecodeWaitProbability is the share of requests that wait for a decode
 	// slot; 0 with no decode side.
 	DecodeWaitProbability float64
@@ -160,6 +185,8 @@ type TTFTParts struct {
 	// EngineWait is W_engine on the worst prefill pod, rho_w * theta
 	// (Pollaczek-Khinchine at Poisson arrivals, Kingman otherwise). W_router
 	// is 0 below the onsets and is not priced apart above the prefill onset.
+	// It is the worst pod's mean, not the fleet's: the mean TTFT (Seconds at
+	// q = 0) is the mean a request on the busiest pod sees.
 	EngineWait float64
 	// OwnPrefill is a + E[I_eff]/V_P, plus the transfer when one is given.
 	OwnPrefill float64

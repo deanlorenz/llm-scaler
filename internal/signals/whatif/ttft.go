@@ -76,6 +76,12 @@ const maxPrefillReplicas = maxSlots
 // gamma's shape is below 0.01 and the model's exponential tail says nothing.
 const maxPromptCV = 10
 
+// minPromptCV is the least prompt spread priced as a gamma; below it the
+// prompt is priced as constant. The gamma's shape 1/cv^2 is then above 1e8,
+// where its incomplete gamma loses its digits to cancellation (cv 1e-7 read
+// 8% high); the two figures differ by less than the spread itself.
+const minPromptCV = 1e-4
+
 // FlowControlState is what is known of EPP flow control.
 type FlowControlState int
 
@@ -127,8 +133,9 @@ type prefillPlan struct {
 	p Prefill
 	// f is the imbalance used (1 for one pod with none given).
 	f float64
-	// ca2, cs2 are Ca^2 and Cs^2.
-	ca2, cs2 float64
+	// cv is the prompt's coefficient of variation as priced (0 below
+	// minPromptCV); ca2, cs2 are Ca^2 and Cs^2 = cv^2.
+	cv, ca2, cs2 float64
 	// work is E[S_work] = E[I]/V_P, the queue's work per request; ownRate
 	// is the own latency per prompt token, 1/V_P + kappa/BW.
 	work, ownRate float64
@@ -162,7 +169,11 @@ func (p Prefill) check() (prefillPlan, *Unanswerable) {
 	case !Finite(p.TransferSecondsPerToken) || p.TransferSecondsPerToken < 0:
 		u = refuse(InvalidInput, fmt.Sprintf("transfer %g s per token", p.TransferSecondsPerToken))
 	default:
-		pl := prefillPlan{p: p, f: max(p.Imbalance, 1), ca2: p.ArrivalCV2, cs2: p.PromptCV * p.PromptCV}
+		cv := p.PromptCV
+		if cv < minPromptCV {
+			cv = 0
+		}
+		pl := prefillPlan{p: p, f: max(p.Imbalance, 1), ca2: p.ArrivalCV2, cv: cv, cs2: cv * cv}
 		if pl.ca2 == 0 {
 			pl.ca2 = 1
 		}
@@ -204,7 +215,43 @@ func (pl prefillPlan) waitScale(rho float64) float64 {
 
 // own is the request's own latency less a: I * (1/V_P + kappa/BW).
 func (pl prefillPlan) own() ownTime {
-	return newOwnTime(pl.p.PromptTokens*pl.ownRate, pl.p.PromptCV)
+	return newOwnTime(pl.p.PromptTokens*pl.ownRate, pl.cv)
+}
+
+// engineWait is the worst pod's wait tail at utilization rho, and its decay
+// rate r. The rule errs only toward a longer tail, and so more replicas:
+//
+//   - Poisson arrivals (Ca^2 = 1), cv >= 1: rho * exp(-r t), r the smaller of
+//     Kingman's 1/theta and the Cramer-Lundberg root gamma of
+//     lambda_w (M_S(gamma) - 1) = gamma (M_S the work's moment generating
+//     function), the exact asymptotic decay of an M/G/1 wait. At cv 1 the two
+//     are equal (mu - lambda) and the tail is exact (M/M/1). Above 1 the root
+//     is the smaller: 1/theta alone read a p99 up to 10% short of a Lindley
+//     simulation.
+//   - Poisson arrivals, cv < 1: min(rho, exp(-gamma t)), the Lundberg
+//     inequality, which bounds every M/G/1 wait from above. An exponential
+//     body behind the atom under-states the wait of light-tailed work just
+//     past the atom: against Erlang's exact M/D/1 wait it read a p90
+//     sojourn 10% short at rho 0.2.
+//   - Otherwise (Kingman's Ca^2 + Cs^2): rho * exp(-r t), r = 1/theta, never
+//     above the work's own tail rate b = 1/(cv^2 E[S]): a wait cannot thin
+//     out faster than one request's work does. Not checked against a
+//     simulation; bursty arrivals lengthen the tail, so Kingman's 1/theta is
+//     the conservative side of it.
+func (pl prefillPlan) engineWait(rho float64) (waitTail, float64) {
+	r := 1 / pl.waitScale(rho)
+	if pl.ca2 == 1 {
+		g := lundbergRoot(rho/pl.work, pl.work, pl.cv)
+		if pl.cv < 1 {
+			return lundbergWait(rho, g), g
+		}
+		r = min(r, g)
+		return expWait(rho, r), r
+	}
+	if pl.cv > 0 {
+		r = min(r, 1/(pl.cv*pl.cv*pl.work))
+	}
+	return expWait(rho, r), r
 }
 
 // queueLength is a pod's mean waiting count at utilization rho,
@@ -264,6 +311,9 @@ func (fl TTFTFleet) plan() (ttftPlan, *Unanswerable) {
 		if !Finite(qt) || !(qt > 0) || !Finite(kt) || !(kt > 0) {
 			u := refuse(FlowControlUnknown, fmt.Sprintf("queue threshold %g, KV threshold %g", qt, kt))
 			return ttftPlan{}, &u
+		}
+		if fl.Decode == nil {
+			pl.flags = append(pl.flags, DecodeOnsetUnchecked)
 		}
 		on, u := pl.placeOnsets()
 		if u != nil {
@@ -334,14 +384,14 @@ func onset(knee float64, score func(float64) float64) float64 {
 
 // PrefillKnee is the prefill knee, N_p * V_P / (f * E[I_eff]), in requests
 // per second over the fleet (question 2, step 1): the rate at which the
-// busiest prefill pod saturates. Basis.KneeRate repeats it.
+// busiest prefill pod saturates. Basis.TTFT.KneeRate repeats it.
 func PrefillKnee(p Prefill) Result {
 	pl, u := p.check()
 	if u != nil {
 		return *u
 	}
 	k := pl.knee()
-	return Answer{Value: k, Flags: pl.flags, Basis: Basis{KneeRate: k, BoundBy: []Bound{BoundPrefillKnee}}}
+	return Answer{Value: k, Flags: pl.flags, Basis: Basis{BoundBy: []Bound{BoundPrefillKnee}, TTFT: &TTFTBasis{KneeRate: k}}}
 }
 
 // FlowControlOnsets are the rates at which EPP flow control's gate starts
@@ -394,10 +444,14 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 
 	rho := pl.pf.utilization(rate)
 	theta := pl.pf.waitScale(rho)
+	wait, tail := pl.pf.engineWait(rho)
 	own := pl.pf.own()
 	a := pl.pf.p.FixedLatency
-	b1 := block{wait: expWait(rho, 1/theta), own: own}
-	out.PrefillUtilization, out.WaitScale = rho, theta
+	b1 := block{wait: wait, own: own}
+	out.PrefillUtilization, out.WaitScale = rho, 1/tail
+	if len(wait.s) > 0 {
+		out.WaitOffset = wait.s[0]
+	}
 	out.Parts.EngineWait = rho * theta
 	out.Parts.OwnPrefill = a + own.mean
 
@@ -513,16 +567,21 @@ func TTFTAt(fl TTFTFleet, rate, q float64) Result {
 // with flow control on, below the decode gate's onset, which caps it
 // (BoundDecodeOnset). When the prefill side alone would allow more (by more
 // than a relative 1e-6), the rate is the one decode admission holds it to
-// (BoundBy TTFT then BoundDecodeAdmission, flagged HeldByDecodeAdmission); Basis.Uncapped is the prefill side's own rate. If
+// (BoundBy TTFT then BoundDecodeAdmission, flagged HeldByDecodeAdmission);
+// Basis.TTFT.PrefillOnlyRate is the prefill side's own rate. If
 // the TTFT at no load, the floor, already reaches the target, it refuses
 // (TargetBelowFloor). The operating-point cap is not applied: the fleet
 // carries the smaller of the roles' rates, then the cap, as the caller
 // combines them.
 //
-// Basis.KneeRate is the lower knee, Basis.Floor the TTFT floor (not a TPOT
-// one), Basis.Fill the decode fill at the answer and Basis.Tier the decode
-// line's tier (both empty with no decode side). Band is nil: the TTFT model is
-// not banded yet.
+// Basis.TTFT carries the lower knee, the TTFT floor and the prefill side's
+// own rate; the TPOT fields (KneeRate, Floor, Uncapped) stay 0. Basis.Fill is
+// the decode fill at the answer and Basis.Tier the decode line's tier (both
+// empty with no decode side). Band is nil: the TTFT model is not banded yet.
+//
+// The cap at the decode onset is not conservative: the onset is where the
+// MEAN endpoint score reaches 1, while the gate reads the current score, and
+// E[max] >= max E, so the gate closes for part of the time below it.
 func RateForTTFT(fl TTFTFleet, t TTFTTarget) Result {
 	pl, u := fl.plan()
 	if u != nil {
@@ -578,7 +637,8 @@ func RateForTTFT(fl TTFTFleet, t TTFTTarget) Result {
 		tier = pl.d.Tier
 	}
 	return Answer{Value: full, Flags: flags, Basis: Basis{
-		Fill: fill, KneeRate: pl.lowestKnee(), Floor: floor, Uncapped: alone, BoundBy: by, Tier: tier,
+		Fill: fill, BoundBy: by, Tier: tier,
+		TTFT: &TTFTBasis{Floor: floor, KneeRate: pl.lowestKnee(), PrefillOnlyRate: alone},
 	}}
 }
 
