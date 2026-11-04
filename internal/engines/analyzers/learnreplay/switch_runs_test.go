@@ -121,6 +121,9 @@ import (
 // land, state the store, but their sweep does not hold the decode pod at
 // its cap without preempting (analyzer-learner.md, PR 4b). Its unit tests
 // hold it (heldBy).
+//
+// Merge note: #460 (TTFT P1) rewrites the start of this table too; 4b-2's
+// six switches belong only in learner4b2Seams, whichever PR merges second.
 var replaySwitches = map[string][]string{
 	throughput.SwitchITLAdmitsAtSequenceCap: nil,
 }
@@ -388,6 +391,7 @@ var heldBy = map[string][]heldTest{
 	throughput.SwitchITLAdmitsAtSequenceCap: {
 		{"../throughput", "TestITLCap_AReplicaAtItsStatedCapIsAReading"},
 		{"../throughput", "TestITLCap_AVariantAtItsCapPricesFromTheBandNotTheFallback"},
+		{"../throughput", "TestITLCap_WhatIsNotAtTheCapIsNotAReading"},
 		{"../throughput", "TestThroughputCapPropertyMutants"},
 		{"../throughput", "TestThroughputProbe_AReplicaAtItsCapWithSiblingsBelowTheBandPricesFromTheBand"},
 	},
@@ -563,11 +567,24 @@ func TestGoldens_ASwitchNoGoldenMovesIsHeldByItsTests(t *testing.T) {
 	}
 }
 
-// mergedRows is replaySwitches and earlierSeams together.
+// mergedRows is replaySwitches and earlierSeams together (mergeRows).
 func mergedRows() map[string][]string {
-	out := maps.Clone(replaySwitches)
-	maps.Copy(out, earlierSeams)
-	return out
+	return mergeRows(replaySwitches, earlierSeams)
+}
+
+// mergeRows is mine and earlier together, on a copy; a name in both is a
+// switch with two rows, this PR's and an earlier one's, and panics, as
+// withSeams does: the row it kept would decide which outputs the switch may
+// move.
+func mergeRows(mine, earlier map[string][]string) map[string][]string {
+	return withSeams(maps.Clone(mine), maps.Clone(earlier))
+}
+
+// A switch in both replaySwitches and earlierSeams panics, and the tables
+// as they stand do not.
+func TestGoldens_ASwitchWithTwoRowsPanics(t *testing.T) {
+	require.Panics(t, func() { mergeRows(map[string][]string{"x": nil}, map[string][]string{"x": nil}) })
+	require.NotPanics(t, func() { mergedRows() })
 }
 
 // switchBase is the sha256 of each output a switch of this PR names, as the

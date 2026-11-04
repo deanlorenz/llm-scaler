@@ -117,6 +117,10 @@ func (a *ThroughputAnalyzer) lineAdmission(adm itl.Admission, namespace, modelID
 	adm.Args = e.args
 	if a.itlAdmitsAtCap && e.batchCap > 0 {
 		adm.MaxNumSeqs, adm.MaxNumSeqsSource = e.batchCap, e.batchCapSource
+		// Readings at the cap sit above DefaultKSat, where a pinned fit
+		// through the default B prices under the truth: priced one-sided
+		// until B is learned.
+		adm.OneSidedAboveKSat = !a.capPinsDefaultB
 	}
 	return adm
 }
@@ -201,9 +205,12 @@ func silenceCause(state *variantState, r itl.Reading) string {
 // in the band, above it, below it, and settling; what the band's and the
 // above-band windows hold; and the readings above the band admitted at the
 // sequence cap, with the cap and its source (SwitchITLAdmitsAtSequenceCap;
-// 0 and "none" when nothing states one, or the switch is off). With no
-// healthy row the tracker was not read, and every count is 0. Called with
-// a.mu held.
+// 0 and "none" when nothing states one, or the switch is off). It logs the
+// same line once too when the cap's source changes, or when readings at the
+// cap start (atCap above 0) or stop, so a line that stays live still says
+// when it is taught from above the band; a source change or a stop is
+// logged only after a first line, and a start always. With no healthy row
+// the tracker was not read, and every count is 0. Called with a.mu held.
 func noteLineSilence(ctx context.Context, state *variantState, r itl.Reading, reason,
 	namespace, modelID, variant string) {
 	silent := r.Tier == ""
@@ -213,10 +220,14 @@ func noteLineSilence(ctx context.Context, state *variantState, r itl.Reading, re
 	} else {
 		state.everLive, state.shapeChanged = true, false
 	}
-	if silent == state.lineSilent {
+	atCap := r.Capped > 0
+	capChanged := atCap != state.loggedAtCap ||
+		(state.summaryLogged && state.batchCapSource != state.loggedCapSource)
+	if silent == state.lineSilent && !capChanged {
 		return
 	}
 	state.lineSilent = silent
+	state.summaryLogged, state.loggedAtCap, state.loggedCapSource = true, atCap, state.batchCapSource
 	ctrl.LoggerFrom(ctx).Info("throughput analyzer: ITL line", "namespace", namespace, "modelID", modelID,
 		"variant", variant, "silent", silent, "cause", cause, "source", reason,
 		"inBand", r.Offered-r.Capped, "aboveBand", r.AboveBand, "belowBand", r.BelowBand, "settling", r.Settling,

@@ -108,6 +108,11 @@ type Reading struct {
 	// (Admission.AboveBandFallback): the band gave no line, the key held no
 	// slope it may hold, and A was fitted from the readings above the band.
 	AboveBandFit bool
+	// PinnedAtLeastITL is set when Model is the pinned fit's line through
+	// the least ITL of the window's readings at a k of at least DefaultKSat,
+	// not through the default baseline (Admission.OneSidedAboveKSat): it
+	// priced the higher ITL at DefaultKSat.
+	PinnedAtLeastITL bool
 	// AboveBandHeld is the above-band window's size after pruning; zero
 	// without the fallback.
 	AboveBandHeld int
@@ -423,11 +428,49 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 		r.Declined = true
 		return r
 	}
+	heldA := m.A
+	if adm.OneSidedAboveKSat && !r.BaselineLearned {
+		if lo, ok := atLeastITLLine(pinned); ok && lo.ITLAt(DefaultKSat) > m.ITLAt(DefaultKSat) {
+			// The hold pairs its A with the baseline (above), so the A held
+			// is the one that prices the chosen line's ITL at DefaultKSat
+			// through it: a held line prices what this one did.
+			m, r.PinnedAtLeastITL = lo, true
+			heldA = (m.ITLAt(DefaultKSat) - baseline) / DefaultKSat
+		}
+	}
 	t.mu.Lock()
-	t.slopes[key] = heldSlope{a: m.A, fittedAt: now, args: adm.Args}
+	t.slopes[key] = heldSlope{a: heldA, fittedAt: now, args: adm.Args}
 	t.mu.Unlock()
 	r.Model, r.Tier = m, TierPinnedB
 	return r
+}
+
+// atLeastITLLine is the line pinned at the least ITL among obs's readings at
+// a k of at least DefaultKSat, fitted over those readings alone
+// (fitAboveBand): the above-band fallback's line, over the readings of the
+// band's own window that lie at or past where the line is priced. ok is
+// false when there is none.
+//
+// Why the pinned fit needs it (Admission.OneSidedAboveKSat). A key with no
+// learned B pins DefaultBaselineSec, and a fit through B0 over readings at
+// k above DefaultKSat prices at kSat, on readings of the true line ITL = A'k
+// + B', A'kSat + B' + (B0 - B')(1 - kSat/kbar): under the truth whenever B'
+// is above B0. Readings at a replica's sequence cap sit there. Pinned at the
+// least ITL of those readings instead, which is at least B' (every ITL is B'
+// + A'k plus a noise small against A'k), the same term is >= 0
+// (fitAboveBand), so the higher of the two lines at kSat never prices a
+// higher mu than the truth.
+func atLeastITLLine(obs []Observation) (Model, bool) {
+	var past []Observation
+	for _, o := range obs {
+		if o.K >= DefaultKSat {
+			past = append(past, o)
+		}
+	}
+	if len(past) == 0 {
+		return Model{}, false
+	}
+	return fitAboveBand(past, aboveBandB(past))
 }
 
 // pruneWithCarry prunes a window and its steady one, and returns what each

@@ -349,8 +349,9 @@ The throughput analyzer uses:
 | `T2-failed` | no line this cycle; the variant is skipped. The causes: fewer than 10 readings in the window, or fewer than 3 settled; every reading above the band at k under 0.85 (nothing the fallback may use); a shape change, which empties the window and drops the held slope; a controller restart or leader change, which starts with no line and waits the settle (see `restart` below); or no healthy row this cycle (stale metrics, no ITL, no KV capacity, no request shape). The `throughput analyzer: ITL line` line below names which |
 
 When a variant's line goes silent (`T2-failed`) or comes back, the throughput
-analyzer logs one line at the default level. It logs only on the change, not
-every cycle:
+analyzer logs one line at the default level; also when readings at a
+replica's sequence cap start or stop, or the cap's source changes (`atCap`,
+`batchCapSource` below). It logs only on the change, not every cycle:
 
 ```text
 INFO  throughput analyzer: ITL line  {"namespace": "default", "modelID": "my-model", "variant": "decode",
@@ -370,7 +371,7 @@ INFO  throughput analyzer: ITL line  {"namespace": "default", "modelID": "my-mod
 | `settling` | this cycle's readings from replicas still settling (just joined, or load just came back) |
 | `held` | readings the band's window holds. The line needs 10, with 3 settled |
 | `aboveBandHeld` | readings the above-band window holds, at k of at least 0.85. The fallback needs 10, with 3 settled |
-| `atCap` | this cycle's readings above the band taken into the band's window because the replica is at its sequence cap (below) |
+| `atCap` | this cycle's readings above the band taken into the band's window because the replica is at its sequence cap (below). The line is logged once too, even while it stays live, when `atCap` goes above 0 or back to 0, or `batchCapSource` changes |
 | `batchCap`, `batchCapSource` | the sequence cap per engine rank the line reads for the variant, and where it comes from: `flags` (`--max-num-seqs`, lowered by `--max-num-active-seqs`), `declared` (the `llm-d.ai/max-num-seqs` annotation), or `none` (`batchCap` 0: no replica above the band teaches the line) |
 
 **A replica at its sequence cap teaches the line from above the band.** Its
@@ -385,12 +386,21 @@ stated (`--max-num-seqs` on the engine, or the `llm-d.ai/max-num-seqs`
 annotation); a cap the engine picks by default is not read. A variant whose
 only loaded replica is at its cap is then priced from its own line
 (`T1-ols`, `T2-pinned` or `T2-default`) once the window holds 10 readings,
-not from the above-band fallback (`T2-above-band`). Which way the fleet
-moves: where the fallback priced such a variant, it priced a higher ITL than
-the line, so the fleet orders **fewer** replicas now; where the line was
-silent (a capped replica between k 0.80 and 0.85, or the cycles before the
-fallback had its 10 readings), the analyzer is **live again**: it orders a
-scale-up when it needs one, and votes on scale-down. A capped replica that
+not from the above-band fallback (`T2-above-band`). Until the variant has
+learned its line's intercept B from a full fit in the band, that price is
+**one-sided**: the line is never priced under the true line at k 0.85. The
+readings at the cap lie above 0.85, and a line through the default B (6 ms)
+would price under the truth whenever the true B is higher, so the line is
+also drawn through the least ITL those readings show, and the higher of the
+two at 0.85 is the price. It errs towards more replicas, never fewer: in
+simulation, by 2 to 11 % on a true B of 10 to 30 ms. Once B is learned, the
+line through it prices as usual. Which way the fleet moves: where the
+fallback priced such a variant, the price is about the same (both are drawn
+through the least ITL), so the fleet orders as many replicas, and the line
+now holds its slope through a dip below the band; where the line was silent
+(a capped replica between k 0.80 and 0.85, or cycles before the fallback had
+its 10 readings), the analyzer is **live again**: it orders a scale-up when
+it needs one, and votes on scale-down. A capped replica that
 preempts more than `capMaxPreemptionRate` is not read at its cap: it stays in
 `aboveBand`, and only the fallback may use it.
 

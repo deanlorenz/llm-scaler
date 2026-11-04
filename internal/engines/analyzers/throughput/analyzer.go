@@ -69,6 +69,11 @@ type ThroughputAnalyzer struct {
 	// itlAdmitsAtCap is the replay switch of learner PR 4b-3 (admission.go):
 	// SwitchITLAdmitsAtSequenceCap. On by the constructor.
 	itlAdmitsAtCap bool
+	// capPinsDefaultB prices readings at the cap through the default B
+	// alone, as 4b-3 first built it (itl.Admission.OneSidedAboveKSat off),
+	// for the tests' negative controls only: set by withCapPinnedAtDefaultB,
+	// which only tests define.
+	capPinsDefaultB bool
 	// ownSettle is the settle tracker the analyzer observes itself when the
 	// engine gave it none (settle.go), and ownSettled when it last observed
 	// each model into it.
@@ -135,6 +140,13 @@ type variantState struct {
 	// (itl.Admission.MaxNumSeqs), for the line's summary only.
 	batchCap       int64
 	batchCapSource string
+	// summaryLogged is whether the line's summary has logged for the
+	// variant, and loggedAtCap and loggedCapSource what it last logged of
+	// the cap: whether readings were taken at it, and its source
+	// (noteLineSilence).
+	summaryLogged   bool
+	loggedAtCap     bool
+	loggedCapSource string
 }
 
 // NewThroughputAnalyzer creates a ThroughputAnalyzer with default configuration.

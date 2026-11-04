@@ -30,7 +30,11 @@ import (
 // analyzerTuning.itlBand.capMaxPreemptionRate (itl.Admission.MaxNumSeqs).
 // Such a reading enters the band's window, not the above-band fallback's,
 // so a variant at its cap prices from the band's line; the fallback stays
-// for a key with no fit and no slope it may hold. Off, as before: nothing
+// for a key with no fit and no slope it may hold. Until the key learns B,
+// that line is priced one-sided at itl.DefaultKSat
+// (itl.Admission.OneSidedAboveKSat): the readings at the cap lie above the
+// k it is priced at, where a fit through the default B prices under the
+// truth when the true B is higher. Off, as before: nothing
 // above the band is the band's. Meaningful only with SwitchITLSteadyGate on:
 // the parent's window reads the band alone.
 const SwitchITLAdmitsAtSequenceCap = "throughput-itl-admits-at-sequence-cap"

@@ -304,7 +304,11 @@ func TestThroughputProbe_ARestartJustBeforeAStepAboveTheBandSettlesAtNeed(t *tes
 // SwitchITLAdmitsAtSequenceCap) its readings are the band's, and the band's
 // line prices the variant from the tenth (T2-default), never the
 // above-band fallback. Synthetic (a sweep does not hold a decode pod at its
-// cap without preempting).
+// cap without preempting). With no learned B the line is priced one-sided
+// (itl.Admission.OneSidedAboveKSat): at or above the truth at k 0.85. On
+// this case's one fill and no noise the line through the least ITL is flat
+// at the capped replica's ITL, 0.0560 s, where the fit through the default
+// B priced 0.0522 s, under the truth's 0.0525 s.
 //
 // Before 4b-3 (and with the switch off, the negative control): the band's
 // window held 0 readings, the line was silent 9 cycles and the fallback
@@ -357,7 +361,11 @@ func TestThroughputProbe_AReplicaAtItsCapWithSiblingsBelowTheBandPricesFromTheBa
 	require.Equal(t, 20, on.inBand, "the capped replica's readings fill the band's window")
 	require.Equal(t, map[string]int{itlReasonT2Failed: 9, itlReasonT2Default: 31}, on.reasons,
 		"silent until the capped replica's tenth reading, then the band's line")
-	require.InEpsilon(t, truth, on.priced, 0.05, "the band's line prices the capped replica's line")
+	require.GreaterOrEqual(t, on.priced, truth, "the band's line priced under the truth with no learned B")
+	pinned := run(NewThroughputAnalyzer().withCapPinnedAtDefaultB())
+	t.Logf("negative control, pinned at the default B only: priced %.4f s", pinned.priced)
+	require.Less(t, pinned.priced, truth, "negative control: the default B alone prices under the truth")
+	require.InEpsilon(t, truth, on.priced, 0.10, "the band's line prices the capped replica's line")
 
 	require.Zero(t, off.inBand, "negative control: off, the band's window holds nothing")
 	require.Equal(t, map[string]int{itlReasonT2Failed: 9, itlReasonT2AboveBand: 31}, off.reasons,

@@ -1,6 +1,7 @@
 package throughput
 
 import (
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -28,13 +29,21 @@ func capCases(newA propAnalyzer) []learnertest.Case {
 		return learnertest.Case{Class: class, Learner: propLearner, Name: name, Family: learnertest.FamilyDirect,
 			Tuning: "default", Seeds: seeds, Check: check}
 	}
-	return []learnertest.Case{
+	cases := make([]learnertest.Case, 0, 5+len(atCapTruths))
+	cases = append(cases,
 		c(learnertest.ClassEdges, "sequence-cap", 1, checkSequenceCap(newA)),
 		c(learnertest.ClassEdges, "sequence-cap-edges", 1, checkSequenceCapEdges(newA)),
 		c(learnertest.ClassEdges, "cap-preemption-default", 1, checkCapPreemption(newA, nil, 0)),
 		c(learnertest.ClassEdges, "cap-preemption-non-default", 1, checkCapPreemption(newA, capPreemptionPolicy(0.5), 0.5)),
-		c(learnertest.ClassKnownTruth, "at-cap-with-siblings-below-the-band", learnertest.CheapSeeds, checkAtCapKnownTruth(newA)),
+		// The truth the line's other cases run on (A 0.05, B 10 ms), at a
+		// cap wandering over 0.89-0.91.
+		c(learnertest.ClassKnownTruth, "at-cap-with-siblings-below-the-band", learnertest.CheapSeeds,
+			checkAtCapKnownTruth(newA, atCapTruth{a: propTrueA, b: propTrueB, kCap: 0.90})),
+	)
+	for _, l := range atCapTruths {
+		cases = append(cases, c(learnertest.ClassKnownTruth, l.name(), learnertest.CheapSeeds, checkAtCapKnownTruth(newA, l)))
 	}
+	return cases
 }
 
 // capPreemptionPolicy is a policy whose itlBand.capMaxPreemptionRate is rate.
@@ -182,43 +191,102 @@ func checkCapPreemption(newA propAnalyzer, cfg *config.ScalingPolicy, rate float
 	}
 }
 
-// Known truth, a variant at its cap: one replica above the band at its
-// stated cap, its k wandering over 0.86-0.94, and two siblings below the
-// band. The band's line prices the variant from the capped replica's
-// readings -- not the above-band fallback -- from its tenth reading, and
-// never under the truth at itl.DefaultKSat by more than propTruthTol (the
-// line pins B at the default, 6 ms against a true 10 ms, so it prices a
-// little under the truth there).
-func checkAtCapKnownTruth(newA propAnalyzer) func(uint64) error {
+// atCapTruth is one true line and the k a replica at its cap reads at, for
+// the one-sided known-truth cases: ITL(k) = a k + b, the capped replica's
+// k wandering over kCap - 0.01, kCap and kCap + 0.01.
+type atCapTruth struct{ a, b, kCap float64 }
+
+func (l atCapTruth) itl(k float64) float64 { return l.a*k + l.b }
+
+// name is the case's name for the line.
+func (l atCapTruth) name() string {
+	return fmt.Sprintf("at-cap-one-sided-a%.2f-b%.0fms-k%.2f", l.a, 1000*l.b, l.kCap)
+}
+
+// atCapTruths is the grid the one-sided cases run on: B above the default
+// 6 ms, where a pin at the default prices under the truth, at a steep and a
+// shallow A and two fills at the cap.
+var atCapTruths = func() []atCapTruth {
+	out := make([]atCapTruth, 0, 12)
+	for _, a := range []float64{0.05, 0.01} {
+		for _, b := range []float64{0.010, 0.020, 0.030} {
+			for _, k := range []float64{0.92, 0.97} {
+				out = append(out, atCapTruth{a: a, b: b, kCap: k})
+			}
+		}
+	}
+	return out
+}()
+
+// atCapRun runs one seed of truth l on the analyzer newA builds: one
+// replica at its stated cap, two siblings below the band, every ITL with
+// the gauge's autocorrelated noise. It returns the lines priced by cycle and
+// the cycles the above-band fallback priced.
+func atCapRun(newA propAnalyzer, l atCapTruth, seed uint64, cycles int, noisy bool) (map[int]itl.Model, int64, error) {
+	ks := []float64{l.kCap - 0.01, l.kCap, l.kCap + 0.01}
+	r := learnertest.Rand(seed)
+	noise := [][]float64{make([]float64, cycles), make([]float64, cycles), make([]float64, cycles)}
+	if noisy {
+		for i := range noise {
+			noise[i] = learnertest.ARNoise(r, cycles, propNoise, propRho)
+		}
+	}
+	a := newA().WithCapacityStore(declaredCapStore())
+	early := learnertest.Start.Add(-time.Hour)
+	_, _, lines, err := lineOf(a, cycles, func(c int) []domain.ReplicaMetrics {
+		k := ks[c%len(ks)]
+		row := cappedRow(k)
+		row.AvgITL = l.itl(k) * (1 + noise[0][c])
+		return []domain.ReplicaMetrics{row,
+			lineRow("pod-b", 0.08, l.itl(0.08)*(1+noise[1][c]), early),
+			lineRow("pod-c", 0.08, l.itl(0.08)*(1+noise[2][c]), early)}
+	})
+	return lines, a.PathCounts()[PathITLAboveBand], err
+}
+
+// Known truth, a variant at its cap, one-sided: one replica above the band
+// at its stated cap and two siblings below the band, on true line l. The
+// band's line prices the variant from the capped replica's readings -- not
+// the above-band fallback -- on every cycle from its tenth reading. On the
+// true line without noise it never prices under the truth at
+// itl.DefaultKSat: with no learned B the fit through the default 6 ms
+// would, for any true B above it (itl.Admission.OneSidedAboveKSat), and
+// TestITLCap_TheBiasTable holds that negative control. With the gauge's
+// noise (propNoise, autocorrelated) it is held to known truth's epsilon,
+// as every line is: the margin the one-sided pin buys is (b - B)(1 -
+// kSat/kbar), under 1 ms on a shallow line at a cap near kSat, and the
+// noise on ten readings' mean is of that size.
+func checkAtCapKnownTruth(newA propAnalyzer, l atCapTruth) func(uint64) error {
 	return func(seed uint64) error {
 		const cycles = 24
-		f := newPropFleet(learnertest.Rand(seed), cycles, 0.86, 0.90, 0.94)
-		a := newA().WithCapacityStore(declaredCapStore())
-		early := learnertest.Start.Add(-time.Hour)
-		_, first, lines, err := lineOf(a, cycles, func(c int) []domain.ReplicaMetrics {
-			k := f.ks[c%len(f.ks)]
-			row := cappedRow(k)
-			row.AvgITL = propITL(k) * (1 + f.noise[c%len(f.ks)][c])
-			return []domain.ReplicaMetrics{row,
-				lineRow("pod-b", 0.08, propITL(0.08), early), lineRow("pod-c", 0.08, propITL(0.08), early)}
-		})
+		truth := l.itl(itl.DefaultKSat)
+		clean, _, err := atCapRun(newA, l, seed, cycles, false)
 		if err != nil {
 			return err
 		}
-		if first < 0 || len(lines) == 0 {
+		for c, m := range clean {
+			if p := propPriced(m); p < truth {
+				return learnertest.Violate(learnertest.KindOverPriced, "no noise, cycle %d: priced %.5f s, under the truth %.5f s by %.2f %%",
+					c, p, truth, 100*(1-p/truth))
+			}
+		}
+		lines, fallback, err := atCapRun(newA, l, seed, cycles, true)
+		if err != nil {
+			return err
+		}
+		if len(lines) == 0 {
 			return learnertest.Violate(learnertest.KindNotLearned, "no line in %d cycles with a replica at its cap", cycles)
 		}
-		if n := a.PathCounts()[PathITLAboveBand]; n > 0 {
-			return learnertest.Violate(learnertest.KindNotLearned, "%d cycles priced from the above-band fallback, not the band's line", n)
+		if fallback > 0 {
+			return learnertest.Violate(learnertest.KindNotLearned, "%d cycles priced from the above-band fallback, not the band's line", fallback)
 		}
 		if len(lines) != cycles-itl.DefaultMinSamples+1 {
 			return learnertest.Violate(learnertest.KindNotLearned, "priced on %d cycles, want every cycle from the tenth reading (%d)",
 				len(lines), cycles-itl.DefaultMinSamples+1)
 		}
-		truth := propITL(itl.DefaultKSat)
 		for c, m := range lines {
 			if p := propPriced(m); p < truth/(1+propTruthTol) {
-				return learnertest.Violate(learnertest.KindOverPriced, "cycle %d: priced %.4f s, under the truth %.4f s by %.2f %%",
+				return learnertest.Violate(learnertest.KindOverPriced, "cycle %d: priced %.5f s, under the truth %.5f s by %.2f %%",
 					c, p, truth, 100*(1-p/truth))
 			}
 		}
@@ -228,13 +296,20 @@ func checkAtCapKnownTruth(newA propAnalyzer) func(uint64) error {
 
 // capMutants is each cap case that must fail with the cap admission off:
 // every one that admits a reading.
-var capMutants = []string{
-	"edges/throughput-itl/sequence-cap",
-	"edges/throughput-itl/sequence-cap-edges",
-	"edges/throughput-itl/cap-preemption-default",
-	"edges/throughput-itl/cap-preemption-non-default",
-	"known-truth/throughput-itl/at-cap-with-siblings-below-the-band",
-}
+var capMutants = func() []string {
+	out := make([]string, 0, 5+len(atCapTruths))
+	out = append(out,
+		"edges/throughput-itl/sequence-cap",
+		"edges/throughput-itl/sequence-cap-edges",
+		"edges/throughput-itl/cap-preemption-default",
+		"edges/throughput-itl/cap-preemption-non-default",
+		"known-truth/throughput-itl/at-cap-with-siblings-below-the-band",
+	)
+	for _, l := range atCapTruths {
+		out = append(out, "known-truth/throughput-itl/"+l.name())
+	}
+	return out
+}()
 
 // TestThroughputCapPropertyMutants runs the cap cases with
 // SwitchITLAdmitsAtSequenceCap off, the line 4b-2 built: each must fail
