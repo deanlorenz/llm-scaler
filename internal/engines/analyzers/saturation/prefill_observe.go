@@ -31,6 +31,18 @@ import (
 // writes no state any output reads.
 const SwitchPrefillCapacityObserve = "prefill-capacity-observe"
 
+// SwitchPrefillBusyMinutes is the replay switch for V_P's first source,
+// busy minutes. On, each prefill row's queue minimum over the minute
+// (domain.ReplicaMetrics.QueueMin, where QueueMinKnown) goes to the
+// observation, and a minute whose queue never emptied is a busy minute. Off,
+// none goes, and V_P comes only from the two lower-bound sources, as P1
+// shipped. It moves no golden output: the observation writes no state any
+// output reads, and no committed recording carries a queue minimum. The
+// collector reads the queue minimum only while a learner recording is on
+// (collector SetRecordTTFTInputs); with none on, no row carries one and the
+// switch changes nothing.
+const SwitchPrefillBusyMinutes = "prefill-busy-minutes"
+
 // prefillObserveKey names a prefill variant's observed state: the variant
 // key's fields (itlWindowKey), and the engine arguments it runs (windowArgs)
 // behind stashKey's separator when they are known. V_P is a max over the
@@ -151,9 +163,13 @@ func (c *cycle) observePrefill() {
 		}
 		key := a.prefillObserveKey(c.input.Namespace, c.input.ModelID, variant, c.accelByVariant[variant],
 			c.gpusByVariant[variant], params)
+		var queueMin map[string]float64
+		if a.prefillBusyMinutes {
+			queueMin = prefill.QueueMins(rows[variant])
+		}
 		est := a.prefillObserver.Observe(prefill.Cycle{
 			Key: key, Engine: engine, Disaggregated: true, Rows: rows[variant],
-			DownstreamSaturated: c.decodeSaturated, Bound: bounds[variant],
+			QueueMin: queueMin, DownstreamSaturated: c.decodeSaturated, Bound: bounds[variant],
 			Settle: view, Now: a.now(),
 		})
 		c.logger.V(perReplicaLogLevel).Info("prefill-capacity-observed",
@@ -166,7 +182,7 @@ func (c *cycle) observePrefill() {
 			"aOverheadKnown", est.AOverheadKnown, "aRefused", string(est.ARefused), "aSamples", est.ASamples,
 			"aPromptMin", est.APromptMin, "aPromptMax", est.APromptMax,
 			"queuedMinutes", est.VPQueuedMinutes, "longestQueuedRun", est.VPLongestQueuedRun,
-			"busyMinutes", est.VPBusyMinutes,
+			"busyMinutes", est.VPBusyMinutes, "queueMinPods", len(queueMin),
 			"f", est.F, "fRefused", string(est.FRefused), "fSamples", est.FSamples,
 			"downstreamSaturated", c.decodeSaturated,
 			"admitted", est.Admitted, "refused", est.Refused)

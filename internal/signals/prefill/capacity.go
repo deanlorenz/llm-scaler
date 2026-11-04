@@ -15,7 +15,8 @@ import (
 //  1. Busy minutes: the queue above zero on every sample of the minute and
 //     decode not back-pressuring; V_P is their median, over at least
 //     MinBusyMinutes. A busy minute needs the least waiting count of the
-//     minute (Cycle.QueueMin), which no collector query reads today.
+//     minute (Cycle.QueueMin, from the rows' QueueMin by QueueMins) read
+//     and above zero: a pod whose queue min was not read has none.
 //  2. The peak under a queue: the highest rate sustained over PeakRun
 //     minutes, each with a queue on some sample. A lower bound. A peak with
 //     no queue is the offered load, not capacity, and is not used.

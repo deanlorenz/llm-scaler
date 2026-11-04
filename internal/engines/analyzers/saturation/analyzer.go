@@ -406,6 +406,9 @@ type SaturationAnalyzer struct {
 	prefillObserve  bool
 	prefillObserver *prefill.Observer
 	prefillBounds   map[string]stashedBound
+	// prefillBusyMinutes is SwitchPrefillBusyMinutes (P1's busy minutes): on
+	// from the constructor; a replay turns it off (SetSwitchesForReplay).
+	prefillBusyMinutes bool
 }
 
 // Evicted is what one sweep of the analyzer's learned state removed, counted
@@ -605,6 +608,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		itlWithheldLogged:      make(map[string]itlWithheldReasons),
 		k2Pending:              make(map[string]*k2PendingReadings),
 		prefillObserve:         true,
+		prefillBusyMinutes:     true,
 		prefillObserver:        prefill.NewObserver(),
 		prefillBounds:          make(map[string]stashedBound),
 	}

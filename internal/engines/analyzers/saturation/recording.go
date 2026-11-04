@@ -119,7 +119,8 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 // SwitchITLRestartUnderName, SwitchITLIdleOnEvidence,
 // SwitchKVPerRequestHitsResident, SwitchZeroReplicaDataParallel,
 // SwitchITLFitsAggregated, SwitchITLAggregatedShapeTerm and
-// SwitchITLAggregatedSizes and SwitchPrefillCapacityObserve; a name it does
+// SwitchITLAggregatedSizes, SwitchPrefillCapacityObserve and
+// SwitchPrefillBusyMinutes; a name it does
 // not know is an error, and sets
 // nothing. Never called on a production path; a test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
@@ -190,6 +191,10 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 
 		// P1: prefill capacity observed and logged (prefill_observe.go).
 		SwitchPrefillCapacityObserve: &a.prefillObserve,
+
+		// P1's busy minutes: the rows' queue minimum read into the
+		// observation (prefill_observe.go).
+		SwitchPrefillBusyMinutes: &a.prefillBusyMinutes,
 	}
 }
 

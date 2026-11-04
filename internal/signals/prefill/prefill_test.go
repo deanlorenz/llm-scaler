@@ -125,7 +125,7 @@ func TestCapacity_BusyMinutesAreTheMedianWhenDecodeIsNotFull(t *testing.T) {
 	for _, downstream := range []bool{false, true} {
 		cs := queuedMinutes(30000, 31000, 29000, 30500, 29500)
 		for i := range cs {
-			cs[i].QueueMin = map[string]int{"p-0": 1}
+			cs[i].QueueMin = map[string]float64{"p-0": 1}
 			cs[i].DownstreamSaturated = downstream
 		}
 		est := run(NewObserver(), cs...)
@@ -145,10 +145,38 @@ func TestCapacity_BusyMinutesAreTheMedianWhenDecodeIsNotFull(t *testing.T) {
 func TestCapacity_AMinuteThatEmptiedIsNotBusy(t *testing.T) {
 	cs := queuedMinutes(30000, 31000, 29000, 30500, 29500)
 	for i := range cs {
-		cs[i].QueueMin = map[string]int{"p-0": 0}
+		cs[i].QueueMin = map[string]float64{"p-0": 0}
 	}
 	est := run(NewObserver(), cs...)
 	assert.Equal(t, SourcePeakUnderQueue, est.VPSource)
+}
+
+// A queue minimum that is not a reading is not a busy minute: NaN, +Inf and a
+// negative each leave the minutes a peak under a queue.
+func TestCapacity_AQueueMinThatIsNotAReadingIsNotBusy(t *testing.T) {
+	for _, qmin := range []float64{math.NaN(), math.Inf(1), -1} {
+		cs := queuedMinutes(30000, 31000, 29000, 30500, 29500)
+		for i := range cs {
+			cs[i].QueueMin = map[string]float64{"p-0": qmin}
+		}
+		est := run(NewObserver(), cs...)
+		assert.Zero(t, est.VPBusyMinutes, "queue min %v", qmin)
+		assert.Equal(t, SourcePeakUnderQueue, est.VPSource, "queue min %v", qmin)
+	}
+}
+
+// QueueMins takes a row's queue minimum only where QueueMinKnown is set, a
+// zero included, and is nil when no row read one.
+func TestQueueMins_TakesOnlyAReading(t *testing.T) {
+	read := base("p-0")
+	read.QueueMin, read.QueueMinKnown = 2, true
+	emptied := base("p-1")
+	emptied.QueueMinKnown = true
+	unread := base("p-2")
+	unread.QueueMin = 5
+	assert.Equal(t, map[string]float64{"p-0": 2, "p-1": 0}, QueueMins([]domain.ReplicaMetrics{read, emptied, unread}))
+	assert.Nil(t, QueueMins([]domain.ReplicaMetrics{unread, base("p-3")}))
+	assert.Nil(t, QueueMins(nil))
 }
 
 // The back-pressure bound is the last source, and needs MinBoundSamples.
@@ -175,7 +203,7 @@ func TestCapacity_SGLangIsRefused(t *testing.T) {
 	for i := range 8 {
 		c := cycle(t0.Add(time.Duration(i)*minute), queued("p-0", 30000, 3), queued("p-1", 30000, 3))
 		c.Engine = inferenceengine.EngineSGLang
-		c.QueueMin = map[string]int{"p-0": 2, "p-1": 2}
+		c.QueueMin = map[string]float64{"p-0": 2, "p-1": 2}
 		c.Bound = Bound{Tokens: 25000, Samples: 5}
 		for j := range c.Rows {
 			c.Rows[j].RequestRate = 10
@@ -839,7 +867,7 @@ func TestCapacity_TheThresholdsAreTwoBoundReadingsAndFiveBusyMinutes(t *testing.
 		rates := []float64{30000, 31000, 29000, 30500, 29500}[:minutes]
 		cs := queuedMinutes(rates...)
 		for i := range cs {
-			cs[i].QueueMin = map[string]int{"p-0": 1}
+			cs[i].QueueMin = map[string]float64{"p-0": 1}
 		}
 		est := run(NewObserver(), cs...)
 		assert.Equal(t, want, est.VPSource, "%d busy minutes", minutes)

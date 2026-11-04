@@ -136,10 +136,10 @@ type Cycle struct {
 	// Rows is the variant's rows this cycle.
 	Rows []domain.ReplicaMetrics
 	// QueueMin is, per pod, the least waiting count over the minute
-	// (min_over_time of num_requests_waiting), where one was read. No
-	// collector query reads it today, so a busy minute is never recognised
-	// until one does.
-	QueueMin map[string]int
+	// (min_over_time of num_requests_waiting), where one was read: the rows'
+	// domain.ReplicaMetrics.QueueMin, by QueueMins. A pod it does not name
+	// has no busy minute this cycle.
+	QueueMin map[string]float64
 	// DownstreamSaturated says decode is back-pressuring prefill this cycle:
 	// the test computeK2 applies (k2ReasonObsDownstream).
 	DownstreamSaturated bool
@@ -173,7 +173,7 @@ type Estimate struct {
 	// VPQueuedMinutes, VPLongestQueuedRun and VPBusyMinutes say why V_P was
 	// refused or where it stands: the samples kept that held a queue on
 	// some sample, the longest run of them (a peak needs PeakRun), and the
-	// busy minutes (which need Cycle.QueueMin; busy minutes need
+	// busy minutes (which need Cycle.QueueMin; V_P from them needs
 	// MinBusyMinutes). Read over every replica of the key.
 	VPQueuedMinutes    int
 	VPLongestQueuedRun int
@@ -352,7 +352,7 @@ func (o *Observer) Observe(c Cycle) Estimate {
 		s.rate, s.rateOK = computedRate(rm, sglang)
 		s.queued = rm.QueueLength > 0
 		if qmin, ok := c.QueueMin[rm.PodName]; ok {
-			s.busy = qmin > 0 && s.queued && !c.DownstreamSaturated
+			s.busy = finitePositive(qmin) && s.queued && !c.DownstreamSaturated
 		}
 		svc := rm.AvgServiceTime
 		rr, rrOK := requestRate(rm)
@@ -410,6 +410,27 @@ func (s *Settle) settled(rm domain.ReplicaMetrics, now time.Time) bool {
 		start = back
 	}
 	return !start.IsZero() && now.Sub(start) >= SteadyFor
+}
+
+// QueueMins is, per pod, the least waiting count each row read over the
+// minute (domain.ReplicaMetrics.QueueMin), for Cycle.QueueMin: only a row
+// whose QueueMinKnown is set, so a zero a row never read is not taken for a
+// queue that emptied. A row of a pod with data-parallel ranks carries the
+// ranks' least summed (the collector's pod collapse): above zero, the pod
+// held work every sample of the minute, though one rank may not have, and
+// that minute's rate reads under V_P, never over. Nil when no row read one.
+func QueueMins(rows []domain.ReplicaMetrics) map[string]float64 {
+	var out map[string]float64
+	for _, rm := range rows {
+		if !rm.QueueMinKnown {
+			continue
+		}
+		if out == nil {
+			out = map[string]float64{}
+		}
+		out[rm.PodName] = rm.QueueMin
+	}
+	return out
 }
 
 // computedRate is the row's computed-token rate, and whether it is a

@@ -1770,6 +1770,7 @@ preemptions
 preempts
 prefill
 prefill-bound
+prefill-busy-minutes
 prefill-capacity-observe
 prefill-capacity-observed
 prefill-catchup
@@ -1836,6 +1837,7 @@ queueLength
 queueLengthThreshold
 queueMax
 queueMean
+queueMinPods
 queueOverThreshold
 queueThreshold
 queued

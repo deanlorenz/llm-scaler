@@ -482,8 +482,10 @@ type ReplicaMetrics struct {
 	// --- Recorded for the TTFT model; read by nothing yet ---
 	//
 	// The fields below are what the what-if planner and the slo analyzer's
-	// TTFT pricing learn from (docs/proposals/analyzer-learner.md, 2.9). No
-	// analyzer reads them. Each is behind a presence bit, or is a histogram
+	// TTFT pricing learn from (docs/proposals/analyzer-learner.md, 2.9). One
+	// is read: QueueMin, by the saturation analyzer's prefill observation
+	// (busy minutes, logs only); no analyzer reads the rest. Each is behind a
+	// presence bit, or is a histogram
 	// that is nil when absent, and each is left out of a learner recording
 	// while it is zero (learnrec.OmitZeroTag), so a recording made before
 	// they existed reads back and is written again byte for byte.

@@ -85,7 +85,9 @@ alone: `S_work = I_eff/V_P`, `ρ = λ·E[I_eff]/V_P`.
    not back-pressuring it (the test `computeK2` applies,
    `k2ReasonObsDownstream`). `V_P` is the median of `PrefillComputedTokenRate`
    over at least 5 such minutes. On P/D this is rare: saturation has never
-   recorded a non-back-pressured prefill saturation there.
+   recorded a non-back-pressured prefill saturation there. As built, the
+   minimum is the recorder's per-pod `QueueMin`, read only while a learner
+   recording is on ([P1 and busy minutes](slo-capacity-planner.md#pr-plan)).
 2. **Observed peak under a queue.** The highest `PrefillComputedTokenRate`
    sustained over 3 minutes in which the pod held a queue on some sample.
    Throughput never exceeds capacity, so this is a lower bound. Flagged. A peak

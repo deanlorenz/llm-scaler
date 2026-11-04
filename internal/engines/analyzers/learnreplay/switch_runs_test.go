@@ -120,6 +120,12 @@ var replaySwitches = map[string][]string{
 	throughput.SwitchITLRestartUnderName:             nil,
 	throughput.SwitchITLIdleOnEvidence:               nil,
 	throughput.SwitchITLReadsFinitePodMean:           nil,
+	// P1's busy minutes (saturation.SwitchPrefillBusyMinutes), on P1's
+	// observation: each prefill row's queue minimum goes to it, and a minute
+	// whose queue never emptied is a busy minute, V_P's first source. It
+	// moves no golden: no committed recording carries a queue minimum, and
+	// the observation only logs. Its unit tests hold it (heldBy).
+	saturation.SwitchPrefillBusyMinutes: nil,
 }
 
 // learner4b1Seams is learner PR 4b-1's switches, earlier seams now (merged
@@ -320,6 +326,13 @@ var heldBy = map[string][]heldTest{
 	saturation.SwitchPrefillCapacityObserve: {
 		{"../saturation", "TestPrefillObserve_TheSwitchLogsTheObservation"},
 		{"../saturation", "TestPrefillObserve_AnSGLangVariantIsRefusedVP"},
+	},
+	// P1's busy minutes: the first runs the switch on and off through
+	// Analyze and asserts both (V_P from busy minutes on, the peak under a
+	// queue off); the second fails with it off (no busy minute).
+	saturation.SwitchPrefillBusyMinutes: {
+		{"../saturation", "TestPrefillBusy_BusyMinutesRecoverVP"},
+		{"../saturation", "TestPrefillBusy_AnEmptiedOrUnreadMinuteIsNotBusy"},
 	},
 	// Issue #275's lift: an aggregated figure sizes once the GPS check has
 	// agreed. Both run the switch on and fail with it off: the first checks

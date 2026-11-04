@@ -38,7 +38,8 @@ var engineSpecificReplicaQueries = []string{
 	registration.QueryKvUsageMean,
 	registration.QueryRequestRate,
 	registration.QueryRunningRequests,
-	// Recorded for the TTFT model and read by nothing yet (ttft_inputs.go).
+	// Recorded for the TTFT model (ttft_inputs.go); only QueueMin is read
+	// yet, by the prefill observation's busy minutes.
 	registration.QueryPromptTokensBuckets,
 	registration.QueryTTFTBuckets,
 	registration.QueryAvgQueueTime,

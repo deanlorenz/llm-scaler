@@ -7,8 +7,9 @@ import (
 
 // The per-pod series the TTFT model learns from
 // (docs/proposals/analyzer-learner.md, 2.9). They are collected and recorded
-// (domain.ReplicaMetrics, "Recorded for the TTFT model") and read by no
-// analyzer yet.
+// (domain.ReplicaMetrics, "Recorded for the TTFT model"). One is read: the
+// saturation analyzer's prefill observation takes QueryQueueMin's busy
+// minutes; the rest are read by no analyzer yet.
 //
 // Each is namespace-scoped like every other replica query, grouped by
 // (model_name, instance, pod) and cut down to the model in Go. A histogram is

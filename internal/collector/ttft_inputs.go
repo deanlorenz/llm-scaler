@@ -43,7 +43,8 @@ var ttftInputFigures = []struct {
 // (registration/ttft_inputs.go) into the instances the model-scoped queries
 // already found. They are supplementary like the output-length histogram:
 // they attach to an instance and never define one, and a failed query leaves
-// each one absent. Recorded, and read by no analyzer yet.
+// each one absent. Recorded; of them only the queue minimum is read, by the
+// saturation analyzer's prefill observation (its busy minutes).
 func (c *ReplicaMetricsCollector) extractTTFTInputs(ctx context.Context, modelID, namespace string,
 	results map[string]*source.MetricResult, podData map[string]*podMetricData) {
 	for _, h := range ttftInputHistograms {

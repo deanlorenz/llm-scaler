@@ -485,6 +485,29 @@ back-pressure bound). R1 adds a per-pod `QueueMin` with a presence bit
 (`QueueMinKnown`); once R1 merges, a follow-up to P1 wires it into the
 observation.
 
+*As built (the P1 follow-up).* The saturation analyzer passes each prefill
+row's `QueueMin` to the observation where `QueueMinKnown` is set
+(`prefill.QueueMins`), behind its own replay switch,
+`prefill-busy-minutes`. A minute is busy when that minimum is above zero
+(finite), the queue's peak is above zero, and decode is not back-pressuring
+prefill; `V_P` is the median computed-token rate over at least 5 of them,
+not flagged as a lower bound. A zero, a minimum that was not read, NaN or
+`+Inf` is not busy. The observation log carries `queueMinPods`, the pods
+that read a minimum this cycle. Three limits:
+
+- The collector issues the queue-minimum query only while a learner
+  recording is on (`SetRecordTTFTInputs`), like every R1 field. With none
+  on, no row carries one and busy minutes still never fire; `queueMinPods`
+  reads 0. Issuing it every cycle is a collector change, left for P3 or the
+  first consumer that sizes from `V_P`.
+- On a data-parallel pod the minimum is each rank's least, summed. Above
+  zero, the pod held work every sample of the minute, but one rank may
+  have idled while another queued: that minute reads under the pod's
+  capacity, never over.
+- No committed recording carries a queue minimum, so no golden moves; the
+  switch is held by its unit tests (`heldBy`). The prefill-stress recording
+  (P2) is the first that will exercise it.
+
 **P3 and the bias of `f`.** P1's `f` is de-biased for Poisson arrivals, and
 the de-bias errs both ways
 ([where it is most wrong](slo-capacity-planner-ttft.md#where-it-is-most-wrong)).
