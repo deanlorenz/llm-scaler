@@ -60,7 +60,7 @@ func (d Decode) check() *Unanswerable {
 	// engine (every step has a fixed cost).
 	case !itl.ValidModel(d.Line.A, d.Line.B) || !Finite(d.Line.B) || !(d.Line.B > 0):
 		u = refuse(NoLine, fmt.Sprintf("line A=%g B=%g", d.Line.A, d.Line.B))
-	case (d.Tier == TierPinnedB || d.Tier == TierHeld) && d.Line.B == itl.DefaultBaselineSec:
+	case d.onDefaultB():
 		u = refuse(PinnedDefaultB, fmt.Sprintf("a %s line on the default intercept %g s", d.Tier, itl.DefaultBaselineSec))
 	case !Finite(d.CapacityTokens) || !(d.CapacityTokens > 0):
 		u = refuse(NoCapacity, fmt.Sprintf("KV capacity %g tokens", d.CapacityTokens))
@@ -77,6 +77,25 @@ func (d Decode) check() *Unanswerable {
 		return nil
 	}
 	return &u
+}
+
+// defaultBTolerance is how near itl.DefaultBaselineSec, relative to it, an
+// intercept reads as that default rather than a measurement: a pinned fit
+// holds B exactly, but a line that travelled through a snapshot or a borrow
+// may not hold every bit of it.
+const defaultBTolerance = 1e-9
+
+// onDefaultB reports a line whose slope was fitted against the default
+// intercept rather than a measured one: a pinned-B, held or above-band fit
+// pins B, and a borrowed line is its donor's, so one of those on the
+// default B rests on no measured floor (PinnedDefaultB). An ols line fits B
+// itself and is never refused for where it lands.
+func (d Decode) onDefaultB() bool {
+	switch d.Tier {
+	case TierPinnedB, TierHeld, TierBorrowed:
+		return math.Abs(d.Line.B-itl.DefaultBaselineSec) <= defaultBTolerance*itl.DefaultBaselineSec
+	}
+	return false
 }
 
 // fullPoint is where a replica saturates: the sequences it runs there, the
@@ -315,7 +334,7 @@ func RateForTPOT(d Decode, q RateQuery) Result {
 	}
 	floor := d.Line.ITLAt(d.Band.Lo) * r
 	if floor >= t.Seconds {
-		return refuse(TargetBelowFloor, fmt.Sprintf("target %g s at or below the floor %g s", t.Seconds, floor))
+		return refuse(TargetBelowFloor, fmt.Sprintf("target %.4g ms at or below the floor %.4g ms", 1000*t.Seconds, 1000*floor))
 	}
 	p := d.full()
 	k := (t.Seconds/r - d.Line.B) / d.Line.A

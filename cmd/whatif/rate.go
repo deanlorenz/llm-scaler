@@ -21,7 +21,11 @@ type rateAnswer struct {
 // "Question 1: from an SLO to a rate") for decode: the largest rate the
 // replicas carry at the TPOT target, capped at the operating point.
 func runSLOToRate(ctx context.Context, args []string, out io.Writer) error {
-	fs := newFlags("slo-to-rate", out)
+	return asJSONError("slo-to-rate", args, out, sloToRate(ctx, args, out))
+}
+
+func sloToRate(ctx context.Context, args []string, out io.Writer) error {
+	fs := newAnswerFlags("slo-to-rate", args, out)
 	var f answerFlags
 	f.register(fs)
 	tpot := fs.String("tpot", "", "the TPOT target: a mean (4ms) or a per-request percentile (4ms@p90) (required)")
@@ -83,7 +87,7 @@ func runSLOToRate(ctx context.Context, args []string, out io.Writer) error {
 	code := whatif.ExitCode(results...)
 
 	if f.output == outputJSON {
-		w := newWireOutput("slo-to-rate", &f, st, code)
+		w := newWireOutput("slo-to-rate", &f, st, variants, code)
 		for _, a := range answers {
 			in := inputsOf(&f, a.pv)
 			h := query.Headroom
@@ -98,7 +102,7 @@ func runSLOToRate(ctx context.Context, args []string, out io.Writer) error {
 		if err := writeJSON(out, w); err != nil {
 			return err
 		}
-	} else if err := writeRateText(out, st, answers, none); err != nil {
+	} else if err := writeRateText(out, st, variants, answers, none); err != nil {
 		return err
 	}
 	if code != whatif.ExitAnswered {
@@ -131,7 +135,7 @@ func parseTPOT(s string) (whatif.TPOTTarget, error) {
 }
 
 // writeRateText is question 1's human output, in the page's layout.
-func writeRateText(out io.Writer, st *learnreplay.State, answers []rateAnswer, none *whatif.Unanswerable) error {
+func writeRateText(out io.Writer, st *learnreplay.State, variants []pricedVariant, answers []rateAnswer, none *whatif.Unanswerable) error {
 	var b strings.Builder
 	const layout = "%-9s%-19s%-41s%s\n"
 	fmt.Fprintf(&b, layout, "role", "est. rate at SLO", "bound by", "basis")
@@ -154,12 +158,13 @@ func writeRateText(out io.Writer, st *learnreplay.State, answers []rateAnswer, n
 		case whatif.Unanswerable:
 			fmt.Fprintf(&b, "%-9s%s\n", role, refusedText(r))
 		}
+		fmt.Fprintf(&b, "%-9sshape %s\n", "", a.pv.shapeText())
 		flagsLine(&b, a.pv, a.result)
 	}
 	if none != nil {
 		fmt.Fprintf(&b, "%-9s%s\n", "decode", refusedText(*none))
 	}
-	b.WriteString(footer(st) + "\n")
+	b.WriteString(footer(st, variants) + "\n")
 	_, err := io.WriteString(out, b.String())
 	return err
 }

@@ -20,13 +20,21 @@ const schemaVersion = 1
 
 // wireOutput is one command's whole JSON output.
 type wireOutput struct {
-	SchemaVersion int        `json:"schemaVersion"`
-	Question      string     `json:"question"`
-	Source        wireSource `json:"source"`
-	Bands         wireBands  `json:"bands"`
-	Roles         []wireRole `json:"roles"`
-	ExitCode      int        `json:"exitCode"`
-	Note          string     `json:"note"`
+	SchemaVersion int         `json:"schemaVersion"`
+	Question      string      `json:"question"`
+	Source        *wireSource `json:"source,omitempty"`
+	Bands         *wireBands  `json:"bands,omitempty"`
+	Roles         []wireRole  `json:"roles"`
+	ExitCode      int         `json:"exitCode"`
+	Note          string      `json:"note,omitempty"`
+	// Error is a usage or internal error met before any answer, with -o
+	// json: the output then holds only it, the question and the exit code.
+	Error *wireError `json:"error,omitempty"`
+}
+
+// wireError is an error met before any answer.
+type wireError struct {
+	Message string `json:"message"`
 }
 
 // wireSource is what the answer was read from.
@@ -64,10 +72,7 @@ type wireInputs struct {
 	FillBand       wireInterval `json:"fillBand"`
 	CapacityTokens float64      `json:"capacityTokens"`
 	KVPerRequest   float64      `json:"kvPerRequest"`
-	InputTokens    float64      `json:"inputTokens"`
-	OutputTokens   float64      `json:"outputTokens"`
-	PrefixHitRate  float64      `json:"prefixHitRate"`
-	ShapeAssumed   bool         `json:"shapeAssumed"`
+	Shape          wireShape    `json:"shape"`
 	BatchCap       int64        `json:"batchCap"`
 	BatchCapSource string       `json:"batchCapSource"`
 	Ranks          int          `json:"ranks"`
@@ -78,6 +83,26 @@ type wireInputs struct {
 	TPOT           *wireTPOT    `json:"tpot,omitempty"`
 }
 
+// wireShape is the traffic shape a variant was priced at: each length
+// measured (the request-rate-weighted mean of the variant's last cycles with
+// traffic, FromCycle to ToCycle) or assumed by a flag.
+type wireShape struct {
+	InputTokens   float64 `json:"inputTokens"`
+	InputSource   string  `json:"inputSource"`
+	OutputTokens  float64 `json:"outputTokens"`
+	OutputSource  string  `json:"outputSource"`
+	PrefixHitRate float64 `json:"prefixHitRate"`
+	FromCycle     int     `json:"fromCycle"`
+	ToCycle       int     `json:"toCycle"`
+	Cycles        int     `json:"cycles"`
+}
+
+// The sources a shape's length comes from.
+const (
+	shapeMeasured = "measured"
+	shapeAssumed  = "assumed"
+)
+
 // wireLine is the ITL line and its readings.
 type wireLine struct {
 	A               float64  `json:"a"`
@@ -86,6 +111,11 @@ type wireLine struct {
 	BorrowedFrom    string   `json:"borrowedFrom,omitempty"`
 	Readings        int      `json:"readings"`
 	ObservedFillMax *float64 `json:"observedFillMax,omitempty"`
+	// Resamples is how many bootstrap resamples were drawn, and
+	// TierChanges how many of them the tracker's choice of fit put at
+	// another tier (TierUnstable above a tenth).
+	Resamples   int `json:"resamples"`
+	TierChanges int `json:"tierChanges"`
 }
 
 // wireTPOT is the TPOT question: the target (question 1 only), the
@@ -175,15 +205,15 @@ func toWire(r whatif.Result, unit string) *wireResult {
 }
 
 // newWireOutput starts a command's JSON output from the state it read.
-func newWireOutput(question string, f *answerFlags, st *learnreplay.State, code int) wireOutput {
+func newWireOutput(question string, f *answerFlags, st *learnreplay.State, variants []pricedVariant, code int) wireOutput {
 	r := f.resampling()
 	return wireOutput{
 		SchemaVersion: schemaVersion, Question: question, ExitCode: code, Roles: []wireRole{},
-		Source: wireSource{Recording: f.recording, Namespace: st.Namespace, Model: st.ModelID,
+		Source: &wireSource{Recording: f.recording, Namespace: st.Namespace, Model: st.ModelID,
 			FirstCycle: 1, LastCycle: st.Cycle, FirstAt: st.FirstAt, LastAt: st.At},
-		Bands: wireBands{Method: "block bootstrap", BlockCycles: r.Block, Resamples: r.Resamples, Seed: r.Seed,
+		Bands: &wireBands{Method: "block bootstrap", BlockCycles: r.Block, Resamples: r.Resamples, Seed: r.Seed,
 			LoPercent: 10, HiPercent: 90},
-		Note: footer(st),
+		Note: footer(st, variants),
 	}
 }
 
@@ -191,15 +221,23 @@ func newWireOutput(question string, f *answerFlags, st *learnreplay.State, code 
 func inputsOf(f *answerFlags, pv pricedVariant) *wireInputs {
 	in := &wireInputs{
 		Line: wireLine{A: pv.decode.Line.A, B: pv.decode.Line.B, Tier: pv.state.Tier,
-			BorrowedFrom: pv.state.BorrowedFrom, Readings: len(pv.readings)},
+			BorrowedFrom: pv.state.BorrowedFrom, Readings: len(pv.state.LineReadings),
+			Resamples: pv.lines.Drawn, TierChanges: pv.lines.TierChanges()},
 		FillBand:       wireInterval{Lo: pv.decode.Band.Lo, Hi: pv.decode.Band.Hi},
 		CapacityTokens: pv.decode.CapacityTokens, KVPerRequest: pv.decode.KVPerRequest,
-		InputTokens: pv.shape.AvgInputTokens, OutputTokens: pv.shape.AvgOutputTokens,
-		PrefixHitRate: pv.shape.PrefixHitRate, ShapeAssumed: pv.assumed,
+		Shape: wireShape{InputTokens: pv.shape.AvgInputTokens, InputSource: shapeMeasured,
+			OutputTokens: pv.shape.AvgOutputTokens, OutputSource: shapeMeasured, PrefixHitRate: pv.shape.PrefixHitRate,
+			FromCycle: pv.state.Shape.FromCycle, ToCycle: pv.state.Shape.ToCycle, Cycles: pv.state.Shape.Cycles},
 		BatchCap: pv.decode.ReplicaCap / int64(max(pv.state.Ranks, 1)), BatchCapSource: pv.state.BatchCapSource,
 		Ranks: max(pv.state.Ranks, 1), Replicas: pv.decode.Replicas, ReplicasFrom: "recording",
 	}
-	if f.set["batch-cap"] {
+	if pv.assumedIL {
+		in.Shape.InputSource = shapeAssumed
+	}
+	if pv.assumedOL {
+		in.Shape.OutputSource = shapeAssumed
+	}
+	if f.batchCap > 0 {
 		in.BatchCapSource = "--batch-cap"
 	}
 	if f.decode > 0 {

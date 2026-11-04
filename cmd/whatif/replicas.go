@@ -22,7 +22,11 @@ type replicasAnswer struct {
 // "Question 2: from replicas to an SLO") for decode: the knee the replicas
 // saturate at, the operating rate below it, and the TPOT held there.
 func runReplicasToSLO(ctx context.Context, args []string, out io.Writer) error {
-	fs := newFlags("replicas-to-slo", out)
+	return asJSONError("replicas-to-slo", args, out, replicasToSLO(ctx, args, out))
+}
+
+func replicasToSLO(ctx context.Context, args []string, out io.Writer) error {
+	fs := newAnswerFlags("replicas-to-slo", args, out)
 	var f answerFlags
 	f.register(fs)
 	rate := fs.Float64("rate", 0, "the operating rate, requests per second over the fleet, in place of headroom x knee")
@@ -92,7 +96,11 @@ func runReplicasToSLO(ctx context.Context, args []string, out io.Writer) error {
 			return func(d whatif.Decode) whatif.Result { return pick(whatif.SLOAtReplicas(d, query)) }
 		}
 		slo.KneeRate = pv.qualify(pv.band(slo.KneeRate, whatif.KneeRate))
-		slo.Rate = pv.qualify(pv.band(slo.Rate, on(func(s whatif.DecodeSLO) whatif.Result { return s.Rate })))
+		// A rate --rate gives is an input, not an estimate: it has no band.
+		if !f.set["rate"] {
+			slo.Rate = pv.band(slo.Rate, on(func(s whatif.DecodeSLO) whatif.Result { return s.Rate }))
+		}
+		slo.Rate = pv.qualify(slo.Rate)
 		slo.MeanTPOT = pv.qualify(pv.band(slo.MeanTPOT, on(func(s whatif.DecodeSLO) whatif.Result { return s.MeanTPOT })))
 		if slo.PercentileTPOT != nil {
 			p := pv.band(slo.PercentileTPOT, on(func(s whatif.DecodeSLO) whatif.Result { return s.PercentileTPOT }))
@@ -112,7 +120,7 @@ func runReplicasToSLO(ctx context.Context, args []string, out io.Writer) error {
 	code := whatif.ExitCode(results...)
 
 	if f.output == outputJSON {
-		w := newWireOutput("replicas-to-slo", &f, st, code)
+		w := newWireOutput("replicas-to-slo", &f, st, variants, code)
 		for _, a := range answers {
 			in := inputsOf(&f, a.pv)
 			if f.set["rate"] {
@@ -135,7 +143,7 @@ func runReplicasToSLO(ctx context.Context, args []string, out io.Writer) error {
 		if err := writeJSON(out, w); err != nil {
 			return err
 		}
-	} else if err := writeReplicasText(out, &f, st, answers, none, *pct, query); err != nil {
+	} else if err := writeReplicasText(out, &f, st, variants, answers, none, *pct, query); err != nil {
 		return err
 	}
 	if code != whatif.ExitAnswered {
@@ -168,7 +176,7 @@ func tpotInputs(st *learnreplay.State, target, q float64, r whatif.TPOTRatio) *w
 }
 
 // writeReplicasText is question 2's human output, in the page's layout.
-func writeReplicasText(out io.Writer, f *answerFlags, st *learnreplay.State, answers []replicasAnswer,
+func writeReplicasText(out io.Writer, f *answerFlags, st *learnreplay.State, variants []pricedVariant, answers []replicasAnswer,
 	none *whatif.Unanswerable, pct string, query whatif.ReplicasQuery) error {
 	var b strings.Builder
 	for i, a := range answers {
@@ -180,6 +188,7 @@ func writeReplicasText(out io.Writer, f *answerFlags, st *learnreplay.State, ans
 		}
 		if u, ok := a.slo.KneeRate.(whatif.Unanswerable); ok {
 			fmt.Fprintf(&b, "%-16s%s\n", "decode", refusedText(u))
+			fmt.Fprintf(&b, "%-16s%s\n", "shape", a.pv.shapeText())
 			continue
 		}
 		knee := a.slo.KneeRate.(whatif.Answer)
@@ -202,12 +211,13 @@ func writeReplicasText(out io.Writer, f *answerFlags, st *learnreplay.State, ans
 		if a.slo.PercentileTPOT != nil {
 			tpotRow(&b, "TPOT p"+strings.TrimPrefix(pct, "p"), a.slo.PercentileTPOT, "per request; "+f.ratioNote(st, a.ratio))
 		}
+		fmt.Fprintf(&b, "%-16s%s\n", "shape", a.pv.shapeText())
 		flagsLine(&b, a.pv, a.slo.KneeRate, a.slo.Rate, a.slo.MeanTPOT, a.slo.PercentileTPOT)
 	}
 	if none != nil {
 		fmt.Fprintf(&b, "%-16s%s\n", "decode", refusedText(*none))
 	}
-	b.WriteString(footer(st) + "\n")
+	b.WriteString(footer(st, variants) + "\n")
 	_, err := io.WriteString(out, b.String())
 	return err
 }

@@ -28,7 +28,9 @@
           "b": 0.0015568837184686396,
           "tier": "ols",
           "readings": 15,
-          "observedFillMax": 0.501466275659824
+          "observedFillMax": 0.501466275659824,
+          "resamples": 200,
+          "tierChanges": 51
         },
         "fillBand": {
           "lo": 0.15,
@@ -36,10 +38,16 @@
         },
         "capacityTokens": 131072,
         "kvPerRequest": 1500,
-        "inputTokens": 1000,
-        "outputTokens": 1000,
-        "prefixHitRate": 0,
-        "shapeAssumed": true,
+        "shape": {
+          "inputTokens": 1000,
+          "inputSource": "assumed",
+          "outputTokens": 1000,
+          "outputSource": "assumed",
+          "prefixHitRate": 0,
+          "fromCycle": 204,
+          "toCycle": 223,
+          "cycles": 20
+        },
         "batchCap": 64,
         "batchCapSource": "flags",
         "ranks": 1,
@@ -59,8 +67,8 @@
             "value": 13.313632625239457,
             "unit": "r/s",
             "band": {
-              "lo": 13.213107139026688,
-              "hi": 13.380214392174715
+              "lo": 12.985428789903894,
+              "hi": 13.384971629671824
             },
             "basis": {
               "fill": 0.732421875,
@@ -73,6 +81,7 @@
               "tier": "ols"
             },
             "flags": [
+              "TierUnstable",
               "AssumedShape",
               "ExtrapolatedFill"
             ]
@@ -83,8 +92,8 @@
             "value": 11.316587731453538,
             "unit": "r/s",
             "band": {
-              "lo": 11.231141068172684,
-              "hi": 11.373182233348507
+              "lo": 11.03761447141831,
+              "hi": 11.37722588522105
             },
             "basis": {
               "fill": 0.4740967917873882,
@@ -97,6 +106,7 @@
               "tier": "ols"
             },
             "flags": [
+              "TierUnstable",
               "AssumedShape"
             ]
           }
@@ -106,8 +116,8 @@
             "value": 0.0036607509947803553,
             "unit": "s",
             "band": {
-              "lo": 0.0036449299737118107,
-              "hi": 0.0036945047047049753
+              "lo": 0.003651573861222654,
+              "hi": 0.00372011305025773
             },
             "basis": {
               "fill": 0.4740967917873882,
@@ -118,6 +128,7 @@
               "tier": "ols"
             },
             "flags": [
+              "TierUnstable",
               "AssumedShape"
             ]
           }
@@ -127,8 +138,8 @@
             "value": 0.004758976293214462,
             "unit": "s",
             "band": {
-              "lo": 0.004738408965825354,
-              "hi": 0.004802856116116468
+              "lo": 0.00474704601958945,
+              "hi": 0.004836146965335049
             },
             "basis": {
               "fill": 0.4740967917873882,
@@ -140,6 +151,7 @@
             },
             "flags": [
               "AssumedTPOTRatio",
+              "TierUnstable",
               "AssumedShape"
             ]
           }
@@ -148,5 +160,5 @@
     }
   ],
   "exitCode": 0,
-  "note": "estimate from cycles 1-226, not a guarantee; see basis (-o json)"
+  "note": "estimate from cycles 1-226 and 15 readings, not a guarantee; see basis (-o json)"
 }

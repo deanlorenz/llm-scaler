@@ -31,9 +31,9 @@ func ITLTier(source learn.Source, borrowed bool) string {
 // analyzer decides next.
 
 // ITLReadings is a copy of the ITL readings filed under key, a pricing key
-// as the ITL learner's report names it (learn.Report.PricingKey): every
-// reading the window holds, and the steady ones the full fit is taken from.
-func (a *SaturationAnalyzer) ITLReadings(key string) (all, steady []itl.Observation) {
+// as the ITL learner's report names it (learn.Report.PricingKey): the main
+// and steady windows, and the above-band fallback's.
+func (a *SaturationAnalyzer) ITLReadings(key string) itl.KeyReadings {
 	return a.itlTracker.Readings(key)
 }
 

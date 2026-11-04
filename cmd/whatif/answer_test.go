@@ -301,6 +301,10 @@ func TestExitCodes(t *testing.T) {
 		{"usage: a --tpot that is no duration", q1("--tpot", "4"), 2, ""},
 		{"usage: a --tpot percentile without p", q1("--tpot", "4ms@90"), 2, ""},
 		{"usage: a --tpot-percentile that is no number", q2("--tpot-percentile", "ninety"), 2, ""},
+		{"usage: a --tpot-percentile of 0", q2("--tpot-percentile", "0", "--assume-tpot-ratio", "1.3"), 2, ""},
+		{"usage: a --tpot at p0", q1("--tpot", "4ms@p0", "--assume-tpot-ratio", "1.3"), 2, ""},
+		{"refused: no line learned by the cycle", []string{"replicas-to-slo", "--recording", olsSweep, "--cycle", "1"}, 3,
+			"NoLine (no ITL line learned by cycle 1)"},
 		// The library's InvalidInput: printed as a refusal, exit 2.
 		{"invalid: a percentile outside (0, 100)", q2("--tpot-percentile", "150", "--assume-tpot-ratio", "1.3"), 2, "InvalidInput"},
 		{"invalid: an assumed ratio below 1", q2("--tpot-percentile", "90", "--assume-tpot-ratio", "0.5"), 2, "InvalidInput"},
@@ -337,6 +341,114 @@ func TestExitCodeInternal(t *testing.T) {
 		if code := exitCode(err); code != 1 {
 			t.Errorf("%v: exit %d (%v), want 1", args, code, err)
 		}
+	}
+}
+
+// A recording that fails inside the analyzers, and a replay cancelled, are
+// internal errors, exit 1: not the caller's input.
+func TestExitCodeReplayFailure(t *testing.T) {
+	gz, err := os.ReadFile(olsSweep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := gunzipped(gz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, _, _ := strings.Cut(string(data), "\n")
+	broken := start + "\n" + `{"Seq":2,"Now":"2026-11-01T21:54:30.377845609Z","Kind":"saturation.Analyze","Data":{"Input":"no input"}}` + "\n"
+	path := filepath.Join(t.TempDir(), "broken.jsonl")
+	if err := os.WriteFile(path, []byte(broken), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, code := runCmd(t, "replicas-to-slo", "--recording", path); code != 1 {
+		t.Errorf("a recording that fails in the replay: exit %d, want 1\n%s", code, out)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if code := exitCode(run(ctx, []string{"replicas-to-slo", "--recording", olsSweep}, &bytes.Buffer{})); code != 1 {
+		t.Errorf("a cancelled replay: exit %d, want 1", code)
+	}
+}
+
+// With -o json an error before any answer is a JSON object too, carrying
+// the message and the exit code, and nothing else.
+func TestJSONUsageError(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		code int
+	}{
+		{[]string{"replicas-to-slo", "-o", "json"}, 2},
+		{[]string{"slo-to-rate", "--recording", olsSweep, "-o=json"}, 2},
+		{[]string{"replicas-to-slo", "--recording", olsSweep, "--bogus", "-o", "json"}, 2},
+		{[]string{"replicas-to-slo", "--recording", olsSweep, "--cycle", "100000", "-o", "json"}, 2},
+	} {
+		out, code := runCmd(t, c.args...)
+		if code != c.code {
+			t.Errorf("%v: exit %d, want %d", c.args, code, c.code)
+		}
+		w := decodeOutput(t, out)
+		if w.SchemaVersion != schemaVersion || w.ExitCode != c.code || w.Error == nil || w.Error.Message == "" ||
+			w.Source != nil || w.Bands != nil || len(w.Roles) != 0 {
+			t.Errorf("%v: %+v, want an error object alone", c.args, w)
+		}
+	}
+	if out, _ := runCmd(t, "replicas-to-slo"); strings.HasPrefix(strings.TrimSpace(out), "{") {
+		t.Errorf("a usage error without -o json wrote JSON:\n%s", out)
+	}
+}
+
+// What the flags set is reported as theirs, and only when they set it: a
+// --rate is an input, not banded; --batch-cap 0 takes the priced cap and
+// its source; an assumed length says so, a measured one names its cycles.
+func TestInputsSayWhereTheyCameFrom(t *testing.T) {
+	out, _ := runCmd(t, "replicas-to-slo", "--recording", olsSweep, "--rate", "1", "--batch-cap", "0", "-o", "json",
+		"--assume-output-tokens", "1000")
+	w := decodeOutput(t, out)
+	role := w.Roles[0]
+	if b := role.Results.OperatingRate.Answer.Band; b != nil {
+		t.Errorf("--rate is banded %+v", b)
+	}
+	if role.Results.MeanTPOT.Answer.Band == nil {
+		t.Error("the TPOT at --rate is not banded")
+	}
+	in := role.Inputs
+	if in.BatchCapSource != "flags" || in.BatchCap != 64 {
+		t.Errorf("--batch-cap 0: cap %d from %q, want the priced 64 from the flags", in.BatchCap, in.BatchCapSource)
+	}
+	sh := in.Shape
+	if sh.OutputSource != shapeAssumed || sh.OutputTokens != 1000 || sh.InputSource != shapeMeasured ||
+		sh.FromCycle != 204 || sh.ToCycle != 223 || sh.Cycles != 20 {
+		t.Errorf("shape %+v, want OL assumed and IL measured over cycles 204-223", sh)
+	}
+	text, _ := runCmd(t, "replicas-to-slo", "--recording", olsSweep, "--assume-output-tokens", "1000")
+	if !strings.Contains(text, "OL 1000 (assumed)") || !strings.Contains(text, "(measured, cycles 204-223)") {
+		t.Errorf("the shape row does not say where each length came from:\n%s", text)
+	}
+}
+
+// The proposal's JSON reference is the pinned key list: a consumer reads
+// the same schema the test holds the wire types to.
+func TestJSONSchemaIsDocumented(t *testing.T) {
+	page, err := os.ReadFile("../../docs/proposals/slo-capacity-planner.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.ReplaceAll(string(page), "\r\n", "\n")
+	const open = "<!-- whatif-json-schema-v1: begin -->\n```\n"
+	const closing = "```\n<!-- whatif-json-schema-v1: end -->"
+	start := strings.Index(text, open)
+	end := strings.Index(text, closing)
+	if start < 0 || end < start {
+		t.Fatal("the proposal has no JSON schema reference between its markers")
+	}
+	want, err := os.ReadFile(filepath.Join("testdata", "schema-v1.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, w := text[start+len(open):end], strings.ReplaceAll(string(want), "\r\n", "\n"); got != w {
+		t.Errorf("the proposal's JSON reference differs from testdata/schema-v1.txt\npage:\n%s\nfile:\n%s", got, w)
 	}
 }
 

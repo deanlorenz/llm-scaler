@@ -34,19 +34,31 @@ const (
 // flags the band TierUnstable.
 const tierUnstableShare = 0.10
 
-// Refit is how a resample's line is fitted: at Tier, TierOLS or TierPinnedB,
-// with PinnedB the intercept a pinned-B fit holds. An ols fit that fails
-// falls back to pinned-B at PinnedB, as the itl tracker does, and that
-// resample has changed tier.
+// Refit is how a resample's line is fitted: by the itl tracker's own choice
+// of fit (itl.Refit), which takes the full fit only on steady readings that
+// are ready (enough of them, spread enough in k) and otherwise the pinned
+// fit, or holds the key's slope; or, for an above-band line, by the
+// tracker's above-band fallback (itl.RefitAboveBand).
 type Refit struct {
-	Tier    string
-	PinnedB float64
+	// Tier is the line's own tier: TierOLS, TierPinnedB or TierAboveBand.
+	// Any other has no fit to rerun.
+	Tier string
+	// Line is the line: a resample on which the tracker would hold the
+	// key's slope holds its A.
+	Line itl.Model
+	// Baseline is the intercept the pinned fit pins: the key's last full
+	// fit's, or itl.DefaultBaselineSec.
+	Baseline float64
+	// MinSettled is the steady gate's MinSettledSamples, 0 for the default.
+	MinSettled int
 }
 
-// Resample is one bootstrap line: the line fitted from one resample, and
-// whether it was fitted at another tier than Refit asked.
+// Resample is one bootstrap line: the line fitted from one resample, the
+// tier the tracker's choice fitted it at, and whether that differs from the
+// line's own tier.
 type Resample struct {
 	Line        itl.Model
+	Tier        string
 	TierChanged bool
 }
 
@@ -59,21 +71,50 @@ type LineResamples struct {
 	Drawn int
 }
 
+// TierChanges is how many of the drawn resamples landed at another tier
+// than the line's, a resample that fitted no line at all included.
+func (rs LineResamples) TierChanges() int {
+	n := rs.Drawn - len(rs.Lines)
+	for _, s := range rs.Lines {
+		if s.TierChanged {
+			n++
+		}
+	}
+	return n
+}
+
 // BootstrapLines refits the line on r.Resamples block-bootstrap resamples
-// of readings. The readings are grouped into cycles by their Timestamp, so a
-// block is Block whole cycles of every replica's readings; a moving block
-// bootstrap draws blocks until the resample holds as many cycles as the
-// readings do. A resample is fitted as fit says.
+// of the windows it was fitted from: for an above-band line the above-band
+// windows, for any other the main and the steady window. The readings are
+// grouped into cycles by Timestamp, a cycle keeping its main and its steady
+// readings together, so a block is Block whole cycles of every replica's
+// readings; a moving block bootstrap draws blocks until the resample holds
+// as many cycles as the windows do. The resample's cycles are stamped again
+// in the order drawn, one second apart, so the tracker's choice of fit,
+// which reads the windows in time order, reads them in that order.
 //
-// With fewer than two cycles, or a Refit at a tier with no fit (held or
-// borrowed: no readings of the variant's own), there is nothing to resample
-// and Drawn is 0. Resampling with Block or Resamples below 1 draws nothing
-// too.
-func BootstrapLines(readings []itl.Observation, fit Refit, r Resampling) LineResamples {
-	if fit.Tier != TierOLS && fit.Tier != TierPinnedB || r.Block < 1 || r.Resamples < 1 {
+// Each resample is fitted as the tracker would fit it (Refit), and the tier
+// it lands at is compared with the line's in both directions: ols to
+// pinned-B and pinned-B to ols are both changes, and so is a resample on
+// which the tracker would hold the slope (priced at the held A) or fit
+// nothing at all.
+//
+// With fewer than two cycles, or a line at a tier with no fit to rerun
+// (held or borrowed), there is nothing to resample and Drawn is 0.
+// Resampling with Block or Resamples below 1 draws nothing too.
+func BootstrapLines(readings itl.KeyReadings, fit Refit, r Resampling) LineResamples {
+	all, steady := readings.All, readings.Steady
+	switch fit.Tier {
+	case TierOLS, TierPinnedB:
+	case TierAboveBand:
+		all, steady = readings.Above, readings.AboveSteady
+	default:
 		return LineResamples{}
 	}
-	cycles := cyclesOf(readings)
+	if r.Block < 1 || r.Resamples < 1 {
+		return LineResamples{}
+	}
+	cycles := cyclesOf(all, steady)
 	n := len(cycles)
 	if n < 2 {
 		return LineResamples{}
@@ -81,50 +122,87 @@ func BootstrapLines(readings []itl.Observation, fit Refit, r Resampling) LineRes
 	block := min(r.Block, n)
 	rng := rand.New(rand.NewPCG(r.Seed, r.Seed^0x9e3779b97f4a7c15))
 	out := LineResamples{Drawn: r.Resamples}
-	var sample []itl.Observation
+	t0 := cycles[0].at
 	for range r.Resamples {
-		sample = sample[:0]
+		var sAll, sSteady []itl.Observation
+		j := 0
 		for got := 0; got < n; got += block {
 			start := rng.IntN(n - block + 1)
 			for _, c := range cycles[start : start+min(block, n-got)] {
-				sample = append(sample, c...)
+				at := t0.Add(time.Duration(j) * time.Second)
+				j++
+				for _, o := range c.all {
+					o.Timestamp = at
+					sAll = append(sAll, o)
+				}
+				for _, o := range c.steady {
+					o.Timestamp = at
+					sSteady = append(sSteady, o)
+				}
 			}
 		}
-		if line, changed, ok := refit(sample, fit); ok {
-			out.Lines = append(out.Lines, Resample{Line: line, TierChanged: changed})
+		if s, ok := refit(sAll, sSteady, fit); ok {
+			out.Lines = append(out.Lines, s)
 		}
 	}
 	return out
 }
 
-// refit fits one resample at fit's tier, falling back from ols to pinned-B.
-func refit(obs []itl.Observation, fit Refit) (line itl.Model, changed, ok bool) {
-	if fit.Tier == TierOLS {
-		if m, ok := itl.Fit(obs); ok {
-			return m, false, true
+// refit fits one resample by the tracker's choice of fit, ok false when it
+// fits no line.
+func refit(all, steady []itl.Observation, fit Refit) (Resample, bool) {
+	var got itl.Refitted
+	tier := ""
+	if fit.Tier == TierAboveBand {
+		got = itl.RefitAboveBand(all, steady, fit.MinSettled)
+		if got.Tier != "" {
+			tier = TierAboveBand
 		}
-		changed = true
+	} else {
+		got = itl.Refit(all, steady, fit.Baseline, fit.MinSettled)
+		tier = got.Tier
+		if got.Hold {
+			got.Model, tier = itl.Model{A: fit.Line.A, B: fit.Baseline}, TierHeld
+		}
 	}
-	if !(fit.PinnedB > 0) {
-		return itl.Model{}, changed, false
+	if tier == "" {
+		return Resample{}, false
 	}
-	m, ok := itl.FitPinnedB(obs, fit.PinnedB)
-	return m, changed, ok
+	return Resample{Line: got.Model, Tier: tier, TierChanged: tier != fit.Tier}, true
 }
 
-// cyclesOf groups readings into cycles, by Timestamp, in time order.
-func cyclesOf(readings []itl.Observation) [][]itl.Observation {
-	sorted := slices.Clone(readings)
-	slices.SortStableFunc(sorted, func(a, b itl.Observation) int { return a.Timestamp.Compare(b.Timestamp) })
-	var out [][]itl.Observation
-	var at time.Time
-	for i, o := range sorted {
-		if i == 0 || !o.Timestamp.Equal(at) {
-			out = append(out, nil)
-			at = o.Timestamp
+// cycle is one cycle's readings: those of the main window and those of the
+// steady one, read at the same instant.
+type cycle struct {
+	at          time.Time
+	all, steady []itl.Observation
+}
+
+// cyclesOf groups two windows' readings into cycles, by Timestamp, in time
+// order.
+func cyclesOf(all, steady []itl.Observation) []cycle {
+	var out []cycle
+	at := map[time.Time]int{}
+	add := func(o itl.Observation, isSteady bool) {
+		i, ok := at[o.Timestamp]
+		if !ok {
+			i = len(out)
+			at[o.Timestamp] = i
+			out = append(out, cycle{at: o.Timestamp})
 		}
-		out[len(out)-1] = append(out[len(out)-1], o)
+		if isSteady {
+			out[i].steady = append(out[i].steady, o)
+		} else {
+			out[i].all = append(out[i].all, o)
+		}
 	}
+	for _, o := range all {
+		add(o, false)
+	}
+	for _, o := range steady {
+		add(o, true)
+	}
+	slices.SortStableFunc(out, func(a, b cycle) int { return a.at.Compare(b.at) })
 	return out
 }
 
@@ -136,11 +214,7 @@ func cyclesOf(readings []itl.Observation) [][]itl.Observation {
 // tier flags TierUnstable. With no figure to band, a comes back unchanged.
 func BandAnswer(a Answer, rs LineResamples, value func(itl.Model) (float64, bool)) Answer {
 	var vals []float64
-	changed := 0
 	for _, s := range rs.Lines {
-		if s.TierChanged {
-			changed++
-		}
 		if v, ok := value(s.Line); ok && Finite(v) {
 			vals = append(vals, v)
 		}
@@ -151,10 +225,7 @@ func BandAnswer(a Answer, rs LineResamples, value func(itl.Model) (float64, bool
 	slices.Sort(vals)
 	at := func(p float64) float64 { return vals[max(0, int(math.Ceil(p*float64(len(vals))))-1)] }
 	a.Band = &Interval{Lo: at(bandLo), Hi: at(bandHi)}
-	// Drawn resamples that fitted no line changed tier too: they fell
-	// through every fit.
-	changed += rs.Drawn - len(rs.Lines)
-	if float64(changed) > tierUnstableShare*float64(rs.Drawn) && !a.HasFlag(TierUnstable) {
+	if float64(rs.TierChanges()) > tierUnstableShare*float64(rs.Drawn) && !a.HasFlag(TierUnstable) {
 		a.Flags = append(slices.Clone(a.Flags), TierUnstable)
 	}
 	return a

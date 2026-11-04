@@ -31,10 +31,11 @@ const (
 	// or intercept that is not positive and finite, or a line that predicts no
 	// positive ITL at the bottom of the band.
 	NoLine Reason = "NoLine"
-	// PinnedDefaultB is a line whose only fit is pinned-B on the default
-	// intercept (itl.DefaultBaselineSec): the slope was fitted against a
-	// constant guessed for no card in particular, so the line describes
-	// nothing measured about this one.
+	// PinnedDefaultB is a line whose only fit is pinned-B (or held, or
+	// borrowed from a donor that is) on the default intercept
+	// (itl.DefaultBaselineSec): the slope was fitted against a constant
+	// guessed for no card in particular, so the line describes nothing
+	// measured about this one.
 	PinnedDefaultB Reason = "PinnedDefaultB"
 	// NoCapacity is no positive, finite KV capacity reading, or one whose
 	// band top holds no whole request (floor(band.Hi*C/KVreq) < 1).
@@ -165,6 +166,10 @@ const (
 	// TierBorrowed is another variant's line for the same engine
 	// configuration.
 	TierBorrowed = "borrowed"
+	// TierAboveBand is the tracker's above-band fallback: a pinned-B line
+	// fitted from readings above the band, at a fill of at least
+	// itl.DefaultKSat, for a key that never fitted in the band.
+	TierAboveBand = "above-band"
 )
 
 // Interval is an uncertainty band around a figure, Lo to Hi in the figure's

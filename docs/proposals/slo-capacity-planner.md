@@ -574,6 +574,203 @@ Exit codes: `0` every role answered; `3` a role refused (output still printed);
 `2` usage or input error; `1` internal error. `whatif.ExitCode` applies them:
 `2` if any result is `InvalidInput`, else `3` if any is refused, else `0`.
 
+### Recording mode, as built (D3)
+
+`whatif replicas-to-slo` and `whatif slo-to-rate` answer for decode from a
+recording, `--recording FILE --cycle N|last`. TTFT, prefill and the fleet row
+are not supported in this build: `--ttft`, `--ttft-percentile`,
+`--assume-vp` and `--prefill` are a usage error.
+
+- **Shape.** Each length is measured or assumed, and the output says which.
+  Measured is the request-rate-weighted mean of the variant's last 20 cycles
+  with traffic (5 minutes at a 15 s cycle), so a recording that ends idle is
+  priced at the traffic it last served. `--assume-input-tokens` and
+  `--assume-output-tokens` state a length instead, flagged `AssumedShape`;
+  the worked example states IL = OL = 1000.
+- **Bands.** Each resample is refitted by the tracker's own choice of fit
+  (`itl.Refit`): the full fit only on steady readings that are ready, else
+  pinned-B on the readings the pinned fit reads, else the held slope. An
+  above-band line is refitted on the above-band readings. A resample at
+  another tier, either way, counts toward `TierUnstable`. `--seed` sets the
+  bootstrap's seed; the JSON names it.
+- **Exit 1** also covers a recording that fails inside the analyzers, and a
+  cancelled run.
+
+### JSON output
+
+`-o json` writes one object. An error met before any answer is an object
+holding `schemaVersion`, `question`, `exitCode` and `error.message` alone.
+Every key path, with its JSON type, for `schemaVersion` 1 (the
+`cmd/whatif` tests hold the wire types to this list):
+
+<!-- whatif-json-schema-v1: begin -->
+```
+bands object
+bands.blockCycles number
+bands.hiPercent number
+bands.loPercent number
+bands.method string
+bands.resamples number
+bands.seed number
+error object
+error.message string
+exitCode number
+note string
+question string
+roles array
+roles[] object
+roles[].inputs object
+roles[].inputs.batchCap number
+roles[].inputs.batchCapSource string
+roles[].inputs.capacityTokens number
+roles[].inputs.fillBand object
+roles[].inputs.fillBand.hi number
+roles[].inputs.fillBand.lo number
+roles[].inputs.headroom number
+roles[].inputs.kvPerRequest number
+roles[].inputs.line object
+roles[].inputs.line.a number
+roles[].inputs.line.b number
+roles[].inputs.line.borrowedFrom string
+roles[].inputs.line.observedFillMax number
+roles[].inputs.line.readings number
+roles[].inputs.line.resamples number
+roles[].inputs.line.tier string
+roles[].inputs.line.tierChanges number
+roles[].inputs.ranks number
+roles[].inputs.rate number
+roles[].inputs.replicas number
+roles[].inputs.replicasFrom string
+roles[].inputs.shape object
+roles[].inputs.shape.cycles number
+roles[].inputs.shape.fromCycle number
+roles[].inputs.shape.inputSource string
+roles[].inputs.shape.inputTokens number
+roles[].inputs.shape.outputSource string
+roles[].inputs.shape.outputTokens number
+roles[].inputs.shape.prefixHitRate number
+roles[].inputs.shape.toCycle number
+roles[].inputs.tpot object
+roles[].inputs.tpot.percentile number
+roles[].inputs.tpot.ratio number
+roles[].inputs.tpot.ratioSource string
+roles[].inputs.tpot.targetSeconds number
+roles[].inputs.tpot.windows number
+roles[].results object
+roles[].results.knee object
+roles[].results.knee.answer object
+roles[].results.knee.answer.band object
+roles[].results.knee.answer.band.hi number
+roles[].results.knee.answer.band.lo number
+roles[].results.knee.answer.basis object
+roles[].results.knee.answer.basis.boundBy array
+roles[].results.knee.answer.basis.boundBy[] string
+roles[].results.knee.answer.basis.fill number
+roles[].results.knee.answer.basis.floor number
+roles[].results.knee.answer.basis.kneeRate number
+roles[].results.knee.answer.basis.tier string
+roles[].results.knee.answer.basis.uncapped number
+roles[].results.knee.answer.flags array
+roles[].results.knee.answer.flags[] string
+roles[].results.knee.answer.unit string
+roles[].results.knee.answer.value number
+roles[].results.knee.refused object
+roles[].results.knee.refused.detail string
+roles[].results.knee.refused.reason string
+roles[].results.meanTPOT object
+roles[].results.meanTPOT.answer object
+roles[].results.meanTPOT.answer.band object
+roles[].results.meanTPOT.answer.band.hi number
+roles[].results.meanTPOT.answer.band.lo number
+roles[].results.meanTPOT.answer.basis object
+roles[].results.meanTPOT.answer.basis.boundBy array
+roles[].results.meanTPOT.answer.basis.boundBy[] string
+roles[].results.meanTPOT.answer.basis.fill number
+roles[].results.meanTPOT.answer.basis.floor number
+roles[].results.meanTPOT.answer.basis.kneeRate number
+roles[].results.meanTPOT.answer.basis.tier string
+roles[].results.meanTPOT.answer.basis.uncapped number
+roles[].results.meanTPOT.answer.flags array
+roles[].results.meanTPOT.answer.flags[] string
+roles[].results.meanTPOT.answer.unit string
+roles[].results.meanTPOT.answer.value number
+roles[].results.meanTPOT.refused object
+roles[].results.meanTPOT.refused.detail string
+roles[].results.meanTPOT.refused.reason string
+roles[].results.operatingRate object
+roles[].results.operatingRate.answer object
+roles[].results.operatingRate.answer.band object
+roles[].results.operatingRate.answer.band.hi number
+roles[].results.operatingRate.answer.band.lo number
+roles[].results.operatingRate.answer.basis object
+roles[].results.operatingRate.answer.basis.boundBy array
+roles[].results.operatingRate.answer.basis.boundBy[] string
+roles[].results.operatingRate.answer.basis.fill number
+roles[].results.operatingRate.answer.basis.floor number
+roles[].results.operatingRate.answer.basis.kneeRate number
+roles[].results.operatingRate.answer.basis.tier string
+roles[].results.operatingRate.answer.basis.uncapped number
+roles[].results.operatingRate.answer.flags array
+roles[].results.operatingRate.answer.flags[] string
+roles[].results.operatingRate.answer.unit string
+roles[].results.operatingRate.answer.value number
+roles[].results.operatingRate.refused object
+roles[].results.operatingRate.refused.detail string
+roles[].results.operatingRate.refused.reason string
+roles[].results.percentileTPOT object
+roles[].results.percentileTPOT.answer object
+roles[].results.percentileTPOT.answer.band object
+roles[].results.percentileTPOT.answer.band.hi number
+roles[].results.percentileTPOT.answer.band.lo number
+roles[].results.percentileTPOT.answer.basis object
+roles[].results.percentileTPOT.answer.basis.boundBy array
+roles[].results.percentileTPOT.answer.basis.boundBy[] string
+roles[].results.percentileTPOT.answer.basis.fill number
+roles[].results.percentileTPOT.answer.basis.floor number
+roles[].results.percentileTPOT.answer.basis.kneeRate number
+roles[].results.percentileTPOT.answer.basis.tier string
+roles[].results.percentileTPOT.answer.basis.uncapped number
+roles[].results.percentileTPOT.answer.flags array
+roles[].results.percentileTPOT.answer.flags[] string
+roles[].results.percentileTPOT.answer.unit string
+roles[].results.percentileTPOT.answer.value number
+roles[].results.percentileTPOT.refused object
+roles[].results.percentileTPOT.refused.detail string
+roles[].results.percentileTPOT.refused.reason string
+roles[].results.rate object
+roles[].results.rate.answer object
+roles[].results.rate.answer.band object
+roles[].results.rate.answer.band.hi number
+roles[].results.rate.answer.band.lo number
+roles[].results.rate.answer.basis object
+roles[].results.rate.answer.basis.boundBy array
+roles[].results.rate.answer.basis.boundBy[] string
+roles[].results.rate.answer.basis.fill number
+roles[].results.rate.answer.basis.floor number
+roles[].results.rate.answer.basis.kneeRate number
+roles[].results.rate.answer.basis.tier string
+roles[].results.rate.answer.basis.uncapped number
+roles[].results.rate.answer.flags array
+roles[].results.rate.answer.flags[] string
+roles[].results.rate.answer.unit string
+roles[].results.rate.answer.value number
+roles[].results.rate.refused object
+roles[].results.rate.refused.detail string
+roles[].results.rate.refused.reason string
+roles[].role string
+roles[].variant string
+schemaVersion number
+source object
+source.firstAt string
+source.firstCycle number
+source.lastAt string
+source.lastCycle number
+source.model string
+source.namespace string
+source.recording string
+```
+<!-- whatif-json-schema-v1: end -->
+
 ## See also
 
 - [End-to-end TTFT](slo-capacity-planner-ttft.md): the TTFT model, flow control,

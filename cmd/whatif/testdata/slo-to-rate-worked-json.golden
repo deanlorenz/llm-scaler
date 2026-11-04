@@ -28,7 +28,9 @@
           "b": 0.0015568837184686396,
           "tier": "ols",
           "readings": 15,
-          "observedFillMax": 0.501466275659824
+          "observedFillMax": 0.501466275659824,
+          "resamples": 200,
+          "tierChanges": 51
         },
         "fillBand": {
           "lo": 0.15,
@@ -36,10 +38,16 @@
         },
         "capacityTokens": 131072,
         "kvPerRequest": 1500,
-        "inputTokens": 1000,
-        "outputTokens": 1000,
-        "prefixHitRate": 0,
-        "shapeAssumed": true,
+        "shape": {
+          "inputTokens": 1000,
+          "inputSource": "assumed",
+          "outputTokens": 1000,
+          "outputSource": "assumed",
+          "prefixHitRate": 0,
+          "fromCycle": 204,
+          "toCycle": 223,
+          "cycles": 20
+        },
         "batchCap": 64,
         "batchCapSource": "flags",
         "ranks": 1,
@@ -57,8 +65,8 @@
             "value": 11.316587731453538,
             "unit": "r/s",
             "band": {
-              "lo": 11.231141068172684,
-              "hi": 11.373182233348507
+              "lo": 11.03761447141831,
+              "hi": 11.37722588522105
             },
             "basis": {
               "fill": 0.4740967917873882,
@@ -71,6 +79,7 @@
               "tier": "ols"
             },
             "flags": [
+              "TierUnstable",
               "AssumedShape"
             ]
           }
@@ -79,5 +88,5 @@
     }
   ],
   "exitCode": 0,
-  "note": "estimate from cycles 1-226, not a guarantee; see basis (-o json)"
+  "note": "estimate from cycles 1-226 and 15 readings, not a guarantee; see basis (-o json)"
 }

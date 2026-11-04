@@ -8,15 +8,17 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 )
 
-// readingsOn is n cycles of two replicas' readings on the line, with noise
-// that alternates in sign so a fit is exact on average but each resample
-// moves it.
-func readingsOn(line itl.Model, n int, noise float64) []itl.Observation {
+// readingsOn is n cycles of two replicas' readings on the line, k cycling
+// over [lo, hi], with noise that alternates in sign so each resample moves
+// the fit. Every reading is steady: the main and the steady window hold the
+// same ones.
+func readingsOn(line itl.Model, n int, lo, hi, noise float64) itl.KeyReadings {
 	t0 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 	out := make([]itl.Observation, 0, 2*n)
 	for c := range n {
 		at := t0.Add(time.Duration(c) * 15 * time.Second)
-		for r, k := range []float64{0.2 + 0.5*float64(c%7)/7, 0.25 + 0.5*float64((c+3)%7)/7} {
+		for r, f := range []float64{float64(c%7) / 6, float64((c+3)%7) / 6} {
+			k := lo + (hi-lo)*f
 			sign := 1.0
 			if (c+r)%2 == 1 {
 				sign = -1
@@ -24,15 +26,22 @@ func readingsOn(line itl.Model, n int, noise float64) []itl.Observation {
 			out = append(out, itl.Observation{K: k, ITLSec: line.ITLAt(k) * (1 + sign*noise), Timestamp: at})
 		}
 	}
-	return out
+	return itl.KeyReadings{All: out, Steady: out}
+}
+
+var worked = itl.Model{A: 0.004438, B: 0.001557}
+
+func TestDefaultResamplingIsThePages(t *testing.T) {
+	if r := DefaultResampling(); r != (Resampling{Block: 4, Resamples: 200, Seed: 1}) {
+		t.Errorf("%+v, want blocks of 4 cycles, 200 resamples, seed 1", r)
+	}
 }
 
 func TestBootstrapLinesIsReproducibleAndMoves(t *testing.T) {
-	line := itl.Model{A: 0.004438, B: 0.001557}
-	obs := readingsOn(line, 40, 0.05)
-	fit := Refit{Tier: TierOLS, PinnedB: line.B}
-	a := BootstrapLines(obs, fit, DefaultResampling())
-	b := BootstrapLines(obs, fit, DefaultResampling())
+	rs := readingsOn(worked, 40, 0.2, 0.7, 0.05)
+	fit := Refit{Tier: TierOLS, Line: worked, Baseline: worked.B}
+	a := BootstrapLines(rs, fit, DefaultResampling())
+	b := BootstrapLines(rs, fit, DefaultResampling())
 	if a.Drawn != 200 || len(a.Lines) != 200 {
 		t.Fatalf("drew %d, fitted %d; want 200 of each", a.Drawn, len(a.Lines))
 	}
@@ -46,66 +55,121 @@ func TestBootstrapLinesIsReproducibleAndMoves(t *testing.T) {
 	if len(distinct) < 50 {
 		t.Errorf("only %d distinct lines in 200 resamples", len(distinct))
 	}
-	other := BootstrapLines(obs, fit, Resampling{Block: 4, Resamples: 200, Seed: 2})
+	other := BootstrapLines(rs, fit, Resampling{Block: 4, Resamples: 200, Seed: 2})
 	if other.Lines[0] == a.Lines[0] && other.Lines[1] == a.Lines[1] {
 		t.Errorf("seed 2 drew what seed 1 did")
 	}
 }
 
-// A resample keeps whole cycles: every replica's reading of a cycle comes
-// with the others, so a block of 4 cycles never splits one.
+// A resample keeps whole cycles: a cycle's main and steady readings, of
+// every replica, come together.
 func TestBootstrapKeepsCyclesWhole(t *testing.T) {
-	obs := readingsOn(itl.Model{A: 0.004, B: 0.002}, 9, 0)
-	cycles := cyclesOf(obs)
+	rs := readingsOn(worked, 9, 0.2, 0.7, 0)
+	cycles := cyclesOf(rs.All, rs.Steady)
 	if len(cycles) != 9 {
 		t.Fatalf("%d cycles, want 9", len(cycles))
 	}
 	for i, c := range cycles {
-		if len(c) != 2 {
-			t.Errorf("cycle %d holds %d readings, want both replicas'", i, len(c))
+		if len(c.all) != 2 || len(c.steady) != 2 {
+			t.Errorf("cycle %d holds %d and %d readings, want both replicas' in both windows", i, len(c.all), len(c.steady))
 		}
 	}
 }
 
 func TestBootstrapHasNothingToResample(t *testing.T) {
-	line := itl.Model{A: 0.004, B: 0.002}
+	rs := readingsOn(worked, 40, 0.2, 0.7, 0.05)
 	cases := map[string]LineResamples{
-		"one cycle":      BootstrapLines(readingsOn(line, 1, 0.05), Refit{Tier: TierOLS, PinnedB: line.B}, DefaultResampling()),
-		"a held line":    BootstrapLines(readingsOn(line, 40, 0.05), Refit{Tier: TierHeld, PinnedB: line.B}, DefaultResampling()),
-		"a borrowed one": BootstrapLines(readingsOn(line, 40, 0.05), Refit{Tier: TierBorrowed}, DefaultResampling()),
-		"no resamples":   BootstrapLines(readingsOn(line, 40, 0.05), Refit{Tier: TierOLS}, Resampling{Block: 4}),
+		"one cycle":      BootstrapLines(readingsOn(worked, 1, 0.2, 0.7, 0.05), Refit{Tier: TierOLS, Line: worked, Baseline: worked.B}, DefaultResampling()),
+		"a held line":    BootstrapLines(rs, Refit{Tier: TierHeld, Line: worked, Baseline: worked.B}, DefaultResampling()),
+		"a borrowed one": BootstrapLines(rs, Refit{Tier: TierBorrowed, Line: worked}, DefaultResampling()),
+		"no resamples":   BootstrapLines(rs, Refit{Tier: TierOLS, Line: worked}, Resampling{Block: 4}),
 	}
-	for name, rs := range cases {
-		if rs.Drawn != 0 || len(rs.Lines) != 0 {
-			t.Errorf("%s: drew %d, fitted %d; want nothing", name, rs.Drawn, len(rs.Lines))
+	for name, got := range cases {
+		if got.Drawn != 0 || len(got.Lines) != 0 {
+			t.Errorf("%s: drew %d, fitted %d; want nothing", name, got.Drawn, len(got.Lines))
 		}
 	}
-	a := Answer{Value: 1}
-	if got := BandAnswer(a, LineResamples{}, func(itl.Model) (float64, bool) { return 1, true }); got.Band != nil {
+	if got := BandAnswer(Answer{Value: 1}, LineResamples{}, func(itl.Model) (float64, bool) { return 1, true }); got.Band != nil {
 		t.Errorf("banded from no resamples: %+v", got.Band)
 	}
 }
 
-// Readings at one k give no full fit: every resample falls back to pinned-B,
-// so the tier is unstable, and the band still comes from the pinned fits.
-func TestBootstrapFallsBackToPinnedB(t *testing.T) {
-	t0 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
-	obs := make([]itl.Observation, 0, 20)
-	for c := range 20 {
-		obs = append(obs, itl.Observation{K: 0.4, ITLSec: 0.0035 + 0.0001*float64(c%3), Timestamp: t0.Add(time.Duration(c) * time.Minute)})
+// The tracker's readiness gates the full fit on a resample, as it gated the
+// line: steady readings spread less than itl.DefaultMinKSpread fit pinned-B,
+// though itl.Fit alone would take them. An ols line on such readings (one
+// fitted when the window was wider) bands as TierUnstable.
+func TestBootstrapRerunsTheReadinessGate(t *testing.T) {
+	rs := readingsOn(worked, 40, 0.40, 0.65, 0.05)
+	if _, ok := itl.Fit(rs.Steady); !ok {
+		t.Fatal("the full fit refuses the readings; the case tests nothing")
 	}
-	rs := BootstrapLines(obs, Refit{Tier: TierOLS, PinnedB: 0.0015}, DefaultResampling())
-	if len(rs.Lines) != rs.Drawn || rs.Drawn != 200 {
-		t.Fatalf("drew %d, fitted %d", rs.Drawn, len(rs.Lines))
+	got := BootstrapLines(rs, Refit{Tier: TierOLS, Line: worked, Baseline: worked.B}, DefaultResampling())
+	if len(got.Lines) != 200 {
+		t.Fatalf("fitted %d of %d", len(got.Lines), got.Drawn)
 	}
-	for _, s := range rs.Lines {
-		if !s.TierChanged || s.Line.B != 0.0015 {
-			t.Fatalf("resample %+v: want a pinned-B fit at B 0.0015, flagged a change of tier", s)
+	for _, s := range got.Lines {
+		if s.Tier != TierPinnedB || !s.TierChanged || s.Line.B != worked.B {
+			t.Fatalf("resample %+v: want a pinned-B fit at the baseline, a change of tier", s)
 		}
 	}
-	got := BandAnswer(Answer{Value: 0.0035}, rs, func(m itl.Model) (float64, bool) { return m.ITLAt(0.4), true })
-	if !got.HasFlag(TierUnstable) || got.Band == nil {
-		t.Errorf("answer %+v: want a band flagged TierUnstable", got)
+	a := BandAnswer(Answer{Value: 1}, got, func(m itl.Model) (float64, bool) { return m.ITLAt(0.5), true })
+	if !a.HasFlag(TierUnstable) {
+		t.Errorf("flags %v, want TierUnstable", a.Flags)
+	}
+}
+
+// A change of tier counts both ways: a pinned-B line whose readings are
+// ready refits ols on the resamples, and that is a change too.
+func TestBootstrapCountsAChangeToOLS(t *testing.T) {
+	rs := readingsOn(worked, 40, 0.2, 0.7, 0.05)
+	got := BootstrapLines(rs, Refit{Tier: TierPinnedB, Line: worked, Baseline: worked.B}, DefaultResampling())
+	changed := 0
+	for _, s := range got.Lines {
+		if s.TierChanged {
+			if s.Tier != TierOLS {
+				t.Fatalf("resample %+v: a change that is not to ols", s)
+			}
+			changed++
+		}
+	}
+	if changed < 180 {
+		t.Errorf("%d of %d resamples changed to ols, want nearly all", changed, len(got.Lines))
+	}
+}
+
+// Readings too few to fit, on every resample, are where the tracker holds
+// the key's slope: the resample is priced at the held A, at the baseline,
+// and has changed tier.
+func TestBootstrapHoldsWhereTheTrackerHolds(t *testing.T) {
+	rs := readingsOn(worked, 4, 0.2, 0.7, 0.05) // 8 readings, under DefaultMinSamples
+	got := BootstrapLines(rs, Refit{Tier: TierPinnedB, Line: worked, Baseline: worked.B}, DefaultResampling())
+	if len(got.Lines) != 200 {
+		t.Fatalf("fitted %d of %d", len(got.Lines), got.Drawn)
+	}
+	for _, s := range got.Lines {
+		if s.Tier != TierHeld || !s.TierChanged || s.Line != worked {
+			t.Fatalf("resample %+v: want the held line, a change of tier", s)
+		}
+	}
+}
+
+// An above-band line resamples the above-band windows, by the fallback's
+// own fit, and stays above-band.
+func TestBootstrapAboveBandOnItsOwnReadings(t *testing.T) {
+	line := itl.Model{A: 0.05, B: 0.01}
+	above := readingsOn(line, 20, 0.86, 0.95, 0.02)
+	rs := itl.KeyReadings{Above: above.All, AboveSteady: above.Steady}
+	got := BootstrapLines(rs, Refit{Tier: TierAboveBand, Line: line}, DefaultResampling())
+	if len(got.Lines) != 200 {
+		t.Fatalf("fitted %d of %d", len(got.Lines), got.Drawn)
+	}
+	for _, s := range got.Lines {
+		if s.Tier != TierAboveBand || s.TierChanged {
+			t.Fatalf("resample %+v: want an above-band fit", s)
+		}
+	}
+	if none := BootstrapLines(itl.KeyReadings{All: above.All, Steady: above.Steady}, Refit{Tier: TierAboveBand, Line: line}, DefaultResampling()); none.Drawn != 0 {
+		t.Errorf("an above-band line resampled the band's windows: drew %d", none.Drawn)
 	}
 }
 
@@ -172,25 +236,31 @@ func TestTierReachesTheBasis(t *testing.T) {
 	}
 }
 
-// PinnedDefaultB refuses a pinned-B or held line on the default intercept,
-// and nothing else: an ols line that happens to land on it is a fit.
+// PinnedDefaultB refuses a line whose slope was fitted against the default
+// intercept -- pinned-B, held, or borrowed from a donor that was -- within a
+// tolerance, and nothing else: an ols line that lands on it is a fit, and an
+// above-band line pins its own least ITL.
 func TestPinnedDefaultB(t *testing.T) {
+	def := itl.DefaultBaselineSec
 	for _, c := range []struct {
 		tier   string
 		b      float64
 		refuse bool
 	}{
-		{TierPinnedB, itl.DefaultBaselineSec, true},
-		{TierHeld, itl.DefaultBaselineSec, true},
+		{TierPinnedB, def, true},
+		{TierHeld, def, true},
+		{TierBorrowed, def, true},
+		{TierPinnedB, def * (1 + 1e-12), true},
+		{TierPinnedB, def * (1 + 1e-6), false},
 		{TierPinnedB, 0.0015, false},
-		{TierOLS, itl.DefaultBaselineSec, false},
-		{TierBorrowed, itl.DefaultBaselineSec, false},
+		{TierOLS, def, false},
+		{TierAboveBand, def, false},
 	} {
 		d := olsSweep()
 		d.Tier, d.Line.B = c.tier, c.b
 		u, refused := KneeRate(d).(Unanswerable)
 		if refused != c.refuse || refused && u.Reason != PinnedDefaultB {
-			t.Errorf("%s at B %g: %#v, want refused %v", c.tier, c.b, KneeRate(d), c.refuse)
+			t.Errorf("%s at B %.15g: %#v, want refused %v", c.tier, c.b, KneeRate(d), c.refuse)
 		}
 	}
 }

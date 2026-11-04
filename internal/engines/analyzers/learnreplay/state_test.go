@@ -2,12 +2,15 @@ package learnreplay
 
 import (
 	"context"
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
@@ -49,16 +52,27 @@ func TestStateAt_OLSSweepLastCycle(t *testing.T) {
 	if math.Abs(d.Line.A-0.004438) > 5e-7 || math.Abs(d.Line.B-0.001557) > 5e-7 || d.Tier != whatif.TierOLS {
 		t.Errorf("line %+v tier %q, want the page's ols line A 0.004438 B 0.001557", d.Line, d.Tier)
 	}
-	if d.PricingKey == "" || len(d.Readings) == 0 || len(d.SteadyReadings) == 0 {
-		t.Errorf("key %q, %d readings, %d steady; want the line's window", d.PricingKey, len(d.Readings), len(d.SteadyReadings))
+	if d.PricingKey == "" || len(d.Readings.All) == 0 || len(d.Readings.Steady) == 0 {
+		t.Errorf("key %q, %d readings, %d steady; want the line's window", d.PricingKey, len(d.Readings.All), len(d.Readings.Steady))
+	}
+	// The tracker's choice of fit, made again on the key's windows, gives the
+	// analyzer's line back to the last bits, from the steady readings.
+	if !d.Refitted || len(d.LineReadings) != len(d.Readings.Steady) || d.Baseline != d.Line.B {
+		t.Errorf("refitted %v from %d readings (%d steady), baseline %g; want the ols line from the steady ones",
+			d.Refitted, len(d.LineReadings), len(d.Readings.Steady), d.Baseline)
 	}
 	if d.CapacityTokens != 131072 || d.BatchCap != 64 || d.BatchCapSource != "flags" || d.Ranks != 1 || d.Replicas != 1 {
 		t.Errorf("C %g, cap %d (%s), ranks %d, replicas %d; want 131072, 64 from the flags, 1, 1",
 			d.CapacityTokens, d.BatchCap, d.BatchCapSource, d.Ranks, d.Replicas)
 	}
-	if d.InputTokens < 900 || d.OutputTokens < 3900 || d.PrefixHitRate != 0 {
-		t.Errorf("shape IL %g OL %g hit %g, want the last cycle's ~1000/~4000 with no hits", d.InputTokens, d.OutputTokens, d.PrefixHitRate)
+	// The recording ends idle (cycles 224-226 serve nothing): the shape is the
+	// last 20 cycles that had traffic, weighted by request rate.
+	sh := d.Shape
+	if sh.ToCycle != 223 || sh.FromCycle != 204 || sh.Cycles != 20 || sh.PrefixHitRate != 0 ||
+		!(sh.InputTokens > 900 && sh.InputTokens < 6100) || !(sh.OutputTokens > 400 && sh.OutputTokens < 4100) {
+		t.Errorf("shape %+v, want cycles 204-223 of traffic, lengths inside what they served", sh)
 	}
+	t.Logf("measured shape %+v", sh)
 	if !p.Line.IsZero() || p.Tier != "" {
 		t.Errorf("the prefill variant priced on line %+v tier %q", p.Line, p.Tier)
 	}
@@ -106,8 +120,53 @@ func TestStateAt_Refuses(t *testing.T) {
 		"a negative cycle number": {StateQuery{Cycle: -1}, "want 1 or more"},
 	} {
 		_, err := StateAt(context.Background(), rec, Options{}, c.q)
-		if err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("%s: %v, want an error saying %q", name, err, c.want)
+		var q *QueryError
+		if !errors.As(err, &q) || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want a QueryError saying %q", name, err, c.want)
 		}
+	}
+}
+
+// A recording that does not replay is not the caller's question: StateAt's
+// error for it is no QueryError, and a cancelled replay is one too.
+func TestStateAt_ReplayFailureIsNoQueryError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := StateAt(ctx, olsSweepRecording(t), Options{}, StateQuery{})
+	var q *QueryError
+	if err == nil || errors.As(err, &q) {
+		t.Errorf("cancelled: %v, want an error that is no QueryError", err)
+	}
+}
+
+// A line the band does not give back, and the above-band fallback does, is
+// an above-band line, read on the above-band readings: its observed fills
+// are those, at or above itl.DefaultKSat.
+func TestRefitFindsAnAboveBandLine(t *testing.T) {
+	t0 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	above := make([]itl.Observation, 0, 12)
+	for i := range 12 {
+		k := 0.86 + 0.01*float64(i%8)
+		above = append(above, itl.Observation{K: k, ITLSec: 0.01 + 0.05*k + 0.0005*float64(i%3), Timestamp: t0.Add(time.Duration(i) * 15 * time.Second)})
+	}
+	line := itl.RefitAboveBand(above, nil, 0)
+	if line.Tier == "" {
+		t.Fatal("the fallback fits nothing; the case tests nothing")
+	}
+	vs := VariantState{Tier: whatif.TierPinnedB, Line: line.Model, Readings: itl.KeyReadings{Above: above}}
+	vs.refit()
+	if !vs.Refitted || vs.Tier != whatif.TierAboveBand || len(vs.LineReadings) != len(above) {
+		t.Fatalf("%+v, want the above-band tier on the %d above-band readings", vs, len(above))
+	}
+	for _, o := range vs.LineReadings {
+		if o.K < itl.DefaultKSat {
+			t.Errorf("a reading at %g, under the fallback's floor", o.K)
+		}
+	}
+	// A line neither fit gives back is left as it was, unbanded.
+	other := VariantState{Tier: whatif.TierPinnedB, Line: itl.Model{A: 1, B: 0.002}, Readings: itl.KeyReadings{Above: above}}
+	other.refit()
+	if other.Refitted || other.Tier != whatif.TierPinnedB || other.LineReadings != nil {
+		t.Errorf("%+v, want it as it was, with no readings", other)
 	}
 }
