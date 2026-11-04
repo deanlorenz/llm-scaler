@@ -13,12 +13,13 @@ import (
 // the pod collapse sums the ranks' queue minimums and computed-token rates,
 // and the prefill observation (prefill.QueueMins, as the saturation analyzer
 // feeds it) reads the sum as the pod's. Two ranks at 12000 and 12500 tokens/s
-// make a pod at 24500, and five such minutes read V_P at 24500 exactly.
+// make a pod at 24500, and five such minutes read V_P at 24500 exactly, a
+// lower bound (prefill.DataParallelRanks): the pod has two ranks.
 //
 //   - Both ranks queued the whole minute (minimums 1 and 2): busy.
 //   - One rank's queue emptied (0) while the other's did not (2): the pod's
 //     queue never did, and the minute is busy. Its rate is under the pod's
-//     capacity if that rank idled, never over (prefill.QueueMins).
+//     capacity if that rank idled, never over, which the flag says.
 //   - One rank's minimum was not read: the pod's is not known, and no minute
 //     is busy.
 func TestQueueMin_ARankSumIsThePodsBusyMinute(t *testing.T) {
@@ -67,9 +68,14 @@ func TestQueueMin_ARankSumIsThePodsBusyMinute(t *testing.T) {
 				}
 				return
 			}
-			if est.VPSource != prefill.SourceBusyMinutes || est.VP != vp || est.VPLowerBound {
-				t.Errorf("V_P = %v from %q (lower bound %v), want %v from busy minutes", est.VP, est.VPSource,
-					est.VPLowerBound, vp)
+			if est.VPSource != prefill.SourceBusyMinutes || est.VP != vp {
+				t.Errorf("V_P = %v from %q, want %v from busy minutes", est.VP, est.VPSource, vp)
+			}
+			// The collapse counts the pod's two ranks, so its busy minutes
+			// are a lower bound, with the reason.
+			if !est.VPLowerBound || est.VPLowerBoundReason != prefill.DataParallelRanks {
+				t.Errorf("a two-rank pod's busy minutes: lower bound %v (%q), want true (%q)",
+					est.VPLowerBound, est.VPLowerBoundReason, prefill.DataParallelRanks)
 			}
 		})
 	}

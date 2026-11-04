@@ -489,21 +489,51 @@ observation.
 row's `QueueMin` to the observation where `QueueMinKnown` is set
 (`prefill.QueueMins`), behind its own replay switch,
 `prefill-busy-minutes`. A minute is busy when that minimum is above zero
-(finite), the queue's peak is above zero, and decode is not back-pressuring
-prefill; `V_P` is the median computed-token rate over at least 5 of them,
-not flagged as a lower bound. A zero, a minimum that was not read, NaN or
-`+Inf` is not busy. The observation log carries `queueMinPods`, the pods
-that read a minimum this cycle. Three limits:
+(finite), the queue's peak is above zero, the prefill pod's KV is not full
+(`kvFull` at the policy's `kvCacheThreshold`), and decode is not
+back-pressuring prefill. `V_P` is the median computed-token rate over the
+busy minutes of the last 30 minutes (`prefill.BusyWindow`), from at least 5.
+A zero, a minimum that was not read, NaN or `+Inf` is not busy.
+
+**A busy minute reads at or below capacity, never above**: at it when the
+pod ran flat out, under it when it did not. Data-parallel pods and stalls
+under-read:
+
+- On a data-parallel pod the minimum is each rank's least, summed. Above
+  zero, the pod held work every sample of the minute, but one rank may
+  have idled while another queued. When any pod behind the busy minutes
+  has more than one rank, `V_P` is flagged a lower bound
+  (`vpLowerBoundReason=DataParallelRanks`).
+- A stall can leave the queue non-empty while throughput falls. A KV-full
+  prefill pod is excluded, and so is a cycle that the saturation test reads
+  as decode back-pressure. Back-pressure that test does not catch (decode's
+  KV full with a short queue) still counts, and under-reads.
+
+The window exists because `V_P` depends on the prompt lengths a pod is fed,
+and a median over the observation's six hours would keep a load long gone
+and win over the fresher sources. Thirty minutes is six times the 5 busy
+minutes needed, so a pod saturated one minute in six keeps its source.
+
+The observation log carries:
+
+- `busyMinutesOn`, the switch;
+- `queueMinPods`, the pods whose row read a minimum this cycle, whether or
+  not the switch feeds them;
+- `kvFullPods`;
+- `vpLowerBoundReason`.
+
+Three limits:
 
 - The collector issues the queue-minimum query only while a learner
   recording is on (`SetRecordTTFTInputs`), like every R1 field. With none
-  on, no row carries one and busy minutes still never fire; `queueMinPods`
-  reads 0. Issuing it every cycle is a collector change, left for P3 or the
-  first consumer that sizes from `V_P`.
-- On a data-parallel pod the minimum is each rank's least, summed. Above
-  zero, the pod held work every sample of the minute, but one rank may
-  have idled while another queued: that minute reads under the pod's
-  capacity, never over.
+  on, no row carries one and no new busy minute is read: `queueMinPods`
+  reads 0 with `busyMinutesOn=true`. Busy minutes already read stay for the
+  window, so for up to 30 minutes after a recording stops the log can show
+  `vpSource=busy-minutes` with `queueMinPods=0`. Issuing the query every
+  cycle is a collector change, left for P3 or the first consumer that
+  sizes from `V_P`.
+- The KV-full test reads the row's KV at the cycle, a one-minute row, so a
+  pod that filled and drained within the minute is not caught.
 - No committed recording carries a queue minimum, so no golden moves; the
   switch is held by its unit tests (`heldBy`). The prefill-stress recording
   (P2) is the first that will exercise it.

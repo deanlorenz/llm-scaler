@@ -87,7 +87,10 @@ alone: `S_work = I_eff/V_P`, `ρ = λ·E[I_eff]/V_P`.
    over at least 5 such minutes. On P/D this is rare: saturation has never
    recorded a non-back-pressured prefill saturation there. As built, the
    minimum is the recorder's per-pod `QueueMin`, read only while a learner
-   recording is on ([P1 and busy minutes](slo-capacity-planner.md#pr-plan)).
+   recording is on. A minute on a KV-full prefill pod is not busy, and only
+   the last 30 minutes are read. A busy minute reads at or below capacity:
+   data-parallel pods (flagged a lower bound) and stalls under-read
+   ([P1 and busy minutes](slo-capacity-planner.md#pr-plan)).
 2. **Observed peak under a queue.** The highest `PrefillComputedTokenRate`
    sustained over 3 minutes in which the pod held a queue on some sample.
    Throughput never exceeds capacity, so this is a lower bound. Flagged. A peak

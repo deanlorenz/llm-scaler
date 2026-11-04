@@ -97,6 +97,7 @@ CrashLoopBackOff
 CreateContainerConfigError
 CreateContainerError
 D
+DataParallelRanks
 Datastore
 Deleted
 Discarding
@@ -570,6 +571,7 @@ busiestRankKvUsage
 busiestRankQueue
 busy-minutes
 busyMinutes
+busyMinutesOn
 but
 by
 byRole
@@ -1269,6 +1271,7 @@ kvCacheThreshold
 kvCacheUsagePct
 kvCeiling
 kvFromInstant
+kvFullPods
 kvMaxToMean
 kvReqFleet
 kvReqPerSeq
@@ -2542,6 +2545,7 @@ volume
 vp
 vpAboveSlopeBound
 vpLowerBound
+vpLowerBoundReason
 vpRefused
 vpSamples
 vpSource

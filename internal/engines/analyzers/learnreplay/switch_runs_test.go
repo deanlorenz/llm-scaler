@@ -329,10 +329,13 @@ var heldBy = map[string][]heldTest{
 	},
 	// P1's busy minutes: the first runs the switch on and off through
 	// Analyze and asserts both (V_P from busy minutes on, the peak under a
-	// queue off); the second fails with it off (no busy minute).
+	// queue off); the other three fail with it off (no busy minute, no
+	// lower-bound reason, no KV-full pod passed).
 	saturation.SwitchPrefillBusyMinutes: {
 		{"../saturation", "TestPrefillBusy_BusyMinutesRecoverVP"},
 		{"../saturation", "TestPrefillBusy_AnEmptiedOrUnreadMinuteIsNotBusy"},
+		{"../saturation", "TestPrefillBusy_AKVFullMinuteIsNotBusy"},
+		{"../saturation", "TestPrefillBusy_ADataParallelPodIsALowerBound"},
 	},
 	// Issue #275's lift: an aggregated figure sizes once the GPS check has
 	// agreed. Both run the switch on and fail with it off: the first checks
