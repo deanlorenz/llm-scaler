@@ -21,6 +21,12 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
+// The output formats -o takes.
+const (
+	outputText = "text"
+	outputJSON = "json"
+)
+
 // answerFlags are the flags both questions take: where to read the fleet,
 // and what to assume about it.
 type answerFlags struct {
@@ -50,7 +56,7 @@ func (f *answerFlags) register(fs *flag.FlagSet) {
 	fs.Float64Var(&f.headroom, "headroom", 0, "the operating point as a fraction of the knee; default the policy's scaleUpThreshold")
 	fs.Float64Var(&f.tpotRatio, "assume-tpot-ratio", 0, "R_q, a TPOT percentile over its mean, assumed rather than learned (flagged)")
 	fs.Uint64Var(&f.seed, "seed", whatif.DefaultResampling().Seed, "the seed of the bands' bootstrap")
-	fs.StringVar(&f.output, "o", "text", "output: text or json")
+	fs.StringVar(&f.output, "o", outputText, "output: text or json")
 	fs.StringVar(&f.ttft, "ttft", "", "TTFT target: not modelled yet")
 	fs.StringVar(&f.ttftPercentile, "ttft-percentile", "", "TTFT percentile: not modelled yet")
 	fs.StringVar(&f.assumeVP, "assume-vp", "", "prefill token throughput: not modelled yet")
@@ -69,7 +75,7 @@ func (f *answerFlags) check(fs *flag.FlagSet) error {
 	switch {
 	case f.recording == "":
 		return usagef("--recording is required")
-	case f.output != "text" && f.output != "json":
+	case f.output != outputText && f.output != outputJSON:
 		return usagef("-o %q, want text or json", f.output)
 	case f.decode < 0:
 		return usagef("--decode %d, want 0 (the recorded count) or more", f.decode)
@@ -133,7 +139,7 @@ type pricedVariant struct {
 	lines    whatif.LineResamples
 }
 
-// decodeRoles is the variants a question prices: every variant that is not
+// decodeVariants is the variants a question prices: every variant that is not
 // prefill (decode, and aggregated, whose line prices decode too), or the one
 // --variant names.
 func (f *answerFlags) decodeVariants(st *learnreplay.State) ([]pricedVariant, error) {
@@ -260,7 +266,7 @@ func (pv pricedVariant) band(r whatif.Result, value func(whatif.Decode) whatif.R
 	})
 }
 
-// headroom is the operating point's fraction of the knee: --headroom, else
+// headroomFor is the operating point's fraction of the knee: --headroom, else
 // the policy's scaleUpThreshold, else the default.
 func (f *answerFlags) headroomFor(p *config.ScalingPolicy) float64 {
 	switch {
@@ -272,7 +278,7 @@ func (f *answerFlags) headroomFor(p *config.ScalingPolicy) float64 {
 	return config.DefaultScaleUpThreshold
 }
 
-// tpotRatio resolves R_q for a percentile q: --assume-tpot-ratio, else
+// tpotRatioFor resolves R_q for a percentile q: --assume-tpot-ratio, else
 // learned from the recording's TPOT windows. A refusal comes back as the
 // Result the percentile answers with.
 func (f *answerFlags) tpotRatioFor(st *learnreplay.State, q float64) (whatif.TPOTRatio, []whatif.Flag, *whatif.Unanswerable) {

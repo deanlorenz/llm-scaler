@@ -111,7 +111,7 @@ func runReplicasToSLO(ctx context.Context, args []string, out io.Writer) error {
 	}
 	code := whatif.ExitCode(results...)
 
-	if f.output == "json" {
+	if f.output == outputJSON {
 		w := newWireOutput("replicas-to-slo", &f, st, code)
 		for _, a := range answers {
 			in := inputsOf(&f, a.pv)

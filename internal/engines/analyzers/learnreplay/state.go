@@ -2,6 +2,7 @@ package learnreplay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -152,7 +153,7 @@ func StateAt(ctx context.Context, recording []byte, opts Options, q StateQuery) 
 	slices.Sort(keys)
 	switch {
 	case len(keys) == 0 && q.ModelID == "":
-		return nil, fmt.Errorf("learnreplay: the recording holds no saturation cycle")
+		return nil, errors.New("learnreplay: the recording holds no saturation cycle")
 	case len(keys) == 0:
 		return nil, fmt.Errorf("learnreplay: the recording holds no cycle of model %q", q.ModelID)
 	case len(keys) > 1:

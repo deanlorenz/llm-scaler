@@ -13,7 +13,7 @@ import (
 // moves it.
 func readingsOn(line itl.Model, n int, noise float64) []itl.Observation {
 	t0 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
-	var out []itl.Observation
+	out := make([]itl.Observation, 0, 2*n)
 	for c := range n {
 		at := t0.Add(time.Duration(c) * 15 * time.Second)
 		for r, k := range []float64{0.2 + 0.5*float64(c%7)/7, 0.25 + 0.5*float64((c+3)%7)/7} {
@@ -90,7 +90,7 @@ func TestBootstrapHasNothingToResample(t *testing.T) {
 // so the tier is unstable, and the band still comes from the pinned fits.
 func TestBootstrapFallsBackToPinnedB(t *testing.T) {
 	t0 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
-	var obs []itl.Observation
+	obs := make([]itl.Observation, 0, 20)
 	for c := range 20 {
 		obs = append(obs, itl.Observation{K: 0.4, ITLSec: 0.0035 + 0.0001*float64(c%3), Timestamp: t0.Add(time.Duration(c) * time.Minute)})
 	}
