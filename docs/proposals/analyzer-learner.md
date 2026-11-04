@@ -992,27 +992,44 @@ defaults), then plays each cycle in the order a cycle calls them
 
 1. `slo.BeginCycle`, called by the cycle before `optimizeV2`
    (`engine.go:881`); the SLO analyzer counts its judging windows by it;
-2. `NoteVariantsPresent` on saturation and slo, including parked variants when
+2. `retainSettle` on the models with a variant that has replicas
+   (`engine_v2.go:786`, from `optimizeV2`'s prune): a model parked whole is
+   in no model group, and its settle record is forgotten. A step with no
+   such model stops here, as the engine's cycle with no active variant
+   returns (`evictAllAnalyzerSeries`, `retainSettle(nil)`);
+3. `NoteVariantsPresent` on saturation and slo, including parked variants when
    the capture can see them (`engine_v2.go:482-514`, `:519` onwards);
-3. the three sweeps, saturation's `EvictStaleHistory`, the store's
+4. the three sweeps, saturation's `EvictStaleHistory`, the store's
    `EvictStale` and slo's `EvictStale` (`engine.go:1478-1479`,
    `engine_v2.go:561-616`), before anything stamps state this cycle;
 
 then, **per model**:
 
-4. `observeSettle` (`engine_v2.go:187`; "the settle tracker first"), or
+5. `observeSettle` (`engine_v2.go:187`; "the settle tracker first"), or
    `holdSettle` for a model with no rows or no policy;
-5. per variant, in key order, `StableAcceleratorFor` and then
+6. per variant, in key order, `StableAcceleratorFor` and then
    `FileScaleTarget` through `LoadFromScaleTarget` (`engine_v2.go:74-101`,
    reached from `buildAnalyzerInput` at `:199`). `forgetOnRequest` is left out:
    a capture has no annotation history, so it writes no `ForgetVariant` events;
-6. `Analyze`: saturation first (`:203`), then the listed analyzers. With slo
+7. `Analyze`: saturation first (`:203`), then the listed analyzers. With slo
    listed, its router source serves the captured router latency.
 
 The variant states come from the role map, and the policy from `--policy` or the
 defaults. The output is an ordinary recording that carries the commit of the
 build that generated it, so `learnergolden add` (which replays at the recorded
-commit) accepts it.
+commit) accepts it. Its start line carries the capture's flags
+(`learnrec.Start.Caveats`), so a golden made from it says what the capture
+could not see.
+
+**Follow-up: Replay does not retain the settle tracker.** The engine records
+no event for `retainSettle`, so a Fidelity replay (`learnreplay/settle.go`)
+never forgets a model's settle record, where the engine and Generate do. A
+recording in which a model is parked whole and returns within
+`settle.TraceHorizon` replays with that model's stale sightings, and its
+returning replicas are judged as already watched rather than joined. None of
+the committed goldens has such a model. The fix records the retained set
+(or derives it from each cycle's Analyze and parked events) and applies it in
+replay; it changes Replay, so it is its own PR.
 
 **Roles and readiness for a past window** cannot come from a kubeconfig, which
 sees today's pods: a scaled-out run's pods are gone. They come from

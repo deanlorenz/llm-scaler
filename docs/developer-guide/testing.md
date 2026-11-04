@@ -323,8 +323,9 @@ the slo analyzer listed, streamed load, router TTFT recorded.
 
    ```bash
    kubectl -n "$PROM_NS" port-forward "svc/$PROM_SVC" 9090:9090 &
-   curl -s -XPOST http://localhost:9090/api/v1/admin/tsdb/snapshot
-   # {"status":"success","data":{"name":"20261101T120000Z-..."}}
+   # The answer is {"status":"success","data":{"name":"20261101T120000Z-..."}}.
+   NAME=$(curl -s -XPOST http://localhost:9090/api/v1/admin/tsdb/snapshot | jq -r .data.name)
+   test -n "$NAME" && test "$NAME" != null || echo "no snapshot: is the admin API on?"
    kubectl -n "$PROM_NS" cp -c prometheus "$PROM_POD:/prometheus/snapshots/$NAME" ./ols-sweep-slo-snapshot
    ```
 
@@ -357,7 +358,15 @@ the slo analyzer listed, streamed load, router TTFT recorded.
 
    The summary lists each variant and every flag the capture carries:
    engine parameters from flags, roles inferred from Pod names, Pods read as
-   Ready without kube-state-metrics. Read them before trusting the window.
+   Ready without kube-state-metrics, rollouts not seen. Read them before
+   trusting the window; the generated recording carries them too.
+
+   Every query is required. One that fails (often `query.max-samples` on a
+   histogram over many steps) stops the capture with exit 1 and names the
+   query: shorten the window or lengthen `--step`. Each HTTP request may
+   take `--timeout` (2m30s by default). A window over
+   `whatifsource.MaxStepQueries` steps times queries (about a day at 15 s)
+   needs `--force`, since every sample is held in memory.
 
 4. Generate the recording, and add it as a golden like any recording
    (below):
@@ -374,7 +383,7 @@ a live one:
 
 ```bash
 go test -p 1 ./internal/whatifsource/... ./cmd/whatif/
-go test -p 1 ./internal/engines/analyzers/learnreplay/ -run TestGenerate
+go test -p 1 ./internal/engines/analyzers/learnreplay/ -run 'TestGenerate|TestMessageWords_AreCurrent'
 go test -p 1 ./internal/engines/steadystate/ -run TestWhatifCapture -v
 ```
 
