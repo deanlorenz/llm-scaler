@@ -268,7 +268,13 @@ moments of the current distribution.
 From the `ols-sweep` golden: the last published line (`A` = 0.004438,
 `B` = 0.001557 s), `C` = 131,072 tokens, batch cap 64, one rank, one prefill and
 one decode pod. `IL` = `OL` = 1000, no prefix hits. `a` = 10.1 ms plus the
-2.5 ms overhead, from the golden. **`V_P` = 30,000 tok/s is assumed**: the
+2.5 ms overhead, from the golden. (That 10.1 ms is an intercept fitted
+against the long-window prompt mean; P1's fit against the effective prompt
+gives 8.36 ms and the overhead 2.68 ms, so `a` is 11.04 ms, not 12.6
+([end-to-end TTFT](slo-capacity-planner-ttft.md#what-is-derivable-today)).
+The example is left as computed: `a` enters only the request's own
+latency, not utilization or the knee, so the TTFT figures and the TTFT
+floor below would each read about 1.6 ms lower.) **`V_P` = 30,000 tok/s is assumed**: the
 golden's prefill pod never queued, so the tool refuses `V_P` from it. Prompt
 spread: coefficient of variation 1, assumed. Flow control inferred off. The
 figures are reproduced by two independent scripts.
@@ -419,7 +425,8 @@ pass mark (goldens scale out):
 A check with no data is **SKIPPED with a reason**, never passed. TTFT's pass mark
 is [the staircase](slo-capacity-planner-ttft.md#ground-truth-and-the-staircase).
 
-**Property cases**, in `internal/signals/whatif/whatiftest`, each
+**Property cases**, in `internal/signals/whatif` (`property_test.go`, in the
+package so the chain's Erlang C case reaches its solver), each
 mutation-checked:
 
 - The rate never falls when a target loosens, never rises when prompts or
@@ -468,6 +475,25 @@ is made.**
 | M2 | The staircase run; an operator page in `docs/reference/`; drops UNVALIDATED if it passes | — | D4, P3 |
 | Only if asked | The controller endpoint and two gauges | none | P3 |
 | Later | Prefill line and learned batch cap in the snapshot; the floor's prefill mu from `V_P`; a shared prefill/decode budget; #275, #277 | — | — |
+
+**P1 and busy minutes.** `V_P`'s first source, busy minutes, needs each pod's
+least waiting count over the minute (`min_over_time` of
+`num_requests_waiting`), which no query reads today. P1 takes it as
+`prefill.Cycle.QueueMin` and is fed none, so busy minutes never fire and
+`V_P` comes only from the lower-bound sources (the peak under a queue, the
+back-pressure bound). R1 adds a per-pod `QueueMin` with a presence bit
+(`QueueMinKnown`); once R1 merges, a follow-up to P1 wires it into the
+observation.
+
+**P3 and the bias of `f`.** P1's `f` is de-biased for Poisson arrivals, and
+the de-bias errs both ways
+([where it is most wrong](slo-capacity-planner-ttft.md#where-it-is-most-wrong)).
+On a real imbalance it reads low: four pods at 2:1:1:1 (`f` 1.6) read about
+1.50 at 100 requests a pod, about 6% low, and about 1.57 at 1500. A low `f`
+over-promises TTFT. On equal pods with variable prompts it reads high, by
+about `√(1+Cs²)` times the request count's excess less that excess: about
+1.03 at 100 requests a pod with `Cs²` = 1. P1 corrects neither; P3 carries
+both as stated limits.
 
 The `ols-sweep-slo` run (flow control off, scales out, router TTFT recorded)
 is worth preserving now, before any capture tool exists, as a Prometheus
@@ -542,26 +568,36 @@ Every answer is an `Answer{Value, Band, Basis, Flags}` or an
 | --- | --- |
 | `NoLine` | No ITL line, or an invalid fit |
 | `PinnedDefaultB` | Only a `pinned-B` fit on the default 6 ms intercept |
-| `NoCapacity` | No KV capacity reading or flag |
+| `NoCapacity` | No KV capacity reading or flag, or one whose band top holds no whole request |
 | `NoBatchCap` | No batch cap known |
 | `NoRoleMap` | Standalone with neither a kubeconfig nor `--role-of` |
-| `NoTraffic` | No traffic in the window |
+| `NoTraffic` | No traffic in the window: an output length or KV footprint per request that is not positive |
 | `NoPrefillCapacity` | No `V_P` from a conservative source (always on SGLang) |
 | `TokenGapPercentile` | A percentile over token gaps (ITL); per-request TPOT percentiles are supported |
 | `NoTPOTHistogram` | A per-request TPOT percentile with no router or engine TPOT histogram (the router's needs `usage` on responses) and no `--assume-tpot-ratio` |
 | `TPOTQuantileUnbounded` | The TPOT `q` quantile falls in the histogram's `+Inf` bucket |
 | `TargetBelowFloor` | The target is below what any number of replicas reaches |
 | `FlowControlUnknown` | Flow control on and the detector's thresholds unknown |
+| `Saturated` | Question 2's operating rate (`--rate`) or the decode admission chain at or above the knee, where no fill or admission wait exists; both saturate at the same rate |
+| `NoDecodeReplicas` | No decode replica read from the fleet |
+| `MalformedHistogram` | A TPOT histogram whose data cannot be read: a NaN, non-positive or falling edge, a negative or non-finite count, observations with no sum. Counts that dip, as `rate()` leaves them, are made monotone, not refused |
+| `TooManySlots` | More than 1,000,000 slots on one replica (a cap or capacity read wrongly); the chain holds one state per slot |
+| `InvalidInput` | A usage or configuration error, exit `2`, not `3`: a NaN or infinite target, rate or assumed ratio, a percentile outside (0, 1), an assumed `R_q` below 1, a headroom outside (0, 1] (outside (0, 1) for question 2), both `--rate` and a headroom for question 2, an invalid band |
 
 **Flags**, never refusals: extrapolation (with its distance), a borrowed, held
 or snapshot line, a lower-bound or assumed `V_P`, no readiness, an unstable
 tier, an assumed `R_q`, a pooled `R_q` on a bucket, a coarse TPOT bucket, the
 engine TPOT histogram used in place of the router's, a rate held down by decode
 admission, flow control inferred off, above a
-flow-control onset, several priority bands, and UNVALIDATED on TTFT.
+flow-control onset, several priority bands, and UNVALIDATED on TTFT. The decode
+library's flags today: `AssumedTPOTRatio`, `CoarseTPOTBucket`,
+`BelowFittedBand` (a fill, or the knee, read at the band's bottom because it
+sits below the band the line was fitted over) and `KVBoundSlots` (admission
+slots set by the requests the band's top holds rather than the batch cap).
 
 Exit codes: `0` every role answered; `3` a role refused (output still printed);
-`2` usage or input error; `1` internal error.
+`2` usage or input error; `1` internal error. `whatif.ExitCode` applies them:
+`2` if any result is `InvalidInput`, else `3` if any is refused, else `0`.
 
 ## See also
 

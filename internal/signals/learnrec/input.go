@@ -12,7 +12,8 @@ import (
 // Input is an Analyze call's input as a recording holds it: the rows raw, as
 // Analyze received them, with every presence bit; the variants' states; the
 // merged policy, analyzerTuning and loadImbalance included, every cycle; the
-// scheduler queue and the arrival rate.
+// scheduler queue, the arrival rate, the router latency and the flow-control
+// pools.
 //
 // It mirrors domain.AnalyzerInput field for field, less VariantMetadata,
 // which no analyzer reads: the engine's composite event records the part of
@@ -31,17 +32,24 @@ type Input struct {
 	ConfigType     string
 	SchedulerQueue *domain.SchedulerQueueMetrics
 	ArrivalRate    float64
+	// RouterLatency and FlowControlPools are left out while zero, so a
+	// recording made before they existed is written again byte for byte
+	// (OmitZeroTag).
+	RouterLatency    *domain.RouterLatency    `learnrec:"omitzero"`
+	FlowControlPools []domain.FlowControlPool `learnrec:"omitzero"`
 }
 
 // InputOf is the recorded form of in.
 func InputOf(in domain.AnalyzerInput) Input {
 	out := Input{
-		ModelID:        in.ModelID,
-		Namespace:      in.Namespace,
-		ReplicaMetrics: in.ReplicaMetrics,
-		VariantStates:  in.VariantStates,
-		SchedulerQueue: in.SchedulerQueue,
-		ArrivalRate:    in.ArrivalRate,
+		ModelID:          in.ModelID,
+		Namespace:        in.Namespace,
+		ReplicaMetrics:   in.ReplicaMetrics,
+		VariantStates:    in.VariantStates,
+		SchedulerQueue:   in.SchedulerQueue,
+		ArrivalRate:      in.ArrivalRate,
+		RouterLatency:    in.RouterLatency,
+		FlowControlPools: in.FlowControlPools,
 	}
 	if in.Config != nil {
 		out.Config, out.ConfigType = in.Config, fmt.Sprintf("%T", in.Config)

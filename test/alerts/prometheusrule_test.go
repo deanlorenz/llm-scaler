@@ -114,7 +114,7 @@ func TestExtractMetricNamesIgnoresLabelMatcherContents(t *testing.T) {
 		},
 		{
 			name: "aggregation and rate survive",
-			expr: `sum by (query_type, reason) (rate(wva_metrics_collection_errors_total[5m])) > 0.0833`,
+			expr: `sum by (query_type, reason) (rate(wva_metrics_collection_errors_total{query_type!="learner_recording"}[5m])) > 0.0833`,
 			want: []string{"wva_metrics_collection_errors_total"},
 		},
 		{

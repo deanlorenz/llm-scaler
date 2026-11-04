@@ -47,7 +47,8 @@ import (
 //     (publishEngineConfig).
 //
 // The input carries the rows, the variant states and their discovery
-// metadata, the merged policy, the scheduler queue and the arrival rate.
+// metadata, the merged policy, the scheduler queue and the arrival rate, and
+// the router latency and flow-control pools it collects here.
 // Learning capacity stays in the analyzers; what the capacity-build step
 // derives from their results (the role join, the clamp to the scale target,
 // supply and the scaling signals) still runs after Analyze, in
@@ -115,7 +116,7 @@ func (e *Engine) buildAnalyzerInput(
 		e.publishEngineConfig(namespace, modelID, va.Name, publishAccel, gpuCount)
 	}
 
-	return domain.AnalyzerInput{
+	input := domain.AnalyzerInput{
 		ModelID:         modelID,
 		Namespace:       namespace,
 		ReplicaMetrics:  replicaMetrics,
@@ -125,6 +126,18 @@ func (e *Engine) buildAnalyzerInput(
 		SchedulerQueue:  schedulerQueue,
 		ArrivalRate:     arrivalRate,
 	}
+	// The router's latency and flow-control pools, every cycle whatever the
+	// policy lists, while a learner recording is on, so the recording
+	// carries them for the TTFT model (docs/proposals/analyzer-learner.md,
+	// 2.9). Off, neither is queried: they would cost up to eight queries per
+	// namespace a cycle that nothing reads. No analyzer reads them: the slo
+	// analyzer asks its router source as before, and reads the same results
+	// from the collector's cycle memo.
+	if c := e.ReplicaMetricsCollector; c != nil && c.RecordsTTFTInputs() {
+		input.RouterLatency = c.CollectRouterLatency(ctx, modelID, namespace)
+		input.FlowControlPools = c.CollectFlowControlPools(ctx, modelID, namespace)
+	}
+	return input
 }
 
 // runSaturation runs the saturation analyzer on the cycle's input and
@@ -610,6 +623,8 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 			"variantStamps", history.VariantStamps,
 			"stashedWindows", history.StashedWindows,
 			"batchCaps", history.BatchCaps,
+			"prefillObservations", history.PrefillObservations,
+			"prefillBounds", history.PrefillBounds,
 			"capacityRecords", records,
 
 			"recordTimeout", capacity.EvictionTimeout)

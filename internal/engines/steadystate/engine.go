@@ -478,9 +478,11 @@ func newEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 	// estimate per-replica arrival rate and model queue behavior.
 	registration.RegisterQueueingModelQueries(metricsRegistry)
 
-	// The router latency the slo analyzer judges an SLO on. Run only when that
-	// analyzer asks for them.
+	// The router latency the slo analyzer judges an SLO on, and the router's
+	// flow-control pools. The engine collects both every cycle into the
+	// analyzer input (buildAnalyzerInput), recorded for the TTFT model.
 	registration.RegisterSLOQueries(metricsRegistry)
+	registration.RegisterFlowControlPoolQueries(metricsRegistry)
 
 	return &engine
 }
@@ -894,7 +896,7 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	// Open the collector's cycle so the models grouped below share one execution
 	// of each namespace-scoped query instead of one per model.
 	if e.ReplicaMetricsCollector != nil {
-		e.ReplicaMetricsCollector.BeginCycle()
+		e.beginCollectorCycle()
 		defer e.ReplicaMetricsCollector.EndCycle()
 	}
 
@@ -1171,6 +1173,35 @@ func (e *Engine) modelOutputSeed(
 	}
 	slices.Sort(named)
 	return best, named
+}
+
+// applyStartSeeds puts each variant's replicaStartSeconds seed on its state,
+// from its trigger metadata, as modelOutputSeed reads defaultOutputTokens: the
+// ScaledObject names the variant, so the variant name is the registry key. A
+// seed the parse ignored leaves the state unset and is reported once per
+// change; it is never a trigger error. A variant the registry does not hold,
+// or whose metadata ParseMeta refuses, gets no seed.
+//
+// Carried in the analyzer input so a learner recording holds it. No analyzer
+// reads it yet (step 5c of docs/proposals/analyzer-learner.md).
+func (e *Engine) applyStartSeeds(ctx context.Context, namespace string, states []domain.VariantReplicaState) {
+	if e.Variants == nil {
+		return
+	}
+	for i := range states {
+		entry, ok := e.Variants.Get(namespace, states[i].VariantName)
+		if !ok {
+			continue
+		}
+		meta, err := registry.ParseMeta(entry.Metadata)
+		if err != nil {
+			continue
+		}
+		e.policies.ReportIgnoredStartSeed(ctx, namespace, states[i].VariantName, meta.ReplicaStartSecondsIgnored)
+		if meta.ReplicaStartSeconds > 0 {
+			states[i].StartSeedSeconds, states[i].StartSeedSet = meta.ReplicaStartSeconds, true
+		}
+	}
 }
 
 // modelPolicy returns the policy tier a model scales under, plus every distinct
@@ -2174,6 +2205,7 @@ func (e *Engine) prepareModelData(
 	for _, m := range variantMetadata {
 		variantStates = append(variantStates, m.ToReplicaState())
 	}
+	e.applyStartSeeds(ctx, namespace, variantStates)
 	schedulerQueue := e.ReplicaMetricsCollector.CollectSchedulerQueueMetrics(ctx, modelID, namespace)
 	arrivalRate := e.ReplicaMetricsCollector.CollectModelArrivalRate(ctx, modelID, namespace)
 

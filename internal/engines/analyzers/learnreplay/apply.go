@@ -243,6 +243,10 @@ type policyInput struct {
 	ConfigType     string
 	SchedulerQueue *domain.SchedulerQueueMetrics
 	ArrivalRate    float64
+	// Absent from a recording made before they were collected (R1), and
+	// read then as nil.
+	RouterLatency    *domain.RouterLatency
+	FlowControlPools []domain.FlowControlPool
 }
 
 // policyType is the Config type the engine passes, as InputOf names it.
@@ -268,6 +272,11 @@ func decodeInput(raw learnrec.Raw) (domain.AnalyzerInput, error) {
 		VariantStates:  in.VariantStates,
 		SchedulerQueue: in.SchedulerQueue,
 		ArrivalRate:    in.ArrivalRate,
+		// Carried so the replay records the input it read, byte for byte.
+		// The slo analyzer is still served the router latency its own
+		// event recorded (recordedRouter), as the run served it.
+		RouterLatency:    in.RouterLatency,
+		FlowControlPools: in.FlowControlPools,
 	}
 	if in.Config != nil {
 		out.Config = in.Config

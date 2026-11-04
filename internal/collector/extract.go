@@ -92,6 +92,26 @@ type podMetricData struct {
 	generationTokenRateKnown      bool
 	requestRateKnown              bool
 	runningRequestsKnown          bool
+	// queueLenKnown follows the queue series the value above came from, as
+	// kvUsageKnown does; avgTTFTKnown and avgServiceTimeKnown are set with
+	// their values, and stay set like ITL's.
+	queueLenKnown       bool
+	avgTTFTKnown        bool
+	avgServiceTimeKnown bool
+	// The TTFT model's inputs (ttft_inputs.go): histograms by bucket bound,
+	// nil when no bucket was read, and means with their presence bits.
+	promptTokensBuckets    map[float64]float64
+	ttftBuckets            map[float64]float64
+	queueTimeBuckets       map[float64]float64
+	tpotBuckets            map[float64]float64
+	avgQueueTime           float64
+	avgQueueTimeKnown      bool
+	avgPrefillTime         float64
+	avgPrefillTimeKnown    bool
+	avgKVTransferTime      float64
+	avgKVTransferTimeKnown bool
+	queueMin               float64
+	queueMinKnown          bool
 }
 
 // extractPodMetrics reads every series the replica queries returned into one
@@ -174,6 +194,10 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 			podData[instanceKey].queueLen = int(value.Value)
 			podData[instanceKey].queueTimestamp = value.Timestamp
 			podData[instanceKey].hasQueue = true
+			// The bit only, the value kept as it always was: a NaN the source
+			// turned into 0 is not an empty queue. It follows the last series
+			// under the key, as the value does.
+			podData[instanceKey].queueLenKnown = value.Finite() && value.Value >= 0
 
 			logger.V(logging.DEBUG).Info("Queue metric",
 				"instanceKey", instanceKey,
@@ -509,6 +533,9 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value > 0 {
 					podData[instanceKey].avgTTFT = value.Value
 					podData[instanceKey].avgTTFTTimestamp = value.Timestamp
+					// Sticky, like ITL: a later unusable series leaves the
+					// value above, so it leaves the bit too.
+					podData[instanceKey].avgTTFTKnown = true
 
 					logger.V(logging.DEBUG).Info("Avg TTFT metric",
 						"instanceKey", instanceKey,
@@ -568,6 +595,7 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value > 0 {
 					podData[instanceKey].avgServiceTime = value.Value
 					podData[instanceKey].avgServiceTimeTimestamp = value.Timestamp
+					podData[instanceKey].avgServiceTimeKnown = true
 
 					logger.V(logging.DEBUG).Info("Avg service time metric",
 						"instanceKey", instanceKey,
@@ -659,6 +687,7 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 
 	c.extractSequenceCap(ctx, modelID, namespace, results, podData)
 	c.extractOutputBuckets(ctx, modelID, namespace, results, podData)
+	c.extractTTFTInputs(ctx, modelID, namespace, results, podData)
 
 	return podData, nil
 }

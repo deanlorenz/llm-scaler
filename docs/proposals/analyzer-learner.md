@@ -930,10 +930,24 @@ made before R1 replays unchanged:
 | Per pod | Queue-time mean and histogram | `request_queue_time_seconds` (`queue_time_seconds`) |
 | Per pod | Prefill-time mean | `request_prefill_time_seconds` (vLLM only) |
 | Per pod | KV transfer time mean | `nixl_xfer_time_seconds` (vLLM only) |
-| Per model | Router TTFT and TPOT every cycle | a new `AnalyzerInput.RouterLatency`, collected by the engine every cycle: one more query per model per cycle |
+| Per model | Router TTFT and TPOT every cycle | a new `AnalyzerInput.RouterLatency`, collected by the engine every cycle while recording is on |
 | Per model | Router per-request TPOT histogram | `llm_d_epp_request_streaming_tpot_seconds_bucket`, as bucket rates beside the TTFT ones. `RouterLatency` keeps only the TPOT `_sum` and `_count` rates today, and the collector queries only those |
 | Per pod | Engine per-request TPOT histogram | `vllm:request_time_per_output_token_seconds_bucket`, the fallback source for the TPOT ratio (vLLM only) |
-| Per pool | Flow-control wait histogram, pool saturation by stage, outcomes | `flow_control_request_queue_duration_seconds`, `flow_control_pool_saturation`, `flow_control_requests_total`. They carry `inference_pool`, not a model, so they are recorded per pool and joined to a model only when the pool serves one |
+| Per pod | Queue minimum over the minute, `QueueMin` with `QueueMinKnown`: above zero, the engine had work waiting the whole minute (the busy minutes TTFT P1 reads its `V_P` from) | `min_over_time(num_requests_waiting[1m])` (`num_queue_reqs`). Each rank's least is summed over the pod's ranks, as the queue length sums their peaks: a floor under the pod's own least, and tighter than the largest rank's |
+| Per model | Flow-control wait histogram, dispatched requests only (`outcome="Dispatched"`): only a dispatched request's wait is part of a TTFT | `flow_control_request_queue_duration_seconds`, which carries `model_name` and `target_model_name` as well as the pool, so it is read per model with the router latency (`RouterLatency.FlowControlWaitBuckets`), not through the pool join |
+| Per pool | Pool saturation by stage, outcomes | `flow_control_pool_saturation` (stages `prefill`, `decode` and `effective`, the larger of the two, which gates dispatch; a pool with no endpoint reads 1.0) and `flow_control_requests_total`. They carry `inference_pool`, not a model, so they are recorded per pool and joined to a model only when the pool serves one |
+
+**Cost.** Every query above runs only while a learner recording is on: the
+engine tells the collector at the start of each cycle whether its recorder
+is writing (`Engine.beginCollectorCycle`, collector `SetRecordTTFTInputs`),
+and with recording off a cycle issues exactly the queries it issued before
+R1, the slo analyzer's router queries included, for the models that list it.
+With recording on, a namespace of vLLM models costs up to 16 more queries
+per cycle: 8 per pod, 5 router queries (the slo analyzer's 3, for models
+that do not list it, and the 2 histograms) and 3 per-pool queries. An SGLang
+or mixed namespace adds the SGLang variants of the 5 engine-specific per-pod
+queries. Each runs once per namespace, shared through the cycle memo, and a
+failed one is counted once, under `query_type="learner_recording"`.
 
 `learnrec.Input` mirrors `domain.AnalyzerInput`, so the router field is new on
 both. Replay keeps serving `AnalyzeEvent.RouterLatency` to the SLO analyzer, for
@@ -946,6 +960,17 @@ goldens are regenerated with `learnergolden update`: values unchanged, new
 fields absent. No switch: nothing reads the fields in R1. R1 also updates the
 comment on `constants.VLLMRequestPrefillTimeSeconds`, which then becomes
 collected.
+
+**Later: write each cycle's input once.** Each `Analyze` event carries its
+whole input, so a model listing three analyzers writes its rows three times
+a cycle. With R1's fields that is an estimated 4 KB more per replica per
+`Analyze`, about 3.3 times the measured 1.7 KB: at a 15 s cycle with 100
+replicas and three analyzers listed, the 256Mi cap fills in about 40 minutes
+instead of 2.1 hours. A later PR writes each model's cycle input once, as its
+own event, and has each `Analyze` event name that event's sequence number
+instead of carrying a copy; replay resolves the reference. That brings the
+cost back to one input per model per cycle, whatever the policy lists, and
+needs no change to what a replay reads.
 
 **R2: `whatif capture` and a `Generate` replay mode.**
 
@@ -1451,7 +1476,7 @@ or deprecated, docs rows rewritten, tools updated.
 | **3** | Mu (#5, #6). The fold across pods stays the mean (#282). Its joined test reads k2's stamp. Exact repeats count as use. Unknown age resolves safe. The latch persisted or restored safe-side. Two prefill pods in one spacing pin #7's max before the fold is touched. The closed-loop probe and its fleet simulator land here (2.5) | flow control off (no) | `learner-write` for mu, including choice flips. `throughput-demand-floor` names `muKey`, `muSource`, `startEstimateSeconds`, `startSource`. Measured mu waits out the post-restart settle |
 | **4a** | ITL #1 and #13 onto the tracker. Cap admission above the band (#293, #331), the policy band, the steady-gate keys and the persisted held slope (`ITLSlopes`, #329) stay as they are. Neutral on the recording except two named changes, each behind its own switch: ITL waits the settle after a controller restart (today it takes the first cycle as settled), and one missing row no longer restarts a settle (the 1 min absence rule, 4.2). Neither occurs in the OLS recording, so 4a carries its own two tests through ITL, a controller restart and one missing row, each failing on 4a's parent; PR 2's restart suite runs as well. The closed-loop probe runs through a controller restart (4.4) | a run that reaches OLS, SLO analyzer recorded with its router latency (no) | No ITL refit for 2 min after a controller restart; with the snapshot off the throughput floor is silent for about 2.75 min (SLO side, masked by the default 300 s scale-down stabilization as long as the controller is back within about 2 min). A missed scrape no longer restarts ITL's settle |
 | **4b** | ITL #16 (throughput analyzer) moves onto `itl.Tracker`, a tracker of its own, and gains #273's fixes and row 1's cap admission, still reading the policy band (`ITLBand()`). Five switches over four PRs (4b-0 to 4b-3): the steady gate (the move, with the settling stamp, the pinned fit over the window, positive B, +Inf refused and the held slope), the GPS-mismatch clear dropped, the settle tracker, the wait after a controller restart, and cap admission; each with a negative control on the parent, and the probe for the slope hold. Design: [PR 4b](#pr-4b-the-throughput-analyzers-itl-line) | `throughput-sweep` and `throughput-sweep-restart` (no) | `learner-write` when A or B moves; `Reason` `T2-held`; no throughput capacity for about 2 min after a controller restart. Throughput-analyzer fleets may change, as named: mostly fewer replicas where the throughput analyzer set the order (above-band rows and joiners' warm-up no longer steepen A), and the analyzer is silent, so out of the scale-down vote, more often. Metrics: none |
-| **5** | Start time (#12) and snapshot. Confirmations counted by distinct pod. The first-sample rule, a named change that bounds **both** sides. PR 5 first wires the seed, a named change of its own: `replicaStartSeconds` is reserved and read by nothing today ([trigger reference](../reference/scaledobject-trigger.md)), so every estimate starts from 70 s. Once it is read, the first-sample bound is anchored to the seed when the ScaledObject sets one, not to the 70 s default. With no seed it blends toward the default until N distinct pods agree, rather than clamping: measured starts run from 15 s (snapshot restore) to 463 s (cold JIT cache) ([start time](../reference/start-time.md)), and a fixed band around 70 s would clamp both ends. Property cases: with a seed of 120 s, a first sample of 15 s gives an estimate in [lower bound, 120] and one of 460 s an estimate in [120, upper bound]; with no seed the estimate sits strictly between the sample and 70 s (never clamped to 70) and reaches the measured value after N distinct pods. First sight persisted. The writer stays central (`internal/engines/steadystate/learned_state_store.go`) with per-learner adapters. The document stays **v1 and additive**: new fields are `omitempty`, as #329's `itlSlopes` was, and PR 5 does not bump the version, which is part of the data key (a v2 would make every upgrade a cold start). `PriorK2` and `K2BorrowedSince` stay dual-written for rollback builds. Fixtures: a v0.10.0 v1 document (no `itlSlopes`) and a v0.10.1 v1 document both restore, and the previous release reads PR 5's document: a test pins a frozen copy of v0.10.1's `learnedStateDoc` and decodes PR 5's document with it. Restart suite plus restore-then-run, including a restore under light load that keeps the ITL line (issue #316) | controller restart with the snapshot on (no) | Start estimates no longer take one pod's first sample raw. `restored: true` on restored lines. With the snapshot on, only replicas with no record wait after a restart |
+| **5** | Start time (#12) and snapshot. Confirmations counted by distinct pod. The first-sample rule, a named change that bounds **both** sides. PR 5 first wires the seed, a named change of its own: `replicaStartSeconds` is reserved and read by nothing today ([trigger reference](../reference/scaledobject-trigger.md)), so every estimate starts from 70 s. Once it is read, the first-sample bound is anchored to the seed when the ScaledObject sets one, not to the 70 s default. With no seed it blends toward the default until N distinct pods agree, rather than clamping: measured starts run from 15 s (snapshot restore) to 463 s (cold JIT cache) ([start time](../reference/start-time.md)), and a fixed band around 70 s would clamp both ends. Property cases: with a seed of 120 s, a first sample of 15 s gives an estimate in [lower bound, 120] and one of 460 s an estimate in [120, upper bound]; with no seed the estimate sits strictly between the sample and 70 s (never clamped to 70) and reaches the measured value after N distinct pods. First sight persisted. The writer stays central (`internal/engines/steadystate/learned_state_store.go`) with per-learner adapters. The document stays **v1 and additive**: new fields are `omitempty`, as #329's `itlSlopes` was, and PR 5 does not bump the version, which is part of the data key (a v2 would make every upgrade a cold start). `PriorK2` and `K2BorrowedSince` stay dual-written for rollback builds. Fixtures: a v0.10.0 v1 document (no `itlSlopes`) and a v0.10.1 v1 document both restore, and the previous release reads PR 5's document: a test pins a frozen copy of v0.10.1's `learnedStateDoc` and decodes PR 5's document with it. Restart suite plus restore-then-run, including a restore under light load that keeps the ITL line (issue #316). Design: [PR 5 design](#pr-5-design-start-time-and-the-snapshot) | controller restart with the snapshot on (no) | Start estimates no longer take one pod's first sample raw. `restored: true` on restored lines. With the snapshot on, only replicas with no record wait after a restart |
 
 Later, each after a recorded run that covers it: idle room and the decode gate
 (#9, #10) after a P/D run; the prefill bound (#7), with a double-scrape fixture
@@ -2034,6 +2059,311 @@ cycles; above it, 30 s and 3; the stamp put back, 1m45s and 8. On the
 settle rig, three steady replicas price first on cycle 8 after a restart
 and one replica on cycle 10, not 8 + 10: readings taken during the settle
 count towards the ten, and only three must be settled.
+### PR 5 design: start time and the snapshot
+
+Design for the row 5 above, checked against main f82a55480. D is
+`internal/engines/analyzers/saturation`. Numbers marked *unmeasured* are
+choices, not results.
+
+#### What exists today
+
+| part | where | what it does |
+| --- | --- | --- |
+| Sample | `internal/collector/pod_serving_state.go:220-245` | Pod Ready `LastTransitionTime` minus creation, 0 when not Ready or outside (0, 3600] s. A readiness blip re-stamps the transition, so an old pod can report its age |
+| Fold | `D/start_est.go:86-206`, called once per variant per cycle (`D/analyze.go:496`), after a restore is installed (`D/analyze.go:50`) | Each pod once (`startSeenPods`, key `itlKey\|namespace\|pod`, `:119`), bridges skipped. The first sample **replaces** the prior (`:171`); later ones fold by EWMA α 0.3 (`:42`, `:165`). A sample over 3x the estimate is refused (`:54`, `:151-158`) until 3 refusals, counted **per refusal**, not per pod (`startOutliers`, `:62`) |
+| The 70 s | `DefaultReplicaStartSeconds`, `D/start_est.go:35`, applied at `:190-191` | Reaches **only** the gauge and the `replica-start-measured` log. Sizing never reads it: `startSecondsPerRole` skips a variant with no measurement (`:263-266`) |
+| Floor | `D/throughput_floor.go:519-521`, `:556`, `:627`; `internal/signals/floor/floor.go:250`, `:664` | Min over the role's measured variants, only while the arrival rate is a true arrival rate. Projects the backlog over the start (`backlogAtLanding`) and caps engine queues over `DrainHorizon`. No measured variant: no projection, `startSource: none` (`:737-751`) |
+| Share pacing | `D/analyze.go:142` (`RoleStartSeconds`, max per role), `steadystate/composite.go:146`, `allocation/utilization_share_groups.go:908`, `allocation/utilization_share_timing.go:49`, `:113` | Slowest measured start, capped at 30 min. None measured: `shareModelLoadEstimate`, 5 min (`:14`) |
+| Warm pool | `internal/warmpool` | Does not read it. Bridges are excluded from the fold |
+| Seed | `registry/scalermeta.go:102-122` | `replicaStartSeconds` is declared, not parsed by `ParseMeta` (`:192`), read by nothing |
+| Persistence | `D/learned_snapshot.go:118` (`startSeconds`), export `:605`, restore `:1410-1413` | Estimate per key only, installed when the key has none. `startSeenPods` and `startOutliers` are working state (`D/learned_maps.go:100-101`): after a restart every running pod is folded again |
+| Metrics | `internal/metrics/metrics.go:1203`, `:1218` | `wva_replica_start_seconds` histogram; `wva_replica_start_seconds_estimate{source=measured\|seed}`, where `seed` today means the 70 s default |
+
+So the row's "every estimate starts from 70 s" is true of the gauge only. A
+variant with no measured start is not projected at all.
+
+#### The changes
+
+Each is a named change behind its own replay switch (2.5), on in the
+constructor. The prior P is the seed when the ScaledObject sets one, else 70 s.
+N = 3 distinct pods, and a seed's bounds are [S/2, 2S]. Both are named
+constants in `D/start_est.go` (`startConfirmPods`, `startSeedLowFactor`,
+`startSeedHighFactor`) whose comments say they are *unmeasured*: N matches
+today's 3-refusal guard and run T's 4-5 pod scale-ups. An LWS group counts
+once, as its leader's row.
+
+Decided (review of this design): N = 3 and [S/2, 2S]; unseeded, unmeasured
+variants stay unprojected; the gauge's sources become `default`, `seed` and
+`measured`; a bad seed is ignored and logged, never a frozen model; the frozen
+decoder pins v0.10.1; sizing never uses a start shorter than measured (C); a
+kind recording, a GPU witness only later and optional; the split below.
+
+**A. Read the seed** (`start-reads-replica-start-seed`). `ParseMeta` parses
+`replicaStartSeconds` as a number in (0, 3600]. A bad value is ignored, as if
+unset, and logged once each time the value changes; it is never a trigger
+error: today any value is accepted, and a rejected trigger freezes the model. The engine puts it on
+`domain.VariantReplicaState` (`StartSeedSeconds`), as `modelOutputSeed`
+(`steadystate/engine.go:1105`) does for output tokens, so the recorder carries
+it. A seeded variant with no measurement now reaches the floor and share
+pacing at the seed.
+- Effect: a seeded, unmeasured role is projected over the seed (was: not at
+  all), so the floor can order **more** during its first scale-up, and share
+  pacing uses the seed instead of 5 min (shorter or longer). Unseeded
+  variants do not move: with no seed and no measurement a role stays
+  unprojected, and the 70 s stays out of sizing. `startSource: seed` on
+  `throughput-demand-floor`.
+- Gauge `source` on `wva_replica_start_seconds_estimate`: `default` (the
+  70 s, which today is labelled `seed`), `seed` (the ScaledObject value) and
+  `measured`. `seed` changes meaning, so the PR rewrites its row in
+  [prometheus.md](../reference/prometheus.md) and adds an upgrade note to
+  [upgrade and uninstall](../reference/upgrade-and-uninstall.md): a query on
+  `source="seed"` now finds only ScaledObject seeds.
+- Negative control: seed 120, no start measured, arrival rate > 0. The
+  parent projects nothing (`startSource: none`); the PR projects over 120 s.
+
+**B. Confirm by distinct pod** (`start-confirms-by-distinct-pod`). A refused
+outlier is remembered per key as a set of pods. The guard opens when N
+distinct pods are over 3x; one pod repeating never opens it. The set is
+pruned with the pods, as `startSeenPods` is. The guard compares a sample with
+the measured part of the estimate only, never with P.
+- Effect: one pod with a readiness blip no longer lifts the estimate on its
+  fourth cycle, so the projection, and the floor, stop over-ordering on it
+  (**down** only). `replica-start-outlier-rejected` gains `distinctPods` and
+  `needed`.
+- Negative control: estimate 70, one pod reporting 2700 s on 4 cycles. The
+  parent folds it on cycle 4 (about 860 s); the PR keeps 70.
+
+**C. Blend the first samples** (`start-blends-first-samples`). With n < N
+distinct pods measured, mean m:
+
+    estimate = ((N - n) * P + n * m) / N
+
+With a seed S it is also held in [S/2, 2S] while n < N. With no seed it is
+never clamped. From N pods on, the estimate is m and later pods fold by the
+EWMA as today. The cases (2.6):
+
+| case | n | estimate | must hold |
+| --- | --- | --- | --- |
+| seed 120, first sample 15 | 1 | 85 | in [60, 120] |
+| seed 120, first sample 460 | 1 | 233.3 | in [120, 240] |
+| seed 120, first sample 3600 | 1 | 240 (held) | in [120, 240] |
+| no seed, first sample 15 | 1 | 51.7 | strictly in (15, 70) |
+| no seed, first sample 463 | 1 | 201 | strictly in (70, 463) |
+| no seed, 3 pods at 463 | 3 | 463 | equals the measurement |
+
+The blend is the **published** estimate: the gauge, the log and the cases
+above. The readers that size, the floor's backlog projection and share
+pacing, take **max(blend, m)** while n < N, so sizing never uses a start
+shorter than one measured. From N pods on they read the estimate. A seeded
+variant with nothing measured is sized at the seed.
+
+| reader case | n | published | sized at |
+| --- | --- | --- | --- |
+| no seed, first sample 460 | 1 | 200 | 460 |
+| no seed, first sample 15 | 1 | 51.7 | 51.7 |
+| seed 120, first sample 460 | 1 | 233.3 | 460 |
+| seed 120, first sample 15 | 1 | 85 | 85 |
+
+- Effect: estimates no longer take one pod raw, and 5c can only
+  **over-order**, during a variant's first N starts: a fast variant (15 s) is
+  projected over the blend, longer than measured, so the floor orders more and
+  share moves wait longer; a slow one is sized at its measurement, as on the
+  parent. `replica-start-measured` gains `pods`, `prior`, `priorSource`
+  (`default` or `seed`) and `sizedSeconds`.
+- Negative controls: no seed, one sample of 15 s: the parent's estimate is
+  15, the PR's 51.7. No seed, one sample of 460 s: a reader that takes the
+  blend alone sizes at 200 and fails the reader case.
+
+**D. Counted pods survive a restart** (`start-counted-pods-restored`). The
+snapshot keeps, for each counted pod, its Ready time. After a restart a pod
+whose row carries the same Ready time is counted already and is not folded
+again. A pod with no Ready time, or another one, is folded as today.
+- Effect, snapshot on only: the restored estimate is no longer pulled toward
+  the running pods' starts at α 0.3 each, and a pod that blipped before the
+  restart is not read as a new start. Small; either direction.
+- Negative control: restored estimate 70, four running pods reporting 90 s
+  with their stored Ready times. The parent ends near 85; the PR stays at 70.
+
+**E. First sight survives a restart** (`settle-first-sight-restored`, the
+settle package's first switch, with its own hook). The snapshot keeps the
+settle tracker's sighting per model and replica: `FirstSeen`, `ReadySince`,
+`ReadySeen` (`internal/signals/settle/settle.go:209-246`). On restore a
+sighting is installed only when the replica's first row is Ready with the same
+non-zero Ready time. An engine restart, an LWS group restart, or a new lend
+changes it, and that replica waits as today. Idle runs are not kept: a return
+of load during the restart is missed, as today.
+- Effect, snapshot on only: after a controller restart only replicas with no
+  record wait (k2 1 min, ITL `steadyFor`, mu behind them). The k1 pricing
+  after a restart (4.4) ends sooner, so the fleet is sized **lower** than on
+  the parent during that window. `learner-start` counts restored sightings,
+  and `settleUntil` covers only the cold replicas.
+- Negative control: four replicas Ready for 1 h, controller restart with the
+  snapshot on. The parent refuses every k2 reading (`P1-obs-unsettled`) for
+  1 min; the PR admits them on the first cycle.
+
+All five: start time joins `learn` as learner `start`, with `learner-write`
+at V(3) and `restored: true` until its first admitted sample after a restart
+(6.1). The "Learned state: snapshot restored" line adds `startKeys` and
+`sightings`. Metrics: no new series; the gauge's `source` values become
+`default`, `seed` and `measured` (A).
+The closed-loop probe runs C for true starts of 15 s and 463 s, and E through
+a restart, and the PR pastes both.
+
+#### Persistence and back-compat
+
+The document stays v1. New fields, all `omitempty`:
+
+| field | in | holds | an old document without it |
+| --- | --- | --- | --- |
+| `startSamples` | `LearnedState` | per key: n (capped at N) and mean m | n = N: the estimate keeps full authority, as before. No fleet moves on upgrade |
+| `startAdmittedAt` | `LearnedState` | per key: last admitted start (the deferred last-admitted stamp) | zero: as old as can be |
+| `startCounted` | `LearnedState` | per counted pod (`itlKey\|ns\|pod`): its Ready time | every running pod is folded again, as today |
+| `settle` | `learnedStateDoc`, beside `state` | per model: each replica's key and its three sighting times | every replica waits, as today |
+
+- `startSeconds`, `priorK2` and `k2BorrowedSince` keep their names and are
+  still written. The seed is never stored: it is read from the ScaledObject.
+- The per-pod fields are the only ones that grow with replicas (about 150 B
+  each). They are spare entries in `learnedStateEntries`
+  (`steadystate/learned_state_store.go:581`), dropped first at the budget:
+  a dropped one costs one replica one wait. Their times are fixed per
+  sighting, so they enter the digest without rewriting every minute.
+- Forget drops the new maps with the rest (`D/learned_maps.go` lists them).
+- Fixtures: a v0.10.0 document (no `itlSlopes`) and a v0.10.1 one restore
+  through the current path; the light-load restore keeps the ITL line for the
+  v0.10.1 one.
+- Rollback: `json.Unmarshal` (`learned_state_store.go:243`) ignores unknown
+  fields, so v0.10.x reads PR 5's document and drops the new ones.
+
+**The frozen decoder.** v0.10.1 is commit 760f76d76; v0.10.2 has the same
+blobs for every file below, so one copy covers both. Built from git alone:
+
+    git show v0.10.1:internal/engines/steadystate/learned_state_store.go         # learnedStateDoc, learnedStateWriter (blob d1f8d339c7a0)
+    git show v0.10.1:internal/engines/analyzers/saturation/learned_snapshot.go   # LearnedState and its *Snapshot types (b8277be9e29d)
+    git show v0.10.1:internal/engines/analyzers/saturation/forget_variant.go     # ForgetMarkSnapshot (d10d6a82f7cf)
+    git show v0.10.1:internal/signals/capacity/rolling_snapshot.go               # RollingAverageSnapshot (a3157ef25c84)
+
+Copy the struct declarations only (fields and tags, no methods, the embedded
+`RollingAverageSnapshot` kept embedded), with a `v0101` prefix, into
+`steadystate/learned_state_v0101_test.go`, its comment naming the tag, the
+commit and the blobs. The test encodes a PR 5 document with every field set
+through the production encoder, decodes it into the frozen type, and asserts
+every field the frozen type knows comes back equal. A second assertion pins
+the frozen type's JSON tag set to a literal list, so an edit to the copy
+fails. Negative control: renaming `startSeconds` or dropping the `priorK2`
+write fails it.
+
+#### Recording
+
+Start time is a pod-lifecycle signal: Pod creation to Ready. kind with the
+inference simulator gives real samples, so **no GPUs are needed**. The
+measured GPU distribution (15 s to 463 s) is already in the start-time
+reference and enters as property cases.
+
+From a build with PR 5a merged (the seed is in the recorded input), on kind,
+with the recorder on, `LEARNED_STATE_SNAPSHOT=true` and `--v=3`:
+
+1. One model, two variants: `fast`, readiness at about 20 s; `slow`, about
+   240 s, its ScaledObject setting `replicaStartSeconds: "120"`.
+2. Load that takes each variant to at least 4 replicas: N + 1 distinct
+   starts each. About 15 min.
+3. Optional: restart the engine process in one long-running pod (a container
+   restart under the same name, the blip case). Skip if the simulator image
+   cannot; the synthetic suite covers it.
+4. When the ConfigMap holds both keys, copy the recordings out, then delete
+   the controller pod under load. `kubectl rollout restart` alone loses them:
+   the recording volume is an `emptyDir`.
+5. 5 min after the restart, drop to light load (issue #316) and restart again
+   the same way.
+6. One more scale-up per variant after the second restart.
+
+Capture: every recording; the ConfigMap before and after each restart; each
+controller pod's full log to a file; `kubectl get pods -o json` each minute
+(the Pods' own creation and Ready times are the independent witness).
+Counters above zero: start samples written, start keys restored, sightings
+restored. About 45 min. Optional: run the v0.10.0 and v0.10.1 images on the
+same cluster for 5 min each with the snapshot on, and keep their documents as
+the back-compat fixtures; hand-built ones from the frozen types also do.
+
+Later and optional, after 5d: a GPU witness. One small model, one variant,
+1 GPU per replica, 1 to 4 replicas, one restart; about 30 min and 4 GPUs on a
+shared cluster, torn down on every exit path. No PR waits for it.
+
+#### Split and order
+
+| PR | content | fleet sizing |
+| --- | --- | --- |
+| 5a | Parse the seed and carry it in the input, read by nothing. The frozen v0.10.1 decoder and the v0.10.0 and v0.10.1 fixtures. Zero golden diff | none |
+| (recording) | the run above, from 5a, base goldens committed first | — |
+| 5b | B | down only, on a pod that blips |
+| 5c | A and C together: the seed's bound is part of the blend, and the property cases need both. The gauge's source rename with its prometheus.md and upgrade notes. `startSamples`, `startAdmittedAt`, learner `start` | up only: during a variant's first N starts, and for a seeded, unmeasured role |
+| 5d | D and E, snapshot on only. `startCounted`, `settle` | lower during the minutes after a restart |
+| later, optional | the GPU witness | — |
+
+5c carries the most change, all of it on the cost side: sizing reads
+max(blend, m), so it never under-orders. It goes after 5b so the
+confirmation rule it leans on is already proven.
+
+#### 5a as built
+
+Built on main 35bd3dd88 (after #462, R1), not on f82a55480, so line numbers
+above are f82a55480's.
+
+- **The seed.** `registry.ParseMeta` (`internal/registry/scalermeta.go`)
+  reads `replicaStartSeconds` as a plain decimal number of seconds from
+  `MinReplicaStartSeconds` to `MaxReplicaStartSeconds`, 1 to 3600 (`"120"`,
+  `"15.5"`, `"1e2"`). Any other value (under a second, over the hour, NaN,
+  infinite, hex, a unit, surrounding space, not a number) leaves
+  `Meta.ReplicaStartSeconds` 0 and is handed back in
+  `Meta.ReplicaStartSecondsIgnored`; it is never a trigger error. An empty
+  value is absent, as for the other keys.
+- **Carried, not read.** `Engine.applyStartSeeds`
+  (`steadystate/engine.go`), called in `prepareModelData` right after the
+  states are projected from discovery, sets
+  `domain.VariantReplicaState.StartSeedSeconds` and its presence bit
+  `StartSeedSet`, from the variant's own registry entry. It runs only on
+  cycles where the model has replica rows, so a model scaled to zero
+  neither carries the seed nor logs a bad one. It is per variant:
+  there is no largest-wins across a model's variants as for
+  `defaultOutputTokens`; how roles combine is 5c's to decide. Both fields are
+  tagged `learnrec:"omitzero"` (R1's tag), so a recording carries the seed
+  in `Input.VariantStates` and an unseeded state is written as before.
+  `ChangeReporter.ReportIgnoredStartSeed` logs "A variant's
+  replicaStartSeconds was ignored" at Info, per variant, once each time the
+  written value changes, and again if a fixed value turns bad again. The
+  value is quoted and cut at 64 bytes. The log is the only place it shows.
+  `TestPrepareModelData_CarriesTheStartSeed` drives `prepareModelData` with
+  a fake client and a stub metrics source for a P/D model whose unseeded
+  prefill comes first and whose two decode variants seed different figures,
+  so the call is tested where it sits and a seed on the wrong variant fails.
+- **Zero golden diff.** Every variant state in the nine goldens (4256) reads
+  back and is written again byte for byte
+  (`learnrec.TestStartSeed_APre5aRecordingIsWrittenAgainByteForByte`).
+- **The frozen decoder** is `steadystate/learned_state_v0101_test.go`, from
+  the commit and blobs above. Three tests: v0.10.1 reads a document with
+  every current field set and gets every field it knows back, equal; a field
+  v0.10.1 does not know is left out while empty, checked inside each entry
+  type v0.10.1 knows as well as at the top; and the frozen tag set is pinned
+  to a literal.
+- **The fixtures are hand-built and frozen**: no capture of either release's
+  ConfigMap exists. `TestLearnedStateFixtures_Generate` built them once,
+  and runs only with `LEARNED_STATE_WRITE_FIXTURES=1`. The base is the last
+  learned state the mu-paths golden exported (a real analyzer's state),
+  put into the frozen types. Each map that export left empty got a
+  hand-built entry in v0.10.1's key formats: argument tags, put-aside
+  windows and baseline, an armed borrow and a previous figure dual-written
+  to `k2BorrowedSince` and `priorK2`, an orphan `priorK2` entry, a forget
+  mark. The document is encoded with `json.Marshal`, as v0.10.1 does; the
+  v0.10.0 one drops `itlSlopes`, the one field v0.10.0 (823ddcd74) lacks.
+  They live in `steadystate/testdata/learned-state/`, with a README saying
+  they are frozen. Both restore through `restoreLearnedState` into a real
+  analyzer with nothing aged, unusable or unattributable; the export holds
+  every map's entries unchanged, the borrow comes back armed, and the
+  orphan previous figure is installed as a lower bound.
+  `saturation.TestLearnedStateKeyFormats_AreV0101s` pins the key builders to
+  one sample key per map. The light-load restore that keeps the ITL
+  line from the v0.10.1 fixture runs cycles, so it is left to 5d's
+  restore-then-run. A document captured from a real controller may be added
+  beside them.
 
 #### 4b-3 as built
 
@@ -2356,6 +2686,12 @@ killed):
   mu removes its own witness; for k2 it is permanent until forgotten
   ([3.4](#34-which-side-breaks-the-slo)). Validation residuals are one-sided by
   construction, and must not be read as two-sided.
+- **Start time blends before it trusts (PR 5c).** For a variant's first N
+  starts the published estimate leans toward the prior, but sizing reads
+  max(blend, measured mean), so 5c can only over-order, and only then: a
+  fast variant is projected over a longer start than it showed. It cannot
+  size a slow variant shorter than measured
+  ([PR 5 design](#pr-5-design-start-time-and-the-snapshot)).
 - **The prefill bound** is reviewed before it moves: a double scrape once
   doubled its input, its max kept it, and `RaiseLast` keeps it past a reset.
 - **The recorder can evict the controller** if pointed at `/tmp`. It is off by

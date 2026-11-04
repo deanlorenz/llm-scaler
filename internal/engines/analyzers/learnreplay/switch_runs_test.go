@@ -122,9 +122,13 @@ import (
 // its cap without preempting (analyzer-learner.md, PR 4b). Its unit tests
 // hold it (heldBy).
 //
-// Merge note: #460 (TTFT P1) rewrites the start of this table too; 4b-2's
-// six switches belong only in learner4b2Seams, whichever PR merges second.
+// The what-if PR P1 (docs/proposals/slo-capacity-planner.md, the PR plan)
+// adds one: the saturation analyzer's prefill observation
+// (saturation.SwitchPrefillCapacityObserve), on 4b-1's base. It moves no
+// golden: it only logs (prefill-capacity-observed), and writes no state an
+// output reads. Its unit tests hold it (heldBy).
 var replaySwitches = map[string][]string{
+	saturation.SwitchPrefillCapacityObserve: nil,
 	throughput.SwitchITLAdmitsAtSequenceCap: nil,
 }
 
@@ -336,6 +340,12 @@ func withSeams(more, rows map[string][]string) map[string][]string {
 // test that holds the same on either side is a control, not a hold, and is
 // not listed here.
 var heldBy = map[string][]heldTest{
+	// P1's prefill observation: it runs the switch on and off through
+	// Analyze and asserts both (a line per cycle on, none off).
+	saturation.SwitchPrefillCapacityObserve: {
+		{"../saturation", "TestPrefillObserve_TheSwitchLogsTheObservation"},
+		{"../saturation", "TestPrefillObserve_AnSGLangVariantIsRefusedVP"},
+	},
 	// Issue #275's lift: an aggregated figure sizes once the GPS check has
 	// agreed. Both run the switch on and fail with it off: the first checks
 	// the lifted rate against a run with it off, the second needs the lift

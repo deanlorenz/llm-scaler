@@ -40,6 +40,20 @@ func (c *ReplicaMetricsCollector) refreshShared(
 	queries []string,
 	params map[string]string,
 ) (map[string]*source.MetricResult, error) {
+	results, _, err := c.refreshSharedIssued(ctx, queries, params)
+	return results, err
+}
+
+// refreshSharedIssued is refreshShared, also returning the queries this call
+// sent to the source: those not in the memo. A caller that counts a failed
+// query counts it for these only, so a failure is counted once, by the
+// model whose collection issued it, and not again by every model in the
+// namespace that reads it from the memo.
+func (c *ReplicaMetricsCollector) refreshSharedIssued(
+	ctx context.Context,
+	queries []string,
+	params map[string]string,
+) (map[string]*source.MetricResult, []string, error) {
 	results := make(map[string]*source.MetricResult, len(queries))
 	missing := queries
 
@@ -61,12 +75,12 @@ func (c *ReplicaMetricsCollector) refreshShared(
 	c.cycleMu.Unlock()
 
 	if len(missing) == 0 {
-		return results, nil
+		return results, nil, nil
 	}
 
 	fetched, err := c.source.Refresh(ctx, source.RefreshSpec{Queries: missing, Params: params})
 	if err != nil && fetched == nil {
-		return nil, err
+		return nil, missing, err
 	}
 
 	c.cycleMu.Lock()
@@ -85,9 +99,33 @@ func (c *ReplicaMetricsCollector) refreshShared(
 	// namespace reads the failed results instead of asking a down Prometheus
 	// again; the error is returned once, to the model that asked.
 	if err != nil {
-		return nil, err
+		return nil, missing, err
 	}
-	return results, nil
+	return results, missing, nil
+}
+
+// countRefreshFailure counts a refresh that failed as a whole once for each
+// query of issued, the queries the failed call sent, under the query type
+// typeOf names for it, and returns the failure's reason for the caller's log.
+func countRefreshFailure(issued []string, err error, typeOf func(string) string) string {
+	reason := prometheus.CategorizePrometheusError(err)
+	for _, q := range issued {
+		metrics.IncMetricsCollectionErrors(typeOf(q), reason)
+	}
+	return reason
+}
+
+// countFailedIssued counts each query of issued whose result carries an
+// error, under the query type typeOf names for it: once per query this
+// collection sent, never for a result read from the memo. A query typeOf
+// names no type for ("") is not counted here.
+func countFailedIssued(issued []string, results map[string]*source.MetricResult, typeOf func(string) string) {
+	for _, q := range issued {
+		queryType := typeOf(q)
+		if r := results[q]; queryType != "" && r != nil && r.HasError() {
+			metrics.IncMetricsCollectionErrors(queryType, prometheus.CategorizePrometheusError(r.Error))
+		}
+	}
 }
 
 // queryReplicaSeries fetches every per-replica series for one model: the
@@ -140,13 +178,19 @@ func (c *ReplicaMetricsCollector) queryReplicaSeries(
 	// - Shared: avg input tokens, avg output tokens
 	// - Per-request timings: avg ITL, avg service time
 	// - Throughput analyzer: generation token rate, instantaneous KV usage (k*), request rate
-	queries := buildEngineQueryList(engines, engineSpecificReplicaQueries, agnosticReplicaQueries)
+	// - With a learner recording on, the TTFT model's inputs (recordOnlyReplicaQueries)
+	recording := c.RecordsTTFTInputs()
+	engineSpecific, agnostic := scalingEngineSpecificQueries, scalingAgnosticQueries
+	if recording {
+		engineSpecific, agnostic = engineSpecificReplicaQueries, agnosticReplicaQueries
+	}
+	queries := buildEngineQueryList(engines, engineSpecific, agnostic)
 
 	// Execute the query with timing. refreshShared skips whatever another model
 	// in this namespace already fetched this cycle, so the timing observed here
 	// is the cost of the queries this collection actually issued.
 	startTime := time.Now()
-	results, err := c.refreshShared(ctx, queries, params)
+	results, issued, err := c.refreshSharedIssued(ctx, queries, params)
 	duration := time.Since(startTime).Seconds()
 	metrics.ObserveMetricsCollectionDuration(duration, constants.QueryTypeKVCache)
 	metrics.ObserveMetricsCollectionDuration(duration, constants.QueryTypeQueueLength)
@@ -158,6 +202,22 @@ func (c *ReplicaMetricsCollector) queryReplicaSeries(
 		metrics.IncMetricsCollectionErrors(constants.QueryTypeQueueLength, reason)
 		metrics.IncMetricsCollectionErrors(constants.QueryTypeCacheConfig, reason)
 		return nil, nil, fmt.Errorf("failed to refresh replica metrics: %w", err)
+	}
+	// A record-only query that failed is counted under its own type, so an
+	// operator who turned recording on can tell its failures from the
+	// scaling queries'. The scaling queries' own failures are counted where
+	// they are read, as before.
+	if recording {
+		recordOnly := make(map[string]bool)
+		for _, q := range buildEngineQueryList(engines, recordOnlyEngineSpecificQueries, recordOnlyAgnosticQueries) {
+			recordOnly[q] = true
+		}
+		countFailedIssued(issued, results, func(q string) string {
+			if recordOnly[q] {
+				return constants.QueryTypeLearnerRecording
+			}
+			return ""
+		})
 	}
 
 	// Re-key engine-specific results under their logical query names so the per-pod
@@ -172,6 +232,7 @@ func (c *ReplicaMetricsCollector) queryReplicaSeries(
 	// matcher.
 	filterResultsToModel(results, engineSpecificReplicaQueries, modelID)
 	filterResultsToModel(results, capacityQueueQueries, modelID)
+	filterResultsToModel(results, ttftAgnosticQueries, modelID)
 
 	return results, engines, nil
 }
