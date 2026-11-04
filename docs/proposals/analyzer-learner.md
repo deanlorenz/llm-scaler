@@ -2437,8 +2437,11 @@ on from the constructor.
   corrected by rollouts as a measured one is (tested).
 - **The log.** `replica-start-outlier-rejected` has a neutral `reason`,
   `start-above-bound` (a blip is the usual cause, not the only one), gains
-  `distinctPods` and `needed`, and is logged on a pod's first refusal in the
-  run and again every `startOutlierRelog` (10 min) while it stays refused. A
+  `distinctPods` (the run's pods after the cycle: 0 on a cycle whose
+  in-range start ended it) and `needed`, and is logged on a pod's first
+  refusal in the run and again every `startOutlierRelog` (10 min, at exactly
+  the interval) while it stays refused. With the switch off the line is the
+  parent's byte for byte, reason included (a test pins it). A
   new line, `replica-start-change-confirmed`, says the guard opened, with
   `distinctPods`, `medianSeconds` and `previousEstimateSeconds`.
 - **Zero golden diff.** Measured alone against all off, the switch moves no
@@ -2456,18 +2459,26 @@ on from the constructor.
   | (b) one replica, ten rollouts to a 300 s image | 70, 70, then 300 from the third | 139, 187.3, ... 293.5 |
   | (b) the same from a restored 70 s | 300 at the third pod | — |
   | (c) two steady slow pods, 50 cycles, then a third | 70, then 300 | 187.3 |
-  | (d) 70 to 3000 s on three pods | 3000 on the first cycle | 1995.0 after 30 cycles |
+  | (d) 70 to 3000 s on three pods | 3000 on the first cycle | 949 on cycle 2, 1995.01 from then on (within 0.01) |
 
-  Also: the median with a blip in the run, the reset in either order, a run
-  pod back in range, the bound, two keys of one variant kept apart, the
-  lines, and the sweep (counted once) and forget. The property edge
+  Also: the median by a table (100/200/300 gives 200; 100/200/300/400 in
+  one cycle gives 250), the median with a blip in the run, the bound (at 70
+  s, 210 s admitted and 210.001 s refused), the re-log at exactly its
+  interval, the reset in either order, a run ended this cycle logged as 0
+  pods, a run pod back in range, the bound on the run's size, two keys of
+  one variant kept apart, a controller restart dropping the run (the
+  snapshot holds the estimate, not the run, so three fresh pods are needed
+  again), (b) driven through `Analyze` (70, 70, 300 on; 187.3 off after
+  three rollouts), the lines, and the sweep (counted once) and forget. The property edge
   `start-time/confirmations-3`, which pinned the parent's "one pod taken on
   cycle 4", is replaced by `one-pod-repeating` (not taken on cycle 3, 4 or
-  20) and `distinct-pods-3` (taken at 3 pods, not 2). Sixteen mutants, each
-  killed, among them the code as first built (pods pruned as they left),
-  the reset applied inside the loop, the EWMA or the mean instead of the
-  median, runs shared across a variant's keys, the sweep counting a key
-  twice, and the parent (switch off everywhere).
+  20) and `distinct-pods-3` (taken at 3 pods, not 2). Twenty-three mutants,
+  each killed, among them the code as first built (pods pruned as they
+  left), the reset applied inside the loop, the EWMA, the mean, the lower
+  or the upper middle instead of the median, the bound at `>=`, the re-log
+  at `>`, the pod count read before the close, the off path's reason,
+  `Analyze` not feeding the estimate, runs shared across a variant's keys,
+  the sweep counting a key twice, and the parent (switch off everywhere).
 
 ## 8. Risks and limits
 

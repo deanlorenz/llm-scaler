@@ -196,7 +196,8 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 				}
 				// NOT recorded as seen, as below.
 				continue
-			} else if a.startOutliers[key] < maxConsecutiveStartOutliers {
+			}
+			if a.startOutliers[key] < maxConsecutiveStartOutliers {
 				a.startOutliers[key]++
 				rejected = append(rejected, outlier{rm.PodName, rm.StartSeconds, cur, false})
 				// NOT recorded as seen: if the next cycle still reports it, it is
@@ -230,7 +231,6 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 		}
 		metrics.ObserveReplicaStartSeconds(namespace, variantName, rm.StartSeconds)
 	}
-	runPods := len(a.startOutlierPods[key])
 	var confirmed *startConfirmation
 	if a.startConfirmsByPod {
 		confirmed = a.closeStartRunLocked(key, endsRun, present, now)
@@ -241,6 +241,10 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 			}
 		}
 	}
+	// The run's distinct Pods, AFTER the cycle closed it: 0 when a start in
+	// range ended it this cycle, so a rejection line never reports a run
+	// that no longer exists. (A run that confirmed logs no rejection line.)
+	runPods := len(a.startOutlierPods[key])
 
 	// Forget this variant's Pods that no longer report. Scoped by the key
 	// prefix so one variant's cycle cannot drop another's bookkeeping.
@@ -268,11 +272,13 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 		kv := []any{"namespace", namespace, "variant", variantName, "pod", o.pod,
 			"sampleSeconds", o.sample, "estimateSeconds", o.against,
 			"factor", maxStartOutlierFactor}
+		// Off, the parent's line, byte for byte.
+		reason := "the Ready condition re-transitions, so a probe blip reports the pod's age"
 		if o.byPod {
 			kv = append(kv, "distinctPods", runPods, "needed", startConfirmPods)
+			reason = "start-above-bound"
 		}
-		logger.V(logging.DEFAULT).Info("replica-start-outlier-rejected", append(kv,
-			"reason", "start-above-bound")...)
+		logger.V(logging.DEFAULT).Info("replica-start-outlier-rejected", append(kv, "reason", reason)...)
 	}
 	if confirmed != nil {
 		logger.V(logging.DEFAULT).Info("replica-start-change-confirmed",

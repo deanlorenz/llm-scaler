@@ -113,15 +113,15 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 // SwitchBatchCapLearned, SwitchMuKeyBucketHeld, SwitchMuSwapFreeze,
 // SwitchMuMarginClamp, SwitchK2FirstReadingWaits, SwitchBatchCapITLAdmission,
 // SwitchBatchCapDecodeView, SwitchBatchCapDerivedMu, SwitchITLPerToken,
-// SwitchStartConfirmsByDistinctPod, SwitchKVPerRequestOutputDispersion, SwitchBatchCapZeroReplica,
+// SwitchKVPerRequestOutputDispersion, SwitchBatchCapZeroReplica,
 // SwitchITLReadsSettle, SwitchITLWaitsAfterRestart,
 // SwitchITLKeepsSettleThroughMissingRow, SwitchITLReadsFinitePodMean,
 // SwitchITLRestartUnderName, SwitchITLIdleOnEvidence,
 // SwitchKVPerRequestHitsResident, SwitchZeroReplicaDataParallel,
-// SwitchITLFitsAggregated, SwitchITLAggregatedShapeTerm and
-// SwitchITLAggregatedSizes and SwitchPrefillCapacityObserve; a name it does
-// not know is an error, and sets
-// nothing. Never called on a production path; a test holds that.
+// SwitchITLFitsAggregated, SwitchITLAggregatedShapeTerm,
+// SwitchITLAggregatedSizes, SwitchPrefillCapacityObserve and
+// SwitchStartConfirmsByDistinctPod; a name it does not know is an error, and
+// sets nothing. Never called on a production path; a test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
 	rest := maps.Clone(switches)
 	fields := a.switchFields()

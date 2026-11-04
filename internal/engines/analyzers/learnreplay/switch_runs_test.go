@@ -517,6 +517,9 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestStartConfirm_TheMedianIgnoresABlipInTheRun"},
 		{"../saturation", "TestStartConfirm_ARunPodBackInRangeLeavesTheRunOpen"},
 		{"../saturation", "TestStartConfirm_TheLinesCountDistinctPods"},
+		{"../saturation", "TestStartConfirm_TheMedianOfTheRun"},
+		{"../saturation", "TestStartConfirm_ARestartDropsTheRun"},
+		{"../saturation", "TestStartConfirm_ThroughAnalyze"},
 	},
 }
 

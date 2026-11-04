@@ -227,7 +227,10 @@ type SaturationAnalyzer struct {
 	// (key|namespace|pod), each with its start: the guard opens on
 	// startConfirmPods distinct Pods across the run, not on repeats of one
 	// (start_est.go, SwitchStartConfirmsByDistinctPod). At most
-	// startConfirmPods-1 Pods per key between cycles.
+	// startConfirmPods-1 Pods per key between cycles. A run has no age limit:
+	// it ends on an in-range start from a new Pod or on confirming, however
+	// long that takes. Memory is bounded by that count and by the sweep,
+	// which drops a stale variant's run (evictStaleHistory), and a forget.
 	startOutlierPods map[string]map[string]startRunPod
 	// startConfirmsByPod is SwitchStartConfirmsByDistinctPod (learner PR
 	// 5b): on from the constructor; a replay turns it off
@@ -895,7 +898,6 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 		if a.variantIsStale(key, now, variantTimeout) {
 			delete(a.startSeconds, key)
 			delete(a.startOutliers, key)
-			delete(a.startOutlierPods, key)
 			evicted.StartEstimates++
 		}
 	}
@@ -939,22 +941,27 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 	// start_est.go, not of this map's type, and an unbounded per-variant map
 	// is the defect this whole function exists to prevent. An earlier version
 	// of this comment claimed the loop was reachable, which was wrong.
+	//
+	// It is also the one place a stale key's run of refused Pods
+	// (startOutlierPods) goes: the keys of both maps, each counted once in
+	// StartOutliers whichever map held it. The run is not dropped with the
+	// estimate in the loop further up, so a stale key with an open run is
+	// counted here as well as in StartEstimates.
+	staleOutliers := make(map[string]struct{})
 	for key := range a.startOutliers {
 		if a.variantIsStale(key, now, variantTimeout) {
-			delete(a.startOutliers, key)
-			delete(a.startOutlierPods, key)
-			evicted.StartOutliers++
+			staleOutliers[key] = struct{}{}
 		}
 	}
-	// The same belt for the refused Pods (startOutlierPods), whose keys are
-	// likewise a subset of startSeconds' today: written only under a
-	// measured estimate. A key the loop above took is gone from it already,
-	// so each key is counted once.
 	for key := range a.startOutlierPods {
 		if a.variantIsStale(key, now, variantTimeout) {
-			delete(a.startOutlierPods, key)
-			evicted.StartOutliers++
+			staleOutliers[key] = struct{}{}
 		}
+	}
+	for key := range staleOutliers {
+		delete(a.startOutliers, key)
+		delete(a.startOutlierPods, key)
+		evicted.StartOutliers++
 	}
 	// On bucketRetention, with the per-configuration maps, because that is
 	// what itlLines is keyed on: the digest of an engine configuration, not a

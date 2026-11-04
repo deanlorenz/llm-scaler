@@ -194,7 +194,8 @@ or `seed` while the default is in force).
 `replica-start-outlier-rejected` is logged when one replica's start is more
 than `factor` (3) times the estimate and is left out: `namespace`, `variant`,
 `pod`, `sampleSeconds`, `estimateSeconds`, `factor`, `distinctPods` (how many
-different pods have been left out so far), `needed` (how many it takes, 3)
+different pods have been left out so far; 0 when a new pod's start inside the
+bound cleared the count on the same cycle), `needed` (how many it takes, 3)
 and `reason` (`start-above-bound`). Two causes are common: a readiness probe
 that fails and recovers, which makes a pod report its age as its start time,
 and a real change, such as a slower image or node.
