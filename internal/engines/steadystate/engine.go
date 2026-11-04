@@ -478,9 +478,11 @@ func newEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 	// estimate per-replica arrival rate and model queue behavior.
 	registration.RegisterQueueingModelQueries(metricsRegistry)
 
-	// The router latency the slo analyzer judges an SLO on. Run only when that
-	// analyzer asks for them.
+	// The router latency the slo analyzer judges an SLO on, and the router's
+	// flow-control pools. The engine collects both every cycle into the
+	// analyzer input (buildAnalyzerInput), recorded for the TTFT model.
 	registration.RegisterSLOQueries(metricsRegistry)
+	registration.RegisterFlowControlPoolQueries(metricsRegistry)
 
 	return &engine
 }
@@ -894,7 +896,7 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	// Open the collector's cycle so the models grouped below share one execution
 	// of each namespace-scoped query instead of one per model.
 	if e.ReplicaMetricsCollector != nil {
-		e.ReplicaMetricsCollector.BeginCycle()
+		e.beginCollectorCycle()
 		defer e.ReplicaMetricsCollector.EndCycle()
 	}
 

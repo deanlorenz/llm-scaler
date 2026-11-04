@@ -150,6 +150,9 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	pod.GenerationTokenRateKnown = true
 	pod.RequestRateKnown = true
 	pod.RunningRequestsKnown = true
+	pod.QueueLengthKnown = true
+	pod.AvgServiceTimeKnown = true
+	pod.AvgTTFTKnown = true
 	// ITL has three states (domain.ITLState). The pod's mean is known when
 	// at least one rank measured one (Finite) and no rank is Absent: a
 	// missing rank would hide its own mean, so any Absent rank makes the pod
@@ -177,6 +180,9 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 		pod.GenerationTokenRateKnown = pod.GenerationTokenRateKnown && m.GenerationTokenRateKnown
 		pod.RequestRateKnown = pod.RequestRateKnown && m.RequestRateKnown
 		pod.RunningRequestsKnown = pod.RunningRequestsKnown && m.RunningRequestsKnown
+		pod.QueueLengthKnown = pod.QueueLengthKnown && m.QueueLengthKnown
+		pod.AvgServiceTimeKnown = pod.AvgServiceTimeKnown && m.AvgServiceTimeKnown
+		pod.AvgTTFTKnown = pod.AvgTTFTKnown && m.AvgTTFTKnown
 		state := m.ITLState()
 		if state == domain.ITLFinite {
 			itlFinite = append(itlFinite, m)
@@ -310,6 +316,30 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	// rank by its prefix_cache_queries_total. Falls back to the request rate.
 	pod.PrefixCacheHitRate = weightedBy(group, func(m domain.ReplicaMetrics) float64 { return m.PrefixCacheHitRate },
 		func(m domain.ReplicaMetrics) float64 { return m.RequestRate * m.AvgInputTokens })
+
+	// The TTFT model's inputs (ttft_inputs.go): each bound's rate summed
+	// over the ranks, the means weighted by their own counts where the row
+	// has them and by request rate otherwise (mergeKnownMean), each present
+	// only when every rank had it.
+	pod.PromptTokensBuckets = mergeBuckets(group, func(m domain.ReplicaMetrics) []domain.LengthBucket { return m.PromptTokensBuckets })
+	pod.OutputTokensBuckets = mergeBuckets(group, func(m domain.ReplicaMetrics) []domain.LengthBucket { return m.OutputTokensBuckets })
+	pod.TTFTBuckets = mergeBuckets(group, func(m domain.ReplicaMetrics) []domain.LatencyBucket { return m.TTFTBuckets })
+	pod.QueueTimeBuckets = mergeBuckets(group, func(m domain.ReplicaMetrics) []domain.LatencyBucket { return m.QueueTimeBuckets })
+	pod.TPOTBuckets = mergeBuckets(group, func(m domain.ReplicaMetrics) []domain.LatencyBucket { return m.TPOTBuckets })
+	pod.AvgQueueTime, pod.AvgQueueTimeKnown = mergeKnownMean(group, func(m domain.ReplicaMetrics) (float64, bool) {
+		return m.AvgQueueTime, m.AvgQueueTimeKnown
+	}, queueTimeCountRate)
+	pod.AvgPrefillTime, pod.AvgPrefillTimeKnown = mergeKnownMean(group, func(m domain.ReplicaMetrics) (float64, bool) {
+		return m.AvgPrefillTime, m.AvgPrefillTimeKnown
+	}, nil)
+	pod.AvgKVTransferTime, pod.AvgKVTransferTimeKnown = mergeKnownMean(group, func(m domain.ReplicaMetrics) (float64, bool) {
+		return m.AvgKVTransferTime, m.AvgKVTransferTimeKnown
+	}, nil)
+	// Summed, as the pod's queue length is: each rank's least summed is a
+	// floor under the pod's own least, and tighter than the largest rank's.
+	pod.QueueMin, pod.QueueMinKnown = mergeKnownSum(group, func(m domain.ReplicaMetrics) (float64, bool) {
+		return m.QueueMin, m.QueueMinKnown
+	})
 
 	pod.Metadata = mergeMetadata(group)
 	return pod

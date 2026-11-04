@@ -30,6 +30,9 @@
 #      firing page, and a cleared one resolves after keep_firing_for; a
 #      collection failure shorter than 2 minutes does not delay the page,
 #      and one that persists takes the series, and the page, away.
+#      metrics-collection-alerts: a failing scaling query raises
+#      WVAMetricsCollectionFailing; a failing learner_recording query, which
+#      feeds only a learner recording, does not.
 #
 # PROMTOOL is the promtool binary (make promtool installs a pinned one); YQ is
 # mikefarah yq v4.
@@ -74,8 +77,8 @@ for t in "$TESTS"/*.test.yaml; do
   RAN=$((RAN + 1))
 done
 # Every file, or a rename silently drops one.
-if [ "$RAN" -ne 5 ]; then
-  echo "FAIL: $RAN alert test files ran, not 5. Update the count deliberately." >&2
+if [ "$RAN" -ne 6 ]; then
+  echo "FAIL: $RAN alert test files ran, not 6. Update the count deliberately." >&2
   exit 1
 fi
 echo "ok: alert rules parse and the alert tests pass ($RAN files)"

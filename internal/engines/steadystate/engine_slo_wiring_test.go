@@ -69,7 +69,9 @@ func TestNewEngineGivesTheSLOAnalyzerARouterSource(t *testing.T) {
 func TestNewEngineRegistersTheRouterQueries(t *testing.T) {
 	e := sloWiringEngine(t)
 	ql := e.metricsRegistry.Get("prometheus").QueryList()
-	for _, name := range []string{"slo_router_ttft_buckets", "slo_router_tpot_sum", "slo_router_tpot_count"} {
+	for _, name := range []string{"slo_router_ttft_buckets", "slo_router_tpot_sum", "slo_router_tpot_count",
+		"slo_router_tpot_buckets", "flow_control_pool_models", "flow_control_wait_buckets",
+		"flow_control_pool_saturation", "flow_control_outcomes"} {
 		if ql.Get(name) == nil {
 			t.Errorf("query %q is not registered", name)
 		}

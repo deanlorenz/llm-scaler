@@ -81,6 +81,19 @@ type AnalyzerInput struct {
 	// traffic yet). Any analyzer with a demand model may convert this into its
 	// own unit (e.g. tokens/sec for the throughput analyzer).
 	ArrivalRate float64
+
+	// RouterLatency is the model's latency as the router measured it, TTFT
+	// and TPOT, collected by the engine every cycle whatever the policy
+	// lists. Nil when the router exports nothing for the model or the
+	// queries failed. Read by nothing yet: the slo analyzer still asks its
+	// own router source (docs/proposals/analyzer-learner.md, 2.9).
+	RouterLatency *RouterLatency
+
+	// FlowControlPools is the flow-control layer of each InferencePool that
+	// serves this model alone, in pool-name order, the names not kept. Nil
+	// when no pool is joined to the model: flow control off, no series yet,
+	// or a pool shared with another model. Read by nothing yet.
+	FlowControlPools []FlowControlPool
 }
 
 // SchedulerQueueMetrics holds model-level queue metrics from the llm-d

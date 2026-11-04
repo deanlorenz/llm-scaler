@@ -41,6 +41,11 @@ var EngineSpecificQueries = []string{
 	QueryRequestRate,
 	QueryModelRequestCount,
 	QueryRunningRequests,
+	QueryPromptTokensBuckets,
+	QueryTTFTBuckets,
+	QueryAvgQueueTime,
+	QueryQueueTimeBuckets,
+	QueryQueueMin,
 }
 
 var engineSpecificSet = func() map[string]bool {

@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -25,6 +26,11 @@ import (
 //   - a struct is an object of its exported fields in declaration order,
 //     named as Go names them (json tags are ignored: the schema is the Go
 //     type, so a tag cannot hide a field from a recording);
+//   - a field tagged `learnrec:"omitzero"` is left out while it holds its
+//     zero value (OmitZeroTag). It loses nothing: a field the data does not
+//     name reads back as its zero value. It is for fields added after
+//     recordings exist, so a recording made before them reads back and is
+//     written again byte for byte;
 //   - a map is an object with its keys sorted, so no output depends on map
 //     order;
 //   - nil and empty are kept apart: a nil map, slice or pointer is null.
@@ -32,6 +38,11 @@ import (
 // A struct with an unexported field is refused rather than written without
 // it: a recording that silently loses an input replays a controller that
 // never ran. time.Time is the one exception, written as above.
+
+// OmitZeroTag is the struct tag that leaves a field out of a recording while
+// it holds its zero value: `learnrec:"omitzero"`. A nil slice, map or pointer
+// is zero; an empty one is not, so nil and empty stay apart.
+const OmitZeroTag = "omitzero"
 
 var (
 	timeType = reflect.TypeOf(time.Time{})
@@ -222,14 +233,36 @@ func mapKey(k reflect.Value) (string, error) {
 	return "", fmt.Errorf("learnrec: cannot encode a map key of %s", k.Type())
 }
 
+// omitZeroFields caches, per struct type, which fields carry OmitZeroTag:
+// reflect.Type to []bool, one per field. A recording encodes the same few
+// types every event, so each type's tags are parsed once.
+var omitZeroFields sync.Map
+
+// omitZero is t's omitzero flags, one per field, from the cache.
+func omitZero(t reflect.Type) []bool {
+	if cached, ok := omitZeroFields.Load(t); ok {
+		return cached.([]bool)
+	}
+	flags := make([]bool, t.NumField())
+	for i := range flags {
+		flags[i] = t.Field(i).Tag.Get("learnrec") == OmitZeroTag
+	}
+	cached, _ := omitZeroFields.LoadOrStore(t, flags)
+	return cached.([]bool)
+}
+
 func encodeStruct(buf *bytes.Buffer, v reflect.Value) error {
 	t := v.Type()
+	omit := omitZero(t)
 	buf.WriteByte('{')
 	first := true
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if !f.IsExported() {
 			return fmt.Errorf("learnrec: %s has an unexported field %s; a recording would lose it", t, f.Name)
+		}
+		if omit[i] && v.Field(i).IsZero() {
+			continue
 		}
 		if !first {
 			buf.WriteByte(',')

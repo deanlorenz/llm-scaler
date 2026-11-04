@@ -38,6 +38,12 @@ var engineSpecificReplicaQueries = []string{
 	registration.QueryKvUsageMean,
 	registration.QueryRequestRate,
 	registration.QueryRunningRequests,
+	// Recorded for the TTFT model and read by nothing yet (ttft_inputs.go).
+	registration.QueryPromptTokensBuckets,
+	registration.QueryTTFTBuckets,
+	registration.QueryAvgQueueTime,
+	registration.QueryQueueTimeBuckets,
+	registration.QueryQueueMin,
 }
 
 // agnosticReplicaQueries are the logical query names collected per replica that
@@ -64,6 +70,57 @@ var agnosticReplicaQueries = []string{
 	// vLLM's waiting count split by reason; SGLang publishes no reason.
 	registration.QueryCapacityQueueLength,
 	registration.QueryMaxRankCapacityQueueLength,
+	// vLLM's prefill time, NIXL transfer time and per-request TPOT
+	// histogram, for the TTFT model; SGLang publishes none of them
+	// (registration/ttft_inputs.go).
+	registration.QueryAvgPrefillTime,
+	registration.QueryAvgKVTransferTime,
+	registration.QueryTPOTBuckets,
+}
+
+// ttftAgnosticQueries are the agnostic queries above that carry model_name
+// and are cut down to the model like the engine-specific ones: the TTFT
+// inputs vLLM alone publishes.
+var ttftAgnosticQueries = []string{
+	registration.QueryAvgPrefillTime,
+	registration.QueryAvgKVTransferTime,
+	registration.QueryTPOTBuckets,
+}
+
+// recordOnlyReplicaQueries are the replica queries above whose results only
+// a learner recording reads: the TTFT model's inputs. They are issued only
+// while the collector records them (SetRecordTTFTInputs), so a controller
+// that records nothing pays nothing for them.
+var recordOnlyReplicaQueries = map[string]bool{
+	registration.QueryPromptTokensBuckets: true,
+	registration.QueryTTFTBuckets:         true,
+	registration.QueryAvgQueueTime:        true,
+	registration.QueryQueueTimeBuckets:    true,
+	registration.QueryQueueMin:            true,
+	registration.QueryAvgPrefillTime:      true,
+	registration.QueryAvgKVTransferTime:   true,
+	registration.QueryTPOTBuckets:         true,
+}
+
+// The replica query lists split once, at start: the scaling queries issued
+// every cycle, and the record-only ones issued while recording.
+var (
+	scalingEngineSpecificQueries    = filterQueries(engineSpecificReplicaQueries, false)
+	scalingAgnosticQueries          = filterQueries(agnosticReplicaQueries, false)
+	recordOnlyEngineSpecificQueries = filterQueries(engineSpecificReplicaQueries, true)
+	recordOnlyAgnosticQueries       = filterQueries(agnosticReplicaQueries, true)
+)
+
+// filterQueries is the queries of names that are record-only, or that are
+// not, in order.
+func filterQueries(names []string, recordOnly bool) []string {
+	var out []string
+	for _, n := range names {
+		if recordOnlyReplicaQueries[n] == recordOnly {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // capacityQueueQueries are the agnostic queries partitioned by model_name like
