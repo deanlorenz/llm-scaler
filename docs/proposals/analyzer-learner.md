@@ -2309,16 +2309,20 @@ Built on main 35bd3dd88 (after #462, R1), not on f82a55480, so line numbers
 above are f82a55480's.
 
 - **The seed.** `registry.ParseMeta` (`internal/registry/scalermeta.go`)
-  reads `replicaStartSeconds` as seconds in (0, `MaxReplicaStartSeconds`],
-  3600. Any other value (zero, negative, NaN, infinite, over the hour, not a
-  number) leaves `Meta.ReplicaStartSeconds` 0 and is handed back in
+  reads `replicaStartSeconds` as a plain decimal number of seconds from
+  `MinReplicaStartSeconds` to `MaxReplicaStartSeconds`, 1 to 3600 (`"120"`,
+  `"15.5"`, `"1e2"`). Any other value (under a second, over the hour, NaN,
+  infinite, hex, a unit, surrounding space, not a number) leaves
+  `Meta.ReplicaStartSeconds` 0 and is handed back in
   `Meta.ReplicaStartSecondsIgnored`; it is never a trigger error. An empty
   value is absent, as for the other keys.
 - **Carried, not read.** `Engine.applyStartSeeds`
   (`steadystate/engine.go`), called in `prepareModelData` right after the
   states are projected from discovery, sets
   `domain.VariantReplicaState.StartSeedSeconds` and its presence bit
-  `StartSeedSet`, from the variant's own registry entry. It is per variant:
+  `StartSeedSet`, from the variant's own registry entry. It runs only on
+  cycles where the model has replica rows, so a model scaled to zero
+  neither carries the seed nor logs a bad one. It is per variant:
   there is no largest-wins across a model's variants as for
   `defaultOutputTokens`; how roles combine is 5c's to decide. Both fields are
   tagged `learnrec:"omitzero"` (R1's tag), so a recording carries the seed
@@ -2326,6 +2330,9 @@ above are f82a55480's.
   `ChangeReporter.ReportIgnoredStartSeed` logs "A variant's
   replicaStartSeconds was ignored" once each time the written value changes,
   and again if a fixed value turns bad again.
+  `TestPrepareModelData_CarriesTheStartSeed` drives `prepareModelData` with
+  a fake client and a stub metrics source, so the call is tested where it
+  sits.
 - **Zero golden diff.** Every variant state in the nine goldens (4256) reads
   back and is written again byte for byte
   (`learnrec.TestStartSeed_APre5aRecordingIsWrittenAgainByteForByte`).
@@ -2335,21 +2342,26 @@ above are f82a55480's.
   v0.10.1 does not know is left out while empty, checked inside each entry
   type v0.10.1 knows as well as at the top; and the frozen tag set is pinned
   to a literal.
-- **The fixtures are hand-built**: no capture of either release's ConfigMap
-  exists. `TestLearnedStateFixtures_Generate` builds them from the last
+- **The fixtures are hand-built and frozen**: no capture of either release's
+  ConfigMap exists. `TestLearnedStateFixtures_Generate` built them once,
+  and runs only with `LEARNED_STATE_WRITE_FIXTURES=1`. The base is the last
   learned state the mu-paths golden exported (a real analyzer's state),
-  projected onto the frozen types and encoded with `json.Marshal` as
-  v0.10.1 does; the v0.10.0 one drops `itlSlopes`, the one field v0.10.0
-  (823ddcd74) lacks. They live in `steadystate/testdata/learned-state/`.
-  Both restore through `restoreLearnedState` into a real analyzer with
-  nothing aged, unusable or unattributable, and the analyzer's export
-  holds every entry unchanged. The light-load restore that keeps the ITL
+  put into the frozen types. Each map that export left empty got a
+  hand-built entry in v0.10.1's key formats: argument tags, put-aside
+  windows and baseline, an armed borrow and a previous figure dual-written
+  to `k2BorrowedSince` and `priorK2`, an orphan `priorK2` entry, a forget
+  mark. The document is encoded with `json.Marshal`, as v0.10.1 does; the
+  v0.10.0 one drops `itlSlopes`, the one field v0.10.0 (823ddcd74) lacks.
+  They live in `steadystate/testdata/learned-state/`, with a README saying
+  they are frozen. Both restore through `restoreLearnedState` into a real
+  analyzer with nothing aged, unusable or unattributable; the export holds
+  every map's entries unchanged, the borrow comes back armed, and the
+  orphan previous figure is installed as a lower bound.
+  `saturation.TestLearnedStateKeyFormats_AreV0101s` pins the key builders to
+  one sample key per map. The light-load restore that keeps the ITL
   line from the v0.10.1 fixture runs cycles, so it is left to 5d's
-  restore-then-run. The optional recorded documents from the kind run may
-  replace them.
-- **Not unit-tested:** the `applyStartSeeds` call inside
-  `prepareModelData`, which needs the API server. The kind recording is its
-  witness: the seeded variant's states carry `StartSeedSeconds`.
+  restore-then-run. A document captured from a real controller may be added
+  beside them.
 
 ## 8. Risks and limits
 

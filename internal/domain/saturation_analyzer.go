@@ -319,7 +319,8 @@ type VariantReplicaState struct {
 	MaxReplicas *int
 	// StartSeedSeconds is the replica start time the variant's ScaledObject
 	// seeds (replicaStartSeconds), read only when StartSeedSet. The engine
-	// sets both from the trigger metadata every cycle; a value the trigger
+	// sets both from the trigger metadata on cycles where the model has
+	// replica rows (the cycles that build an analyzer input); a value the trigger
 	// parse ignored leaves them unset. Carried so a learner recording holds
 	// it; no analyzer reads it yet (step 5c of
 	// docs/proposals/analyzer-learner.md). Both are left out of a recording

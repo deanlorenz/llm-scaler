@@ -137,10 +137,10 @@ func (p *ChangeReporter) ReportIgnoredStartSeed(ctx context.Context, namespace, 
 		return
 	}
 	ctrl.LoggerFrom(ctx).Info(
-		"A variant's replicaStartSeconds was ignored: it must be a number of seconds above 0 and at "+
-			"most maxSeconds. The variant is treated as having no seed.",
+		"A variant's replicaStartSeconds was ignored: it must be a plain decimal number of seconds "+
+			"from minSeconds to maxSeconds. The variant is treated as having no seed.",
 		"namespace", namespace, "variant", variant, "replicaStartSeconds", raw,
-		"maxSeconds", registry.MaxReplicaStartSeconds)
+		"minSeconds", registry.MinReplicaStartSeconds, "maxSeconds", registry.MaxReplicaStartSeconds)
 }
 
 // joinInts renders a deterministic list, so the same set reported in a different

@@ -2,6 +2,7 @@ package registry
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"time"
 )
@@ -113,7 +114,8 @@ const (
 	// it with a measurement, and wva_replica_start_seconds_estimate carries a
 	// source label saying which is in force.
 	//
-	// ParseMeta reads it as seconds in (0, MaxReplicaStartSeconds]. Any other
+	// ParseMeta reads it as a plain decimal number of seconds in
+	// [MinReplicaStartSeconds, MaxReplicaStartSeconds], 1 to 3600. Any other
 	// value is ignored, as if unset, and never rejects the trigger: before it
 	// was parsed any value was accepted, and a rejected trigger freezes the
 	// model. The engine puts it on the analyzer input
@@ -157,10 +159,16 @@ const (
 // a trigger that omits variantCost ranks exactly where an unset one always has.
 const DefaultVariantCost = "10.0"
 
-// MaxReplicaStartSeconds is the longest replicaStartSeconds seed ParseMeta
-// accepts: an hour, the same bound the collector puts on a measured start
-// (a Ready transition later than that is not read as a start).
-const MaxReplicaStartSeconds = 3600.0
+// MinReplicaStartSeconds and MaxReplicaStartSeconds bound the
+// replicaStartSeconds seed ParseMeta accepts. A second is below any start
+// measured (the fastest, a snapshot restore, is about 15 s), so a smaller
+// figure is a slip, such as a fraction of a minute. An hour is the bound the
+// collector puts on a measured start (a Ready transition later than that is
+// not read as a start).
+const (
+	MinReplicaStartSeconds = 1.0
+	MaxReplicaStartSeconds = 3600.0
+)
 
 // Meta is the validated trigger metadata for one variant.
 type Meta struct {
@@ -193,20 +201,28 @@ type Meta struct {
 	// seed: no replica becomes Ready in no time.
 	ReplicaStartSeconds float64
 	// ReplicaStartSecondsIgnored is the replicaStartSeconds value as written
-	// when ParseMeta ignored it -- not a number, not finite, not above zero,
-	// or over MaxReplicaStartSeconds -- and empty otherwise. A bad seed is not
+	// when ParseMeta ignored it -- not a plain decimal number, or outside
+	// [MinReplicaStartSeconds, MaxReplicaStartSeconds] -- and empty otherwise. A bad seed is not
 	// a trigger error (see ReplicaStartSecondsKey); this is what lets the
 	// caller say it was ignored.
 	ReplicaStartSecondsIgnored string
 }
 
+// plainDecimal is a decimal number as an operator writes one: digits, an
+// optional fraction and an optional exponent ("120", "15.5", "1e2"). It
+// leaves out what strconv.ParseFloat also reads -- hex ("0x1p6"),
+// underscores, NaN, Inf -- and surrounding space.
+var plainDecimal = regexp.MustCompile(`^[+]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$`)
+
 // parseReplicaStartSeconds reads a replicaStartSeconds value: the seed, or 0
-// and false when raw is not seconds in (0, MaxReplicaStartSeconds].
+// and false when raw is not a plain decimal number of seconds in
+// [MinReplicaStartSeconds, MaxReplicaStartSeconds].
 func parseReplicaStartSeconds(raw string) (float64, bool) {
+	if !plainDecimal.MatchString(raw) {
+		return 0, false
+	}
 	v, err := strconv.ParseFloat(raw, 64)
-	// NaN fails every comparison, so it is refused by the first clause rather
-	// than admitted by a negated one.
-	if err != nil || !(v > 0 && v <= MaxReplicaStartSeconds) {
+	if err != nil || v < MinReplicaStartSeconds || v > MaxReplicaStartSeconds {
 		return 0, false
 	}
 	return v, true

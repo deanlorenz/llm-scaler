@@ -4,8 +4,8 @@ import (
 	"testing"
 )
 
-// TestReplicaStartSecondsIsParsedAndABadValueIgnored: the seed is read as
-// seconds in (0, MaxReplicaStartSeconds]. Unlike defaultOutputTokens, a bad
+// TestReplicaStartSecondsIsParsedAndABadValueIgnored: the seed is read as a
+// plain decimal number of seconds in [1, 3600]. Unlike defaultOutputTokens, a bad
 // value never rejects the trigger -- before it was parsed every value was
 // accepted, and a rejected trigger freezes the model. It is ignored, as if
 // unset, and handed back as written so the caller can say so.
@@ -24,6 +24,13 @@ func TestReplicaStartSecondsIsParsedAndABadValueIgnored(t *testing.T) {
 		{name: "the hour itself", raw: "3600", set: true, want: 3600},
 		{name: "over the hour", raw: "3600.5", set: true, ignored: true},
 		{name: "zero", raw: "0", set: true, ignored: true},
+		{name: "one second", raw: "1", set: true, want: 1},
+		{name: "under a second", raw: "0.999", set: true, ignored: true},
+		{name: "an exponent", raw: "1e2", set: true, want: 100},
+		{name: "a leading space", raw: " 120", set: true, ignored: true},
+		{name: "a trailing space", raw: "120 ", set: true, ignored: true},
+		{name: "hex", raw: "0x1p6", set: true, ignored: true},
+		{name: "an underscore", raw: "1_20", set: true, ignored: true},
 		{name: "negative", raw: "-30", set: true, ignored: true},
 		{name: "NaN", raw: "NaN", set: true, ignored: true},
 		{name: "infinite", raw: "+Inf", set: true, ignored: true},

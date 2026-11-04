@@ -9,10 +9,13 @@ import (
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/scalingpolicy"
+	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
 )
 
 // startSeedEngine is an engine with an empty registry and a reporter.
@@ -88,6 +91,8 @@ func TestApplyStartSeeds_ABadSeedIsIgnoredAndLoggedOncePerChange(t *testing.T) {
 		{raw: "120", set: true, lines: 4}, // fixed: nothing to say
 		{raw: "", lines: 4},               // removed: nothing to say
 		{raw: "garbage", lines: 5},        // bad again after the fix: said again
+		{raw: " 120", lines: 6},           // a stray space: ignored, and said
+		{raw: "0.5", lines: 7},            // under a second
 	} {
 		st := run(step.raw)
 		assert.Equal(t, step.set, st.StartSeedSet, "seed %q", step.raw)
@@ -113,4 +118,30 @@ func TestApplyStartSeeds_NoRegistry(t *testing.T) {
 	states := []domain.VariantReplicaState{{VariantName: "v"}}
 	assert.NotPanics(t, func() { (&Engine{}).applyStartSeeds(context.Background(), "ns", states) })
 	assert.False(t, states[0].StartSeedSet)
+}
+
+// The seed reaches the analyzer input through prepareModelData, not only
+// through applyStartSeeds called by hand: a registry entry seeding 120 s
+// gives the variant's state the seed and its presence bit. Calling it
+// before the states are built, or not at all, fails here.
+func TestPrepareModelData_CarriesTheStartSeed(t *testing.T) {
+	e, _ := engineConfigEngine(t)
+	reg := registry.New(0)
+	reg.Observe("ns", "v", map[string]string{registry.ModelIDKey: "m", registry.ReplicaStartSecondsKey: "120"})
+	e.Variants, e.policies = reg, scalingpolicy.NewChangeReporter()
+	d := deployWithArgs("--max-num-seqs=128")
+	one := int32(1)
+	d.Spec.Replicas = &one
+	d.Status.Replicas, d.Status.ReadyReplicas = 1, 1
+	k8s := fake.NewClientBuilder().WithObjects(d).Build()
+	e.ReplicaMetricsCollector = collector.NewReplicaMetricsCollector(
+		replicaSource{modelID: "m", pods: []string{"v" + podSuffix}}, k8s, nil, nil, variantOfPodLocator{})
+
+	md, err := e.prepareModelData(context.Background(), "m",
+		[]llmdVariantAutoscalingV1alpha1.VariantAutoscaling{parkedVA()}, k8s)
+	require.NoError(t, err)
+	require.NotNil(t, md, "precondition: the model has a replica row, so it is not skipped")
+	require.Len(t, md.variantStates, 1)
+	assert.True(t, md.variantStates[0].StartSeedSet, "the seed's presence bit")
+	assert.Equal(t, 120.0, md.variantStates[0].StartSeedSeconds)
 }
