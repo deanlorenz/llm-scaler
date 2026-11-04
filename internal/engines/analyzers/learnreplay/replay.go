@@ -12,8 +12,9 @@
 // own commit (Fidelity) that recording must equal the original byte for
 // byte: every result, every store record read before an Analyze, every check
 // event. Nothing in the controller imports it: the tests, cmd/learnergolden,
-// cmd/whatif (Generate, generate.go) and internal/whatifsource, which
-// writes the capture Generate reads (CaptureWindow, CaptureCycle), do.
+// cmd/whatif (Generate, generate.go; StateAt, state.go, for the answer
+// commands) and internal/whatifsource, which writes the capture Generate
+// reads (CaptureWindow, CaptureCycle), do.
 package learnreplay
 
 import (
@@ -73,6 +74,9 @@ type Options struct {
 	// RegisterEngine set, and with none the engine events are skipped
 	// (Report.Ignored).
 	Engine EngineReplayer
+	// stop, when set, is asked after each applied event; true ends the
+	// replay there (StateAt).
+	stop func(r *replayer, ev learnrec.RawEvent) bool
 }
 
 // build makes the analyzers and the store a recording's start describes.

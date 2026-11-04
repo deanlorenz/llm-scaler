@@ -180,6 +180,9 @@ func Replay(ctx context.Context, recording []byte, opts Options) (*Report, error
 		if err := r.apply(ctx, ev); err != nil {
 			return nil, fmt.Errorf("learnreplay: seq %d %s: %w", ev.Seq, ev.Kind, err)
 		}
+		if opts.stop != nil && opts.stop(r, ev) {
+			break
+		}
 	}
 	if err := rec.Err(); err != nil {
 		return nil, fmt.Errorf("learnreplay: the replay's own recording failed: %w", err)

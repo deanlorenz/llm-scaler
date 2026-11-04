@@ -300,6 +300,14 @@ func (a *SaturationAnalyzer) observeBatchCap(namespace, modelID, role string, rm
 // and the fleet priced at the default again.
 func (a *SaturationAnalyzer) pricingBatchCap(namespace, modelID, variant string,
 	params *capacity.EngineParams, learning bool) pricedBatchCap {
+	return a.pricingBatchCapFor(namespace, modelID, variant, params, learning, true)
+}
+
+// pricingBatchCapFor is pricingBatchCap; stamp false reads a learned cap
+// without stamping it as used, for a reader outside the analyzer's cycle
+// (PricingBatchCap).
+func (a *SaturationAnalyzer) pricingBatchCapFor(namespace, modelID, variant string,
+	params *capacity.EngineParams, learning, stamp bool) pricedBatchCap {
 	if params != nil {
 		if stated := params.ExplicitMaxNumSeqs(); stated > 0 {
 			return pricedBatchCap{perRank: stated, source: batchCapFromFlags}
@@ -313,7 +321,9 @@ func (a *SaturationAnalyzer) pricingBatchCap(namespace, modelID, variant string,
 		a.mu.Lock()
 		lc := a.batchCaps[batchCapKey(namespace, modelID, variant)]
 		if lc != nil && lc.args == windowArgs(params) && lc.perRank > 0 && (def <= 0 || lc.perRank < def) {
-			lc.usedAt = a.now()
+			if stamp {
+				lc.usedAt = a.now()
+			}
 			learned := lc.perRank
 			a.mu.Unlock()
 			return pricedBatchCap{perRank: learned, source: batchCapLearned}

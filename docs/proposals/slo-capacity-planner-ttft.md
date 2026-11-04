@@ -58,7 +58,12 @@ Three derivations matter here:
   `AvgServiceTime − (OL − 1)·ITLPerToken` subtracts two large numbers. The
   per-stage `request_prefill_time_seconds` is needed.
 - **`ols-sweep`** has one prefill pod that never queued. It supports `a`
-  (10.1 ms at low load) and the low-load slope, not `V_P` or `f`.
+  and the low-load slope, not `V_P` or `f`. `a` is 11.04 ms: an
+  intercept of 8.36 ms, fitted against the effective prompt over low-load
+  minutes, plus the least overhead, 2.68 ms. An earlier
+  revision said 10.1 ms: that was an intercept fitted against
+  `AvgInputTokens`, the long-window prompt mean, not the minute the service
+  time covers, and it left the overhead out.
 
 ## Prefill capacity
 
@@ -93,7 +98,7 @@ alone: `S_work = I_eff/V_P`, `ρ = λ·E[I_eff]/V_P`.
 The **low-load slope** of service time against prompt length is an upper bound,
 not a source. A lone prompt runs as `T(I) = s0 + c·I`, and a busy pod's steps of
 `B` tokens run at `B/(s0 + c·B) < 1/c`, so `1/slope ≥ V_P`: on `ols-sweep` about
-760k tok/s against an offered peak of 30k. It is a validation signal only.
+520k tok/s against an offered peak of 30k. It is a validation signal only.
 `--assume-vp` supplies `V_P` by hand for an illustration or for hardware not yet
 measured; every answer built on it is flagged ASSUMED.
 
@@ -115,7 +120,10 @@ pooled M/G/c (Allen-Cunneen) is printed as an optimistic bound only.
 
 **Measuring `f`**: the busiest pod's share of prefill work over the mean share,
 from per-pod `PrefillComputedTokenRate`, over minutes with at least 100
-requests per pod, minus the expected max of `N_p` Poisson counts. Sticky routing
+requests a pod on average, minus the expected max of `N_p` Poisson counts.
+That de-bias errs both ways ([where it is most wrong](#where-it-is-most-wrong)):
+low on a real imbalance at few requests, high on equal pods with variable
+prompts. Sticky routing
 (one pod wins a whole refresh window `w`) averages back toward 1 per minute; the
 worst pod then gets `Ca² ≈ 1 + λ_w·w`, uncapped.
 
@@ -125,13 +133,15 @@ A decode pod holding `n` requests completes them at
 
     μ_n = m / ( OL · ITL(m·KVreq/C) ),   m = min(n, c),   c = batchCap·ranks
 
-a birth-death chain using the line at each state's own fill. Above `c` the chain
+a birth-death chain using the line at each state's own fill, clamped to the
+fitted band (a fill below it reads the band's bottom). Above `c` the chain
 is geometric, so the wait of a request that waits is exactly
 `Exp(μ_c − λ_rep)`, and the wait probability is the chain's mass at `n ≥ c`. A
 constant ITL (Erlang C at the mean fill) under-states the wait near the knee: in
-the worked example 0.0007 against 0.032 at 0.85 of the knee. When KV binds
-before the cap, `c = C/KVreq` at a full cache, flagged approximate. Residence is
-treated as exponential.
+the worked example 0.0007 against 0.032 at 0.85 of the knee. When the band's
+top holds fewer requests than the cap, `c = floor(band.Hi·C/KVreq)`, flagged
+approximate. Either way `μ_c` is the decode knee per replica, so the chain and
+the knee saturate at the same rate. Residence is treated as exponential.
 
 **One rule, flow control on or off:** `W_decode` is this chain, on the decode
 pods. With the batch cap binding (the worked example's cap fill is 0.732), the
@@ -265,6 +275,9 @@ that is itself wrong (the exponential tail, Poisson arrivals, an omitted
 | Proxy hop before the EPP | Over-promises by that hop |
 | `T_xfer` omitted (not collected) | Over-promises |
 | `V_P` from a lower bound | Under-promises |
+| `V_P` from the peak under a queue: a max over up to 358 overlapping 3-minute windows' minimums of a one-minute `rate()` | Over-promises, by about the noise of a one-minute rate |
+| `f` de-biased for Poisson arrivals, on a real imbalance | Over-promises: the busiest pod's share holds little chance excess, but the equal pods' excess is subtracted anyway. Four pods at 2:1:1:1 (`f` 1.6) read about 1.50 at 100 requests a pod (6% low) and about 1.57 at 1500 |
+| `f` from computed-token shares with variable prompts | Under-promises: a pod's token count varies about `√(1+Cs²)` times its request count, and only the request count's excess is subtracted. Four equal pods with `Cs²` = 1 read about 1.03 at 100 requests a pod |
 | Worst-pod percentile | Under-promises |
 | The union bound | Under-promises against the true combination of the modelled parts; the independent figure beside it over-promises |
 

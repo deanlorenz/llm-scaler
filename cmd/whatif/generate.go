@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -123,19 +121,15 @@ func writeFileAtomic(path string, write func(w io.Writer) error) (err error) {
 	return os.Rename(tmp.Name(), path)
 }
 
-// readMaybeGzipped reads a file, gunzipping it when it is gzipped.
+// readMaybeGzipped reads a file, gunzipping it when it is gzipped
+// (gunzipped); a gzip error names the file.
 func readMaybeGzipped(path string) ([]byte, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	if len(b) < 2 || b[0] != 0x1f || b[1] != 0x8b {
-		return b, nil
-	}
-	r, err := gzip.NewReader(bytes.NewReader(b))
-	if err != nil {
+	if b, err = gunzipped(b); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	defer func() { _ = r.Close() }()
-	return io.ReadAll(r)
+	return b, nil
 }
