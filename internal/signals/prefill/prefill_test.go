@@ -30,10 +30,10 @@ func base(pod string) domain.ReplicaMetrics {
 	}
 }
 
-// lowLoad is a row at low load: rr requests/s of ieff tokens, each served in
+// lowLoad is a row of p-0 at low load: rr requests/s of ieff tokens, each served in
 // svc seconds, with a TTFT overhead of overhead seconds.
-func lowLoad(pod string, ieff, svc, rr, overhead float64) domain.ReplicaMetrics {
-	rm := base(pod)
+func lowLoad(ieff, svc, rr, overhead float64) domain.ReplicaMetrics {
+	rm := base("p-0")
 	rm.RequestRate, rm.PrefillComputedTokenRate = rr, ieff*rr
 	rm.AvgServiceTime, rm.AvgTTFT = svc, svc+overhead
 	return rm
@@ -228,11 +228,11 @@ func TestCapacity_PropertyAnUnqueuedMinuteNeverRaisesIt(t *testing.T) {
 // --- a ---
 
 // lowLoadMinutes is one low-load cycle per prompt length, each minute, on a
-// pod whose service time is s0 + c*I and whose overhead is overhead.
-func lowLoadMinutes(s0, c, overhead float64, prompts ...float64) []Cycle {
+// pod whose service time is s0 + c*I and whose overhead is 2.5 ms.
+func lowLoadMinutes(s0, c float64, prompts ...float64) []Cycle {
 	out := make([]Cycle, len(prompts))
 	for i, p := range prompts {
-		out[i] = cycle(time.Time{}, lowLoad("p-0", p, s0+c*p, 1, overhead))
+		out[i] = cycle(time.Time{}, lowLoad(p, s0+c*p, 1, 0.0025))
 	}
 	return out
 }
@@ -241,7 +241,7 @@ func lowLoadMinutes(s0, c, overhead float64, prompts ...float64) []Cycle {
 // level after the first steady-gates its first two minutes out and keeps
 // two: eight minutes over three levels.
 func steadyPrompts(levels ...float64) []float64 {
-	var out []float64
+	out := make([]float64, 0, 4*len(levels))
 	for _, l := range levels {
 		out = append(out, l, l, l, l)
 	}
@@ -251,7 +251,7 @@ func steadyPrompts(levels ...float64) []float64 {
 // The low-load fit recovers the intercept and the slope of a pod's service
 // time, and a adds the least overhead.
 func TestFixed_RecoversTheLine(t *testing.T) {
-	est := run(NewObserver(), lowLoadMinutes(0.008, 2e-6, 0.0025, steadyPrompts(1000, 3000, 6000)...)...)
+	est := run(NewObserver(), lowLoadMinutes(0.008, 2e-6, steadyPrompts(1000, 3000, 6000)...)...)
 	require.Empty(t, est.ARefused)
 	assert.InDelta(t, 0.008, est.AIntercept, 1e-12)
 	assert.InDelta(t, 0.0025, est.AOverhead, 1e-12)
@@ -266,13 +266,13 @@ func TestFixed_RecoversTheLine(t *testing.T) {
 // LowLoadOccupancy, with their service time stretched by shared steps, leave
 // a where the low-load minutes put it. So do minutes with a queue.
 func TestFixed_LoadedAndQueuedMinutesAreExcluded(t *testing.T) {
-	cs := lowLoadMinutes(0.008, 2e-6, 0.0025, steadyPrompts(1000, 3000, 6000)...)
+	cs := lowLoadMinutes(0.008, 2e-6, steadyPrompts(1000, 3000, 6000)...)
 	for i := range 6 {
 		// 30 requests/s at 3x the service time: occupancy above 0.1.
-		loaded := lowLoad("p-0", 6000, 3*(0.008+2e-6*6000), 30, 0.0025)
+		loaded := lowLoad(6000, 3*(0.008+2e-6*6000), 30, 0.0025)
 		cs = append(cs, cycle(time.Time{}, loaded))
 		if i%2 == 0 {
-			q := lowLoad("p-0", 6000, 3*(0.008+2e-6*6000), 0.5, 0.0025)
+			q := lowLoad(6000, 3*(0.008+2e-6*6000), 0.5, 0.0025)
 			q.QueueLength = 2
 			cs = append(cs, cycle(time.Time{}, q))
 		}
@@ -285,9 +285,10 @@ func TestFixed_LoadedAndQueuedMinutesAreExcluded(t *testing.T) {
 // A prompt length that just moved is not steady: the minute after a step,
 // whose service time still carries the old level, is kept out of the fit.
 func TestFixed_AStepInPromptLengthIsNotSteady(t *testing.T) {
-	var cs []Cycle
-	for _, l := range steadyPrompts(1000, 3000, 6000) {
-		cs = append(cs, cycle(time.Time{}, lowLoad("p-0", l, 0.008+2e-6*l, 1, 0.0025)))
+	prompts := steadyPrompts(1000, 3000, 6000)
+	cs := make([]Cycle, 0, len(prompts))
+	for _, l := range prompts {
+		cs = append(cs, cycle(time.Time{}, lowLoad(l, 0.008+2e-6*l, 1, 0.0025)))
 	}
 	// The first minute of each new level reads the previous level's service
 	// time: a fit that took it would move.
@@ -304,26 +305,26 @@ func TestFixed_AStepInPromptLengthIsNotSteady(t *testing.T) {
 // The refusals of a, each by its state.
 func TestFixed_Refusals(t *testing.T) {
 	t.Run("too few", func(t *testing.T) {
-		est := run(NewObserver(), lowLoadMinutes(0.008, 2e-6, 0.0025, 1000, 6000, 6000)...)
+		est := run(NewObserver(), lowLoadMinutes(0.008, 2e-6, 1000, 6000, 6000)...)
 		assert.Equal(t, TooFewLowLoadMinutes, est.ARefused)
 		assert.Zero(t, est.A)
 	})
 	t.Run("no spread", func(t *testing.T) {
-		est := run(NewObserver(), lowLoadMinutes(0.008, 2e-6, 0.0025, 1000, 1000, 1000, 1100, 1100, 1100)...)
+		est := run(NewObserver(), lowLoadMinutes(0.008, 2e-6, 1000, 1000, 1000, 1100, 1100, 1100)...)
 		assert.Equal(t, NoPromptSpread, est.ARefused)
 	})
 	t.Run("non-positive slope", func(t *testing.T) {
-		est := run(NewObserver(), lowLoadMinutes(0.02, -1e-6, 0.0025, steadyPrompts(1000, 6000)...)...)
+		est := run(NewObserver(), lowLoadMinutes(0.02, -1e-6, steadyPrompts(1000, 6000)...)...)
 		assert.Equal(t, NonPositiveSlope, est.ARefused)
 		assert.Zero(t, est.SlopeBound)
 	})
 	t.Run("non-positive intercept", func(t *testing.T) {
-		est := run(NewObserver(), lowLoadMinutes(-0.001, 2e-6, 0.0025, steadyPrompts(1000, 6000)...)...)
+		est := run(NewObserver(), lowLoadMinutes(-0.001, 2e-6, steadyPrompts(1000, 6000)...)...)
 		assert.Equal(t, NonPositiveIntercept, est.ARefused)
 		assert.Zero(t, est.A)
 	})
 	t.Run("aggregated", func(t *testing.T) {
-		cs := lowLoadMinutes(0.008, 2e-6, 0.0025, steadyPrompts(1000, 3000, 6000)...)
+		cs := lowLoadMinutes(0.008, 2e-6, steadyPrompts(1000, 3000, 6000)...)
 		for i := range cs {
 			cs[i].Disaggregated = false
 		}
@@ -335,7 +336,7 @@ func TestFixed_Refusals(t *testing.T) {
 
 // With no TTFT read, a is the intercept alone, and says so.
 func TestFixed_NoTTFTIsTheInterceptAlone(t *testing.T) {
-	cs := lowLoadMinutes(0.008, 2e-6, 0.0025, steadyPrompts(1000, 3000, 6000)...)
+	cs := lowLoadMinutes(0.008, 2e-6, steadyPrompts(1000, 3000, 6000)...)
 	for i := range cs {
 		cs[i].Rows[0].AvgTTFT = 0
 	}
@@ -354,15 +355,16 @@ func TestFixed_PropertyRecoversRandomPods(t *testing.T) {
 		// Each level more than MaxPromptDrift from the one before it, so the
 		// steady gate keeps the minutes steadyPrompts says.
 		levels := []float64{lo, lo * (1.5 + 3*rng.Float64()), lo * (1.2 + 0.1*rng.Float64())}
-		var cs []Cycle
+		prompts := steadyPrompts(levels...)
+		cs := make([]Cycle, 0, len(prompts))
 		least := math.Inf(1)
-		for i, l := range steadyPrompts(levels...) {
+		for i, l := range prompts {
 			ov := 0.002 + 0.01*rng.Float64()
 			// The minutes the steady gate admits (steadyPrompts).
 			if i < 4 || i%4 >= 2 {
 				least = math.Min(least, ov)
 			}
-			cs = append(cs, cycle(time.Time{}, lowLoad("p-0", l, s0+c*l, 0.5, ov)))
+			cs = append(cs, cycle(time.Time{}, lowLoad(l, s0+c*l, 0.5, ov)))
 		}
 		est := run(NewObserver(), cs...)
 		require.Empty(t, est.ARefused, "seed %d", seed)
@@ -384,7 +386,7 @@ func TestSettle_AJoiningReplicaWaits(t *testing.T) {
 	var settling, admitted int
 	for i := range 12 {
 		now := t0.Add(time.Duration(i) * 15 * time.Second)
-		rm := lowLoad("p-0", 1000, 0.01, 1, 0.003)
+		rm := lowLoad(1000, 0.01, 1, 0.003)
 		rm.ReadySince = t0
 		tr.Observe("ns/m", settlerow.Of([]domain.ReplicaMetrics{rm}, roles), now)
 		c := cycle(now, rm)
@@ -404,7 +406,7 @@ func TestSettle_AJoiningReplicaWaits(t *testing.T) {
 
 // A replica the tracker does not know is not settled.
 func TestSettle_AnUnknownReplicaIsNotAdmitted(t *testing.T) {
-	c := cycle(t0, lowLoad("p-0", 1000, 0.01, 1, 0.003))
+	c := cycle(t0, lowLoad(1000, 0.01, 1, 0.003))
 	c.Settle = &Settle{View: settle.NewTracker(), Model: "ns/m"}
 	est := NewObserver().Observe(c)
 	assert.Zero(t, est.Admitted)
@@ -592,7 +594,7 @@ func TestInputs_NaNInfAndMissing(t *testing.T) {
 	}
 	learned := func() (*Observer, Estimate) {
 		o := NewObserver()
-		cs := lowLoadMinutes(0.008, 2e-6, 0.0025, steadyPrompts(1000, 3000, 6000)...)
+		cs := lowLoadMinutes(0.008, 2e-6, steadyPrompts(1000, 3000, 6000)...)
 		cs = append(cs, queuedMinutes(20000, 20000, 20000)...)
 		est := run(o, cs...)
 		require.Empty(t, est.ARefused)
@@ -601,7 +603,7 @@ func TestInputs_NaNInfAndMissing(t *testing.T) {
 	}
 	check := func(name string, rm domain.ReplicaMetrics, bound Bound) {
 		// From nothing: refusals, no NaN.
-		var cs []Cycle
+		cs := make([]Cycle, 0, 8)
 		for range 8 {
 			c := cycle(time.Time{}, rm, rm)
 			c.Rows[1].PodName = "p-1"
@@ -624,7 +626,7 @@ func TestInputs_NaNInfAndMissing(t *testing.T) {
 	for name, set := range mutate {
 		for _, x := range bad {
 			for _, q := range []int{0, 3} {
-				rm := lowLoad("p-0", 2000, 0.012, 1, 0.003)
+				rm := lowLoad(2000, 0.012, 1, 0.003)
 				rm.QueueLength = q
 				set(&rm, x)
 				check(name, rm, Bound{})
@@ -632,7 +634,7 @@ func TestInputs_NaNInfAndMissing(t *testing.T) {
 		}
 	}
 	for name, set := range unread {
-		rm := lowLoad("p-0", 2000, 0.012, 1, 0.003)
+		rm := lowLoad(2000, 0.012, 1, 0.003)
 		set(&rm)
 		check(name, rm, Bound{})
 	}

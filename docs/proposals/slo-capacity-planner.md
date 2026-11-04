@@ -469,6 +469,15 @@ is made.**
 | Only if asked | The controller endpoint and two gauges | none | P3 |
 | Later | Prefill line and learned batch cap in the snapshot; the floor's prefill mu from `V_P`; a shared prefill/decode budget; #275, #277 | — | — |
 
+**P1 and busy minutes.** `V_P`'s first source, busy minutes, needs each pod's
+least waiting count over the minute (`min_over_time` of
+`num_requests_waiting`), which no query reads today. P1 takes it as
+`prefill.Cycle.QueueMin` and is fed none, so busy minutes never fire and
+`V_P` comes only from the lower-bound sources (the peak under a queue, the
+back-pressure bound). R1 adds a per-pod `QueueMin` with a presence bit
+(`QueueMinKnown`); once R1 merges, a follow-up to P1 wires it into the
+observation.
+
 The `ols-sweep-slo` run (flow control off, scales out, router TTFT recorded)
 is worth preserving now, before any capture tool exists, as a Prometheus
 snapshot (the TSDB snapshot API or a `promtool tsdb` dump), while Prometheus

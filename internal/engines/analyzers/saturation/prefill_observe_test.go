@@ -107,7 +107,7 @@ func TestPrefillObserve_MovesNoResult(t *testing.T) {
 			{VariantName: "decode", Role: domain.RoleDecode, AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1},
 			{VariantName: "prefill", Role: domain.RolePrefill, AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1},
 		}
-		var out []domain.AnalyzerResult
+		out := make([]domain.AnalyzerResult, 0, 8)
 		for i := range 8 {
 			dec := makeReplicaMetrics("decode-0", "decode", 12000, 16000, i%3*4, 4000, 500)
 			pre := makeReplicaMetrics("prefill-0", "prefill", 2000, 16000, 6, 4000, 1)
