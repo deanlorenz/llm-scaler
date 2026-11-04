@@ -205,7 +205,9 @@ func silenceCause(state *variantState, r itl.Reading) string {
 // in the band, above it, below it, and settling; what the band's and the
 // above-band windows hold; and the readings above the band admitted at the
 // sequence cap, with the cap and its source (SwitchITLAdmitsAtSequenceCap;
-// 0 and "none" when nothing states one, or the switch is off). It logs the
+// 0 and "none" when nothing states one, or the switch is off); and whether
+// the line was priced one-sided through the least ITL past kSat
+// (itl.Reading.PinnedAtLeastITL). It logs the
 // same line once too when the cap's source changes, or when readings at the
 // cap start (atCap above 0) or stop, so a line that stays live still says
 // when it is taught from above the band; a source change or a stop is
@@ -232,7 +234,8 @@ func noteLineSilence(ctx context.Context, state *variantState, r itl.Reading, re
 		"variant", variant, "silent", silent, "cause", cause, "source", reason,
 		"inBand", r.Offered-r.Capped, "aboveBand", r.AboveBand, "belowBand", r.BelowBand, "settling", r.Settling,
 		"held", r.Held, "aboveBandHeld", r.AboveBandHeld,
-		"atCap", r.Capped, "batchCap", state.batchCap, "batchCapSource", state.batchCapSource)
+		"atCap", r.Capped, "batchCap", state.batchCap, "batchCapSource", state.batchCapSource,
+		"pinnedAtLeastITL", r.PinnedAtLeastITL)
 }
 
 // lineReason is the Reason a reading's line carries.

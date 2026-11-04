@@ -2,6 +2,7 @@ package itl
 
 import (
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -52,4 +53,33 @@ func TestTracker_OneSidedAboveKSatPricesAtOrAboveTheTruth(t *testing.T) {
 		t.Errorf("negative control, without it: priced %.5f s against the truth %.5f s; it should price under", off, truth)
 	}
 	t.Logf("truth %.5f s: one-sided %.5f s, through the default B %.5f s", truth, on, off)
+}
+
+// The line through the least ITL reads only the readings at or past
+// DefaultKSat: in a window of capped readings at k 0.82 and 0.93, on a
+// shallow line, its pin is the least ITL at 0.93 and its slope is fitted
+// over those alone (flat, on readings without noise), not the 0.82 ones,
+// which lie under the k the line is priced at and would turn its margin
+// against the truth.
+func TestTracker_OneSidedReadsOnlyTheReadingsPastKSat(t *testing.T) {
+	start := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	const a, b = 0.01, 0.030
+	tr := NewTracker()
+	adm := Admission{MaxNumSeqs: 64, OneSidedAboveKSat: true}
+	var r Reading
+	for c := range 6 {
+		rows := cappedRows(0.82, a, b, start)
+		rows[2].KvCacheUsage, rows[2].KvUsageInstant, rows[2].AvgITL = 0.93, 0.93, a*0.93+b
+		r = tr.Observe("k", "v", rows, adm, start.Add(time.Duration(c)*15*time.Second))
+	}
+	if r.Capped != 3 || !r.PinnedAtLeastITL {
+		t.Fatalf("premise: three capped readings a cycle, priced one-sided; got capped %d, one-sided %v", r.Capped, r.PinnedAtLeastITL)
+	}
+	want := Model{A: 0, B: a*0.93 + b}
+	if math.Abs(r.Model.A-want.A) > 1e-12 || math.Abs(r.Model.B-want.B) > 1e-12 {
+		t.Errorf("the line %+v, want %+v: the pin or the slope read readings under kSat", r.Model, want)
+	}
+	if truth := a*DefaultKSat + b; r.Model.ITLAt(DefaultKSat) < truth {
+		t.Errorf("priced %.5f s, under the truth %.5f s", r.Model.ITLAt(DefaultKSat), truth)
+	}
 }

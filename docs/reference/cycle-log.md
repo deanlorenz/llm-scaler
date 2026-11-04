@@ -345,7 +345,7 @@ The throughput analyzer uses:
 | `T2-pinned` | capacity from Tier-2 constrained OLS with a prior fitted B |
 | `T2-default` | capacity from Tier-2 constrained OLS with the default baseline B (cold start) |
 | `T2-held` | the last fitted slope, held because the window is too short to fit a new one: the fleet sits below the band or above it, or its replicas are still settling. B is the variant's measured intercept, or the default. The hold ends when the slope is older than `LEARNED_STATE_BUCKET_RETENTION` (7 days by default), or when the variant's engine arguments change. A shape change drops it |
-| `T2-above-band` | no line from the band and no slope to hold, so the line is fitted from settled readings above the band at k of at least 0.85 (10 readings, 3 settled, as in the band), with B at the least ITL among them. A replica at its sequence cap is not among them: its readings are the band's (see `atCap` below). This is a variant that never fitted, under load that keeps every replica above the band: a controller restart into saturation, or a variant that starts there. It errs one way only: it prices a higher ITL than the true line, so a lower per-replica capacity and more replicas. On readings of the true line it never under-provisions. Its slope is never held and its B never stored; the first fit in the band replaces it. It does not wait out a controller restart or leader change, since readings taken during warm-up can only raise its price: measured with 4 replicas all above the band, 15 s cycles and `steadyFor` 2 min, it came back about 45 seconds after a simulated restart. A pod that became Ready less than `steadyFor` before the restart still waits |
+| `T2-above-band` | no line from the band and no slope to hold, so the line is fitted from settled readings above the band at k of at least 0.85 (10 readings, 3 settled, as in the band), with B at the least ITL among them. A replica at its sequence cap is not among them: its readings are the band's (see `atCap` below). This is a variant that never fitted, under load that keeps every replica above the band: a controller restart into saturation, or a variant that starts there. It errs one way only: it prices a higher ITL than the true line, so a lower per-replica capacity and more replicas. On readings of the true line without noise it never under-provisions; with 2 % gauge noise it was at most 0.5 % under in simulation, within the 5 % known-truth bound. Its slope is never held and its B never stored; the first fit in the band replaces it. It does not wait out a controller restart or leader change, since readings taken during warm-up can only raise its price: measured with 4 replicas all above the band, 15 s cycles and `steadyFor` 2 min, it came back about 45 seconds after a simulated restart. A pod that became Ready less than `steadyFor` before the restart still waits |
 | `T2-failed` | no line this cycle; the variant is skipped. The causes: fewer than 10 readings in the window, or fewer than 3 settled; every reading above the band at k under 0.85 (nothing the fallback may use); a shape change, which empties the window and drops the held slope; a controller restart or leader change, which starts with no line and waits the settle (see `restart` below); or no healthy row this cycle (stale metrics, no ITL, no KV capacity, no request shape). The `throughput analyzer: ITL line` line below names which |
 
 When a variant's line goes silent (`T2-failed`) or comes back, the throughput
@@ -357,7 +357,7 @@ replica's sequence cap start or stop, or the cap's source changes (`atCap`,
 INFO  throughput analyzer: ITL line  {"namespace": "default", "modelID": "my-model", "variant": "decode",
   "silent": true, "cause": "too-few-readings", "source": "T2-failed", "inBand": 3, "aboveBand": 0,
   "belowBand": 0, "settling": 0, "held": 6, "aboveBandHeld": 0, "atCap": 0, "batchCap": 0,
-  "batchCapSource": "none"}
+  "batchCapSource": "none", "pinnedAtLeastITL": false}
 ```
 
 | Field | Meaning |
@@ -371,8 +371,9 @@ INFO  throughput analyzer: ITL line  {"namespace": "default", "modelID": "my-mod
 | `settling` | this cycle's readings from replicas still settling (just joined, or load just came back) |
 | `held` | readings the band's window holds. The line needs 10, with 3 settled |
 | `aboveBandHeld` | readings the above-band window holds, at k of at least 0.85. The fallback needs 10, with 3 settled |
-| `atCap` | this cycle's readings above the band taken into the band's window because the replica is at its sequence cap (below). The line is logged once too, even while it stays live, when `atCap` goes above 0 or back to 0, or `batchCapSource` changes |
+| `atCap` | this cycle's readings above the band taken into the band's window because the replica is at its sequence cap (below). The line is logged once too, even while it stays live, when `atCap` goes above 0 or back to 0, or `batchCapSource` changes. A replica whose batch moves on and off its cap from cycle to cycle logs once per flip: expect a line each such cycle while it does |
 | `batchCap`, `batchCapSource` | the sequence cap per engine rank the line reads for the variant, and where it comes from: `flags` (`--max-num-seqs`, lowered by `--max-num-active-seqs`), `declared` (the `llm-d.ai/max-num-seqs` annotation), or `none` (`batchCap` 0: no replica above the band teaches the line) |
+| `pinnedAtLeastITL` | `true` when this cycle's line was priced one-sided at the cap: the variant has no learned intercept B yet, and the line through the least ITL of its readings at k 0.85 or more priced higher than the line through the default B (below) |
 
 **A replica at its sequence cap teaches the line from above the band.** Its
 batch is exactly the stated cap on every engine rank, requests are waiting,
@@ -388,12 +389,17 @@ only loaded replica is at its cap is then priced from its own line
 (`T1-ols`, `T2-pinned` or `T2-default`) once the window holds 10 readings,
 not from the above-band fallback (`T2-above-band`). Until the variant has
 learned its line's intercept B from a full fit in the band, that price is
-**one-sided**: the line is never priced under the true line at k 0.85. The
+**one-sided**: without noise, the line is never priced under the true line
+at k 0.85. The
 readings at the cap lie above 0.85, and a line through the default B (6 ms)
 would price under the truth whenever the true B is higher, so the line is
 also drawn through the least ITL those readings show, and the higher of the
-two at 0.85 is the price. It errs towards more replicas, never fewer: in
-simulation, by 2 to 11 % on a true B of 10 to 30 ms. Once B is learned, the
+two at 0.85 is the price. Without noise it errs towards more replicas,
+never fewer: in simulation, by 2 to 11 % on a true B of 10 to 30 ms. With
+2 % gauge noise it was at most 0.5 % under in simulation, within the 5 %
+known-truth bound: on a shallow line with the cap near 0.85 its margin is
+under a millisecond, the size of the noise. The `pinnedAtLeastITL` field
+says when the line was priced this way. Once B is learned, the
 line through it prices as usual. Which way the fleet moves: where the
 fallback priced such a variant, the price is about the same (both are drawn
 through the least ITL), so the fleet orders as many replicas, and the line

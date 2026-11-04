@@ -320,6 +320,7 @@ func TestThroughputProbe_AReplicaAtItsCapWithSiblingsBelowTheBandPricesFromTheBa
 		reasons map[string]int
 		inBand  int
 		priced  float64
+		logs    []string
 	}
 	run := func(a *ThroughputAnalyzer) outcome {
 		store := capacity.NewStore()
@@ -345,7 +346,8 @@ func TestThroughputProbe_AReplicaAtItsCapWithSiblingsBelowTheBandPricesFromTheBa
 			o.inBand = max(o.inBand, st.SampleCount)
 			o.priced = st.ITLModel.ITLAt(itl.DefaultKSat)
 		}
-		t.Logf("summary lines: %v", lineLogs(buf.String()))
+		o.logs = lineLogs(buf.String())
+		t.Logf("summary lines: %v", o.logs)
 		return o
 	}
 	truth := probeITL(itl.DefaultKSat)
@@ -359,6 +361,8 @@ func TestThroughputProbe_AReplicaAtItsCapWithSiblingsBelowTheBandPricesFromTheBa
 	t.Logf("the parent's line: %v, priced %.4f s", parent.reasons, parent.priced)
 
 	require.Equal(t, 20, on.inBand, "the capped replica's readings fill the band's window")
+	require.Len(t, on.logs, 2, "silent, then live")
+	require.Contains(t, on.logs[1], `"pinnedAtLeastITL": true`, "the summary does not say the line was priced one-sided")
 	require.Equal(t, map[string]int{itlReasonT2Failed: 9, itlReasonT2Default: 31}, on.reasons,
 		"silent until the capped replica's tenth reading, then the band's line")
 	require.GreaterOrEqual(t, on.priced, truth, "the band's line priced under the truth with no learned B")

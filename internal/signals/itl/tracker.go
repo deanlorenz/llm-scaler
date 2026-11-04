@@ -287,13 +287,13 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 			r.BelowBand++
 		case k > hi && !adm.atSequenceCap(rm):
 			r.AboveBand++
-			if k < DefaultKSat {
+			if !atOrPastKSat(k) {
 				r.AboveBandUnderKSat++
 			}
 			// Kept for the fallback only, stamped as a reading in the band
 			// is, and only at a k of at least the one the line is priced at
 			// (fitAboveBand: what makes the fallback one-sided).
-			if aw == nil || k < DefaultKSat {
+			if aw == nil || !atOrPastKSat(k) {
 				break
 			}
 			dropped := aw.add(Observation{K: k, ITLSec: rm.AvgITL, Timestamp: now, settling: aboveSettling})
@@ -459,11 +459,22 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 // least ITL of those readings instead, which is at least B' (every ITL is B'
 // + A'k plus a noise small against A'k), the same term is >= 0
 // (fitAboveBand), so the higher of the two lines at kSat never prices a
-// higher mu than the truth.
+// higher mu than the truth, on readings without noise. With the gauge's
+// noise the margin, (b - B')(1 - kSat/kbar), can be smaller than the noise
+// on the readings' mean: under 1 ms on a shallow line at a cap near kSat,
+// where it measured at most 0.5 % under the truth at 2 % noise, within
+// known truth's 5 %.
+//
+// One reading at or past kSat is enough. Through a single reading the line
+// is flat at its ITL (A 0), and that ITL is B' + A'k with k >= kSat, so at
+// kSat it is at least the truth: one reading errs the same way, only by
+// more. The window's floors (DefaultMinSamples, MinSettledSamples) have
+// already been met by the pinned fit it is set against, and the higher of
+// the two is taken, so a lone reading can only raise the price.
 func atLeastITLLine(obs []Observation) (Model, bool) {
 	var past []Observation
 	for _, o := range obs {
-		if o.K >= DefaultKSat {
+		if atOrPastKSat(o.K) {
 			past = append(past, o)
 		}
 	}
@@ -472,6 +483,13 @@ func atLeastITLLine(obs []Observation) (Model, bool) {
 	}
 	return fitAboveBand(past, aboveBandB(past))
 }
+
+// atOrPastKSat reports whether a reading at fill k lies at or past
+// DefaultKSat, where the line is priced: the floor both one-sided lines
+// read from (the above-band window, and atLeastITLLine over the band's
+// window), since a reading under it turns their margin against the truth
+// (fitAboveBand).
+func atOrPastKSat(k float64) bool { return k >= DefaultKSat }
 
 // pruneWithCarry prunes a window and its steady one, and returns what each
 // then holds. A steady reading outlives the main window's oldest by at most

@@ -2245,7 +2245,7 @@ fallback prices). `TestITLCap_TheBiasTable` holds, as the negative
 control, that B pinned at the default alone prices under the truth without
 noise at every point and on average at 30 ms. The probe now prices 0.0560 s
 (truth 0.0525 s) and asserts at or above the truth; pinned at the default
-alone it prices 0.0522 s and fails. `TestITLCap_ALearnedBEndsTheOneSidedPrice`
+alone it prices 0.0522 s and fails. `TestITLCap_ALearnedBEndsTheOneSidedPriceAndAForgetBringsItBack`
 and `TestITLCap_AHeldSlopeKeepsTheOneSidedPrice` (held 0.05600 s, the
 one-sided price) hold the rule's two edges; in I,
 `TestTracker_OneSidedAboveKSatPricesAtOrAboveTheTruth`.
@@ -2275,7 +2275,7 @@ replica at its cap with nothing waiting
 | no queue needed (`atSequenceCap` without `QueueLength > 0`) | `TestITLCap_WhatIsNotAtTheCapIsNotAReading` (nothing waiting), `sequence-cap-edges` |
 | the source always `flags` | the annotation's stated-cap case, the summary line test |
 | one-sided rule off | all 13 at-cap known-truth cases, the bias table, the held-slope test, the probe |
-| one-sided with a learned B | `TestITLCap_ALearnedBEndsTheOneSidedPrice` |
+| one-sided with a learned B | `TestITLCap_ALearnedBEndsTheOneSidedPriceAndAForgetBringsItBack` |
 | the held A not adjusted | `TestITLCap_AHeldSlopeKeepsTheOneSidedPrice` |
 | the summary ignores the cap | `TestITLCap_TheSummaryLogsTheCapWhileTheLineIsLive` |
 
@@ -2286,6 +2286,53 @@ not taken as the new engine's. The throughput line never had that guard,
 before 4b or since; with the cap read from the store, a rollout that
 changes `--max-num-seqs` can briefly judge old pods against the new cap.
 A small PR of its own, with the forget for this line.
+
+#### 4b-3 round-2 review
+
+No blockers; tests and docs tightened.
+
+- **The kSat floor is pinned.** `atLeastITLLine` and the above-band
+  window share one predicate (`itl.atOrPastKSat`). A window of capped
+  readings at k 0.82 and 0.93 on a shallow line pins at the least ITL at
+  0.93 and fits a flat line through it alone
+  (`TestTracker_OneSidedReadsOnlyTheReadingsPastKSat`). The mutant that
+  reads from 0.80 survived round 1, where every capped reading sat at 0.88
+  or more; it is killed by this test.
+- **The bias table asserts what this plan says**: the worst noisy seed
+  within known truth's ε; the default pin's error equal to the derived
+  term (B0 - B)(1 - kSat/kCap) over the truth, to 0.05 points, at every
+  point of the grid; and the cap admission's columns equal to the
+  fallback's (no noise, mean, least and most).
+- **The rule both ways in one run**
+  (`TestITLCap_ALearnedBEndsTheOneSidedPriceAndAForgetBringsItBack`):
+  one-sided while B is unlearned, off once a full fit in the band learns
+  it, and on again after the key is forgotten. The line's only forget today
+  is the analyzer's eviction of a variant unseen for 2 x the window's 30
+  min, which sweeps its key and its B.
+- **The hold's expiry** (`TestITLCap_TheHeldOneSidedSlopeEndsWithTheHold`,
+  hold 1 h): last fit at 32m30s, held through 1h32m30s, silent (T2-failed)
+  from 1h32m45s and for the rest of the 2 h run. Nothing prices the
+  variant from above the band after it: the fallback has no readings there.
+- **The summary line logs `pinnedAtLeastITL`**, so an operator can tell a
+  one-sided price from the default pin's. A cap that flaps logs once per
+  flip; the reference pages say so.
+- **`atLeastITLLine` may rest on one reading**: through one reading the line
+  is flat at its ITL, which lies at or past kSat on the true line, so it
+  errs the same way, only by more; and it only ever raises the price.
+- **Docs qualify every "never under" and "never fewer"** as without noise;
+  with 2 % gauge noise the one-sided lines were at most 0.5 % under in
+  simulation, within the 5 % known-truth bound.
+
+Mutants, round 2 (each alone, the throughput and itl packages run; all
+killed):
+
+| mutant | what fails |
+| --- | --- |
+| the pin reads from k 0.80 (M2) | `TestTracker_OneSidedReadsOnlyTheReadingsPastKSat` |
+| the hold never expires | `TestITLCap_TheHeldOneSidedSlopeEndsWithTheHold` and four earlier hold tests |
+| one-sided with a learned B | `TestITLCap_ALearnedBEndsTheOneSidedPriceAndAForgetBringsItBack` |
+| the summary omits `pinnedAtLeastITL` | the probe |
+| the negative control's knob ignored | the bias table and the probe |
 
 ## 8. Risks and limits
 
