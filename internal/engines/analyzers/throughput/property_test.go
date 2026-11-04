@@ -228,14 +228,14 @@ func checkJoinerWarmUp(newA propAnalyzer) func(uint64) error {
 		if err != nil {
 			return err
 		}
-		return movedFrom(base, with, before, before+during, propTransientTol, "with a joiner's warm-up")
+		return movedFrom(base, with, before, before+during, "with a joiner's warm-up")
 	}
 }
 
 // movedFrom is a violation of kind KindTransient when, on a cycle from first
 // to the run's end, base priced a line and got priced none, or one more than
-// tol off it.
-func movedFrom(base, got map[int]itl.Model, first, cycles int, tol float64, what string) error {
+// propTransientTol off it.
+func movedFrom(base, got map[int]itl.Model, first, cycles int, what string) error {
 	if len(base) == 0 {
 		return learnertest.Violate(learnertest.KindNotLearned, "the run without the transient priced no line")
 	}
@@ -248,7 +248,7 @@ func movedFrom(base, got map[int]itl.Model, first, cycles int, tol float64, what
 		if !okG {
 			return learnertest.Violate(learnertest.KindTransient, "cycle %d: no line %s, against %.4f s without", c, what, propPriced(b))
 		}
-		if e := learnertest.RelErr(propPriced(g), propPriced(b)); e > tol {
+		if e := learnertest.RelErr(propPriced(g), propPriced(b)); e > propTransientTol {
 			return learnertest.Violate(learnertest.KindTransient, "cycle %d: priced %.4f s %s, against %.4f s without (%.1f %%)",
 				c, propPriced(g), what, propPriced(b), 100*e)
 		}
@@ -289,7 +289,7 @@ func checkLoadStep(newA propAnalyzer) func(uint64) error {
 		if err != nil {
 			return err
 		}
-		return movedFrom(base, with, steady, steady+after, propTransientTol, "through the step's overshoot")
+		return movedFrom(base, with, steady, steady+after, "through the step's overshoot")
 	}
 }
 
@@ -403,7 +403,7 @@ func checkMissing(newA propAnalyzer, edit func(*domain.ReplicaMetrics)) func(uin
 		if err != nil {
 			return err
 		}
-		return movedFrom(base, with, before, before+after, propTransientTol, "with the defect")
+		return movedFrom(base, with, before, before+after, "with the defect")
 	}
 }
 

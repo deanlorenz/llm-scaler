@@ -17,15 +17,18 @@ import (
 // throughputCases with the line's other cases; the mutant of the restart
 // case is SwitchITLWaitsAfterRestart off (TestThroughputPropertySettleMutants).
 
+// engineCycles is how many cycles each engine-rig case runs.
+const engineCycles = 32
+
 // engineLineOf is lineOf on the engine's rig, from a controller start at
-// cycle from: a new tracker, observed before every cycle.
-func engineLineOf(a *ThroughputAnalyzer, from, cycles int, rows func(c int) []domain.ReplicaMetrics) (map[int]itl.Model, error) {
+// cycle from to engineCycles: a new tracker, observed before every cycle.
+func engineLineOf(a *ThroughputAnalyzer, from int, rows func(c int) []domain.ReplicaMetrics) (map[int]itl.Model, error) {
 	tr := settle.NewTracker()
 	tr.SetInterval(learnertest.Cycle)
 	r := newPropRun(a.WithSettleView(tr).WithOptimizationInterval(learnertest.Cycle))
 	r.cycle = from
 	lines := map[int]itl.Model{}
-	for c := from; c < cycles; c++ {
+	for c := from; c < engineCycles; c++ {
 		rs := rows(c)
 		tr.Observe("ns/m", settlerow.Of(rs, nil), r.now())
 		m, has, err := r.step(rs)
@@ -62,22 +65,22 @@ func warmJoiner(c, joined int, noise float64) domain.ReplicaMetrics {
 // restart's first fit.
 func checkRestartWithAJoiner(newA propAnalyzer) func(uint64) error {
 	return func(seed uint64) error {
-		const before, after = 16, 16
+		const before, after = 16, engineCycles - 16
 		restart := before
 		joined := restart - 2
 		f := newPropFleet(learnertest.Rand(seed), before+after, 0.30, 0.40, 0.50)
 		jn := learnertest.ARNoise(learnertest.Rand(seed+1), before+after, propNoise, propRho)
-		base, err := engineLineOf(newA(), restart, before+after, f.rows)
+		base, err := engineLineOf(newA(), restart, f.rows)
 		if err != nil {
 			return err
 		}
-		with, err := engineLineOf(newA(), restart, before+after, func(c int) []domain.ReplicaMetrics {
+		with, err := engineLineOf(newA(), restart, func(c int) []domain.ReplicaMetrics {
 			return append(f.rows(c), warmJoiner(c, joined, jn[c]))
 		})
 		if err != nil {
 			return err
 		}
-		return movedFrom(base, with, restart, before+after, propTransientTol, "with a joiner's warm-up across the restart")
+		return movedFrom(base, with, restart, before+after, "with a joiner's warm-up across the restart")
 	}
 }
 
@@ -85,14 +88,14 @@ func checkRestartWithAJoiner(newA propAnalyzer) func(uint64) error {
 // engine's tracker: its warm-up is stamped and kept out of the line.
 func checkEngineJoiner(newA propAnalyzer) func(uint64) error {
 	return func(seed uint64) error {
-		const joined, cycles = 16, 32
+		const joined, cycles = 16, engineCycles
 		f := newPropFleet(learnertest.Rand(seed), cycles, 0.30, 0.40, 0.50)
 		jn := learnertest.ARNoise(learnertest.Rand(seed+1), cycles, propNoise, propRho)
-		base, err := engineLineOf(newA(), 0, cycles, f.rows)
+		base, err := engineLineOf(newA(), 0, f.rows)
 		if err != nil {
 			return err
 		}
-		with, err := engineLineOf(newA(), 0, cycles, func(c int) []domain.ReplicaMetrics {
+		with, err := engineLineOf(newA(), 0, func(c int) []domain.ReplicaMetrics {
 			rows := f.rows(c)
 			if c >= joined {
 				rows = append(rows, warmJoiner(c, joined, jn[c]))
@@ -102,7 +105,7 @@ func checkEngineJoiner(newA propAnalyzer) func(uint64) error {
 		if err != nil {
 			return err
 		}
-		return movedFrom(base, with, joined, cycles, propTransientTol, "with a joiner's warm-up")
+		return movedFrom(base, with, joined, cycles, "with a joiner's warm-up")
 	}
 }
 
@@ -110,13 +113,13 @@ func checkEngineJoiner(newA propAnalyzer) func(uint64) error {
 // does not move past the transient tolerance, nor go silent.
 func checkEngineMissedRow(newA propAnalyzer) func(uint64) error {
 	return func(seed uint64) error {
-		const missed, cycles = 16, 32
+		const missed, cycles = 16, engineCycles
 		f := newPropFleet(learnertest.Rand(seed), cycles, 0.30, 0.40, 0.50)
-		base, err := engineLineOf(newA(), 0, cycles, f.rows)
+		base, err := engineLineOf(newA(), 0, f.rows)
 		if err != nil {
 			return err
 		}
-		with, err := engineLineOf(newA(), 0, cycles, func(c int) []domain.ReplicaMetrics {
+		with, err := engineLineOf(newA(), 0, func(c int) []domain.ReplicaMetrics {
 			if c == missed {
 				return f.rows(c)[1:]
 			}
@@ -125,7 +128,7 @@ func checkEngineMissedRow(newA propAnalyzer) func(uint64) error {
 		if err != nil {
 			return err
 		}
-		return movedFrom(base, with, missed, cycles, propTransientTol, "with a missed row")
+		return movedFrom(base, with, missed, cycles, "with a missed row")
 	}
 }
 
