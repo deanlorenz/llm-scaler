@@ -142,7 +142,10 @@ type TTFT struct {
 	PrefillKnee, DecodeKnee float64
 	// Onsets are the flow-control onsets; zero with flow control off.
 	Onsets Onsets
-	Flags  []Flag
+	// Tier is the decode line's tier, as Decode.Tier gave it; "" with no
+	// decode side.
+	Tier  string
+	Flags []Flag
 }
 
 func (TTFT) result() {}

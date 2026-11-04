@@ -4,6 +4,7 @@ import (
 	"math"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/prefill"
 )
@@ -55,14 +56,14 @@ func relNear(t *testing.T, what string, got, want, rel float64) {
 func TestTTFTWorkedExample(t *testing.T) {
 	fl := workedFleet()
 	op := 0.85 * mustAnswer(t, KneeRate(*fl.Decode)).Value
-	p90 := mustTTFT(t, TTFTAt(fl, op, 0.9))
+	p90 := mustTTFT(t, ttftAt(t, fl, op, 0.9))
 	relNear(t, "TTFT p90", p90.Seconds, 0.1599611515667, 1e-6)
 	relNear(t, "independent p90", p90.Independent, 0.15440219990354434, 1e-5)
 	relNear(t, "rho", p90.PrefillUtilization, 0.3771893403059625, 1e-12)
 	relNear(t, "theta", p90.WaitScale, 0.053520813773015215, 1e-12)
 	relNear(t, "decode share", p90.DecodeShare, 0.03177463658731497, 1e-4)
 	relNear(t, "floor p90", p90.Floor, 0.09157553643313485, 1e-9)
-	p95 := mustTTFT(t, TTFTAt(fl, op, 0.95))
+	p95 := mustTTFT(t, ttftAt(t, fl, op, 0.95))
 	relNear(t, "TTFT p95", p95.Seconds, 0.2306087421668428, 1e-6)
 	relNear(t, "independent p95", p95.Independent, 0.20999230485834747, 1e-5)
 	for _, f := range []Flag{UnvalidatedTTFT, AssumedVP, AssumedPromptSpread, TransferOmitted, FlowControlInferredOff} {
@@ -79,7 +80,7 @@ func TestTTFTWorkedExample(t *testing.T) {
 func TestTTFTWorkedExample_RateForTTFT(t *testing.T) {
 	fl := workedFleet()
 	for _, c := range []struct{ q, want float64 }{{0.9, 11.638534256575051}, {0.95, 11.104948214254135}} {
-		a := mustAnswer(t, RateForTTFT(fl, TTFTTarget{Seconds: 0.2, Percentile: c.q}))
+		a := mustAnswer(t, rateForTTFT(t, fl, TTFTTarget{Seconds: 0.2, Percentile: c.q}))
 		relNear(t, "rate for 200 ms", a.Value, c.want, 1e-5)
 		// The decode wait takes the tail's first share, so the prefill side
 		// alone would carry more.
@@ -88,7 +89,7 @@ func TestTTFTWorkedExample_RateForTTFT(t *testing.T) {
 			t.Errorf("q %g: uncapped %g, bound %v, flags %v", c.q, a.Basis.Uncapped, a.Basis.BoundBy, a.Flags)
 		}
 		relNear(t, "knee", a.Basis.KneeRate, 13.312564951975148, 1e-9)
-		back := mustTTFT(t, TTFTAt(fl, a.Value, c.q))
+		back := mustTTFT(t, ttftAt(t, fl, a.Value, c.q))
 		relNear(t, "TTFT back at the rate", back.Seconds, 0.2, 1e-6)
 	}
 }
@@ -107,23 +108,23 @@ func TestFlowControlOnsets(t *testing.T) {
 	relNear(t, "prefill onset", on.Prefill, 25.623058987490534, 1e-6)
 
 	// At or above the decode onset TTFT is not priced; just below it, it is.
-	if u, ok := TTFTAt(fl, on.Decode, 0.9).(Unanswerable); !ok || u.Reason != AboveDecodeOnset {
-		t.Errorf("at the decode onset: %#v", TTFTAt(fl, on.Decode, 0.9))
+	if u, ok := ttftAt(t, fl, on.Decode, 0.9).(Unanswerable); !ok || u.Reason != AboveDecodeOnset {
+		t.Errorf("at the decode onset: %#v", ttftAt(t, fl, on.Decode, 0.9))
 	}
-	below := mustTTFT(t, TTFTAt(fl, 0.99*on.Decode, 0.9))
-	off := mustTTFT(t, TTFTAt(workedFleet(), 0.99*on.Decode, 0.9))
+	below := mustTTFT(t, ttftAt(t, fl, 0.99*on.Decode, 0.9))
+	off := mustTTFT(t, ttftAt(t, workedFleet(), 0.99*on.Decode, 0.9))
 	// Below both onsets flow control changes nothing.
 	if below.Seconds != off.Seconds || below.HasFlag(AboveFlowControlOnset) {
 		t.Errorf("below the onsets: on %g off %g, flags %v", below.Seconds, off.Seconds, below.Flags)
 	}
 	// Question 1 caps at the decode onset: a loose target reaches it.
-	a := mustAnswer(t, RateForTTFT(fl, TTFTTarget{Seconds: 30, Percentile: 0.9}))
+	a := mustAnswer(t, rateForTTFT(t, fl, TTFTTarget{Seconds: 30, Percentile: 0.9}))
 	relNear(t, "rate capped at the onset", a.Value, on.Decode, 1e-12)
 	if !slices.Equal(a.Basis.BoundBy, []Bound{BoundDecodeOnset}) {
 		t.Errorf("bound %v, want the decode onset", a.Basis.BoundBy)
 	}
 	// Without flow control the same target is met up to near the knee.
-	if b := mustAnswer(t, RateForTTFT(workedFleet(), TTFTTarget{Seconds: 30, Percentile: 0.9})); !(b.Value > on.Decode) {
+	if b := mustAnswer(t, rateForTTFT(t, workedFleet(), TTFTTarget{Seconds: 30, Percentile: 0.9})); !(b.Value > on.Decode) {
 		t.Errorf("flow control off: %g r/s, not above the onset %g", b.Value, on.Decode)
 	}
 
@@ -133,17 +134,17 @@ func TestFlowControlOnsets(t *testing.T) {
 	slow.Prefill.VP = 12000 // knee 12 r/s, onset 0.854 * 12 = 10.25
 	son := FlowControlOnsets(slow).(Onsets)
 	relNear(t, "slow prefill onset", son.Prefill, 0.8541019662496845*12, 1e-6)
-	if v := mustTTFT(t, TTFTAt(slow, 11, 0.9)); !v.HasFlag(AboveFlowControlOnset) {
+	if v := mustTTFT(t, ttftAt(t, slow, 11, 0.9)); !v.HasFlag(AboveFlowControlOnset) {
 		t.Errorf("above the prefill onset, not flagged: %v", v.Flags)
 	}
-	if v := mustTTFT(t, TTFTAt(slow, 9, 0.9)); v.HasFlag(AboveFlowControlOnset) {
+	if v := mustTTFT(t, ttftAt(t, slow, 9, 0.9)); v.HasFlag(AboveFlowControlOnset) {
 		t.Errorf("below the prefill onset, flagged: %v", v.Flags)
 	}
 	// Flow control on with a threshold unknown is refused.
 	unknown := fl
 	unknown.FlowControl.KVThreshold = 0
-	if u, ok := TTFTAt(unknown, 5, 0.9).(Unanswerable); !ok || u.Reason != FlowControlUnknown {
-		t.Errorf("unknown thresholds: %#v", TTFTAt(unknown, 5, 0.9))
+	if u, ok := ttftAt(t, unknown, 5, 0.9).(Unanswerable); !ok || u.Reason != FlowControlUnknown {
+		t.Errorf("unknown thresholds: %#v", ttftAt(t, unknown, 5, 0.9))
 	}
 	// Several prefill pods: the busiest at f, the rest sharing the remainder,
 	// scored by each pod's mean waiting count rho^2 (Ca^2 + Cs^2)/(2(1 - rho))
@@ -204,10 +205,10 @@ func TestTTFTIsMM1Sojourn(t *testing.T) {
 	mu := fl.Prefill.VP / fl.Prefill.PromptTokens
 	for _, lam := range []float64{0, 1, 5, 15, 25, 29, 29.9} {
 		for _, q := range []float64{0.5, 0.9, 0.99, 0.999} {
-			v := mustTTFT(t, TTFTAt(fl, lam, q))
+			v := mustTTFT(t, ttftAt(t, fl, lam, q))
 			relNear(t, "M/M/1 quantile", v.Seconds, fl.Prefill.FixedLatency+math.Log(1/(1-q))/(mu-lam), 1e-9)
 		}
-		m := mustTTFT(t, TTFTAt(fl, lam, 0))
+		m := mustTTFT(t, ttftAt(t, fl, lam, 0))
 		relNear(t, "M/M/1 mean", m.Seconds, fl.Prefill.FixedLatency+1/(mu-lam), 1e-12)
 		if !m.HasFlag(DecodeSideOmitted) {
 			t.Errorf("no decode side, not flagged: %v", m.Flags)
@@ -224,7 +225,7 @@ func TestEngineWaitIsPollaczekKhinchine(t *testing.T) {
 		fl := prefillOnly(cv)
 		es := fl.Prefill.PromptTokens / fl.Prefill.VP
 		for _, lam := range []float64{3, 15, 27} {
-			v := mustTTFT(t, TTFTAt(fl, lam, 0))
+			v := mustTTFT(t, ttftAt(t, fl, lam, 0))
 			rho := lam * es
 			relNear(t, "PK mean wait", v.Parts.EngineWait, lam*es*es*(1+cv*cv)/(2*(1-rho)), 1e-12)
 			relNear(t, "mean", v.Seconds, fl.Prefill.FixedLatency+es+v.Parts.EngineWait, 1e-12)
@@ -236,7 +237,7 @@ func TestEngineWaitIsPollaczekKhinchine(t *testing.T) {
 		rho := lam * es
 		theta := es / (2 * (1 - rho))
 		for _, q := range []float64{0.9, 0.99} {
-			v := mustTTFT(t, TTFTAt(fl, lam, q))
+			v := mustTTFT(t, ttftAt(t, fl, lam, q))
 			relNear(t, "M/D/1 quantile", v.Seconds, fl.Prefill.FixedLatency+es+theta*math.Log(rho/(1-q)), 1e-9)
 		}
 	}
@@ -271,9 +272,9 @@ func TestTTFTAgainstReference(t *testing.T) {
 			d.Replicas = c.nd
 			fl.Decode = &d
 		}
-		v := mustTTFT(t, TTFTAt(fl, c.rate, c.q))
+		v := mustTTFT(t, ttftAt(t, fl, c.rate, c.q))
 		relNear(t, c.name+" quantile", v.Seconds, c.wantSeconds, 2e-6)
-		m := mustTTFT(t, TTFTAt(fl, c.rate, 0))
+		m := mustTTFT(t, ttftAt(t, fl, c.rate, 0))
 		relNear(t, c.name+" mean", m.Seconds, c.wantMean, 1e-9)
 		if got := v.HasFlag(TransferOmitted); got != (c.xfer == 0) {
 			t.Errorf("%s: TransferOmitted %v with transfer %g", c.name, got, c.xfer)
@@ -289,12 +290,12 @@ func TestPooledIsAllenCunneen(t *testing.T) {
 	fl.Prefill.Replicas, fl.Prefill.Imbalance, fl.Prefill.ArrivalCV2 = 4, 1.3, 1.5
 	es := fl.Prefill.PromptTokens / fl.Prefill.VP
 	for _, lam := range []float64{20, 60, 85} {
-		m := mustTTFT(t, TTFTAt(fl, lam, 0))
+		m := mustTTFT(t, ttftAt(t, fl, lam, 0))
 		rho := lam * es / 4
 		wq := erlangC(4, lam*es) * es * (1.5 + 1) / (2 * 4 * (1 - rho))
 		relNear(t, "pooled mean", m.Pooled, fl.Prefill.FixedLatency+es+wq, 1e-12)
 		for _, q := range []float64{0, 0.9, 0.99} {
-			v := mustTTFT(t, TTFTAt(fl, lam, q))
+			v := mustTTFT(t, ttftAt(t, fl, lam, q))
 			if !(v.Pooled <= v.Seconds) {
 				t.Errorf("rate %g q %g: pooled %g above the worst pod's %g", lam, q, v.Pooled, v.Seconds)
 			}
@@ -333,7 +334,7 @@ func TestTTFTFloor(t *testing.T) {
 	fl := workedFleet()
 	d := *fl.Decode
 	for _, q := range []float64{0.5, 0.9, 0.99} {
-		v := mustTTFT(t, TTFTAt(fl, 0, q))
+		v := mustTTFT(t, ttftAt(t, fl, 0, q))
 		want := 0.0126 + -math.Log1p(-q)*1000/30000 + d.Line.ITLAt(d.Band.Lo)
 		relNear(t, "floor", v.Floor, want, 1e-11)
 		relNear(t, "TTFT at no load", v.Seconds, want, 1e-11)
@@ -341,37 +342,126 @@ func TestTTFTFloor(t *testing.T) {
 			t.Errorf("decode's first step below the band, not flagged: %v", v.Flags)
 		}
 		// A target at the floor is refused, just above it is answered.
-		if u, ok := RateForTTFT(fl, TTFTTarget{Seconds: v.Floor, Percentile: q}).(Unanswerable); !ok || u.Reason != TargetBelowFloor {
-			t.Errorf("q %g at the floor: %#v", q, RateForTTFT(fl, TTFTTarget{Seconds: v.Floor, Percentile: q}))
+		if u, ok := rateForTTFT(t, fl, TTFTTarget{Seconds: v.Floor, Percentile: q}).(Unanswerable); !ok || u.Reason != TargetBelowFloor {
+			t.Errorf("q %g at the floor: %#v", q, rateForTTFT(t, fl, TTFTTarget{Seconds: v.Floor, Percentile: q}))
 		}
-		if a := mustAnswer(t, RateForTTFT(fl, TTFTTarget{Seconds: want * 1.01, Percentile: q})); !(a.Value > 0) {
+		if a := mustAnswer(t, rateForTTFT(t, fl, TTFTTarget{Seconds: want * 1.01, Percentile: q})); !(a.Value > 0) {
 			t.Errorf("q %g just above the floor: %g r/s", q, a.Value)
 		}
 	}
 	// The mean's floor is the mean prompt's.
-	m := mustTTFT(t, TTFTAt(fl, 0, 0))
+	m := mustTTFT(t, ttftAt(t, fl, 0, 0))
 	relNear(t, "mean floor", m.Floor, 0.0126+1000.0/30000+d.Line.ITLAt(d.Band.Lo), 1e-12)
 }
 
-// The knees: prefill N_p V_P / (f E[I]); TTFT refuses at it, as at decode's.
+// within runs f under a short deadline: a refusal that went missing lets the
+// queue run past saturation, where its scale is infinite and the quantile
+// search does not return, and that must fail here by name rather than as the
+// whole package's timeout.
+func within(t *testing.T, what string, f func() Result) Result {
+	t.Helper()
+	done := make(chan Result, 1)
+	go func() { done <- f() }()
+	select {
+	case r := <-done:
+		return r
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s: no result within 5 s", what)
+		return nil
+	}
+}
+
+// ttftAt and rateForTTFT are TTFTAt and RateForTTFT under within's deadline,
+// so a mutant that lets the model run past saturation fails the test that
+// asked, by name, instead of stalling every test after it.
+func ttftAt(t *testing.T, fl TTFTFleet, rate, q float64) Result {
+	t.Helper()
+	return within(t, "TTFTAt", func() Result { return TTFTAt(fl, rate, q) })
+}
+
+func rateForTTFT(t *testing.T, fl TTFTFleet, tg TTFTTarget) Result {
+	t.Helper()
+	return within(t, "RateForTTFT", func() Result { return RateForTTFT(fl, tg) })
+}
+
+// The knees: prefill N_p V_P / (f E[I]); TTFT refuses at it and above it
+// (Saturated), as at decode's, and question 1 stays below it.
 func TestTTFTSaturates(t *testing.T) {
 	fl := workedFleet()
 	fl.Prefill.VP, fl.Prefill.Replicas, fl.Prefill.Imbalance = 6000, 2, 1.25
 	pk := mustAnswer(t, PrefillKnee(fl.Prefill))
 	relNear(t, "prefill knee", pk.Value, 2*6000/(1.25*1000), 1e-12)
-	for _, r := range []float64{pk.Value, pk.Value * 1.5} {
-		if u, ok := TTFTAt(fl, r, 0.9).(Unanswerable); !ok || u.Reason != Saturated {
-			t.Errorf("at %g r/s, prefill knee %g: %#v", r, pk.Value, TTFTAt(fl, r, 0.9))
+	for _, r := range []float64{pk.Value, pk.Value * (1 + 1e-9), pk.Value * 1.5, pk.Value * 3} {
+		for _, q := range []float64{0, 0.9} {
+			res := within(t, "TTFTAt at the prefill knee", func() Result { return TTFTAt(fl, r, q) })
+			if u, ok := res.(Unanswerable); !ok || u.Reason != Saturated {
+				t.Errorf("at %g r/s (q %g), prefill knee %g: %#v, want Saturated", r, q, pk.Value, res)
+			}
 		}
 	}
-	mustTTFT(t, TTFTAt(fl, pk.Value*(1-1e-9), 0.9))
+	mustTTFT(t, within(t, "TTFTAt below the prefill knee", func() Result { return TTFTAt(fl, pk.Value*(1-1e-9), 0.9) }))
 	dk := mustAnswer(t, KneeRate(*workedFleet().Decode)).Value
-	if u, ok := TTFTAt(workedFleet(), dk, 0.9).(Unanswerable); !ok || u.Reason != Saturated {
-		t.Errorf("at the decode knee: %#v", TTFTAt(workedFleet(), dk, 0.9))
+	for _, r := range []float64{dk, dk * 1.5} {
+		res := within(t, "TTFTAt at the decode knee", func() Result { return TTFTAt(workedFleet(), r, 0.9) })
+		if u, ok := res.(Unanswerable); !ok || u.Reason != Saturated {
+			t.Errorf("at %g r/s, decode knee %g: %#v, want Saturated", r, dk, res)
+		}
 	}
-	// Question 1 never answers at or above the lower knee.
-	if a := mustAnswer(t, RateForTTFT(fl, TTFTTarget{Seconds: 100, Percentile: 0.9})); !(a.Value < pk.Value) {
-		t.Errorf("rate %g at or above the prefill knee %g", a.Value, pk.Value)
+	// Question 1 never answers at or above the lower knee, here prefill's.
+	for _, q := range []float64{0, 0.9} {
+		a := mustAnswer(t, within(t, "RateForTTFT", func() Result {
+			return RateForTTFT(fl, TTFTTarget{Seconds: 100, Percentile: q})
+		}))
+		if !(a.Value < pk.Value) || a.Basis.KneeRate != pk.Value {
+			t.Errorf("q %g: rate %g, knee %g; want below the prefill knee %g", q, a.Value, a.Basis.KneeRate, pk.Value)
+		}
+	}
+}
+
+// The own time's convolution with an exponential wait, against its closed
+// forms, on both branches of the code's (z = b - r above and at or below 0)
+// and at z = 0. For a gamma of shape 1 (rate b),
+//
+//	int_0^t b e^(-bs) e^(-r(t-s)) ds = b (e^(-bt) - e^(-rt)) / (r - b),  b t e^(-bt) at r = b,
+//
+// and for shape 2, b^2 e^(-rt) (1 - e^(-zt)(1 + zt)) / z^2.
+func TestOwnTimeConvolution(t *testing.T) {
+	const mean = 0.04
+	for _, c := range []struct {
+		name string
+		r, t float64
+	}{
+		{"r below b", 5, 0.03}, {"r below b, late", 5, 0.4},
+		{"r above b", 80, 0.03}, {"r above b, late", 80, 0.4}, {"r far above b", 900, 0.1},
+		{"r at b", 0, 0.05}, // 0: r is set to b exactly
+	} {
+		one := newOwnTime(mean, 1)
+		b := one.b
+		if c.r == 0 {
+			c.r = b
+		}
+		want := b * c.t * math.Exp(-b*c.t)
+		if c.r != b {
+			want = b * (math.Exp(-b*c.t) - math.Exp(-c.r*c.t)) / (c.r - b)
+		}
+		relNear(t, c.name+", shape 1", one.conv(c.r, c.t), want, 1e-11)
+
+		two := newOwnTime(mean, 1/math.Sqrt2)
+		b2 := two.b
+		if z := b2 - c.r; z != 0 {
+			want2 := b2 * b2 * math.Exp(-c.r*c.t) * -math.Expm1(-z*c.t) / (z * z)
+			want2 -= b2 * b2 * math.Exp(-c.r*c.t) * math.Exp(-z*c.t) * z * c.t / (z * z)
+			relNear(t, c.name+", shape 2", two.conv(c.r, c.t), want2, 1e-9)
+		}
+	}
+	// And in a block: P(W + own > t) at a wait faster than the work
+	// (r > b, the series branch), exact for shape 1:
+	// sf(t) + p b (e^(-bt) - e^(-rt)) / (r - b).
+	bl := block{wait: expWait(0.3, 80), own: newOwnTime(mean, 1)}
+	for _, tt := range []float64{0.01, 0.05, 0.2} {
+		b := 1 / mean
+		want := math.Exp(-b*tt) + 0.3*b*(math.Exp(-b*tt)-math.Exp(-80*tt))/(80-b)
+		relNear(t, "block tail, r above b", bl.exceeds(tt), want, 1e-11)
 	}
 }
 
@@ -384,7 +474,7 @@ func TestUnionBoundAgainstIndependentAndEvenSplit(t *testing.T) {
 	for _, frac := range []float64{0.3, 0.6, 0.85, 0.9, 0.95, 0.98} {
 		for _, q := range []float64{0.5, 0.9, 0.95, 0.99} {
 			rate := frac * knee
-			v := mustTTFT(t, TTFTAt(fl, rate, q))
+			v := mustTTFT(t, ttftAt(t, fl, rate, q))
 			if !(v.Seconds >= v.Independent*(1-1e-9)) {
 				t.Errorf("%.2f of the knee, q %g: union %g below independent %g", frac, q, v.Seconds, v.Independent)
 			}
@@ -411,7 +501,7 @@ func TestPrefillFromEstimate(t *testing.T) {
 		t.Errorf("mapped %+v", p)
 	}
 	p.Replicas, p.PromptTokens, p.PromptCV = 4, 1000, 1
-	if v := mustTTFT(t, TTFTAt(TTFTFleet{Prefill: p}, 10, 0.9)); !v.HasFlag(VPLowerBound) {
+	if v := mustTTFT(t, ttftAt(t, TTFTFleet{Prefill: p}, 10, 0.9)); !v.HasFlag(VPLowerBound) {
 		t.Errorf("a lower-bound V_P, not flagged: %v", v.Flags)
 	}
 
@@ -422,11 +512,11 @@ func TestPrefillFromEstimate(t *testing.T) {
 		t.Errorf("refused f mapped to %g", p.Imbalance)
 	}
 	p.Replicas, p.PromptTokens = 3, 1000
-	if u, ok := TTFTAt(TTFTFleet{Prefill: p}, 1, 0.9).(Unanswerable); !ok || u.Reason != NoImbalance {
-		t.Errorf("three pods, no f: %#v", TTFTAt(TTFTFleet{Prefill: p}, 1, 0.9))
+	if u, ok := ttftAt(t, TTFTFleet{Prefill: p}, 1, 0.9).(Unanswerable); !ok || u.Reason != NoImbalance {
+		t.Errorf("three pods, no f: %#v", ttftAt(t, TTFTFleet{Prefill: p}, 1, 0.9))
 	}
 	p.Replicas = 1
-	mustTTFT(t, TTFTAt(TTFTFleet{Prefill: p}, 1, 0.9))
+	mustTTFT(t, ttftAt(t, TTFTFleet{Prefill: p}, 1, 0.9))
 
 	for name, c := range map[string]struct {
 		est  prefill.Estimate
@@ -454,14 +544,14 @@ func ttftReasonCases(t *testing.T) map[Reason]Result {
 		return fl
 	}
 	return map[Reason]Result{
-		NoPrefillCapacity: TTFTAt(with(func(fl *TTFTFleet) { fl.Prefill.VP = 0 }), 1, 0.9),
-		NoFixedLatency:    TTFTAt(with(func(fl *TTFTFleet) { fl.Prefill.FixedLatency = 0 }), 1, 0.9),
-		NoImbalance:       TTFTAt(with(func(fl *TTFTFleet) { fl.Prefill.Replicas = 2 }), 1, 0.9),
-		NoPrefillReplicas: TTFTAt(with(func(fl *TTFTFleet) { fl.Prefill.Replicas = 0 }), 1, 0.9),
-		FlowControlUnknown: TTFTAt(with(func(fl *TTFTFleet) {
+		NoPrefillCapacity: ttftAt(t, with(func(fl *TTFTFleet) { fl.Prefill.VP = 0 }), 1, 0.9),
+		NoFixedLatency:    ttftAt(t, with(func(fl *TTFTFleet) { fl.Prefill.FixedLatency = 0 }), 1, 0.9),
+		NoImbalance:       ttftAt(t, with(func(fl *TTFTFleet) { fl.Prefill.Replicas = 2 }), 1, 0.9),
+		NoPrefillReplicas: ttftAt(t, with(func(fl *TTFTFleet) { fl.Prefill.Replicas = 0 }), 1, 0.9),
+		FlowControlUnknown: ttftAt(t, with(func(fl *TTFTFleet) {
 			fl.FlowControl = FlowControl{State: FlowControlOn, QueueThreshold: 5}
 		}), 1, 0.9),
-		AboveDecodeOnset: TTFTAt(with(func(fl *TTFTFleet) {
+		AboveDecodeOnset: ttftAt(t, with(func(fl *TTFTFleet) {
 			fl.FlowControl = FlowControl{State: FlowControlOn, QueueThreshold: 5, KVThreshold: 0.8}
 		}), 12.6, 0.9),
 	}
@@ -489,7 +579,7 @@ func TestTTFTRefusals(t *testing.T) {
 		fl.Decode = &d
 		c.set(&fl)
 		for q, r := range map[string]Result{
-			"TTFTAt": TTFTAt(fl, 1, 0.9), "RateForTTFT": RateForTTFT(fl, TTFTTarget{Seconds: 0.2, Percentile: 0.9}),
+			"TTFTAt": ttftAt(t, fl, 1, 0.9), "RateForTTFT": rateForTTFT(t, fl, TTFTTarget{Seconds: 0.2, Percentile: 0.9}),
 			"FlowControlOnsets": FlowControlOnsets(fl),
 		} {
 			if u, ok := r.(Unanswerable); !ok || u.Reason != c.want {
@@ -499,11 +589,11 @@ func TestTTFTRefusals(t *testing.T) {
 	}
 	fl := workedFleet()
 	for name, r := range map[string]Result{
-		"percentile 1":        TTFTAt(fl, 1, 1),
-		"negative percentile": TTFTAt(fl, 1, -0.5),
-		"negative rate":       TTFTAt(fl, -1, 0.9),
-		"zero target":         RateForTTFT(fl, TTFTTarget{Seconds: 0, Percentile: 0.9}),
-		"target percentile 1": RateForTTFT(fl, TTFTTarget{Seconds: 0.2, Percentile: 1}),
+		"percentile 1":        ttftAt(t, fl, 1, 1),
+		"negative percentile": ttftAt(t, fl, 1, -0.5),
+		"negative rate":       ttftAt(t, fl, -1, 0.9),
+		"zero target":         rateForTTFT(t, fl, TTFTTarget{Seconds: 0, Percentile: 0.9}),
+		"target percentile 1": rateForTTFT(t, fl, TTFTTarget{Seconds: 0.2, Percentile: 1}),
 	} {
 		if !isInvalid(r) {
 			t.Errorf("%s: %#v, want InvalidInput", name, r)

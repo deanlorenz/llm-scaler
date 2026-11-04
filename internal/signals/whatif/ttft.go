@@ -405,7 +405,7 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 	var first, floorStep float64
 	if pl.d != nil {
 		d := *pl.d
-		out.DecodeKnee = d.kneeRate()
+		out.DecodeKnee, out.Tier = d.kneeRate(), d.Tier
 		adm, ok := DecodeAdmission(d, rate).(Admission)
 		if !ok {
 			r := DecodeAdmission(d, rate).(Unanswerable)
@@ -519,8 +519,10 @@ func TTFTAt(fl TTFTFleet, rate, q float64) Result {
 // carries the smaller of the roles' rates, then the cap, as the caller
 // combines them.
 //
-// Basis.KneeRate is the lower knee, Basis.Floor the TTFT floor and
-// Basis.Fill the decode fill at the answer (0 with no decode side).
+// Basis.KneeRate is the lower knee, Basis.Floor the TTFT floor (not a TPOT
+// one), Basis.Fill the decode fill at the answer and Basis.Tier the decode
+// line's tier (both empty with no decode side). Band is nil: the TTFT model is
+// not banded yet.
 func RateForTTFT(fl TTFTFleet, t TTFTTarget) Result {
 	pl, u := fl.plan()
 	if u != nil {
@@ -570,11 +572,13 @@ func RateForTTFT(fl TTFTFleet, t TTFTTarget) Result {
 		}
 	}
 	var fill float64
+	var tier string
 	if pl.d != nil {
 		fill, _ = pl.d.fillAtReplicaRate(full / float64(pl.d.Replicas))
+		tier = pl.d.Tier
 	}
 	return Answer{Value: full, Flags: flags, Basis: Basis{
-		Fill: fill, KneeRate: pl.lowestKnee(), Floor: floor, Uncapped: alone, BoundBy: by,
+		Fill: fill, KneeRate: pl.lowestKnee(), Floor: floor, Uncapped: alone, BoundBy: by, Tier: tier,
 	}}
 }
 

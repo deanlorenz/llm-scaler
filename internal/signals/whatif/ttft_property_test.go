@@ -33,7 +33,7 @@ func randomTTFTFleet(r *rand.Rand) TTFTFleet {
 // saturated.
 func ttftSeconds(t *testing.T, fl TTFTFleet, rate, q float64) float64 {
 	t.Helper()
-	switch v := TTFTAt(fl, rate, q).(type) {
+	switch v := ttftAt(t, fl, rate, q).(type) {
 	case TTFT:
 		return v.Seconds
 	case Unanswerable:
@@ -65,8 +65,8 @@ func TestProperty_TTFTMonotone(t *testing.T) {
 			}
 			prev = got
 		}
-		if v, ok := TTFTAt(fl, knee, q).(Unanswerable); !ok || v.Reason != Saturated {
-			t.Errorf("at the knee %g: %#v", knee, TTFTAt(fl, knee, q))
+		if v, ok := ttftAt(t, fl, knee, q).(Unanswerable); !ok || v.Reason != Saturated {
+			t.Errorf("at the knee %g: %#v", knee, ttftAt(t, fl, knee, q))
 		}
 
 		rate := 0.6 * knee
@@ -100,9 +100,9 @@ func TestProperty_RateForTTFT(t *testing.T) {
 	for range ttftDraws {
 		fl := randomTTFTFleet(r)
 		q := []float64{0, 0.9, 0.95}[r.IntN(3)]
-		floor := mustTTFT(t, TTFTAt(fl, 0, q)).Floor
+		floor := mustTTFT(t, ttftAt(t, fl, 0, q)).Floor
 		target := TTFTTarget{Seconds: floor * (1.2 + 3*r.Float64()), Percentile: q}
-		res := RateForTTFT(fl, target)
+		res := rateForTTFT(t, fl, target)
 		a, ok := res.(Answer)
 		if !ok {
 			t.Fatalf("%+v: %#v", fl.Prefill, res)
@@ -115,22 +115,22 @@ func TestProperty_RateForTTFT(t *testing.T) {
 		if !(a.Basis.Uncapped >= a.Value*(1-1e-9)) {
 			t.Errorf("prefill side alone %g below the answer %g", a.Basis.Uncapped, a.Value)
 		}
-		back := mustTTFT(t, TTFTAt(fl, a.Value, q))
+		back := mustTTFT(t, ttftAt(t, fl, a.Value, q))
 		relNear(t, "TTFT at the answer", back.Seconds, target.Seconds, 1e-6)
 
 		looser := target
 		looser.Seconds *= 1.3
-		if got := mustAnswer(t, RateForTTFT(fl, looser)).Value; !(got >= a.Value) {
+		if got := mustAnswer(t, rateForTTFT(t, fl, looser)).Value; !(got >= a.Value) {
 			t.Errorf("a looser target lowered the rate %g -> %g", a.Value, got)
 		}
 		more := fl
 		more.Prefill.Replicas++
-		if got := mustAnswer(t, RateForTTFT(more, target)).Value; !(got >= a.Value*(1-1e-9)) {
+		if got := mustAnswer(t, rateForTTFT(t, more, target)).Value; !(got >= a.Value*(1-1e-9)) {
 			t.Errorf("a prefill pod more lowered the rate %g -> %g", a.Value, got)
 		}
 		longer := fl
 		longer.Prefill.PromptTokens *= 1.2
-		switch v := RateForTTFT(longer, target).(type) {
+		switch v := rateForTTFT(t, longer, target).(type) {
 		case Answer:
 			if !(v.Value <= a.Value*(1+1e-9)) {
 				t.Errorf("longer prompts raised the rate %g -> %g", a.Value, v.Value)
@@ -155,7 +155,7 @@ func TestProperty_TTFTFigures(t *testing.T) {
 		pl, _ := fl.plan()
 		rate := (0.3 + 0.65*r.Float64()) * pl.lowestKnee()
 		for _, q := range []float64{0.9, 0.99} {
-			v := mustTTFT(t, TTFTAt(fl, rate, q))
+			v := mustTTFT(t, ttftAt(t, fl, rate, q))
 			if !(v.Seconds >= v.Independent*(1-1e-9)) || !(v.Pooled <= v.Seconds*(1+1e-9)) || !(v.Floor <= v.Seconds*(1+1e-9)) {
 				t.Errorf("%+v q %g: union %g independent %g pooled %g floor %g", fl.Prefill, q, v.Seconds, v.Independent, v.Pooled, v.Floor)
 			}
@@ -163,7 +163,7 @@ func TestProperty_TTFTFigures(t *testing.T) {
 				t.Errorf("not flagged UNVALIDATED: %v", v.Flags)
 			}
 		}
-		m := mustTTFT(t, TTFTAt(fl, rate, 0))
+		m := mustTTFT(t, ttftAt(t, fl, rate, 0))
 		p := m.Parts
 		relNear(t, "mean", m.Seconds, p.EngineWait+p.OwnPrefill+p.DecodeWait+p.FirstStep, 1e-12)
 	}
@@ -194,9 +194,9 @@ func TestProperty_TTFTNonFiniteIsRefused(t *testing.T) {
 			fl.Decode = &d
 			rate, tg := 5.0, TTFTTarget{Seconds: 0.2, Percentile: 0.9}
 			set(&fl, &rate, &tg, v)
-			results := map[string]Result{"RateForTTFT": RateForTTFT(fl, tg)}
+			results := map[string]Result{"RateForTTFT": rateForTTFT(t, fl, tg)}
 			if name != "target" {
-				results["TTFTAt"] = TTFTAt(fl, rate, tg.Percentile)
+				results["TTFTAt"] = ttftAt(t, fl, rate, tg.Percentile)
 			}
 			for fn, res := range results {
 				if name == "rate" && fn == "RateForTTFT" {
