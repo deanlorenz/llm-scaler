@@ -175,6 +175,19 @@ var presenceBits = []struct {
 		func(m domain.ReplicaMetrics) bool { return m.SpecAcceptedPerStepKnown }},
 	{"AvgITLKnown", registration.QueryAvgITL, 0.02, false, true,
 		func(m domain.ReplicaMetrics) bool { return m.AvgITLKnown }},
+	// The TTFT model's (analyzer-learner.md, 2.9). Service time and TTFT
+	// keep their values' rule, a positive mean; the three new means read a
+	// zero as no wait.
+	{"AvgServiceTimeKnown", registration.QueryAvgServiceTime, 0.5, false, true,
+		func(m domain.ReplicaMetrics) bool { return m.AvgServiceTimeKnown }},
+	{"AvgTTFTKnown", registration.QueryAvgTTFT, 0.2, false, true,
+		func(m domain.ReplicaMetrics) bool { return m.AvgTTFTKnown }},
+	{"AvgQueueTimeKnown", registration.QueryAvgQueueTime, 0.1, true, true,
+		func(m domain.ReplicaMetrics) bool { return m.AvgQueueTimeKnown }},
+	{"AvgPrefillTimeKnown", registration.QueryAvgPrefillTime, 0.05, true, true,
+		func(m domain.ReplicaMetrics) bool { return m.AvgPrefillTimeKnown }},
+	{"AvgKVTransferTimeKnown", registration.QueryAvgKVTransferTime, 0.01, true, true,
+		func(m domain.ReplicaMetrics) bool { return m.AvgKVTransferTimeKnown }},
 }
 
 // Each bit is set by a present finite series and by nothing else: a NaN or
@@ -277,6 +290,8 @@ func TestNonFiniteValuesUnchanged(t *testing.T) {
 		m.KvCacheUsageKnown, m.KvUsageInstantKnown, m.KvUsageMeanKnown, m.CapacityQueueKnown, m.PreemptionRateKnown = false, false, false, false, false
 		m.PrefillComputedTokenRateKnown, m.GenerationTokenRateKnown, m.RequestRateKnown, m.RunningRequestsKnown = false, false, false, false
 		m.AvgITLKnown, m.AvgITLEmpty, m.SpecAcceptedPerStepKnown = false, false, false
+		m.AvgServiceTimeKnown, m.AvgTTFTKnown, m.AvgQueueTimeKnown, m.AvgPrefillTimeKnown, m.AvgKVTransferTimeKnown =
+			false, false, false, false, false
 		m.Metadata = nil
 		return m
 	}
@@ -374,13 +389,26 @@ func TestMergePodInstances_PresenceBitsIndependent(t *testing.T) {
 			func(m domain.ReplicaMetrics) bool { return m.RunningRequestsKnown }},
 		{"AvgITLKnown", func(m *domain.ReplicaMetrics) { m.AvgITLKnown = false },
 			func(m domain.ReplicaMetrics) bool { return m.AvgITLKnown }},
+		{"QueueLengthKnown", func(m *domain.ReplicaMetrics) { m.QueueLengthKnown = false },
+			func(m domain.ReplicaMetrics) bool { return m.QueueLengthKnown }},
+		{"AvgServiceTimeKnown", func(m *domain.ReplicaMetrics) { m.AvgServiceTimeKnown = false },
+			func(m domain.ReplicaMetrics) bool { return m.AvgServiceTimeKnown }},
+		{"AvgTTFTKnown", func(m *domain.ReplicaMetrics) { m.AvgTTFTKnown = false },
+			func(m domain.ReplicaMetrics) bool { return m.AvgTTFTKnown }},
+		{"AvgQueueTimeKnown", func(m *domain.ReplicaMetrics) { m.AvgQueueTimeKnown = false },
+			func(m domain.ReplicaMetrics) bool { return m.AvgQueueTimeKnown }},
+		{"AvgPrefillTimeKnown", func(m *domain.ReplicaMetrics) { m.AvgPrefillTimeKnown = false },
+			func(m domain.ReplicaMetrics) bool { return m.AvgPrefillTimeKnown }},
+		{"AvgKVTransferTimeKnown", func(m *domain.ReplicaMetrics) { m.AvgKVTransferTimeKnown = false },
+			func(m domain.ReplicaMetrics) bool { return m.AvgKVTransferTimeKnown }},
 	}
 	full := func() domain.ReplicaMetrics {
 		return domain.ReplicaMetrics{PodName: "p", ModelID: "m",
 			KvCacheUsageKnown: true, KvUsageInstantKnown: true, KvUsageMeanKnown: true, CapacityQueueKnown: true,
 			PreemptionRateKnown: true, PrefillComputedTokenRateKnown: true,
 			GenerationTokenRateKnown: true, RequestRateKnown: true, RunningRequestsKnown: true,
-			AvgITLKnown: true}
+			AvgITLKnown: true, QueueLengthKnown: true, AvgServiceTimeKnown: true, AvgTTFTKnown: true,
+			AvgQueueTimeKnown: true, AvgPrefillTimeKnown: true, AvgKVTransferTimeKnown: true}
 	}
 	for _, cleared := range bits {
 		for _, onRank := range []int{0, 1} {

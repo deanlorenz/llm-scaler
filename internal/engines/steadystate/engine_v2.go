@@ -47,7 +47,8 @@ import (
 //     (publishEngineConfig).
 //
 // The input carries the rows, the variant states and their discovery
-// metadata, the merged policy, the scheduler queue and the arrival rate.
+// metadata, the merged policy, the scheduler queue and the arrival rate, and
+// the router latency and flow-control pools it collects here.
 // Learning capacity stays in the analyzers; what the capacity-build step
 // derives from their results (the role join, the clamp to the scale target,
 // supply and the scaling signals) still runs after Analyze, in
@@ -115,7 +116,7 @@ func (e *Engine) buildAnalyzerInput(
 		e.publishEngineConfig(namespace, modelID, va.Name, publishAccel, gpuCount)
 	}
 
-	return domain.AnalyzerInput{
+	input := domain.AnalyzerInput{
 		ModelID:         modelID,
 		Namespace:       namespace,
 		ReplicaMetrics:  replicaMetrics,
@@ -125,6 +126,16 @@ func (e *Engine) buildAnalyzerInput(
 		SchedulerQueue:  schedulerQueue,
 		ArrivalRate:     arrivalRate,
 	}
+	// The router's latency and flow-control pools, every cycle whatever the
+	// policy lists, so a learner recording carries them for the TTFT model
+	// (docs/proposals/analyzer-learner.md, 2.9). No analyzer reads them: the
+	// slo analyzer asks its router source as before, and reads the same
+	// results from the collector's cycle memo.
+	if e.ReplicaMetricsCollector != nil {
+		input.RouterLatency = e.ReplicaMetricsCollector.CollectRouterLatency(ctx, modelID, namespace)
+		input.FlowControlPools = e.ReplicaMetricsCollector.CollectFlowControlPools(ctx, modelID, namespace)
+	}
+	return input
 }
 
 // runSaturation runs the saturation analyzer on the cycle's input and

@@ -25,6 +25,11 @@ import (
 //   - a struct is an object of its exported fields in declaration order,
 //     named as Go names them (json tags are ignored: the schema is the Go
 //     type, so a tag cannot hide a field from a recording);
+//   - a field tagged `learnrec:"omitzero"` is left out while it holds its
+//     zero value (OmitZeroTag). It loses nothing: a field the data does not
+//     name reads back as its zero value. It is for fields added after
+//     recordings exist, so a recording made before them reads back and is
+//     written again byte for byte;
 //   - a map is an object with its keys sorted, so no output depends on map
 //     order;
 //   - nil and empty are kept apart: a nil map, slice or pointer is null.
@@ -32,6 +37,11 @@ import (
 // A struct with an unexported field is refused rather than written without
 // it: a recording that silently loses an input replays a controller that
 // never ran. time.Time is the one exception, written as above.
+
+// OmitZeroTag is the struct tag that leaves a field out of a recording while
+// it holds its zero value: `learnrec:"omitzero"`. A nil slice, map or pointer
+// is zero; an empty one is not, so nil and empty stay apart.
+const OmitZeroTag = "omitzero"
 
 var (
 	timeType = reflect.TypeOf(time.Time{})
@@ -230,6 +240,9 @@ func encodeStruct(buf *bytes.Buffer, v reflect.Value) error {
 		f := t.Field(i)
 		if !f.IsExported() {
 			return fmt.Errorf("learnrec: %s has an unexported field %s; a recording would lose it", t, f.Name)
+		}
+		if f.Tag.Get("learnrec") == OmitZeroTag && v.Field(i).IsZero() {
+			continue
 		}
 		if !first {
 			buf.WriteByte(',')

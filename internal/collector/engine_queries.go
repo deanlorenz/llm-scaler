@@ -38,6 +38,11 @@ var engineSpecificReplicaQueries = []string{
 	registration.QueryKvUsageMean,
 	registration.QueryRequestRate,
 	registration.QueryRunningRequests,
+	// Recorded for the TTFT model and read by nothing yet (ttft_inputs.go).
+	registration.QueryPromptTokensBuckets,
+	registration.QueryTTFTBuckets,
+	registration.QueryAvgQueueTime,
+	registration.QueryQueueTimeBuckets,
 }
 
 // agnosticReplicaQueries are the logical query names collected per replica that
@@ -64,6 +69,21 @@ var agnosticReplicaQueries = []string{
 	// vLLM's waiting count split by reason; SGLang publishes no reason.
 	registration.QueryCapacityQueueLength,
 	registration.QueryMaxRankCapacityQueueLength,
+	// vLLM's prefill time, NIXL transfer time and per-request TPOT
+	// histogram, for the TTFT model; SGLang publishes none of them
+	// (registration/ttft_inputs.go).
+	registration.QueryAvgPrefillTime,
+	registration.QueryAvgKVTransferTime,
+	registration.QueryTPOTBuckets,
+}
+
+// ttftAgnosticQueries are the agnostic queries above that carry model_name
+// and are cut down to the model like the engine-specific ones: the TTFT
+// inputs vLLM alone publishes.
+var ttftAgnosticQueries = []string{
+	registration.QueryAvgPrefillTime,
+	registration.QueryAvgKVTransferTime,
+	registration.QueryTPOTBuckets,
 }
 
 // capacityQueueQueries are the agnostic queries partitioned by model_name like

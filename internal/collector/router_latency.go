@@ -30,6 +30,7 @@ func (c *ReplicaMetricsCollector) CollectRouterLatency(
 		registration.QuerySLORouterTTFTBuckets,
 		registration.QuerySLORouterTPOTSum,
 		registration.QuerySLORouterTPOTCount,
+		registration.QuerySLORouterTPOTBuckets,
 	}
 	results, err := c.refreshShared(ctx, queries, map[string]string{source.ParamNamespace: namespace})
 	if err != nil {
@@ -85,10 +86,31 @@ func (c *ReplicaMetricsCollector) CollectRouterLatency(
 			out.TPOTSumRate, out.TPOTCountRate = 0, 0
 		}
 	}
+	// The TPOT histogram rides along, read by nothing yet: it alone does not
+	// make a reading, so the slo analyzer sees the same nil it always did.
+	out.TPOTBuckets = routerBuckets(results[registration.QuerySLORouterTPOTBuckets], modelID)
 	if len(out.TTFTBuckets) == 0 && out.TPOTCountRate == 0 {
 		return nil
 	}
 	return out
+}
+
+// routerBuckets is one model's bucket rates of a router histogram, a model
+// reached under both labels summed into one bucket, sorted by bound. Nil when
+// the query failed or no bucket of the model was readable.
+func routerBuckets(result *source.MetricResult, modelID string) []domain.LatencyBucket {
+	byBound := map[float64]float64{}
+	for _, v := range modelValues(result, modelID) {
+		le, err := strconv.ParseFloat(v.Labels["le"], 64)
+		if err != nil || math.IsNaN(le) {
+			continue
+		}
+		byBound[le] += v.Value
+	}
+	if len(byBound) == 0 {
+		return nil
+	}
+	return latencyBuckets(byBound)
 }
 
 // modelValues returns the finite, non-negative values of result that belong to

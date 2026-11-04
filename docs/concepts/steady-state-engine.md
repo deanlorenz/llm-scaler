@@ -391,6 +391,7 @@ model; check the health metrics below.
 | `vllm:prefix_cache_hits_total` / `vllm:prefix_cache_queries_total` | counters | prefix-cache hit rate (discounts input-token demand) — *optional* |
 | `vllm:num_requests_running` | gauge | the requests a replica holds: with the tokens in use, the KV each holds, so a prefix-cache hit on a block no other running request holds is not counted as saved memory (SGLang: `sglang:num_running_reqs`) — *optional*: without it every hit is taken to save memory, as the hit rate says |
 | `inference_extension_flow_control_queue_size` / `_bytes` | gauges (EPP) | upstream scheduler-queue demand — *optional* |
+| `vllm:request_prompt_tokens_bucket`, `vllm:time_to_first_token_seconds_bucket`, `vllm:request_queue_time_seconds`, `vllm:request_prefill_time_seconds`, `vllm:nixl_xfer_time_seconds`, `vllm:request_time_per_output_token_seconds_bucket`; the EPP's `llm_d_epp_request_streaming_tpot_seconds_bucket`, `llm_d_epp_flow_control_request_queue_duration_seconds`, `llm_d_epp_flow_control_pool_saturation`, `llm_d_epp_flow_control_requests_total` | histograms, gauge, counter | **recorded only**: written to a learner recording for the TTFT model, read by no analyzer yet (SGLang: the prompt, TTFT and queue-time histograms under its own names) — *optional*: without them nothing changes |
 
 Deployment engine args (`--max-num-seqs`, `--gpu-memory-utilization`, `--block-size`,
 `--max-model-len`, `--max-num-batched-tokens`, `--num-gpu-blocks-override`, …) are read from the

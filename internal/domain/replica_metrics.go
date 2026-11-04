@@ -313,7 +313,9 @@ type ReplicaMetrics struct {
 	// The distinction is what makes it usable for sizing. End-to-end latency
 	// climbs when a replica is behind and falls when it catches up, so it varies
 	// with capacity; service time is what one request costs to serve and does
-	// not. Zero when the engine does not publish it or nothing has completed.
+	// not. Zero when the engine does not publish it or nothing has completed;
+	// AvgServiceTimeKnown, below with the TTFT inputs, says whether it was
+	// read.
 	AvgServiceTime float64
 
 	// AvgITL is the average inter-token latency on this replica in seconds.
@@ -378,7 +380,8 @@ type ReplicaMetrics struct {
 	// docs/proposals/prefill-ttft-model.md records that result. Prefill's
 	// capacity comes from PrefillComputedTokenRate below, which excludes queue
 	// wait by construction and needs no regression at all.
-	// Zero when metrics are unavailable.
+	// Zero when metrics are unavailable; AvgTTFTKnown, below with the other
+	// TTFT inputs, says whether it was read.
 	AvgTTFT float64
 
 	// PrefillComputedTokenRate is the rate at which this replica computes
@@ -475,6 +478,76 @@ type ReplicaMetrics struct {
 	// finite, non-negative series. A pod whose ranks did not all report one
 	// is not known.
 	RequestRateKnown bool
+
+	// --- Recorded for the TTFT model; read by nothing yet ---
+	//
+	// The fields below are what the what-if planner and the slo analyzer's
+	// TTFT pricing learn from (docs/proposals/analyzer-learner.md, 2.9). No
+	// analyzer reads them. Each is behind a presence bit, or is a histogram
+	// that is nil when absent, and each is left out of a learner recording
+	// while it is zero (learnrec.OmitZeroTag), so a recording made before
+	// they existed reads back and is written again byte for byte.
+	//
+	// They are recorded as read, for a not-Ready Pod too: the row's Ready
+	// says whether to use them. A histogram is the per-second rate of
+	// requests at or under each bound, cumulative, over the window its query
+	// names, sorted by bound; the +Inf bucket carries the total. A bucket
+	// whose bound does not parse or whose rate is not a finite non-negative
+	// number is dropped. A pod's ranks merge by summing each bound's rate,
+	// and the pod has a histogram only when every rank had one.
+
+	// QueueLengthKnown is set when QueueLength was read from a present,
+	// finite, non-negative series, so a zero means an empty queue and not a
+	// missing reading. A pod whose ranks did not all report one is not known.
+	QueueLengthKnown bool `learnrec:"omitzero"`
+	// AvgServiceTimeKnown and AvgTTFTKnown are set when AvgServiceTime and
+	// AvgTTFT hold a mean read from a present, finite, positive series. They
+	// follow the value: a not-Ready Pod's timings are dropped, and so is a
+	// mean longer than the Pod has run, and the bit with them. A NaN (no
+	// request in the window) is not known. A pod whose ranks did not all
+	// report one is not known.
+	AvgServiceTimeKnown bool `learnrec:"omitzero"`
+	AvgTTFTKnown        bool `learnrec:"omitzero"`
+
+	// PromptTokensBuckets is the prompt-length histogram, tokens per
+	// request, over [5m] like AvgInputTokens. vLLM
+	// request_prompt_tokens_bucket; SGLang prompt_tokens_histogram_bucket
+	// (behind --collect-tokens-histogram). Nil when absent.
+	PromptTokensBuckets []LengthBucket `learnrec:"omitzero"`
+	// OutputTokensBuckets is the output-length histogram, tokens per
+	// request, over [5m] like AvgOutputTokens: the buckets
+	// AvgOutputTokensSquared is reduced from. vLLM
+	// request_generation_tokens_bucket; SGLang
+	// generation_tokens_histogram_bucket. Nil when absent.
+	OutputTokensBuckets []LengthBucket `learnrec:"omitzero"`
+	// TTFTBuckets is the engine's time-to-first-token histogram, seconds,
+	// over [1m] like AvgTTFT. vLLM and SGLang time_to_first_token_seconds.
+	// Nil when absent.
+	TTFTBuckets []LatencyBucket `learnrec:"omitzero"`
+	// AvgQueueTime is the mean time a request waited in the engine's queue
+	// before it was scheduled, seconds, over [1m]; QueueTimeBuckets is its
+	// histogram over the same window. vLLM request_queue_time_seconds;
+	// SGLang queue_time_seconds. AvgQueueTimeKnown is set when the mean was
+	// read from a present, finite, non-negative series (a zero is no wait);
+	// a NaN, no request in the window, is not known.
+	AvgQueueTime      float64         `learnrec:"omitzero"`
+	AvgQueueTimeKnown bool            `learnrec:"omitzero"`
+	QueueTimeBuckets  []LatencyBucket `learnrec:"omitzero"`
+	// AvgPrefillTime is the mean time a request spent in prefill, queue wait
+	// excluded, seconds, over [1m]. vLLM request_prefill_time_seconds only;
+	// SGLang publishes no per-stage figure. Known as AvgQueueTime is.
+	AvgPrefillTime      float64 `learnrec:"omitzero"`
+	AvgPrefillTimeKnown bool    `learnrec:"omitzero"`
+	// AvgKVTransferTime is the mean time of one KV transfer through NIXL
+	// (P/D), seconds, over [1m]. vLLM nixl_xfer_time_seconds only, exported
+	// by a pod that runs the NIXL connector. Known as AvgQueueTime is.
+	AvgKVTransferTime      float64 `learnrec:"omitzero"`
+	AvgKVTransferTimeKnown bool    `learnrec:"omitzero"`
+	// TPOTBuckets is the engine's per-request time-per-output-token
+	// histogram, seconds, over [1m]: each request's own mean TPOT, the
+	// fallback source for the TPOT ratio where the router's is missing.
+	// vLLM request_time_per_output_token_seconds only. Nil when absent.
+	TPOTBuckets []LatencyBucket `learnrec:"omitzero"`
 }
 
 // ITLState is which of three readings a replica's AvgITL is.

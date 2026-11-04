@@ -172,6 +172,7 @@ func (c *ReplicaMetricsCollector) queryReplicaSeries(
 	// matcher.
 	filterResultsToModel(results, engineSpecificReplicaQueries, modelID)
 	filterResultsToModel(results, capacityQueueQueries, modelID)
+	filterResultsToModel(results, ttftAgnosticQueries, modelID)
 
 	return results, engines, nil
 }

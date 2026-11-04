@@ -326,8 +326,8 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		//
 		// ITL ONLY. The other presence bits stay as read: their values are
 		// kept for a not-Ready Pod, and a bit says whether its value was
-		// read, not whether the Pod is serving. Service time and TTFT have
-		// no presence bit.
+		// read, not whether the Pod is serving. Service time and TTFT are
+		// dropped below with their values, so their bits go with them.
 		avgITLKnown, avgITLEmpty = false, false
 		// At DEFAULT, not DEBUG. The incident this guards against was
 		// visible only as a moved demand floor; now that both layers
@@ -412,6 +412,10 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 	// The spread of output lengths: the histogram and the mean over the same
 	// [5m] reduced to a lower bound on E[O^2] (output_buckets.go).
 	outputSquared, outputSquaredKnown := outputTokensSquared(data.outputTokensBuckets, data.avgOutputTokens)
+	// The two timings' bits follow their values: a mean dropped above, for
+	// a not-Ready Pod or one longer than the Pod has run, is not a reading.
+	avgServiceTimeKnown := data.avgServiceTimeKnown && avgServiceTime > 0
+	avgTTFTKnown := data.avgTTFTKnown && avgTTFT > 0
 	metric := domain.ReplicaMetrics{
 		PodName:                  podName,
 		ModelID:                  modelID,
@@ -463,6 +467,22 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		RequestRateKnown:              data.requestRateKnown,
 		RunningRequestsKnown:          data.runningRequestsKnown,
 		AvgOutputTokensSquaredKnown:   outputSquaredKnown,
+		QueueLengthKnown:              data.hasQueue && data.queueLenKnown,
+		AvgServiceTimeKnown:           avgServiceTimeKnown,
+		AvgTTFTKnown:                  avgTTFTKnown,
+		// The TTFT model's inputs, as read, for a not-Ready Pod too
+		// (domain.ReplicaMetrics, "Recorded for the TTFT model").
+		PromptTokensBuckets:    lengthBuckets(data.promptTokensBuckets),
+		OutputTokensBuckets:    lengthBuckets(data.outputTokensBuckets),
+		TTFTBuckets:            latencyBuckets(data.ttftBuckets),
+		AvgQueueTime:           data.avgQueueTime,
+		AvgQueueTimeKnown:      data.avgQueueTimeKnown,
+		QueueTimeBuckets:       latencyBuckets(data.queueTimeBuckets),
+		AvgPrefillTime:         data.avgPrefillTime,
+		AvgPrefillTimeKnown:    data.avgPrefillTimeKnown,
+		AvgKVTransferTime:      data.avgKVTransferTime,
+		AvgKVTransferTimeKnown: data.avgKVTransferTimeKnown,
+		TPOTBuckets:            latencyBuckets(data.tpotBuckets),
 		Metadata: &domain.ReplicaMetricsMetadata{
 			CollectedAt:     collectedAt,
 			Age:             freshnessAge,

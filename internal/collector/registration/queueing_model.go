@@ -145,6 +145,10 @@ func RegisterQueueingModelQueries(sourceRegistry *source.SourceRegistry) {
 	})
 
 	registerSGLangQueueingModelQueries(registry)
+
+	// What the TTFT model learns from, recorded and read by nothing yet
+	// (ttft_inputs.go).
+	registerTTFTInputQueries(registry)
 }
 
 // registerSGLangQueueingModelQueries registers the SGLang variants of the

@@ -15,6 +15,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/registration"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
@@ -211,5 +212,54 @@ func TestCollectRouterLatency_CountsAFailedQuery(t *testing.T) {
 			}
 		}
 	}
-	assert.Equal(t, 3.0, counted, "one per failed query")
+	assert.Equal(t, 4.0, counted, "one per failed query")
+}
+
+// TestCollectRouterLatency_TPOTBuckets pins the per-request TPOT histogram the
+// TTFT and TPOT models are recorded with (analyzer-learner.md, 2.9): this
+// model's buckets summed per bound and sorted, a NaN or unparsable one
+// dropped; nil when the query is missing or failed, never a histogram of
+// zeros; and on its own it does not make a reading, so the slo analyzer
+// sees the nil it always did.
+func TestCollectRouterLatency_TPOTBuckets(t *testing.T) {
+	ttft := &source.MetricResult{Values: []source.MetricValue{
+		{Labels: map[string]string{seriesTargetModelLabel: "model-a", "le": "+Inf"}, Value: 1},
+	}}
+	buckets := &source.MetricResult{Values: []source.MetricValue{
+		{Labels: map[string]string{seriesTargetModelLabel: "model-a", "le": "+Inf"}, Value: 2},
+		{Labels: map[string]string{seriesTargetModelLabel: "model-a", "le": "0.05"}, Value: 0.5},
+		{Labels: map[string]string{seriesModelLabel: "model-a", "le": "0.05"}, Value: 0.25},
+		{Labels: map[string]string{seriesTargetModelLabel: "model-a", "le": "0.1"}, Value: math.NaN()},
+		{Labels: map[string]string{seriesTargetModelLabel: "model-a", "le": "slow"}, Value: 1},
+		{Labels: map[string]string{seriesTargetModelLabel: "model-b", "le": "0.05"}, Value: 9},
+	}}
+	collect := func(results map[string]*source.MetricResult) *domain.RouterLatency {
+		src := &mockMetricsSource{refreshFunc: func(context.Context, source.RefreshSpec) (map[string]*source.MetricResult, error) {
+			return results, nil
+		}}
+		return NewReplicaMetricsCollector(src, nil, nil, nil, nil).CollectRouterLatency(context.Background(), "model-a", "ns")
+	}
+
+	got := collect(map[string]*source.MetricResult{
+		registration.QuerySLORouterTTFTBuckets: ttft, registration.QuerySLORouterTPOTBuckets: buckets})
+	require.NotNil(t, got)
+	assert.Equal(t, []domain.LatencyBucket{{UpperBound: 0.05, Rate: 0.75}, {UpperBound: math.Inf(1), Rate: 2}}, got.TPOTBuckets)
+
+	got = collect(map[string]*source.MetricResult{registration.QuerySLORouterTTFTBuckets: ttft})
+	require.NotNil(t, got)
+	assert.Nil(t, got.TPOTBuckets, "a missing query is no histogram")
+
+	got = collect(map[string]*source.MetricResult{registration.QuerySLORouterTTFTBuckets: ttft,
+		registration.QuerySLORouterTPOTBuckets: {Error: errors.New("timeout"), Values: buckets.Values}})
+	require.NotNil(t, got)
+	assert.Nil(t, got.TPOTBuckets, "a failed query is no histogram")
+
+	got = collect(map[string]*source.MetricResult{registration.QuerySLORouterTTFTBuckets: ttft,
+		registration.QuerySLORouterTPOTBuckets: {Values: []source.MetricValue{
+			{Labels: map[string]string{seriesTargetModelLabel: "model-a", "le": "+Inf"}, Value: math.NaN()}}}})
+	require.NotNil(t, got)
+	assert.Nil(t, got.TPOTBuckets, "a histogram of NaNs is no histogram")
+
+	assert.Nil(t, collect(map[string]*source.MetricResult{registration.QuerySLORouterTPOTBuckets: buckets}),
+		"TPOT buckets alone are not a router reading")
 }
