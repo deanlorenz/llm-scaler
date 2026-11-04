@@ -202,8 +202,9 @@ func TestReasonsAreListedAndDocumented(t *testing.T) {
 	if end < 0 {
 		end = len(text) - start
 	}
-	var onPage []string
-	for _, m := range regexp.MustCompile("(?m)^\\| `(\\w+)` \\|").FindAllStringSubmatch(text[start:start+end], -1) {
+	rows := regexp.MustCompile("(?m)^\\| `(\\w+)` \\|").FindAllStringSubmatch(text[start:start+end], -1)
+	onPage := make([]string, 0, len(rows))
+	for _, m := range rows {
 		onPage = append(onPage, m[1])
 	}
 	if len(onPage) < len(listed) {
