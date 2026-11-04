@@ -368,6 +368,7 @@ agreeCycles
 agreed
 aim
 all
+all-above-band-below-ksat
 all2all_backend
 allMark
 allMarkAt
@@ -889,6 +890,7 @@ first-sample
 firstDroppedSeq
 firstWrite
 fit
+fit-declined
 fitted
 fitting
 fix
@@ -1489,6 +1491,7 @@ no-change
 no-compatible-donor
 no-data
 no-decode-candidate
+no-healthy-rows
 no-hit
 no-itl
 no-k
@@ -2303,6 +2306,7 @@ tokens
 tokensInUse
 tolerance
 too
+too-few-readings
 took
 totalAvail
 totalDecisions

@@ -130,9 +130,8 @@ func freshRows(rows []domain.ReplicaMetrics) []domain.ReplicaMetrics {
 // held.
 func (a *ThroughputAnalyzer) lineModel(ctx context.Context, key string, state *variantState,
 	namespace, modelID, variant string, now time.Time) (itl.Model, string, bool) {
-	if !state.hasReading {
-		return itl.Model{}, itlReasonT2Failed, false
-	}
+	// A cycle with no healthy row read nothing (observe): no line, and
+	// its zero reading says so.
 	r := state.reading
 	reason := lineReason(r)
 	a.noteLearnerWrite(ctx, key, r, reason, namespace, modelID, variant, now)
@@ -143,20 +142,70 @@ func (a *ThroughputAnalyzer) lineModel(ctx context.Context, key string, state *v
 	return r.Model, reason, true
 }
 
+// The causes a silent line's summary names (silenceCause), in the order
+// they are judged.
+const (
+	// silenceNoHealthyRows: no row of the variant was healthy this cycle
+	// (stale, no KV capacity, no ITL, no shape), so nothing was read.
+	silenceNoHealthyRows = "no-healthy-rows"
+	// silenceFitDeclined: the window held enough readings, and the pinned
+	// fit refused them (a flat or negative slope).
+	silenceFitDeclined = "fit-declined"
+	// silenceShapeChange: the request shape changed, which empties the
+	// window and drops the held slope, and the new shape has not fitted.
+	silenceShapeChange = "shape-change"
+	// silenceAboveBandUnderKSat: every reading this cycle was above the
+	// band at a k under itl.DefaultKSat: the band gets none, and the
+	// above-band fallback keeps none.
+	silenceAboveBandUnderKSat = "all-above-band-below-ksat"
+	// silenceRestart: the line has not been live since the controller
+	// started, or since the variant first appeared.
+	silenceRestart = "restart"
+	// silenceTooFewReadings: fewer than itl.DefaultMinSamples readings, or
+	// fewer than minSettledSamples settled, and no slope to hold.
+	silenceTooFewReadings = "too-few-readings"
+)
+
+// silenceCause is why the variant's line is silent this cycle, from what the
+// analyzer already holds: the first of the causes above that applies.
+func silenceCause(state *variantState, r itl.Reading) string {
+	switch {
+	case !state.hasReading:
+		return silenceNoHealthyRows
+	case r.Declined:
+		return silenceFitDeclined
+	case state.shapeChanged:
+		return silenceShapeChange
+	case r.Offered == 0 && r.AboveBand > 0 && r.AboveBandUnderKSat == r.AboveBand:
+		return silenceAboveBandUnderKSat
+	case !state.everLive:
+		return silenceRestart
+	}
+	return silenceTooFewReadings
+}
+
 // noteLineSilence logs one line at the default level when the variant's line
 // goes silent -- no line, so no throughput capacity and no say in the
-// decision -- or comes back, as the GPS summary logs, with what its rows
-// were this cycle: in the band, above it, below it, and settling; and what
-// the band's and the above-band windows hold. Called with a.mu held.
+// decision -- or comes back, as the GPS summary logs, with the cause of a
+// silence (silenceCause; empty when live) and what its rows were this cycle:
+// in the band, above it, below it, and settling; and what the band's and the
+// above-band windows hold. With no healthy row the tracker was not read, and
+// every count is 0. Called with a.mu held.
 func noteLineSilence(ctx context.Context, state *variantState, r itl.Reading, reason,
 	namespace, modelID, variant string) {
 	silent := r.Tier == ""
+	cause := ""
+	if silent {
+		cause = silenceCause(state, r)
+	} else {
+		state.everLive, state.shapeChanged = true, false
+	}
 	if silent == state.lineSilent {
 		return
 	}
 	state.lineSilent = silent
 	ctrl.LoggerFrom(ctx).Info("throughput analyzer: ITL line", "namespace", namespace, "modelID", modelID,
-		"variant", variant, "silent", silent, "source", reason,
+		"variant", variant, "silent", silent, "cause", cause, "source", reason,
 		"inBand", r.Offered-r.Capped, "aboveBand", r.AboveBand, "belowBand", r.BelowBand, "settling", r.Settling,
 		"held", r.Held, "aboveBandHeld", r.AboveBandHeld)
 }
