@@ -598,7 +598,7 @@ Why:
 - **The floor 1.5** covers minutes in which the shares happen to look even.
   It is P3's own synthetic multi-pod case, and near P1's 2:1:1:1 example
   (1.6). It is a constant, not a policy field, until a recording argues for
-  another value ([open question S1-6](#s1-open-questions)).
+  another value ([open question 5 below](#s1-open-questions)).
 - **Capped at `N_p`**, the most one pod can carry.
 - **Deriving `f` from the router's configuration** (scorer weights) was
   rejected: no formula maps weights to a share.
@@ -629,11 +629,13 @@ Why:
   at moderate load reads well below `V_P` and over-provisions. That is why Q1
   comes before S2, which spends replicas, and not before S1, which spends
   none.
-- **Q1 is its own PR** because it is a collector cost, reviewable alone: one
-  more namespace-scoped query per cycle, issued only for namespaces holding a
-  model whose policy sets a TTFT target. It moves no golden (recordings
-  already carry `QueueMin`), and it has a reader only once #470's
-  `prefill-busy-minutes` is merged.
+- **Q1 is its own PR** because it is a collector cost, reviewable alone: two
+  more namespace-scoped queries per cycle, the queue minimum and the
+  prompt-tokens histogram (both record-only today), issued only for
+  namespaces holding a model whose policy sets a TTFT target. The histogram
+  replaces the assumed prompt spread (decision 3). Q1 moves no golden
+  (recordings already carry both), and the queue minimum has a reader only
+  once #470's `prefill-busy-minutes` is merged.
 - **P1's estimate is not persisted** (the plan's "Later" row). After a
   controller restart every prefill variant reads `no-prefill-capacity` until
   a pod queues again; S2 holds prefill there.
@@ -649,7 +651,7 @@ variant and its replica count, so that S2 can call it at other counts:
 | `f` | Decision 1 |
 | `N_p` | The variant's Ready replicas: the count that serves the arrivals now |
 | `PromptTokens` | The effective prompt, `E[I_eff]` (prefix hits are not prefill work), as the analyzer reads the shape |
-| `PromptCV` | From the prompt-tokens histogram where a row carries it (record-only today); otherwise 1, flagged `AssumedPromptSpread` |
+| `PromptCV` | From the prompt-tokens histogram where a row carries it (record-only until Q1); otherwise 2, flagged `AssumedPromptSpread` ([below](#the-assumed-prompt-spread)) |
 | `ArrivalCV2` | 0, Poisson (P3's open question 5) |
 | `TransferSecondsPerToken` | 0, flagged `TransferOmitted`: `nixl_xfer_time_seconds` is not collected |
 | `Decode` | The model's decode variant, from the inputs S1 already prices TPOT with: its line, band, capacity tokens, `KVreq`, `O`, batch cap times ranks, and Ready replicas `N_d`. Only when the model has exactly one decode variant and its line prices (`own` or `pinned`; not `pinned-default`, `no-line` or `declined`) |
@@ -659,11 +661,48 @@ variant and its replica count, so that S2 can call it at other counts:
 
 **The decode side.** With flow control on and no decode side, S1 does not
 price, and the source reads `no-decode-side`: without decode, P3 cannot place
-the decode onset, above which TTFT is not priced at all (P3's review). This
-tightens P3's "What S1 calls" note, which allows no decode side in every
-case. With flow control off, S1 prices prefill alone, flagged
+the decode onset, above which TTFT is not priced at all (P3's review). P3
+answers such a fleet flagged `DecodeOnsetUnchecked`, and its "What S1 calls"
+note says S1 must pass the decode role there; S1 does not publish a
+`DecodeOnsetUnchecked` answer. With flow control off, S1 prices prefill alone, flagged
 `DecodeSideOmitted`: published, but S2 does not act on it, because it leaves
 out `W_decode` and decode's first step and so over-promises.
+
+###### The assumed prompt spread
+
+Without the histogram, S1 assumes `cv` = 2, not 1. A gamma prompt at `cv` 1
+is exponential; heavy-tailed prompts (a few long documents among short chat
+turns) sit above it, and a `cv` too low under-states both the queue
+(`Cs²` = `cv²`) and the request's own prefill tail, so it over-promises TTFT
+and asks for too few replicas.
+
+**Checked before relying on it:** does a larger `cv` always price a longer
+TTFT at p90 and above? No test on #471 asserts it (its property cases vary
+the rate and the replicas, not `cv`), so it was scanned on #471's round-1 tip
+(`f12de0dcf`, `engineWait`): `TTFTAt` on the prefill side, mean prompt 1000
+and 8000 tokens, `a` 5 and 30 ms, 1 and 4 pods, at 0.05, 0.3, 0.6 and 0.85 of
+the knee, p90, p95 and p99, `cv` 0, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 7 and 10:
+96 cells, 1056 priced points.
+
+- **Up to `cv` 3 it holds** in all 96 cells: TTFT rises with `cv` at every
+  percentile and load, on that grid.
+- **Above 3 it does not, at p90 and low load** (8 of the 96 cells, all of
+  them p90 at 0.05 of the knee). There the p90
+  peaks near `cv` 3 and then falls (8000 tokens, `a` 5 ms: 1.131 s at `cv` 3,
+  1.118 at 4, 0.072 at 10). There the request's own prefill dominates, and a
+  gamma of shape `1/cv²` puts ever more mass near zero, so its p90 shrinks. At
+  0.3 of the knee and above, and at p95 and p99 everywhere, it still rises.
+
+So the claim is true only over a range, and the value is chosen as the one
+that maximises the priced TTFT over the plausible range. Over [0, 3] that is
+the range's top, because TTFT is monotone there. **The plausible top is taken
+as 2**, not 3: it is the top of the spread P3's property cases draw, a gamma
+at `cv` 2 already puts the p99 prompt near 10 times the mean, and `cv` 3 would
+roughly double the predicted TTFT at 0.6 of the knee (0.47 s to 0.93 s at
+1000 tokens, p90), spending replicas on a spread no measurement supports. The
+2 is not measured: P2's prompt histogram is the first evidence, and Q1
+replaces the assumption in production. An assumed `cv` is never set above 3,
+where the p90 stops being monotone.
 
 **Two calls per variant:**
 
@@ -768,18 +807,15 @@ run 2 is necessary, not sufficient.
 1. **Several decode variants** behind one prefill variant: which decode side?
    *Recommend:* none, priced prefill alone with flow control off and
    `no-decode-side` with it on, until a fleet needs it.
-2. **The prompt spread in production.** The prompt-tokens histogram is
-   record-only too, so production assumes `cv` = 1, which over-promises on
-   heavy-tailed prompts. *Open:* issue that query in Q1 as well.
-3. **Burstiness.** Poisson over-promises on bursty traffic (P3's open
+2. **Burstiness.** Poisson over-promises on bursty traffic (P3's open
    question 5).
-4. **Sizer mode.** With saturation disabled, P1's observer does not run, so S2
+3. **Sizer mode.** With saturation disabled, P1's observer does not run, so S2
    in sizer mode needs it moved to the engine.
-5. **Flow-control thresholds** when an install overrides the detector: a
+4. **Flow-control thresholds** when an install overrides the detector: a
    policy field, or read the EPP's configuration?
-6. **The `f` floor 1.5** is not measured. *Recommend:* set it from the
+5. **The `f` floor 1.5** is not measured. *Recommend:* set it from the
    three-pod prefill-stress recording.
-7. **Several prefill variants per model.** The router's TTFT is per model,
+6. **Several prefill variants per model.** The router's TTFT is per model,
    so a per-variant prediction cannot be scored one to one. *Recommend:*
    score the request-weighted mixture of the variants' predicted tails.
 
