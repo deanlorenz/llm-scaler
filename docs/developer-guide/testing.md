@@ -1535,10 +1535,22 @@ tests do. The controller goes into `CONTROLLER_NAMESPACE`, which defaults to
   registry.k8s.io or ghcr.io except Grafana, which Grafana publishes only on
   Docker Hub, so the installer pulls it from `mirror.gcr.io`
   (`GRAFANA_IMAGE_REGISTRY`) with the chart's tag.
+  `mirror.gcr.io` is Google's mirror of Docker Hub: the same images, with
+  the same digests, served by Google. It is allowed because the rule exists
+  for Docker Hub's anonymous rate limit, and the mirror has none. It only
+  holds tags someone has pulled through it, though.
   `hack/check-kps-images.sh`, run by `make lint-deploy-scripts`, renders the
-  installed release and fails on any docker.io or unqualified image. It
-  needs `helm` and access to the chart repository; the CI job installs a
-  pinned helm.
+  installed release. It fails on any docker.io or unqualified image, and on
+  any `mirror.gcr.io` tag the mirror does not serve, so a chart bump fails
+  there rather than as ImagePullBackOff in CI.
+- **What `make lint-deploy-scripts` needs.** `helm`, `crane` or `docker` (to
+  ask the mirror), and network access to the chart repository and the
+  mirror. The CI job installs a pinned helm. Offline, point
+  `KPS_CHART_DIR=<dir>` at an untarred kube-prometheus-stack chart of the
+  pinned version (`helm pull kube-prometheus-stack --repo
+  https://prometheus-community.github.io/helm-charts --version <pin>
+  --untar`) to skip the chart download. The mirror check still needs the
+  network.
 - **Runner disk.** A full disk on the CI runner shows up as a Deployment
   that never becomes ready, not as a disk error. Two PRs failed setup on
   `kube-prometheus-stack-grafana not ready ... Progress deadline exceeded`

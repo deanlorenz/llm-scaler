@@ -138,6 +138,38 @@ while IFS= read -r ref; do
 done <"$WORK/images.txt"
 
 # A render that lost Grafana or Prometheus would pass on fewer images.
+# mirror.gcr.io is Google's pull-through mirror of Docker Hub. It serves what
+# has been pulled through it, so a chart bump to a tag nobody has pulled yet
+# may not be there, and the install would reach CI as ImagePullBackOff with the
+# chart's tag in a registry that never had it. Ask the mirror for each tag.
+manifest_exists() {
+    if command -v crane >/dev/null 2>&1; then
+        crane manifest "$1" >/dev/null 2>"$WORK/manifest.err"
+    else
+        docker manifest inspect "$1" >/dev/null 2>"$WORK/manifest.err"
+    fi
+}
+MIRRORED="$(grep '^mirror\.gcr\.io/' "$WORK/images.txt" || true)"
+if [ -n "$MIRRORED" ]; then
+    command -v crane >/dev/null 2>&1 || command -v docker >/dev/null 2>&1 || {
+        printf 'FATAL: crane or docker is required to check that mirror.gcr.io serves %s.\n' "$(printf '%s' "$MIRRORED" | tr '\n' ' ')" >&2
+        exit 1
+    }
+    while IFS= read -r ref; do
+        found=""
+        for attempt in 1 2 3; do
+            if manifest_exists "$ref"; then found=1; break; fi
+            [ "$attempt" -lt 3 ] && sleep 5
+        done
+        if [ -n "$found" ]; then
+            echo "ok   $ref is served by the mirror"
+        else
+            FAIL=$((FAIL + 1))
+            echo "FAIL $ref: mirror.gcr.io does not serve this tag ($(head -1 "$WORK/manifest.err" | tr -d '\r')). Pull it through the mirror once, or set GRAFANA_IMAGE_REGISTRY to a registry that has it."
+        fi
+    done <<<"$MIRRORED"
+fi
+
 for want in grafana/grafana prometheus/prometheus prometheus-operator/prometheus-operator; do
     grep -q "/$want:" "$WORK/images.txt" || {
         FAIL=$((FAIL + 1)); echo "FAIL the render has no $want image; it is not the release the installer deploys"
