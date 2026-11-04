@@ -1504,6 +1504,30 @@ cycle (`TestMuKeyBucket_TheKeysShareABucket`). The switch is
   bucket with no derived mu is still priced from the shorter bucket's higher
   mu, as a borrow: that is the neighbour borrow's behaviour, not changed here.
 
+## Prefill capacity, observed
+
+The what-if PR P1 ([what-if capacity](../proposals/slo-capacity-planner.md),
+the PR plan) learns what the end-to-end TTFT model
+([end-to-end TTFT](../proposals/slo-capacity-planner-ttft.md)) needs of a
+prefill pod, and only logs it. `internal/signals/prefill` holds the
+estimators; `prefill_observe.go` feeds it each prefill variant's rows after
+the replicas are priced, with this analyzer's decode back-pressure
+(`decodeSaturated`) and the prefill lower-bound window (`prefill_bound.go`,
+passed through `prefillBounds`). Nothing sizes from it.
+
+| Figure | From | Refused |
+| --- | --- | --- |
+| `V_P`, computed tokens/s | busy minutes (median of at least 5; needs the queue's minimum over the minute, which no query reads yet), else the peak under a queue sustained over 3 minutes, else the back-pressure bound (at least 2 readings). The last two are lower bounds | `NoPrefillCapacity`; `SGLangNoComputedTokens` on SGLang |
+| `a`, seconds | an untrimmed fit of `AvgServiceTime` against the effective prompt (`PrefillComputedTokenRate / RequestRate`) over low-load minutes (no queue, occupancy at most 0.1, prompt steady within 10% for 2 minutes), plus the least `AvgTTFT - AvgServiceTime`. `1/slope` is logged as `slopeBound`, an upper bound on `V_P` for validation only | aggregated, fewer than 5 minutes, prompts spanning less than 1.5x, a non-positive slope or intercept |
+| `f` | the busiest pod's share of computed tokens over the mean, less the expected max of `N_p` Poisson counts, over minutes with at least 100 requests a pod; median of at least 5 | `OnePod`, `NoComputedTokens`, `TooFewImbalanceMinutes` |
+
+A row is read only from a Ready, non-bridge replica settled for 2 minutes on
+the settle tracker. Samples are spaced a minute apart and kept 6 hours; the
+state is not persisted and not forgotten by `llm-d.ai/forget-learned-state`.
+The line is `prefill-capacity-observed`, at `--v=3`, one per prefill variant
+per cycle. The replay switch is `prefill-capacity-observe`; it moves no
+golden output.
+
 ## Constants
 
 | constant | value | package |

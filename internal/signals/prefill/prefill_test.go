@@ -645,6 +645,30 @@ func TestInputs_NaNInfAndMissing(t *testing.T) {
 	assert.Equal(t, NoPrefillCapacity, NewObserver().Observe(c).VPRefused)
 }
 
+// Each reading's own guard refuses what is not a reading, so no guard
+// downstream is the only one: a computed-token rate or a request rate that
+// is NaN, infinite or negative, or read with no presence bit, is none.
+func TestInputs_EachReadingRefusesNaN(t *testing.T) {
+	for _, x := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), -1} {
+		rm := base("p-0")
+		rm.PrefillComputedTokenRate, rm.RequestRate = x, x
+		_, ok := computedRate(rm, false)
+		assert.False(t, ok, "computed rate %v", x)
+		_, ok = requestRate(rm)
+		assert.False(t, ok, "request rate %v", x)
+	}
+	rm := base("p-0")
+	rm.PrefillComputedTokenRate, rm.RequestRate = 1000, 1
+	rm.PrefillComputedTokenRateKnown, rm.RequestRateKnown = false, false
+	_, ok := computedRate(rm, false)
+	assert.False(t, ok, "an unread computed rate")
+	_, ok = requestRate(rm)
+	assert.False(t, ok, "an unread request rate")
+	rm.PrefillComputedTokenRateKnown = true
+	_, ok = computedRate(rm, true)
+	assert.False(t, ok, "SGLang's computed rate")
+}
+
 // --- retention ---
 
 // A key with no cycle for Retention is forgotten; one observed is kept.
