@@ -1093,10 +1093,18 @@ and [troubleshooting](troubleshooting.md#symptom-index).
   leader change every replica first waits its settle,
   [`steadyGate.steadyFor`](scaling-policy.md#analyzertuningsteadygate-which-itl-readings-teach-the-line)
   (2 minutes by default), as for the saturation and slo lines: none of its
-  readings counts as settled until then, so the line comes back no sooner
-  than `steadyFor`, about 8 cycles at 15 s with 3 replicas in the band. On
-  a simulated restart 15 s before a load step the fleet sat under need for
-  1m45s with the wait, against 30 s without it.
+  readings in the band counts as settled until then, so the line comes
+  back no sooner than `steadyFor`. Measured on a simulated restart at 15 s
+  cycles with the load in the band, the line was silent for 2.5 minutes.
+  The above-band line (below) does not wait: with every replica above the
+  band it came back after 45 seconds. A pod that became Ready less than
+  `steadyFor` before the restart still waits on either line.
+- **With `throughput` listed alone, nothing sizes the role while the line
+  is silent.** For those 2.5 minutes after a restart the role is held
+  where it is. A role under need stays under need until the line is back,
+  and only then does it order the pods it needs, which still have to
+  start. Whole-node pods that take minutes to start add that start to the
+  time under need. List `saturation` too if that is too long.
 - **A variant that starts above the band is priced from above it.** With no
   line from the band and no slope to hold, the line is fitted from readings
   at k of at least 0.85 (`T2-above-band`). It errs one way only: it prices a
