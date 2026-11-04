@@ -462,6 +462,10 @@ learner-golden-add: ## Commit a raw learner recording as a golden: RECORDING=<fi
 	@if [ -z "$(RECORDING)" ] || [ -z "$(NAME)" ] || [ -z "$(SOURCE)" ]; then echo 'usage: make learner-golden-add RECORDING=<raw .jsonl> NAME=<fixture> SOURCE="<scenario, build, policy>" [HEAD_LINES=N] [REPLACE=1]'; exit 1; fi
 	go run -ldflags "$(LEARNREC_LDFLAGS)" ./cmd/learnergolden add -in "$(RECORDING)" -name "$(NAME)" -source "$(SOURCE)" $(if $(HEAD_LINES),-head-lines $(HEAD_LINES)) $(if $(REPLACE),-replace)
 
+.PHONY: whatif
+whatif: ## Build the what-if command line (bin/whatif), with the commit a generated recording carries; not in the manager image
+	go build -ldflags "$(LEARNREC_LDFLAGS)" -o bin/whatif ./cmd/whatif
+
 .PHONY: learner-goldens
 learner-goldens: ## Rewrite every learner golden from a replay at this commit (only for a golden change the PR names)
 	go run -ldflags "$(LEARNREC_LDFLAGS)" ./cmd/learnergolden update

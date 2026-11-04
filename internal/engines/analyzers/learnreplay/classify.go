@@ -216,7 +216,7 @@ var valueRules = map[string]rule{
 	"FromVariant": {class: classComposite}, "PhysicsKey": {class: classComposite},
 	"K2Args": {class: classFingerprint}, "ThroughputArgs": {class: classFingerprint},
 
-	"Error": {class: classText}, "Issues": {class: classText},
+	"Error": {class: classText}, "Issues": {class: classText}, "Caveats": {class: classText},
 
 	"Query": {class: classRedact}, "DecodeErr": {class: classRedact}, "Err": {class: classRedact},
 	"Threshold": {class: classRedact},

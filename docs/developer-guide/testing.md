@@ -304,6 +304,106 @@ go test ./internal/engines/steadystate/ -run TestLearnerRecording -v
 go test ./internal/engines/analyzers/learnreplay/ ./internal/signals/learnrec/ -v
 ```
 
+### Capture a past window
+
+A run that was not recorded can still be made into a recording, from
+Prometheus alone, while Prometheus holds its series: `whatif capture` reads
+the window's cycle inputs, and `whatif generate` plays them through the
+analyzers ([how it works](whatif-capture.md)). The result is an ordinary
+recording at the commit of the `whatif` that generated it.
+
+`_bucket` series are often kept for days, not weeks. Preserve a window worth
+keeping as a Prometheus snapshot first, and capture it from the snapshot
+later. The `ols-sweep-slo` run is the first such window: flow control off,
+the slo analyzer listed, streamed load, router TTFT recorded.
+
+1. Snapshot Prometheus while it still holds the run. The snapshot API needs
+   Prometheus started with `--web.enable-admin-api`; the snapshot is written
+   under its data directory:
+
+   ```bash
+   kubectl -n "$PROM_NS" port-forward "svc/$PROM_SVC" 9090:9090 &
+   # The answer is {"status":"success","data":{"name":"20261101T120000Z-..."}}.
+   NAME=$(curl -s -XPOST http://localhost:9090/api/v1/admin/tsdb/snapshot | jq -r .data.name)
+   test -n "$NAME" && test "$NAME" != null || echo "no snapshot: is the admin API on?"
+   kubectl -n "$PROM_NS" cp -c prometheus "$PROM_POD:/prometheus/snapshots/$NAME" ./ols-sweep-slo-snapshot
+   ```
+
+   `kubectl cp` runs `tar` inside the container, so it needs `tar` in the
+   Prometheus image. A distroless image has none, and the copy fails with
+   `executable file not found`. Then copy from a helper Pod that mounts the
+   same volume and has `tar`: a Pod with an image that has `tar` (from a
+   registry you trust), the Prometheus data volume's claim mounted
+   read-only at `/prometheus`, then
+   `kubectl -n "$PROM_NS" cp "$HELPER_POD:/prometheus/snapshots/$NAME" ./ols-sweep-slo-snapshot`.
+   A ReadWriteOnce claim mounts only on Prometheus' own node, so schedule
+   the helper there. An ephemeral container works as well where the
+   cluster allows them:
+   `kubectl debug -n "$PROM_NS" "$PROM_POD" --target=prometheus --image=IMAGE-WITH-TAR -c snap -- sleep 3600`,
+   then `kubectl cp -c snap "$PROM_POD:/proc/1/root/prometheus/snapshots/$NAME" ./ols-sweep-slo-snapshot`.
+
+   Without the admin API, `promtool tsdb dump` writes the series out as text,
+   and `promtool tsdb create-blocks-from openmetrics` makes blocks of them
+   again.
+
+2. Serve the snapshot with a local Prometheus. Give it a retention longer
+   than the snapshot's age, or it deletes the old blocks on start:
+
+   ```bash
+   prometheus --storage.tsdb.path=./ols-sweep-slo-snapshot --storage.tsdb.retention.time=10y \
+     --web.listen-address=:9091 --config.file=/dev/null
+   ```
+
+3. Capture the run's window, with the policy it ran under and the engine
+   arguments its Deployments had. With kube-state-metrics in the snapshot,
+   `--kube-state-metrics` reads Pods, readiness, GPUs and nodes; without its
+   role labels (`--metric-labels-allowlist=pods=[llm-d.ai/role]`), add a
+   `--role-of` per variant:
+
+   ```bash
+   make whatif
+   bin/whatif capture --prometheus http://localhost:9091 --namespace "$RUN_NS" \
+     --kube-state-metrics --role-of decode=app=ols-decode --role-of prefill=app=ols-prefill \
+     --from 2026-11-01T12:00:00Z --to 2026-11-01T13:00:00Z --step 15s \
+     --policy ols-sweep-slo-policy.yaml --engine-args "--max-num-seqs=256" \
+     -o ols-sweep-slo.capture.jsonl.gz
+   ```
+
+   The summary lists each variant and every flag the capture carries:
+   engine parameters from flags, roles inferred from Pod names, Pods read as
+   Ready without kube-state-metrics, rollouts not seen. Read them before
+   trusting the window; the generated recording carries them too.
+
+   Every query is required. One that fails (often `query.max-samples` on a
+   histogram over many steps) stops the capture with exit 1 and names the
+   query: shorten the window or lengthen `--step`. Each HTTP request may
+   take `--timeout` (2m30s by default). Two bounds need `--force` to pass:
+   `whatifsource.MaxStepQueries`, 1,000,000 steps times the 80 queries a
+   capture with kube-state-metrics registers (12,500 steps, a little over
+   two days at 15 s), which bounds the load; and `whatifsource.MaxSamples`,
+   20 million samples held in memory, which grows with the Pods as well.
+   [What-if capture](whatif-capture.md#load-on-prometheus) gives the load
+   a window puts on Prometheus.
+
+4. Generate the recording, and add it as a golden like any recording
+   (below):
+
+   ```bash
+   bin/whatif generate -in ols-sweep-slo.capture.jsonl.gz -o ols-sweep-slo.jsonl
+   make learner-golden-add RECORDING=ols-sweep-slo.jsonl NAME=ols-sweep-slo-capture \
+     SOURCE="ols-sweep-slo window, captured from its Prometheus snapshot"
+   ```
+
+A capture asks only range queries, one per query over the whole window.
+Its tests use the fake Prometheus in `internal/whatifsource/promtest`, never
+a live one:
+
+```bash
+go test -p 1 ./internal/whatifsource/... ./cmd/whatif/
+go test -p 1 ./internal/engines/analyzers/learnreplay/ -run 'TestGenerate|TestMessageWords_AreCurrent'
+go test -p 1 ./internal/engines/steadystate/ -run TestWhatifCapture -v
+```
+
 ### Learner Goldens
 
 A golden is a recording committed as a test fixture, beside the outputs its
