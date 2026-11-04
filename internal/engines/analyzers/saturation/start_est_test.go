@@ -229,7 +229,13 @@ func TestReplicaStartEstimateIdentityAndOutliers(t *testing.T) {
 		// Otherwise the guard becomes the bug: a variant redeployed onto
 		// genuinely slower hardware would have every sample rejected forever
 		// against an estimate that no longer describes it.
+		//
+		// The guard counted per refusal before learner PR 5b, and this is
+		// that path, with SwitchStartConfirmsByDistinctPod off: one Pod
+		// reporting on four cycles opens it. On, it takes distinct Pods
+		// (start_confirm_test.go).
 		a := NewSaturationAnalyzer(capacity.NewStore())
+		a.startConfirmsByPod = false
 		a.noteReplicaStart(key, "ns", variant,
 			[]domain.ReplicaMetrics{replica("ns", "d0", 67)}, logr.Discard())
 		// N rejections, then admitted on the sighting after them.

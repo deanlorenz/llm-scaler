@@ -222,6 +222,20 @@ type SaturationAnalyzer struct {
 	// implausible for a variant, so a genuine change of hardware is eventually
 	// admitted rather than rejected forever against a stale estimate.
 	startOutliers map[string]int
+	// startOutlierPods is, per start key, the open run of Pods whose start
+	// was refused as implausible, keyed like startSeenPods
+	// (key|namespace|pod), each with its start: the guard opens on
+	// startConfirmPods distinct Pods across the run, not on repeats of one
+	// (start_est.go, SwitchStartConfirmsByDistinctPod). At most
+	// startConfirmPods-1 Pods per key between cycles. A run has no age limit:
+	// it ends on an in-range start from a new Pod or on confirming, however
+	// long that takes. Memory is bounded by that count and by the sweep,
+	// which drops a stale variant's run (evictStaleHistory), and a forget.
+	startOutlierPods map[string]map[string]startRunPod
+	// startConfirmsByPod is SwitchStartConfirmsByDistinctPod (learner PR
+	// 5b): on from the constructor; a replay turns it off
+	// (SetSwitchesForReplay), and the guard counts refusals as before.
+	startConfirmsByPod bool
 	// variantSeenAt is when each variant key was last REPORTED, which is what
 	// the learned per-variant state is swept on.
 	//
@@ -551,6 +565,8 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		startSeconds:           make(map[string]float64),
 		startSeenPods:          make(map[string]time.Time),
 		startOutliers:          make(map[string]int),
+		startOutlierPods:       make(map[string]map[string]startRunPod),
+		startConfirmsByPod:     true,
 		variantSeenAt:          make(map[string]time.Time),
 		now:                    clock.RealClock{}.Now,
 		readySince:             replicaReadySince,
@@ -925,11 +941,27 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 	// start_est.go, not of this map's type, and an unbounded per-variant map
 	// is the defect this whole function exists to prevent. An earlier version
 	// of this comment claimed the loop was reachable, which was wrong.
+	//
+	// It is also the one place a stale key's run of refused Pods
+	// (startOutlierPods) goes: the keys of both maps, each counted once in
+	// StartOutliers whichever map held it. The run is not dropped with the
+	// estimate in the loop further up, so a stale key with an open run is
+	// counted here as well as in StartEstimates.
+	staleOutliers := make(map[string]struct{})
 	for key := range a.startOutliers {
 		if a.variantIsStale(key, now, variantTimeout) {
-			delete(a.startOutliers, key)
-			evicted.StartOutliers++
+			staleOutliers[key] = struct{}{}
 		}
+	}
+	for key := range a.startOutlierPods {
+		if a.variantIsStale(key, now, variantTimeout) {
+			staleOutliers[key] = struct{}{}
+		}
+	}
+	for key := range staleOutliers {
+		delete(a.startOutliers, key)
+		delete(a.startOutlierPods, key)
+		evicted.StartOutliers++
 	}
 	// On bucketRetention, with the per-configuration maps, because that is
 	// what itlLines is keyed on: the digest of an engine configuration, not a
