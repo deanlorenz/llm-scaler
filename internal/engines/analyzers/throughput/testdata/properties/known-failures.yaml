@@ -12,10 +12,7 @@
 # id is class/learner/case, as the test names it; rows are sorted by id.
 # measured is the fail rate over the case's seeds and the first failure, when
 # the row was written. owner is the learner PR that clears the row.
-- id: edges/throughput-itl/sequence-cap
-  class: edges
-  learner: throughput-itl
-  expect: not-learned
-  finding: "A replica above the band at its stated sequence cap (llm-d.ai/max-num-seqs 64, 64 running, requests waiting, no preemption) is refused: the line has no cap admission, so a variant whose only replica in reach is at its cap has no line and no throughput capacity (#287). The parent refuses it too (its window reads the band alone)."
-  measured: "1/1 seeds; seed 1: a replica at its sequence cap above the band was refused: the window holds 0 readings"
-  owner: "PR 4b-3 (throughput-itl-admits-at-sequence-cap)"
+#
+# Empty since learner PR 4b-3 removed its last row,
+# edges/throughput-itl/sequence-cap (the cap admission).
+[]

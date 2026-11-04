@@ -267,8 +267,8 @@ func TestThroughputProbe_AControllerRestartBeforeALoadStepSettlesAtNeed(t *testi
 // The same restart 15 s before the step, as the plan states the case: the
 // step lands before the restarted line has its ten readings, and the step
 // pushes every replica above the band, where the band admits no reading
-// (the sequence-cap admission is 4b-3's, and these replicas queue below any
-// stated cap). The restarted line has never fitted, so it fits from the
+// (the probe's fleet states no sequence cap, so none is read as at one,
+// SwitchITLAdmitsAtSequenceCap). The restarted line has never fitted, so it fits from the
 // readings above the band (T2-above-band) until the scale-up it orders
 // brings the fleet back into the band, and the fleet is under need for no
 // longer than a start and a settle take.
@@ -300,21 +300,32 @@ func TestThroughputProbe_ARestartJustBeforeAStepAboveTheBandSettlesAtNeed(t *tes
 
 // One replica at its sequence cap with its siblings below the band: the
 // only reading in reach is above the band, from a replica at its stated
-// cap. The band has no cap admission until learner PR 4b-3
-// (throughput-itl-admits-at-sequence-cap), so the band's window holds no
-// reading, and the line that prices the variant is the above-band
-// fallback's (T2-above-band), from the capped replica's readings, once
-// there are ten of them. Synthetic (a sweep does not hold a decode pod at
-// its cap without preempting): when 4b-3 admits the reading, the band's
-// window fills and this test fails.
-func TestThroughputProbe_AReplicaAtItsCapWithSiblingsBelowTheBandPricesFromAboveTheBand(t *testing.T) {
-	run := func(a *ThroughputAnalyzer) (map[string]int, int) {
+// cap. With the cap admission (learner PR 4b-3,
+// SwitchITLAdmitsAtSequenceCap) its readings are the band's, and the band's
+// line prices the variant from the tenth (T2-default), never the
+// above-band fallback. Synthetic (a sweep does not hold a decode pod at its
+// cap without preempting).
+//
+// Before 4b-3 (and with the switch off, the negative control): the band's
+// window held 0 readings, the line was silent 9 cycles and the fallback
+// priced the other 31 (T2-above-band). The parent's line priced every cycle
+// from the below-band rows' tier-2 fit (T2-default 40), which reads the
+// rows at k 0.08 that the band refuses.
+func TestThroughputProbe_AReplicaAtItsCapWithSiblingsBelowTheBandPricesFromTheBand(t *testing.T) {
+	type outcome struct {
+		reasons map[string]int
+		inBand  int
+		priced  float64
+	}
+	run := func(a *ThroughputAnalyzer) outcome {
 		store := capacity.NewStore()
 		store.Update("ns", "m", "v1", capacity.Record{EngineParams: &capacity.EngineParams{Engine: "vllm", DeclaredBatchCap: 64}},
 			lineStart)
 		r := newLineRun(t, a.WithCapacityStore(store))
+		ctx, buf := logContext()
+		r.ctx = ctx
 		early := lineStart.Add(-time.Hour)
-		reasons, most := map[string]int{}, 0
+		o := outcome{reasons: map[string]int{}}
 		for range 40 {
 			capped := probeRow("r00", 0.92, probeITL(0.92), early, 3, 6)
 			capped.RunningRequests, capped.PreemptionRate, capped.PreemptionRateKnown = 64, 0, true
@@ -322,22 +333,36 @@ func TestThroughputProbe_AReplicaAtItsCapWithSiblingsBelowTheBandPricesFromAbove
 				probeRow("r01", 0.08, probeITL(0.08), early, 0.3, 0), probeRow("r02", 0.08, probeITL(0.08), early, 0.3, 0)}
 			vc, has := r.step(rows)
 			if has {
-				reasons[vc.Reason]++
+				o.reasons[vc.Reason]++
 			} else {
-				reasons[itlReasonT2Failed]++
+				o.reasons[itlReasonT2Failed]++
 			}
 			st, _ := a.VariantState("m", "ns", "v1")
-			most = max(most, st.SampleCount)
+			o.inBand = max(o.inBand, st.SampleCount)
+			o.priced = st.ITLModel.ITLAt(itl.DefaultKSat)
 		}
-		return reasons, most
+		t.Logf("summary lines: %v", lineLogs(buf.String()))
+		return o
 	}
-	on, inBand := run(NewThroughputAnalyzer())
-	parent, _ := run(newParentLineAnalyzer())
-	t.Logf("on the tracker: %v, the band's window up to %d readings; the parent's line: %v", on, inBand, parent)
-	require.Zero(t, inBand, "the capped replica's reading was admitted to the band: if 4b-3 landed, make this its case")
-	require.Equal(t, 9, on[itlReasonT2Failed], "silent until the capped replica's tenth reading")
-	require.Equal(t, 31, on[itlReasonT2AboveBand], "the above-band fallback prices the variant after it")
-	require.Positive(t, parent[itlReasonT2Default], "the parent prices from the below-band rows' tier-2 fit")
+	truth := probeITL(itl.DefaultKSat)
+	on := run(NewThroughputAnalyzer())
+	t.Logf("on: %v, the band's window up to %d readings, priced %.4f s at kSat against the truth %.4f s",
+		on.reasons, on.inBand, on.priced, truth)
+	off := run(withSwitchOff(SwitchITLAdmitsAtSequenceCap)())
+	t.Logf("negative control, the cap admission off: %v, the band's window up to %d readings, priced %.4f s",
+		off.reasons, off.inBand, off.priced)
+	parent := run(newParentLineAnalyzer())
+	t.Logf("the parent's line: %v, priced %.4f s", parent.reasons, parent.priced)
+
+	require.Equal(t, 20, on.inBand, "the capped replica's readings fill the band's window")
+	require.Equal(t, map[string]int{itlReasonT2Failed: 9, itlReasonT2Default: 31}, on.reasons,
+		"silent until the capped replica's tenth reading, then the band's line")
+	require.InEpsilon(t, truth, on.priced, 0.05, "the band's line prices the capped replica's line")
+
+	require.Zero(t, off.inBand, "negative control: off, the band's window holds nothing")
+	require.Equal(t, map[string]int{itlReasonT2Failed: 9, itlReasonT2AboveBand: 31}, off.reasons,
+		"negative control: off, the fallback prices the variant")
+	require.Positive(t, parent.reasons[itlReasonT2Default], "the parent prices from the below-band rows' tier-2 fit")
 }
 
 // A controller restart on the engine's settle tracker (learner PR 4b-2,

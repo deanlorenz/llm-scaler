@@ -90,6 +90,7 @@ func (a *ThroughputAnalyzer) switchFields() map[string]*bool {
 		SwitchITLRestartUnderName:             &a.itlRestartUnderName,
 		SwitchITLIdleOnEvidence:               &a.itlIdleOnEvidence,
 		SwitchITLReadsFinitePodMean:           &a.itlFiniteOnly,
+		SwitchITLAdmitsAtSequenceCap:          &a.itlAdmitsAtCap,
 	}
 }
 
@@ -98,12 +99,14 @@ func ReplaySwitchNames() []string {
 	return slices.Sorted(maps.Keys((&ThroughputAnalyzer{}).switchFields()))
 }
 
-// lineAdmission is adm for one variant of the model: with the line on the
-// tracker, the above-band fallback, and the engine arguments its rows were
-// produced under, which bound a held slope (itl.Admission.Args); and each
+// lineAdmission is adm for one variant of the model, whose engine engineOf
+// read: with the line on the tracker, the above-band fallback; the engine
+// arguments its rows were produced under, which bound a held slope
+// (itl.Admission.Args); the stated sequence cap, under
+// SwitchITLAdmitsAtSequenceCap (itl.Admission.MaxNumSeqs); and each
 // replica's settle, read as the six settle switches say (settleAdmission).
-// Called with a.mu held.
-func (a *ThroughputAnalyzer) lineAdmission(adm itl.Admission, namespace, modelID, variant string) itl.Admission {
+// It reads no store: called with a.mu held.
+func (a *ThroughputAnalyzer) lineAdmission(adm itl.Admission, namespace, modelID string, e variantEngine) itl.Admission {
 	adm.Settle = nil
 	if !a.itlSteadyGate {
 		return adm
@@ -111,11 +114,9 @@ func (a *ThroughputAnalyzer) lineAdmission(adm itl.Admission, namespace, modelID
 	a.settleAdmission(&adm, namespace, modelID)
 	adm.AboveBandFallback = !a.noAboveBandFallback
 	adm.AboveBandWaitsAfterRestart = a.aboveBandWaitsAfterRestart
-	if a.store == nil {
-		return adm
-	}
-	if rec := a.store.Get(namespace, modelID, variant); rec != nil {
-		adm.Args = rec.EngineParams.ArgsTag()
+	adm.Args = e.args
+	if a.itlAdmitsAtCap && e.batchCap > 0 {
+		adm.MaxNumSeqs, adm.MaxNumSeqsSource = e.batchCap, e.batchCapSource
 	}
 	return adm
 }
@@ -197,9 +198,12 @@ func silenceCause(state *variantState, r itl.Reading) string {
 // goes silent -- no line, so no throughput capacity and no say in the
 // decision -- or comes back, as the GPS summary logs, with the cause of a
 // silence (silenceCause; empty when live) and what its rows were this cycle:
-// in the band, above it, below it, and settling; and what the band's and the
-// above-band windows hold. With no healthy row the tracker was not read, and
-// every count is 0. Called with a.mu held.
+// in the band, above it, below it, and settling; what the band's and the
+// above-band windows hold; and the readings above the band admitted at the
+// sequence cap, with the cap and its source (SwitchITLAdmitsAtSequenceCap;
+// 0 and "none" when nothing states one, or the switch is off). With no
+// healthy row the tracker was not read, and every count is 0. Called with
+// a.mu held.
 func noteLineSilence(ctx context.Context, state *variantState, r itl.Reading, reason,
 	namespace, modelID, variant string) {
 	silent := r.Tier == ""
@@ -216,7 +220,8 @@ func noteLineSilence(ctx context.Context, state *variantState, r itl.Reading, re
 	ctrl.LoggerFrom(ctx).Info("throughput analyzer: ITL line", "namespace", namespace, "modelID", modelID,
 		"variant", variant, "silent", silent, "cause", cause, "source", reason,
 		"inBand", r.Offered-r.Capped, "aboveBand", r.AboveBand, "belowBand", r.BelowBand, "settling", r.Settling,
-		"held", r.Held, "aboveBandHeld", r.AboveBandHeld)
+		"held", r.Held, "aboveBandHeld", r.AboveBandHeld,
+		"atCap", r.Capped, "batchCap", state.batchCap, "batchCapSource", state.batchCapSource)
 }
 
 // lineReason is the Reason a reading's line carries.
