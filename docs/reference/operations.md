@@ -272,6 +272,7 @@ kubectl get cm wva-controller-status -n "$NS" -o jsonpath='{.data}{"\n"}'
 | `limiterWarnings` | what is wrong with the limiters in force though they still apply, joined by `; `: for example a namespace a quota excludes that no limit bounds ([validation](quota-limiter.md#validation)). Empty when none |
 | `utilizationShare` | the optimizer's mode: `off`, `invalid`, `shadow` or `active` |
 | `utilizationShareError` | the optimizer block's error when the mode is `invalid` |
+| `passiveDefault` | `true` or `false`: the `WVA_PASSIVE` the controller read at start ([passive](scaling-policy.md#passive)). It is read only then: a different value in `wva-manager-config` means a restart is due, and `make deploy-wva` restarts it |
 | `utilizationShareNote` | present while the settings in force differ from the block as written. Today: a namespace-scoped controller with no quota on its namespace ignores `physicalGroups`. The mode is not `invalid` |
 | `leader` | the pod that wrote it |
 | `controllerInstance` | the `controller_instance` metrics label, when set |

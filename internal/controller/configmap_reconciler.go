@@ -58,6 +58,10 @@ type ConfigMapReconciler struct {
 	// time one is applied, for the controller-status ConfigMap. Nil-safe:
 	// tests that do not check it leave it unset.
 	Status *controllerstatus.Publisher
+
+	// passiveWarned is the WVA_PASSIVE value last warned about as differing
+	// from the one this process read at start; "" when none is.
+	passiveWarned string
 }
 
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
@@ -115,10 +119,13 @@ func (r *ConfigMapReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// names are accepted — the current one and the pre-rename one — so an operator
 	// who has not renamed theirs keeps getting live updates. Using the old name is
 	// reported once per change by handleScalingPolicyConfigMap.
-	if slices.Contains(config.ScalingPolicyConfigMapNames(), name) {
+	switch {
+	case slices.Contains(config.ScalingPolicyConfigMapNames(), name):
 		// As above: the error arises at startup only and is already reported.
 		_ = r.handleScalingPolicyConfigMap(ctx, cm, namespace, isGlobal)
-	} else {
+	case isGlobal && name == config.ConfigMapName():
+		r.warnIfPassiveChanged(ctx, cm)
+	default:
 		logger.V(1).Info("Ignoring unrecognized ConfigMap", "name", name, "namespace", namespace)
 	}
 

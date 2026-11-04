@@ -654,6 +654,11 @@ your call.
 
 ## Turn on sharing
 
+> **A passive model puts its share group in shadow.** If one model of a group
+> is [passive](../../reference/scaling-policy.md#passive), the whole group
+> plans and moves nothing, and `wva_utilization_share_passive_shadow` is 1.
+> Make the model active, or keep it out of the group, to share again.
+
 ### Step 14: Check the budget
 
 Wait a minute after step 13, then run:

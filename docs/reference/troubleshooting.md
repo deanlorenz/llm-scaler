@@ -26,6 +26,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | a lightly loaded model reads busy | `util` in `analyzer-result` far above what its load implies; `eppQueueSize` above 0 in its `scheduler-queue-demand` line while its own router queues nothing | v0.10.0-rc2 and earlier: another namespace serving the same model name, whose router queue was read as this model's | [reads busy](#a-lightly-loaded-model-reads-busy) |
 | pinned at max | `wva_variant_at_max_replicas == 1`; `"atMax":true` in `scaling-decision` | `maxReplicaCount` too low for the load | [pinned at max](#a-model-is-pinned-at-max) |
 | one replica full while others idle | `WVALoadImbalanced`; `wva_load_imbalanced == 1`; log `WARNING: load imbalanced` | the router's scorer weights (`prefix-cache-scorer` above `queue-scorer`, `active-request-scorer`, `kv-cache-utilization-scorer`), prefix caching off on the engines | [uneven load](#one-replica-is-saturated-while-others-idle) |
+| replicas never move, though `wva_desired_replicas` does | `wva_passive_mode{mode=~"hold\|observe\|observe-unsafe"} == 1`; `Passive mode entered` in the log; `PassiveRecommendation` Events | the model is passive: `WVA_PASSIVE`, or `passive: true` on a scaling-policy entry | [passive](#a-passive-model-does-not-scale) |
 | desired is not current | `wva_desired_replicas != wva_current_replicas` for many cycles | HPA stabilization window, KEDA not reaching the scaler, Pods Pending (GPUs, ResourceQuota), slow starts | [actuation stuck](#desired-is-not-current-actuation-stuck) |
 | replicas dropped under Kueue borrowing | fewer replicas with no scale-down asked for; `wva_model_scaling_blocked{reason=~"lender-reclaimed\|borrow-unplaced\|released-to-lender"}`; `BorrowedCapacityReleased` Event | Kueue preempted, a borrowed replica did not place and was released, a waiting lender was handed it back (opt-in), demand fell | [replicas dropped](#replicas-dropped-under-kueue-borrowing) |
 | a lender's replica Pending after Kueue preempted | the lender's new pod `Pending` with no node; a borrower's Workload evicted with reason `Preempted`; later `reason="borrow-unplaced"` | Kueue preempts by priority, not by node: the GPUs it freed form no node the replica fits | [replicas dropped](#replicas-dropped-under-kueue-borrowing) |
@@ -453,6 +454,38 @@ What the scaling manager does meanwhile: capacity is learned per replica from
 that replica's own readings. But a deep queue pinned on one replica still
 counts as demand, so the role may grow while the imbalance lasts, by replicas
 that the router then leaves idle.
+
+## A passive model does not scale
+
+**Symptom**: the replica count stays where it is while `wva_desired_replicas`
+moves, and the model gets `PassiveRecommendation` Events instead of `ScaledUp`.
+
+That is passive mode doing its job ([passive](scaling-policy.md#passive)).
+
+1. **Which mode, and who set it.** `wva_passive_mode{model_name="<model>"} == 1`
+   names the mode. The `Passive mode entered` log line names the layer in
+   `source`: `perModel`, `tier:<name>`, `default`, `namespaceDefault` or
+   `WVA_PASSIVE`. Set `passive: false` there, or on the model's own entry, to
+   scale it.
+2. **`hold` and the count is not what you want.** Scale the workload yourself
+   (`kubectl scale`): the trigger answers the live count, so it sticks.
+3. **`observe` and KEDA does not scale either.** Our trigger answers 0 and
+   inactive; the other triggers decide. Check them in the HPA
+   (`kubectl describe hpa keda-hpa-<scaledobject>`).
+4. **`observe-unsafe`.** The ScaledObject's `scalingModifiers` formula names
+   our trigger, so our 0 enters the formula. Remove our trigger from the
+   formula.
+5. **At zero with requests waiting.** A passive model is not woken. Scale it
+   by hand, or make it active.
+6. **A held count moved by one.** A rollout that holds exactly one surge pod
+   at 9 or more replicas (`maxSurge: 1`), or a pod that cannot be created at 11
+   or more, moves it inside the HPA's tolerance
+   ([how exact the hold is](scaling-policy.md#how-exact-the-hold-is)). Roll a
+   held model with `maxSurge: 0` to rule out the first.
+   For a count that must not move, use `autoscaling.keda.sh/paused-replicas`.
+7. **`WVA_PASSIVE` edited, nothing changed.** It is read at start: the log says
+   `restart required` and the ConfigMap gets a `PassiveRestartRequired` event.
+   Restart the controller, or re-run `make deploy-wva`, which restarts it.
 
 ## Desired is not current (actuation stuck)
 

@@ -90,7 +90,9 @@ func (e *Engine) inFlightAdmissions(requests []allocation.ModelScalingRequest, d
 	flavors := e.borrowedFlavors(now)
 	placementTimeout := e.borrowSettings().PlacementTimeout
 	for _, req := range requests {
-		if planned[utils.GetNamespacedKey(req.Namespace, req.ModelID)] {
+		// A passive model orders nothing: a hole held for its would-be growth
+		// would be held from every model that can grow.
+		if planned[utils.GetNamespacedKey(req.Namespace, req.ModelID)] || e.modelPassive(req.Namespace, req.ModelID) {
 			continue
 		}
 		for _, st := range req.VariantStates {

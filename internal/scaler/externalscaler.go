@@ -28,6 +28,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/passive"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 )
 
@@ -82,6 +83,15 @@ type Handler struct {
 	// undecided is the set of ScaledObjects currently answered without a
 	// decision. See undecided and UndecidedTargets.
 	undecided undecidedTargets
+	// passive resolves which models are passive; nil is every model active.
+	// See WithPassive.
+	passive PassiveResolver
+	// zeroRecheck is how often StreamIsActive re-reads a held variant it
+	// reports inactive: PassiveZeroRecheck, shorter only in tests.
+	zeroRecheck time.Duration
+	// modes is each ScaledObject's passive mode as this handler last
+	// answered it, so a change is logged once. See passiveMode.
+	modes passiveModes
 }
 
 // NewHandler builds a Handler. A nil store falls back to decision.Default, and a
@@ -95,7 +105,7 @@ func NewHandler(c client.Reader, store *decision.Store, reg *registry.Registry) 
 	if reg == nil {
 		reg = registry.Default
 	}
-	return &Handler{client: c, store: store, registry: reg, now: time.Now}
+	return &Handler{client: c, store: store, registry: reg, now: time.Now, zeroRecheck: PassiveZeroRecheck}
 }
 
 // WithElected makes the handler refuse decision-bearing calls until elected is
@@ -301,7 +311,7 @@ func (h *Handler) resolveTarget(ctx context.Context, ref *pb.ScaledObjectRef) (r
 	if err := h.client.Get(ctx, nn, &so); err != nil {
 		return registry.Target{}, status.Errorf(readErrorCode(err), "getting ScaledObject %s: %v", nn, err)
 	}
-	t := registry.TargetFromScaledObject(&so)
+	t := registry.TargetFromScaledObjectFor(&so, ref.GetScalerMetadata()[registry.ScalerAddressKey])
 	if t.Name == "" {
 		return registry.Target{}, status.Errorf(codes.FailedPrecondition, "ScaledObject %s has no scaleTargetRef.name", nn)
 	}
@@ -420,6 +430,13 @@ func (h *Handler) GetMetrics(ctx context.Context, req *pb.GetMetricsRequest) (*p
 	h.observe(ref)
 	logger := log.FromContext(ctx)
 	if !h.leader() {
+		if h.standbyObserve(ctx, ref) {
+			logger.V(1).Info("external scaler GetMetrics: passive (observe), answered before the leader lease is held",
+				"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(), "metricName", MetricName, "value", 0)
+			return &pb.GetMetricsResponse{
+				MetricValues: []*pb.MetricValue{{MetricName: MetricName, MetricValue: 0}},
+			}, nil
+		}
 		// At V(1), beside IsActive's line, because this is the poll path and
 		// says the same thing every 5 s while a lease changes hands. It is
 		// logged at all because WVA used to refuse here in total silence: KEDA
@@ -436,6 +453,21 @@ func (h *Handler) GetMetrics(ctx context.Context, req *pb.GetMetricsRequest) (*p
 		logger.V(1).Info("external scaler GetMetrics failed",
 			"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(), "err", err)
 		return nil, err
+	}
+	if mode := h.passiveMode(ctx, ref, t); mode.Passive() {
+		value, err := h.passiveAnswer(ctx, ref, t, mode)
+		if err != nil {
+			logger.V(1).Info("external scaler GetMetrics failed: passive (hold) and the current replica count is unreadable",
+				"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(), "err", err)
+			return nil, err
+		}
+		h.undecided.clear(types.NamespacedName{Namespace: ref.GetNamespace(), Name: ref.GetName()})
+		logger.V(1).Info("external scaler GetMetrics",
+			"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(),
+			"metricName", MetricName, "value", value, "decided", false, "passive", string(mode))
+		return &pb.GetMetricsResponse{
+			MetricValues: []*pb.MetricValue{{MetricName: MetricName, MetricValue: value}},
+		}, nil
 	}
 	decided := ok && h.honoursDecision(d)
 	value := int64(d.DesiredReplicas)
@@ -506,6 +538,11 @@ func (h *Handler) IsActive(ctx context.Context, ref *pb.ScaledObjectRef) (*pb.Is
 	h.observe(ref)
 	logger := log.FromContext(ctx)
 	if !h.leader() {
+		if h.standbyObserve(ctx, ref) {
+			logger.V(1).Info("external scaler IsActive: passive (observe), answered before the leader lease is held",
+				"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(), "active", false)
+			return &pb.IsActiveResponse{Result: false}, nil
+		}
 		// Logged for the same reason GetMetrics' refusal is, and it was missed
 		// there first: a refusal KEDA records and WVA does not leaves the
 		// component an operator reads first with no trace of its own answer.
@@ -548,16 +585,19 @@ func (h *Handler) isActive(ctx context.Context, ref *pb.ScaledObjectRef) (bool, 
 	if err != nil {
 		return false, err
 	}
-	return h.activeFor(ctx, ref, t, d, ok), nil
+	return h.activeFor(ctx, ref, t, d, ok)
 }
 
 // activeFor is isActive for a target already resolved and its decision already
-// read.
-func (h *Handler) activeFor(ctx context.Context, ref *pb.ScaledObjectRef, t registry.Target, d decision.Decision, ok bool) bool {
-	if ok && h.honoursDecision(d) {
-		return d.DesiredReplicas > 0
+// read. Only a passive variant whose count cannot be read answers an error.
+func (h *Handler) activeFor(ctx context.Context, ref *pb.ScaledObjectRef, t registry.Target, d decision.Decision, ok bool) (bool, error) {
+	if mode := h.passiveMode(ctx, ref, t); mode.Passive() {
+		return h.passiveActive(ctx, ref, t, mode)
 	}
-	return h.currentlyRunning(ctx, ref, t)
+	if ok && h.honoursDecision(d) {
+		return d.DesiredReplicas > 0, nil
+	}
+	return h.currentlyRunning(ctx, ref, t), nil
 }
 
 // currentlyRunning reports whether the scale target has replicas right now. It
@@ -682,16 +722,34 @@ func (h *Handler) StreamIsActive(ref *pb.ScaledObjectRef, stream pb.ExternalScal
 	}
 	updates, unsubscribe := h.store.Subscribe(ref.GetNamespace(), t.Name)
 	defer unsubscribe()
+	// target is the latest enrichment of the target resolved above, when there
+	// is one: passive mode turns on what else the ScaledObject carries, which
+	// can change while the stream is open. The target's name cannot.
+	target := func() registry.Target {
+		if h.registry != nil {
+			if e, found := h.registry.Get(ref.GetNamespace(), ref.GetName()); found && e.Target.Name == t.Name {
+				return e.Target
+			}
+		}
+		return t
+	}
 	// activeNow re-reads the decision for the target resolved above; the target
 	// itself does not move for the life of the stream.
-	activeNow := func() bool {
+	activeNow := func() (bool, error) {
 		d, ok := h.store.Get(ref.GetNamespace(), t.Name)
-		return h.activeFor(ctx, ref, t, d, ok)
+		return h.activeFor(ctx, ref, target(), d, ok)
 	}
 
 	// Send the opening state before waiting on anything, so KEDA is never left
 	// holding a stream that has said nothing.
-	active := activeNow()
+	// An error ends the stream: only a passive variant whose replica count
+	// cannot be read answers one, and reporting it active would wake a target
+	// parked at zero on the strength of a failed read. KEDA reopens the stream.
+	active, err := activeNow()
+	if err != nil {
+		logger.V(1).Info("external scaler StreamIsActive failed", "err", err)
+		return err
+	}
 	if err := stream.Send(&pb.IsActiveResponse{Result: active}); err != nil {
 		return err
 	}
@@ -699,28 +757,73 @@ func (h *Handler) StreamIsActive(ref *pb.ScaledObjectRef, stream pb.ExternalScal
 
 	ticker := time.NewTicker(streamKeepalive)
 	defer ticker.Stop()
+	// A held variant answers its live count, which an operator changes by
+	// hand; a decision-store wake-up does not follow that. While the stream
+	// says inactive, a held variant is re-read this often, so a kubectl scale
+	// from zero is reported active before KEDA's cooldown scales it back. The
+	// read is the scale subresource through h.client, which is uncached by
+	// design (see the field): one GET per tick, and only for a held variant
+	// at zero with its stream open. Observe never reads a count, so it is not
+	// re-read.
+	recheck := time.NewTicker(h.zeroRecheck)
+	defer recheck.Stop()
 
+	// push sends next when it changes what KEDA was told.
+	push := func(next bool) error {
+		if next == active {
+			return nil // nothing for KEDA to act on
+		}
+		active = next
+		if err := stream.Send(&pb.IsActiveResponse{Result: active}); err != nil {
+			return err
+		}
+		logger.V(1).Info("external scaler pushed activation change", "active", active)
+		return nil
+	}
+	// keepalive re-asserts the current state whether or not it changed.
+	keepalive := func(next bool) error {
+		changed := next != active
+		active = next
+		if err := stream.Send(&pb.IsActiveResponse{Result: active}); err != nil {
+			return err
+		}
+		if changed {
+			logger.V(1).Info("external scaler pushed activation change", "active", active)
+		}
+		return nil
+	}
 	for {
+		send := push
 		select {
 		case <-ctx.Done():
 			logger.V(1).Info("external scaler StreamIsActive closed")
 			return nil
 		case <-updates:
-			next := activeNow()
-			if next == active {
-				continue // nothing for KEDA to act on
-			}
-			active = next
-			if err := stream.Send(&pb.IsActiveResponse{Result: active}); err != nil {
-				return err
-			}
-			logger.V(1).Info("external scaler pushed activation change", "active", active)
 		case <-ticker.C:
-			next := activeNow()
-			active = next
-			if err := stream.Send(&pb.IsActiveResponse{Result: active}); err != nil {
-				return err
+			send = keepalive
+		case <-recheck.C:
+			if !recheckDue(active, h.passiveMode(ctx, ref, target())) {
+				continue
 			}
+		}
+		next, err := activeNow()
+		if err != nil {
+			logger.V(1).Info("external scaler StreamIsActive failed", "err", err)
+			return err
+		}
+		if err := send(next); err != nil {
+			return err
 		}
 	}
 }
+
+// recheckDue reports whether the stream's recheck re-reads a variant: only a
+// held one it reports inactive. Observe answers no count, and an active held
+// variant is re-asserted by the keepalive.
+func recheckDue(active bool, mode passive.Mode) bool {
+	return !active && mode == passive.Hold
+}
+
+// PassiveZeroRecheck is how often StreamIsActive re-reads a held variant it
+// is reporting inactive (Handler.zeroRecheck). See the recheck ticker there.
+const PassiveZeroRecheck = 5 * time.Second

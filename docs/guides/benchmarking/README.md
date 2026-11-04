@@ -206,8 +206,76 @@ Notes on the defaults:
 - [FMA post-mortem](../../proposals/fma-post-mortem.md)
 - [After the install](../../reference/operations.md): what the metrics mean
 - [Configuration](../../reference/configuration.md): every installer variable
+- [Side by side with KEDA](#side-by-side-with-keda): KEDA scales, the scaling
+  manager only says what it would do
 
 ## Details
+
+### Side by side with KEDA
+
+To compare the scaling manager with a KEDA trigger you already trust, let KEDA
+scale and have the scaling manager only report. Nothing else is needed.
+
+1. Make the model passive. On the scaling manager's policy, in the
+   controller's namespace:
+
+   ```yaml
+   # kubectl edit configmap wva-scaling-policy-config -n <controller-namespace>
+   data:
+     cmp.<namespace>: |
+       model_id: <model-id>
+       namespace: <namespace>
+       passive: true
+   ```
+
+2. Put our trigger beside KEDA's on the model's ScaledObject. With another
+   trigger there, ours answers 0 and inactive (mode `observe`), so the HPA
+   follows KEDA's trigger alone. Do not name ours in a `scalingModifiers`
+   formula.
+
+   ```yaml
+   triggers:
+     - type: prometheus          # yours, unchanged: this one scales
+       metadata: {serverAddress: ..., query: ..., threshold: "..."}
+     - type: external-push       # ours: observes
+       name: wva
+       metricType: AverageValue  # the only type our answer is a count under
+       metadata:
+         scalerAddress: wva-external-scaler.<controller-namespace>.svc:9090
+         modelID: <model-id>
+       authenticationRef:        # TLS, the default; a plaintext install uses
+         name: wva-external-scaler-<controller-namespace>   # ...svc.cluster.local:9090
+         kind: ClusterTriggerAuthentication                 # and no authenticationRef
+   ```
+
+   To compare every model at once, run the whole controller passive instead
+   of step 1: `make deploy-wva WVA_PASSIVE=true`
+   ([configuration](../../reference/configuration.md#deployment-flags)).
+
+3. Check the mode, then read the two counts side by side over the run:
+
+   ```bash
+   kubectl logs -n <controller-namespace> deploy/wva-controller-manager | grep "Passive mode entered"
+   ```
+
+   ```promql
+   # observe means our trigger stays out of KEDA's way; observe-unsafe means a
+   # scalingModifiers formula reads it, and the comparison is not clean
+   wva_passive_mode{model_name="<model-id>", mode=~"observe|observe-unsafe"} == 1
+   # exported_namespace is the model's namespace; namespace is the controller's
+   wva_desired_replicas{exported_namespace="<namespace>"}   # what the scaling manager would run
+   wva_current_replicas{exported_namespace="<namespace>"}   # what KEDA runs
+   ```
+
+The would-be count is computed from a fleet KEDA sized, so it says what the
+scaling manager would order next from where KEDA is, not where its own fleet
+would be.
+
+To hand the model over, take the steps in this order: remove the other
+trigger first, then set `passive: false` (or delete the entry). The other way
+round, both triggers scale the model for a while, and the HPA follows
+whichever asks for more. [Passive mode](../../reference/scaling-policy.md#passive)
+has the details.
 
 ### The model cache must be ReadWriteMany
 

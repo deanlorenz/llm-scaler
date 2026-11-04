@@ -1314,9 +1314,15 @@ test-e2e-smoke: ## Run smoke e2e tests
 	exit $$TEST_EXIT_CODE
 
 # Runs the complete e2e test suite (KEDA backend, excluding smoke and flaky tests).
+# The live-Kueue borrowing spec (kueue-borrow) and the passive-mode specs
+# (passive) are excluded too: each runs in a CI job of its own, through
+# test-e2e-kueue-borrow and test-e2e-passive. test-e2e-passive reuses this
+# recipe, for its Prometheus port-forward, by overriding the two variables below.
+E2E_FULL_LABEL_FILTER ?= full && !smoke && !flaky && !kueue-borrow && !passive
+E2E_FULL_GINKGO_ARGS  ?=
 .PHONY: test-e2e-full
 test-e2e-full: ## Run full e2e test suite
-	@echo "Running full e2e test suite..."
+	@echo "Running e2e specs matching: $(E2E_FULL_LABEL_FILTER)"
 	$(eval FOCUS_ARGS := $(if $(FOCUS),-ginkgo.focus="$(FOCUS)",))
 	$(eval SKIP_ARGS := $(if $(SKIP),-ginkgo.skip="$(SKIP)",))
 	@# The suite reaches Prometheus at https://localhost:9090
@@ -1360,7 +1366,7 @@ test-e2e-full: ## Run full e2e test suite
 	KEDA_NAMESPACE=$(E2E_KEDA_NAMESPACE) \
 	MODEL_ID=$(MODEL_ID) \
 	go test ./test/e2e/ -timeout $(E2E_GO_TIMEOUT) -v -ginkgo.v -ginkgo.timeout=$(E2E_TIMEOUT) \
-		-ginkgo.label-filter="full && !smoke && !flaky && !kueue-borrow" $(FOCUS_ARGS) $(SKIP_ARGS); \
+		-ginkgo.label-filter="$(E2E_FULL_LABEL_FILTER)" $(E2E_FULL_GINKGO_ARGS) $(FOCUS_ARGS) $(SKIP_ARGS); \
 	TEST_EXIT_CODE=$$?; \
 	[ -n "$$PF_PID" ] && kill $$PF_PID 2>/dev/null || true; \
 	echo ""; \
@@ -1420,7 +1426,8 @@ test-e2e-full-with-setup:
 	@# The quota-reader spec (kueue_quota_test.go) needs only the three CRDs,
 	@# and passes against the controller too. The borrowing spec
 	@# (kueue_borrow_test.go) is not in this suite: it runs on its own,
-	@# test-e2e-kueue-borrow-with-setup.
+	@# test-e2e-kueue-borrow-with-setup. Nor are the passive-mode specs:
+	@# test-e2e-passive-with-setup.
 	@if [ "$(ENVIRONMENT)" = "kind-emulator" ]; then $(MAKE) install-kueue-e2e; fi
 	$(MAKE) test-e2e-full
 
@@ -1482,6 +1489,27 @@ test-e2e-kueue-borrow-with-setup: ## Deploy e2e infra + Kueue, then run the live
 	SCALER_BACKEND=keda $(MAKE) deploy-e2e-infra
 	KUEUE_CONTROLLER=true $(MAKE) install-kueue-e2e
 	$(MAKE) test-e2e-kueue-borrow
+
+# Runs only the passive-mode specs (label passive), which the full suite
+# excludes. They need Prometheus (the full recipe port-forwards it), the
+# simulator's --fake-metrics (USE_SIMULATOR=true) and EPP flow control
+# (SCALE_TO_ZERO_ENABLED=true, on the infra deploy too), and skip without the
+# last two, so read the -v output. -ginkgo.fail-on-empty fails a filter that
+# matches nothing. 19 specs took 43 minutes on a 22-CPU kind host; the budget
+# allows a CI runner about 1.6 times that.
+E2E_PASSIVE_TIMEOUT    ?= 70m
+E2E_PASSIVE_GO_TIMEOUT ?= 75m
+.PHONY: test-e2e-passive
+test-e2e-passive: ## Run the passive-mode e2e specs
+	$(MAKE) test-e2e-full E2E_FULL_LABEL_FILTER="passive" E2E_FULL_GINKGO_ARGS="-ginkgo.fail-on-empty" \
+		E2E_TIMEOUT=$(E2E_PASSIVE_TIMEOUT) E2E_GO_TIMEOUT=$(E2E_PASSIVE_GO_TIMEOUT)
+
+# Deploys the e2e infra on kind and runs the passive-mode specs alone. It never
+# deletes the cluster. No LWS and no Kueue: no passive spec uses either.
+.PHONY: test-e2e-passive-with-setup
+test-e2e-passive-with-setup: ## Deploy e2e infra, then run the passive-mode specs
+	SCALER_BACKEND=keda $(MAKE) deploy-e2e-infra
+	$(MAKE) test-e2e-passive
 
 # The whole-node utilization-share specs (label utilization-share-wholenode): a
 # large model whose replica is one whole 8-GPU node, or a LeaderWorkerSet group
@@ -3019,6 +3047,11 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# borrowNamespaces turns a pilot into borrowing everywhere, and the
 	@# document it writes is perfectly valid.
 	@bash hack/check-kueue-borrow-keep.sh
+	@echo "Checking a re-install keeps passive mode through the apply..."
+	@# Executes the passive keep against a stub kubectl. Restoring it after
+	@# the apply left a window where a new pod started active, and a
+	@# passive: false read through the yq alternative operator came back empty.
+	@bash hack/check-passive-keep.sh
 	@echo "Checking the controller readiness check..."
 	@# Executes it against a stub kubectl. `rollout status` passes at once for
 	@# a Deployment at 0 replicas, so an install over a controller at 0/0

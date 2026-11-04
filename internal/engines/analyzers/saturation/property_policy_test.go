@@ -60,6 +60,7 @@ var notLearnerKeys = map[string]string{
 	"optimizer":                    "the optimizer's configuration",
 	"weightClass":                  "the share optimizer's weight class",
 	"weight":                       "the share optimizer's weight",
+	"passive":                      "passive mode, read by the scaler and the engines; the analyzers run the same either way",
 }
 
 // tuningPolicy is a policy that sets t and nothing else.

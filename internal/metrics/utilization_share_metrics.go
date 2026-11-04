@@ -35,6 +35,7 @@ var (
 	utilizationShareMode           *prometheus.GaugeVec
 	utilizationShareInFlight       *prometheus.GaugeVec
 	utilizationShareHeadroomCapped *prometheus.GaugeVec
+	utilizationSharePassiveShadow  *prometheus.GaugeVec
 	utilizationShareStarts         *prometheus.CounterVec
 )
 
@@ -138,7 +139,12 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 			"group, or none stored); 0 while the spare is spread. The cause is logged when it changes. "+
 			"Published only while the optimizer plans.",
 		groupLabels)
+	utilizationSharePassiveShadow = gauge(constants.WVAUtilizationSharePassiveShadow,
+		"Utilization-share optimizer: 1 while a group is planned in shadow because it holds a passive model "+
+			"(the controller observes it and changes none of its replica counts), 0 otherwise.",
+		groupLabels)
 	for name, c := range map[string]prometheus.Collector{
+		constants.WVAUtilizationSharePassiveShadow:     utilizationSharePassiveShadow,
 		constants.WVAUtilizationShareHeadroom:          utilizationShareHeadroom,
 		constants.WVAUtilizationShareHeadroomCapped:    utilizationShareHeadroomCapped,
 		constants.WVAUtilizationShareTargetGPUs:        utilizationShareTargetGPUs,
@@ -207,6 +213,9 @@ type UtilizationShareGroup struct {
 	// nil, and not published, in a cycle it did not plan (the restart quiet
 	// period), when the published targets are not the planner's.
 	HeadroomCapped *bool
+	// PassiveShadow is true when the group is planned in shadow because it
+	// holds a passive model, under an optimizer configured to act.
+	PassiveShadow bool
 }
 
 // SetUtilizationShareMode publishes the optimizer's mode: 1 for mode, 0 for
@@ -283,6 +292,11 @@ func PublishUtilizationShare(groups []UtilizationShareGroup) {
 		}
 		set(utilizationShareSpareGPUs, gl, grp.SpareGPUs)
 		set(utilizationShareReplicasToMove, gl, float64(grp.ReplicasToMove))
+		passiveShadow := 0.0
+		if grp.PassiveShadow {
+			passiveShadow = 1
+		}
+		set(utilizationSharePassiveShadow, gl, passiveShadow)
 		if grp.Active {
 			initUtilizationShareTransfers(gl)
 			set(utilizationSharePromisedGPUs, gl, grp.PromisedGPUs)

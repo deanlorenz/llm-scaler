@@ -71,6 +71,9 @@ func (bs *borrowState) yieldReclaimed(decisions []domain.VariantDecision, reques
 	}
 	states := map[string]domain.VariantReplicaState{}
 	paired := map[string]bool{}
+	// A passive model gives nothing back: its target is a would-be figure,
+	// and lowering it frees no GPU for the reclaim.
+	passive := passiveModels(requests)
 	for _, req := range requests {
 		paired[req.Namespace+"/"+req.ModelID] = req.Disaggregated
 		for _, st := range req.VariantStates {
@@ -99,7 +102,7 @@ func (bs *borrowState) yieldReclaimed(decisions []domain.VariantDecision, reques
 			var models []string
 			for i := range decisions {
 				d := &decisions[i]
-				if d.Namespace != ns || !accelerator.SameName(d.AcceleratorName, k.acc) {
+				if d.Namespace != ns || !accelerator.SameName(d.AcceleratorName, k.acc) || passive[ns+"/"+d.ModelID] {
 					continue
 				}
 				if !slices.Contains(models, d.ModelID) {

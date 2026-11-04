@@ -143,6 +143,7 @@ func loadConfig(cfg *Config, flagSet *flag.FlagSet, configFilePath string) error
 	v.SetDefault("WVA_SCALE_TO_ZERO", false)
 	v.SetDefault("WVA_LIMITED_MODE", false)
 	v.SetDefault("WVA_STICKY_SCALE_DOWN", true)
+	v.SetDefault("WVA_PASSIVE", false)
 	v.SetDefault("SCALE_FROM_ZERO_ENGINE_MAX_CONCURRENCY", 10)
 	// Matches config/base/manager/manager-configmap.yaml so a deployment without
 	// the ConfigMap key runs at the same cadence as the shipped default.
@@ -216,6 +217,7 @@ func loadConfig(cfg *Config, flagSet *flag.FlagSet, configFilePath string) error
 		scaleToZeroEnabled:          v.GetBool("WVA_SCALE_TO_ZERO"),
 		limitedModeEnabled:          v.GetBool("WVA_LIMITED_MODE"),
 		stickyScaleDownEnabled:      v.GetBool("WVA_STICKY_SCALE_DOWN"),
+		passive:                     v.GetBool("WVA_PASSIVE"),
 		scaleFromZeroMaxConcurrency: v.GetInt("SCALE_FROM_ZERO_ENGINE_MAX_CONCURRENCY"),
 	}
 

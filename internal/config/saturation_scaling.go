@@ -189,6 +189,15 @@ type ScalingPolicy struct {
 	// one-way for a plain bool.
 	EnableBatchCapLearning bool `yaml:"enableBatchCapLearning,omitempty"`
 
+	// Passive makes the model observe instead of scale: the controller computes,
+	// logs and publishes everything for it and changes none of its replica
+	// counts (docs/reference/scaling-policy.md, "passive"). Nil inherits from
+	// the layer below -- the tier, then the default entry, then the
+	// WVA_PASSIVE controller flag -- so a pointer, not a bool: Merge copies
+	// only what an entry sets, and a plain false could never turn a passive
+	// default back to active for one model.
+	Passive *bool `yaml:"passive,omitempty"`
+
 	// ShapeChangeHoldSeconds overrides how long the fleet is withheld from
 	// release after its shape changes, when nothing settles the hold sooner.
 	// Zero takes the default.
@@ -697,6 +706,11 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	// One-way like reuse: a true turns batch-cap learning on.
 	if override.EnableBatchCapLearning {
 		c.EnableBatchCapLearning = true
+	}
+	// Both ways, because it is a pointer: a set false wins over a true below.
+	if override.Passive != nil {
+		v := *override.Passive
+		c.Passive = &v
 	}
 	// The weight is one choice expressed one of two ways, so an override that
 	// states either replaces both: a model that names a class must not inherit a

@@ -77,6 +77,9 @@ const (
 	// below because it is the steady state for every serving model and must not
 	// be reported as a failure to wake.
 	OutcomeAlreadyServing SelectionOutcome = "already-serving"
+	// OutcomePassive is a model with pending requests that passive mode keeps
+	// from being woken: the wake it would get is logged, never published.
+	OutcomePassive SelectionOutcome = "passive"
 	// OutcomePrefillCatchUp woke a prefill variant for a model whose decode is
 	// already up. It is not a cold start — the model can serve — but it is the
 	// only path by which a P/D model that came up decode-first ever completes.

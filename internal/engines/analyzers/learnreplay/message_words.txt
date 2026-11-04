@@ -118,6 +118,7 @@ Greedy-by-score
 GreedyByScore
 Grouped
 HEALTH_PROBE_BIND_ADDRESS
+HPA
 HPA/KEDA
 Health
 Hybrid
@@ -135,6 +136,7 @@ Invalid
 InvalidImageName
 It
 JSON
+KEDA
 KV
 Kubernetes
 Kueue
@@ -209,6 +211,7 @@ PROMETHEUS_SERVER_NAME
 PROMETHEUS_TLS_INSECURE_SKIP_VERIFY
 PROMETHEUS_TOKEN_PATH
 PROPSEED
+Passive
 Pending
 Physical
 Please
@@ -228,6 +231,7 @@ Recording
 RegisterAnalyzer
 Released
 Releasing
+Remove
 Removed
 Replica
 ReplicaSet
@@ -301,6 +305,7 @@ WITHOUT
 WVA
 WVA-managed
 WVA_LIMITED_MODE
+WVA_PASSIVE
 WVA_SCALE_TO_ZERO
 WVA_STICKY_SCALE_DOWN
 Wake-signal
@@ -339,6 +344,7 @@ activation
 active
 active-request-scorer
 activeModels
+acts
 add
 adding
 address
@@ -386,6 +392,8 @@ analyzers
 and
 annotation
 another
+answer
+answers
 any
 anything
 app.kubernetes.io/component
@@ -413,6 +421,7 @@ attempted
 attributed
 auto
 autoscalers
+autoscaling.keda.sh/paused
 autoscalings
 available
 averages
@@ -453,6 +462,7 @@ become
 becomes
 been
 before
+behavior
 behind
 being
 below
@@ -604,11 +614,13 @@ compute
 computeCapacityHistory
 computed
 computedTokenRate
+computes
 concurrency
 condition
 config
 config.ScalingPolicy
 config.num_speculative_tokens
+config.yaml
 config/components/learner-recorder
 configMap
 configuration
@@ -803,6 +815,8 @@ engineParamsSource
 engineRanks
 engines
 enough
+entered
+enters
 entries
 entry
 env.VLLM_ALL2ALL_BACKEND
@@ -816,6 +830,7 @@ eppQueueBytes
 eppQueueSize
 errPct
 error
+errors
 estimate
 estimateSeconds
 estimatedTokens
@@ -850,9 +865,11 @@ failed
 failing
 fails
 failure
+failureThreshold
 fair-share
 fall
 fallback
+fallback.replicas
 fallbackSource
 false
 fell
@@ -901,6 +918,7 @@ folded
 for
 forbidden
 force
+foreignTriggers
 forget
 forgets
 forgotten
@@ -1439,6 +1457,7 @@ namespace
 namespace-local
 namespace-scoped
 namespace/variant
+namespaceDefault
 namespacePools
 namespaceQuotas
 namespaceScoped
@@ -1610,9 +1629,11 @@ parts
 pass
 passedBy
 passes
+passive
 past
 path
 paused
+paused-replicas
 pd-pair-borrows-whole
 peakClaimGPUs
 peaks
@@ -1629,6 +1650,7 @@ per
 per-model
 per-replica
 per-role
+perModel
 perReplicaCapacity
 perReplicaTokensPerSec
 percent
@@ -1700,6 +1722,7 @@ previous
 previous-desired
 previousA
 previousB
+previousMode
 previousSource
 previousValue
 price
@@ -1728,6 +1751,7 @@ provided
 provider
 providersSkipped
 published
+publishes
 quantization
 quarter
 query
@@ -1986,6 +2010,7 @@ scales
 scaling
 scaling-decision
 scaling-policy
+scalingModifiers
 scheduled
 scheduler
 scheduler-queue-demand
@@ -2114,6 +2139,7 @@ source
 spaces
 spare
 spec
+spec.fallback
 speculates
 speculative
 speculative_
@@ -2179,6 +2205,7 @@ stored
 stored-live
 str
 stream
+strict
 string
 subjects
 succeeds
@@ -2344,6 +2371,7 @@ unservable
 unsigned
 unsizable
 unsteady
+unsupported
 until
 unusable
 unusually
@@ -2472,6 +2500,7 @@ works
 worstErrPct
 worstPod
 would
+wouldBe
 write
 writer
 writerNamespace

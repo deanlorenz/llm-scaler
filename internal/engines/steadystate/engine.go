@@ -56,6 +56,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/passive"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/scalingpolicy"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/balance"
@@ -150,6 +151,15 @@ type Engine struct {
 	// admitInFlight needs once the decisions are final. Set by decideV2.
 	cycleFitted  bool
 	cyclePlanned map[string]bool
+	// Passive resolves which models the controller only observes
+	// (docs/reference/scaling-policy.md, "passive"). Nil is every model
+	// active. cyclePassive (keyed namespace/modelID) and cyclePassiveVariants
+	// (keyed namespace/scale-target name) are this cycle's answers
+	// (observePassive); passiveLast is the last cycle's, for logging changes.
+	Passive              *passive.Resolver
+	cyclePassive         map[string]bool
+	cyclePassiveVariants map[string]passive.Mode
+	passiveLast          map[string]passiveVariantState
 	// inFlightMark is what this cycle's provisional admission of the pass's
 	// placements replaced in the in-flight ledger (admitPassInFlight), until
 	// admitInFlight commits the final targets; nil between cycles.
@@ -824,6 +834,8 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 		logger.Error(err, "Unable to get active variant autoscalings")
 		return err
 	}
+	// Before anything decides: which variants are only observed this cycle.
+	e.observePassive(logger, activeVAs)
 
 	if len(activeVAs) == 0 {
 		// A cycle, though it analyzes nothing: the models parked through it
@@ -1588,6 +1600,7 @@ func (e *Engine) optimizeV2(
 
 		reportSignalReason(namespace, modelID, req)
 
+		req.Passive = e.modelPassive(namespace, modelID)
 		requests = append(requests, *req)
 		modelReplicaMetrics[modelID] = data.replicaMetrics
 		modelScaleTargets[utils.GetNamespacedKey(namespace, modelID)] = data.scaleTargets
@@ -2220,7 +2233,13 @@ func (e *Engine) applySaturationDecisions(
 	for vaName, va := range vaMap {
 		decision, hasDecision := decisionMap[vaName]
 
-		if hasDecision && sticky {
+		// Not for a passive variant: the hold keeps a published scale-down
+		// from being undone inside KEDA's window, and nothing acts on a
+		// passive variant's published value -- KEDA holds the count it has,
+		// so "a descent in flight" (published below running) would be true
+		// for as long as it is passive, and the hold would pin its would-be
+		// count to an old figure.
+		if hasDecision && sticky && !e.variantPassive(va.Namespace, va.GetScaleTargetName()) {
 			p, at, ok := published(va.Namespace, va.GetScaleTargetName())
 			var held bool
 			if decision, held = scalingpolicy.HoldPublishedScaleDown(decision, p, at, ok, e.stickyAge(), time.Now()); held {
@@ -2321,7 +2340,8 @@ func (e *Engine) applySaturationDecisions(
 				}
 			}
 
-			if sticky {
+			// Not for a passive variant, for the reason the hold above is not.
+			if sticky && !e.variantPassive(va.Namespace, va.GetScaleTargetName()) {
 				// AFTER the fallback above has resolved the running count -- a
 				// variant synthesized from a ScaledObject has no status and the
 				// allocations map is empty, so before it targetReplicas is 0 for
@@ -2445,7 +2465,15 @@ func (e *Engine) applySaturationDecisions(
 			logger.Error(err, msg, "variant", updateVa.Name)
 		} else {
 			// Only log detail if we had a decision or periodically (to avoid spamming logs on every loop for no-ops)
-			if hasDecision {
+			if hasDecision && e.variantPassive(va.Namespace, va.GetScaleTargetName()) {
+				// What it would do, never that it did: KEDA holds this count.
+				e.recordPassiveRecommendation(&updateVa, decision.Action, decision.CurrentReplicas, decision.TargetReplicas, decision.Reason())
+				if decision.CurrentReplicas != targetReplicas {
+					logger.V(logging.VERBOSE).Info("Passive: would scale",
+						"variant", updateVa.Name, "mode", string(e.cyclePassiveVariants[utils.GetNamespacedKey(va.Namespace, va.GetScaleTargetName())]),
+						"current", decision.CurrentReplicas, "wouldBe", targetReplicas)
+				}
+			} else if hasDecision {
 				// Emit Kubernetes event for observability
 				e.recordScalingEvent(&updateVa, decision.Action, decision.TargetReplicas, decision.Reason())
 				if decision.WasLimited {
@@ -2493,7 +2521,7 @@ func (e *Engine) applySaturationDecisions(
 					logger.Error(err, "Failed to emit replica scaling metrics")
 				}
 			}
-			logger.Info("Applied saturation decision via shared cache",
+			logDecision(logger, e.variantPassive(va.Namespace, va.GetScaleTargetName()),
 				"variant", vaName,
 				"namespace", updateVa.Namespace,
 				"action", decision.Action,
