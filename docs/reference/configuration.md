@@ -886,16 +886,9 @@ analyzer's) does not refit for
 - **The slo analyzer** has no learned-state restore. Its line waits after
   every restart, with the snapshot on or off; its figures are published as
   no line until it refits. It does not size the fleet.
-- **The throughput analyzer** (a policy that lists `throughput`) has no
-  learned-state restore either. Its ITL line waits after every restart too,
-  and the analyzer has no throughput capacity until the line refits:
-  `steadyFor` and then its ten readings, about 8 cycles (2 minutes at 15 s)
-  for a variant of three or more replicas, longer for fewer. It is silent
-  meanwhile: it neither orders a scale-up nor holds the fleet against a
-  scale-down, so the other analyzers decide. On a simulated restart 15 s
-  before a load step it left the fleet under need for 1m45s, against 30 s
-  without the wait. A policy that lists `throughput` alone has nothing else
-  to hold the fleet in that time but the scale-down stabilization above.
+- **The throughput analyzer** has no learned-state restore either. Its ITL
+  line waits after every restart too, and the analyzer is silent until the
+  line refits: see [the throughput analyzer's line](#the-throughput-analyzers-line).
 
 What is restored, and what is not:
 
@@ -1096,7 +1089,14 @@ and [troubleshooting](troubleshooting.md#symptom-index).
   slope. It comes back once its window holds 10
   readings, 3 of them settled: about 4 cycles with 3 replicas inside the
   band, 10 cycles with one. Replicas below the band add no readings, so a
-  lightly loaded fleet stays silent longer.
+  lightly loaded fleet stays silent longer. After a controller restart or
+  leader change every replica first waits its settle,
+  [`steadyGate.steadyFor`](scaling-policy.md#analyzertuningsteadygate-which-itl-readings-teach-the-line)
+  (2 minutes by default), as for the saturation and slo lines: none of its
+  readings counts as settled until then, so the line comes back no sooner
+  than `steadyFor`, about 8 cycles at 15 s with 3 replicas in the band. On
+  a simulated restart 15 s before a load step the fleet sat under need for
+  1m45s with the wait, against 30 s without it.
 - **A variant that starts above the band is priced from above it.** With no
   line from the band and no slope to hold, the line is fitted from readings
   at k of at least 0.85 (`T2-above-band`). It errs one way only: it prices a

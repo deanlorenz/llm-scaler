@@ -1867,8 +1867,8 @@ on the line itself.
 
 #### 4b-2 as built
 
-Status: built on `feat/learner-4b2`, on 4b-1's tip (bd4807f67); pushed
-after 4b-1 merges. The line reads each replica's settle from the engine's
+Status: built on `feat/learner-4b2`, on main after 4b-1 merged (#456,
+1c9a34fe8). The line reads each replica's settle from the engine's
 settle tracker (`T/settle.go`), which 4b-0 wired (`WithSettleView`) and
 4b-1 withheld. An analyzer given no view -- a test that drives `Analyze`
 alone, a replay of a recording with no `start.ThroughputConfig` -- observes
@@ -1931,13 +1931,20 @@ need for 1m45s, 16 silent, against 30 s and 5. Both inside the probe's
 **Goldens.** No committed recording gives the throughput analyzer the
 engine's view (the in-process three predate `ThroughputConfig`), so the
 restart wait moves none until `throughput-sweep-restart` lands, and is held
-by its unit tests (`heldBy`). The move is expected to move the acceptance
-and engine throughput rows after their day-long clock jump, as
-`itl-reads-the-settle-tracker` moved the saturation line's; the other four
-are expected to move none, as their 4a twins moved none. Not yet measured:
-the switch runs, goldens and message words are regenerated when the cluster
-recording now running is done, and `replaySwitches` is corrected to what
-they measure.
+by its unit tests (`heldBy`). Measured, each alone against all off from
+main's goldens: the move moves `acceptance/variant-capacities.csv` (3 of 149
+rows) and `engine/variant-capacities.csv` (1 of 139). On the cycles after
+the day-long clock jump the tracker reads the gap as an absence
+(`settle.Rejoined`), and model-01's variant-01 holds its slope (`T2-held`)
+where the key's own trace refitted (`T1-ols`). The all-on goldens also
+rewrote `results.csv` of both and the engine's `composite-release.csv`, in
+the last digit only, inside the comparison's tolerance. The other five move
+nothing. The acceptance fixture now reaches the line's held slope, which only
+the engine fixture reached in 4b-1. The engine's own recording test
+(`steadystate/learner_recording_test.go`), whose throughput analyzer has the
+engine's view, prices 4 variants where 4b-1 priced 21: the line now waits
+after the controller start and after each day the clock jumps, as the slo
+line does.
 
 ## 8. Risks and limits
 

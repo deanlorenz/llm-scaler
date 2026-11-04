@@ -1033,9 +1033,13 @@ func assertResultsPriced(t *testing.T, recording []byte) {
 	// settle tracker's absence tolerance): it has no line, and prices
 	// nothing, on those cycles. The throughput line, on the shared tracker
 	// since learner PR 4b-1, needs 10 readings in its window and settled
-	// replicas before it prices: the run's twelve cycles price 21 of its
-	// variants, where the line from one cycle's rows priced 52.
-	assert.Equal(t, map[string]int{saturation.KindAnalyze: 64, slo.KindAnalyze: 6, throughput.KindAnalyze: 21}, priced,
+	// replicas before it prices: the run's twelve cycles priced 21 of its
+	// variants, where the line from one cycle's rows priced 52. Since 4b-2
+	// it reads the engine's settle tracker and waits like the slo line,
+	// after the controller start and after each day the clock jumps
+	// (throughput.SwitchITLWaitsAfterRestart and the tracker's absence
+	// tolerance): it prices 4.
+	assert.Equal(t, map[string]int{saturation.KindAnalyze: 64, slo.KindAnalyze: 6, throughput.KindAnalyze: 4}, priced,
 		"variants priced per analyzer")
 }
 

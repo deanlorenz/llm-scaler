@@ -83,31 +83,30 @@ import (
 //
 // Since learner PR 4b-2 this PR's are the throughput analyzer's ITL line on
 // the engine's settle tracker, six switches, as learner PR 4a split the
-// saturation and slo lines' (throughput/settle.go). Its base is 4b-1's tip
-// (bd4807f67), whose goldens are 4b-1's all-on run. The fixtures that run
-// the throughput analyzer are the in-process three (acceptance, engine,
-// mu-paths), and none was recorded with the analyzer given the engine's
-// view (start.ThroughputConfig is absent): the replay builds it with none,
-// and its line reads the tracker the analyzer observes itself. So:
+// saturation and slo lines' (throughput/settle.go). Its base is main after
+// 4b-1 merged (1c9a34fe8, #456), whose goldens are 4b-1's all-on run. The
+// fixtures that run the throughput analyzer are the in-process three
+// (acceptance, engine, mu-paths), and none was recorded with the analyzer
+// given the engine's view (start.ThroughputConfig is absent): the replay
+// builds it with none, and its line reads the tracker the analyzer observes
+// itself. Measured, each alone against all off:
 //
+//   - SwitchITLReadsSettle moves acceptance/variant-capacities.csv (3 of
+//     149 rows) and engine/variant-capacities.csv (1 of 139): on the cycles
+//     after the clock jumps a day, the tracker reads the gap as an absence
+//     (settle.Rejoined) and model-01's variant-01 holds its slope (T2-held)
+//     where the key's own trace refitted (T1-ols). Its results.csv and the
+//     engine's composite-release.csv rows differ in the last digit only,
+//     inside the comparison's tolerance: not a move, though the all-on
+//     goldens were rewritten with them.
 //   - SwitchITLWaitsAfterRestart moves nothing: an analyzer with no engine
 //     view never waits. It moves the throughput-sweep-restart recording when
 //     that lands (recorded on 4b-0, with the view). Its unit tests hold it.
-//   - SwitchITLReadsSettle is expected to move the acceptance and engine
-//     throughput rows on the cycles after their clock jumps a day: the
-//     tracker reads the gap as an absence (settle.Rejoined), the key's own
-//     trace did not, as saturation.SwitchITLReadsSettle moved the
-//     saturation line's rows on the same cycles.
-//   - The other four are expected to move nothing, as their 4a twins moved
-//     nothing; their unit tests hold them.
-//
-// NOT YET MEASURED: TestGoldens_TheSwitchRuns has not run on this tree. The
-// rows below are the expectation; the run replaces them with what it
-// measures, and switchBase with the base digests of what they name.
+//   - The other four move nothing, as their 4a twins moved nothing; their
+//     unit tests hold them.
 var replaySwitches = map[string][]string{
 	throughput.SwitchITLReadsSettle: {
-		"acceptance/results.csv", "acceptance/variant-capacities.csv",
-		"engine/results.csv", "engine/variant-capacities.csv",
+		"acceptance/variant-capacities.csv", "engine/variant-capacities.csv",
 	},
 	throughput.SwitchITLWaitsAfterRestart:            nil,
 	throughput.SwitchITLKeepsSettleThroughMissingRow: nil,
@@ -334,8 +333,8 @@ var heldBy = map[string][]heldTest{
 	},
 	// Learner PR 4b-2's throughput line on the engine's settle tracker: each
 	// test runs the switch on and off through Analyze on the engine's rig.
-	// The move names outputs, and is listed for the case the measured run
-	// finds it moves none.
+	// The move names outputs too; its tests hold its two own rules directly
+	// (a rollout under the same name, a gap between cycles).
 	throughput.SwitchITLReadsSettle: {
 		{"../throughput", "TestITLSettle_ANewRevisionUnderTheSameNameStartsTheSettle"},
 		{"../throughput", "TestITLSettle_AGapBetweenCyclesPastTheToleranceSettlesAgain"},
@@ -538,7 +537,7 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch of this PR names, as the
-// base commit's goldens hold it (bd4807f67, learner PR 4b-1's tip). It also
+// base commit's goldens hold it (main at 1c9a34fe8, learner PR 4b-1 merged). It also
 // holds the base digests of the outputs a 4b-2 switch could move that the
 // expectation does not name, so the measured rows need no new lookup.
 var switchBase = map[string]string{
@@ -549,8 +548,8 @@ var switchBase = map[string]string{
 	"engine/composite-variants.csv":     "9cb3149dc328096552a9b5aa640ffb2195e92f562e73266d5d89e92fd9e09828",
 	"engine/results.csv":                "fdef165cd21f47deb81d73870af4953c05d9c303180975e713e39e4a138845e9",
 	"engine/variant-capacities.csv":     "bded174c24f569874299866fb541e7f4ac4cc72294adbaf8e626f1e9ea06712f",
-	"mu-paths/results.csv":              "bebf99f9aab24e310bcea2a03dfeda96b3719ba7e09627d5e19bb3a3102503b0",
-	"mu-paths/variant-capacities.csv":   "f766c4b028c2824be188fb6407b873330e3fb64772c568e4655fd3ebacdf6b15",
+	"mu-paths/results.csv":              "83fca27f185344e2784706b0b6ae2e3ea8fe0ae70ecabe332862f04f4f4e951c",
+	"mu-paths/variant-capacities.csv":   "dd5b3186f6fe513520ba6e0309d88520e668d60f84003326f57bd7dee0ca0275",
 }
 
 // The slow tests of this package run in parallel with each other (each
