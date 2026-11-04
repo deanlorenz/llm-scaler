@@ -64,7 +64,7 @@ func asLatency(bs []domain.LengthBucket) []domain.LatencyBucket {
 	}
 	out := make([]domain.LatencyBucket, 0, len(bs))
 	for _, b := range bs {
-		out = append(out, domain.LatencyBucket{UpperBound: b.UpperBound, Rate: b.Rate})
+		out = append(out, domain.LatencyBucket(b))
 	}
 	return out
 }
