@@ -13,7 +13,25 @@ import (
 // under the learner rules' property-test discipline
 // (docs/proposals/analyzer-learner.md, 2.6): each runs on seeded random inputs
 // as well as on the worked example, and each was run against a mutant that
-// reintroduces the defect it guards (the PR lists them).
+// reintroduces the defect it guards.
+
+// rateFor is question 1 with the target and headroom as arguments.
+func rateFor(d Decode, target TPOTTarget, headroom float64) Result {
+	return RateForTPOT(d, RateQuery{Target: target, Headroom: headroom})
+}
+
+// ratioFrom is TPOTRatioFromWindows as a Result: the ratio as an Answer
+// carrying its flags, or the refusal.
+func ratioFrom(windows []TPOTWindow, q float64) Result {
+	r, flags, u := TPOTRatioFromWindows(windows, q)
+	if u != nil {
+		if r != (TPOTRatio{}) || flags != nil {
+			panic("a refused ratio came back with a value")
+		}
+		return *u
+	}
+	return Answer{Value: r.Value, Flags: flags}
+}
 
 // randomDecode draws a decode role from the ranges real fleets span: a line
 // from 2 to 60 ms across the band, 4k to 2M KV tokens, prompts and outputs
@@ -55,6 +73,10 @@ func pricedRate(t *testing.T, r Result) float64 {
 
 const propertyDraws = 2000
 
+// minCappedDraws is the fewest of propertyDraws that must reach the operating-point
+// cap for TestProperty_RateUnderOperatingPoint to be exercising it.
+const minCappedDraws = propertyDraws * 3 / 4
+
 // Round trip, at unclamped points only (fill inside the band, n under the
 // cap, rate under the operating-point cap, which a headroom of 1 lifts):
 // question 1 at ITL(k)*R_q gives back the rate whose fill is k, and question
@@ -78,7 +100,7 @@ func TestProperty_RoundTrip(t *testing.T) {
 				ratio = tg.Ratio.Value
 			}
 			tg.Seconds = d.Line.ITLAt(k) * ratio
-			a := mustAnswer(t, RateForTPOT(d, tg, 1))
+			a := mustAnswer(t, rateFor(d, tg, 1))
 			if !slices.Equal(a.Basis.BoundBy, []Bound{BoundTPOT}) {
 				t.Fatalf("%+v at k=%g: bound by %v, want TPOT at an unclamped point", d, k, a.Basis.BoundBy)
 			}
@@ -90,7 +112,11 @@ func TestProperty_RoundTrip(t *testing.T) {
 			if math.Abs(fill-k) > 1e-6*k {
 				t.Fatalf("%+v: fill back %.12g, want %.12g", d, fill, k)
 			}
-			slo := SLOAtReplicas(d, ReplicasQuery{Rate: a.Value, Percentile: tg})
+			q := ReplicasQuery{Rate: a.Value}
+			if tg.Percentile > 0 {
+				q.PercentileTarget = &tg
+			}
+			slo := SLOAtReplicas(d, q)
 			back := mustAnswer(t, slo.MeanTPOT).Value
 			if tg.Percentile > 0 {
 				back = mustAnswer(t, slo.PercentileTPOT).Value
@@ -115,19 +141,20 @@ func TestProperty_RateUnderOperatingPoint(t *testing.T) {
 		d := randomDecode(r)
 		h := 0.5 + 0.5*r.Float64()
 		tg := TPOTTarget{Seconds: d.Line.ITLAt(d.Band.Lo) * (1 + 3*r.Float64())}
-		a, ok := RateForTPOT(d, tg, h).(Answer)
+		a, ok := rateFor(d, tg, h).(Answer)
 		if !ok {
 			continue
 		}
-		if a.Value > h*a.Basis.Knee*(1+1e-12) || a.Value > a.Basis.Uncapped*(1+1e-12) {
-			t.Fatalf("%+v at headroom %g: rate %g above the cap %g or the target's %g", d, h, a.Value, h*a.Basis.Knee, a.Basis.Uncapped)
+		if a.Value > h*a.Basis.KneeRate*(1+1e-12) || a.Value > a.Basis.Uncapped*(1+1e-12) {
+			t.Fatalf("%+v at headroom %g: rate %g above the cap %g or the target's %g", d, h, a.Value, h*a.Basis.KneeRate, a.Basis.Uncapped)
 		}
 		if slices.Contains(a.Basis.BoundBy, BoundOperatingPoint) {
 			capped++
 		}
 	}
-	if capped == 0 {
-		t.Fatal("no draw reached the operating-point cap")
+	t.Logf("%d of %d draws capped at the operating point", capped, propertyDraws)
+	if capped < minCappedDraws {
+		t.Fatalf("only %d draws reached the operating-point cap, want at least %d", capped, minCappedDraws)
 	}
 }
 
@@ -143,22 +170,22 @@ func TestProperty_Monotonicity(t *testing.T) {
 		h := 0.5 + 0.5*r.Float64()
 		floor := d.Line.ITLAt(d.Band.Lo)
 		tg := TPOTTarget{Seconds: floor * (0.5 + 3*r.Float64())}
-		base := pricedRate(t, RateForTPOT(d, tg, h))
+		base := pricedRate(t, rateFor(d, tg, h))
 		if base > 0 {
 			priced++
 		}
 
 		looser := tg
 		looser.Seconds *= 1 + r.Float64()
-		if got := pricedRate(t, RateForTPOT(d, looser, h)); got < base*(1-1e-12) {
+		if got := pricedRate(t, rateFor(d, looser, h)); got < base*(1-1e-12) {
 			t.Fatalf("%+v: target %g -> %g lowered the rate %g -> %g", d, tg.Seconds, looser.Seconds, base, got)
 		}
 
 		pct := TPOTTarget{Seconds: tg.Seconds, Percentile: 0.9, Ratio: TPOTRatio{Value: 1 + r.Float64()}}
 		higher := pct
 		higher.Ratio.Value *= 1 + r.Float64()
-		pBase := pricedRate(t, RateForTPOT(d, pct, h))
-		if got := pricedRate(t, RateForTPOT(d, higher, h)); got > pBase*(1+1e-12) {
+		pBase := pricedRate(t, rateFor(d, pct, h))
+		if got := pricedRate(t, rateFor(d, higher, h)); got > pBase*(1+1e-12) {
 			t.Fatalf("%+v: R_q %g -> %g raised the rate %g -> %g", d, pct.Ratio.Value, higher.Ratio.Value, pBase, got)
 		}
 		if pBase > base*(1+1e-12) {
@@ -167,7 +194,7 @@ func TestProperty_Monotonicity(t *testing.T) {
 
 		more := d
 		more.Replicas += 1 + r.IntN(8)
-		if got := pricedRate(t, RateForTPOT(more, tg, h)); got < base*(1-1e-12) {
+		if got := pricedRate(t, rateFor(more, tg, h)); got < base*(1-1e-12) {
 			t.Fatalf("%+v: %d -> %d replicas lowered the rate %g -> %g", d, d.Replicas, more.Replicas, base, got)
 		}
 
@@ -175,21 +202,21 @@ func TestProperty_Monotonicity(t *testing.T) {
 		extra := 1 + 5000*r.Float64()
 		longOut.OutputTokens += extra
 		longOut.KVPerRequest += extra / 2
-		if got := pricedRate(t, RateForTPOT(longOut, tg, h)); got > base*(1+1e-12) {
+		if got := pricedRate(t, rateFor(longOut, tg, h)); got > base*(1+1e-12) {
 			t.Fatalf("%+v: output +%g raised the rate %g -> %g", d, extra, base, got)
 		}
 		longIn := d
 		longIn.KVPerRequest += extra
-		if got := pricedRate(t, RateForTPOT(longIn, tg, h)); got > base*(1+1e-12) {
+		if got := pricedRate(t, rateFor(longIn, tg, h)); got > base*(1+1e-12) {
 			t.Fatalf("%+v: prompt +%g raised the rate %g -> %g", d, extra, base, got)
 		}
 		for _, longer := range []Decode{longOut, longIn} {
-			if k1, k2 := pricedRate(t, Knee(d)), pricedRate(t, Knee(longer)); k2 > k1*(1+1e-12) {
+			if k1, k2 := pricedRate(t, KneeRate(d)), pricedRate(t, KneeRate(longer)); k2 > k1*(1+1e-12) {
 				t.Fatalf("%+v: a longer request raised the knee %g -> %g", d, k1, k2)
 			}
 		}
 
-		knee := mustAnswer(t, Knee(d)).Value
+		knee := mustAnswer(t, KneeRate(d)).Value
 		x1 := knee * 0.98 * r.Float64()
 		x2 := x1 + (knee*0.98-x1)*r.Float64()
 		s1 := mustAnswer(t, SLOAtReplicas(d, ReplicasQuery{Rate: x1}).MeanTPOT).Value
@@ -231,73 +258,100 @@ func admissionWait(t *testing.T, d Decode, rate float64) (float64, float64) {
 	return 0, 0
 }
 
-// NaN or infinity anywhere gives a reason, never 0, +Inf or NaN as a number.
-func TestProperty_NonFiniteIsRefused(t *testing.T) {
-	bad := []float64{math.NaN(), math.Inf(1), math.Inf(-1)}
-	tg := TPOTTarget{Seconds: 0.004}
-	pct := TPOTTarget{Percentile: 0.9, Ratio: TPOTRatio{Value: 1.3}}
-	type mutate func(*Decode, *TPOTTarget, *float64, *float64)
-	fields := map[string]mutate{
-		"A":        func(d *Decode, _ *TPOTTarget, _, _ *float64) { d.Line.A = bad[0] },
-		"B":        func(d *Decode, _ *TPOTTarget, _, _ *float64) { d.Line.B = bad[0] },
-		"band lo":  func(d *Decode, _ *TPOTTarget, _, _ *float64) { d.Band.Lo = bad[0] },
-		"band hi":  func(d *Decode, _ *TPOTTarget, _, _ *float64) { d.Band.Hi = bad[0] },
-		"C":        func(d *Decode, _ *TPOTTarget, _, _ *float64) { d.CapacityTokens = bad[0] },
-		"KVreq":    func(d *Decode, _ *TPOTTarget, _, _ *float64) { d.KVPerRequest = bad[0] },
-		"OL":       func(d *Decode, _ *TPOTTarget, _, _ *float64) { d.OutputTokens = bad[0] },
-		"target":   func(_ *Decode, t *TPOTTarget, _, _ *float64) { t.Seconds = bad[0] },
-		"q":        func(_ *Decode, t *TPOTTarget, _, _ *float64) { t.Percentile, t.Ratio = bad[0], TPOTRatio{Value: 1.3} },
-		"R_q":      func(_ *Decode, t *TPOTTarget, _, _ *float64) { t.Percentile, t.Ratio = 0.9, TPOTRatio{Value: bad[0]} },
-		"headroom": func(_ *Decode, _ *TPOTTarget, h, _ *float64) { *h = bad[0] },
-		"rate":     func(_ *Decode, _ *TPOTTarget, _, x *float64) { *x = bad[0] },
+// nonFiniteInputs are the inputs every question reads, one of which a case of
+// TestProperty_NonFiniteIsRefused sets to NaN or infinity.
+type nonFiniteInputs struct {
+	d           Decode
+	target, pct TPOTTarget
+	// h1 is question 1's headroom, h2 question 2's (asked without a rate),
+	// and rate the rate FillAtRate, DecodeAdmission and question 2 (asked
+	// without a headroom) price at.
+	h1, h2, rate float64
+}
+
+// results asks every question of in and names each result.
+func (in nonFiniteInputs) results() map[string]Result {
+	byRate := SLOAtReplicas(in.d, ReplicasQuery{Rate: in.rate, PercentileTarget: &in.pct})
+	byHeadroom := SLOAtReplicas(in.d, ReplicasQuery{Headroom: in.h2, PercentileTarget: &in.pct})
+	return map[string]Result{
+		"RateForTPOT":     RateForTPOT(in.d, RateQuery{Target: in.target, Headroom: in.h1}),
+		"FillAtRate":      FillAtRate(in.d, in.rate),
+		"DecodeAdmission": DecodeAdmission(in.d, in.rate),
+		"KneeRate":        KneeRate(in.d),
+		"Q2(rate).Knee":   byRate.KneeRate,
+		"Q2(rate).Rate":   byRate.Rate,
+		"Q2(rate).Mean":   byRate.MeanTPOT,
+		"Q2(rate).Pct":    byRate.PercentileTPOT,
+		"Q2(h).Knee":      byHeadroom.KneeRate,
+		"Q2(h).Rate":      byHeadroom.Rate,
+		"Q2(h).Mean":      byHeadroom.MeanTPOT,
+		"Q2(h).Pct":       byHeadroom.PercentileTPOT,
 	}
-	for _, v := range bad {
-		bad[0] = v
-		for name, m := range fields {
-			d, target, h, rate := olsSweep(), tg, 0.85, 5.0
-			m(&d, &target, &h, &rate)
-			q := ReplicasQuery{Headroom: h, Rate: rate, Percentile: pct}
-			if name == "q" || name == "R_q" {
-				q.Percentile = target
-				target.Seconds = 0.004
+}
+
+// NaN or infinity anywhere gives a reason, never 0, +Inf or NaN as a number:
+// each input in turn is set to each non-finite value, and every result that
+// reads it must refuse while every other must still answer.
+func TestProperty_NonFiniteIsRefused(t *testing.T) {
+	everything := []string{"RateForTPOT", "FillAtRate", "DecodeAdmission", "KneeRate",
+		"Q2(rate).Knee", "Q2(rate).Rate", "Q2(rate).Mean", "Q2(rate).Pct",
+		"Q2(h).Knee", "Q2(h).Rate", "Q2(h).Mean", "Q2(h).Pct"}
+	cases := []struct {
+		input string
+		set   func(*nonFiniteInputs, float64)
+		reads []string
+	}{
+		{"A", func(in *nonFiniteInputs, v float64) { in.d.Line.A = v }, everything},
+		{"B", func(in *nonFiniteInputs, v float64) { in.d.Line.B = v }, everything},
+		{"band lo", func(in *nonFiniteInputs, v float64) { in.d.Band.Lo = v }, everything},
+		{"band hi", func(in *nonFiniteInputs, v float64) { in.d.Band.Hi = v }, everything},
+		{"C", func(in *nonFiniteInputs, v float64) { in.d.CapacityTokens = v }, everything},
+		{"KVreq", func(in *nonFiniteInputs, v float64) { in.d.KVPerRequest = v }, everything},
+		{"OL", func(in *nonFiniteInputs, v float64) { in.d.OutputTokens = v }, everything},
+		{"target", func(in *nonFiniteInputs, v float64) { in.target.Seconds = v }, []string{"RateForTPOT"}},
+		{"q", func(in *nonFiniteInputs, v float64) { in.target.Percentile, in.pct.Percentile = v, v },
+			[]string{"RateForTPOT", "Q2(rate).Pct", "Q2(h).Pct"}},
+		{"R_q", func(in *nonFiniteInputs, v float64) { in.target.Ratio.Value, in.pct.Ratio.Value = v, v },
+			[]string{"RateForTPOT", "Q2(rate).Pct", "Q2(h).Pct"}},
+		{"question 1 headroom", func(in *nonFiniteInputs, v float64) { in.h1 = v }, []string{"RateForTPOT"}},
+		{"question 2 headroom", func(in *nonFiniteInputs, v float64) { in.h2 = v },
+			[]string{"Q2(h).Rate", "Q2(h).Mean", "Q2(h).Pct"}},
+		{"rate", func(in *nonFiniteInputs, v float64) { in.rate = v },
+			[]string{"FillAtRate", "DecodeAdmission", "Q2(rate).Rate", "Q2(rate).Mean", "Q2(rate).Pct"}},
+	}
+	for _, v := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		for _, c := range cases {
+			in := nonFiniteInputs{
+				d:      olsSweep(),
+				target: TPOTTarget{Seconds: 0.004, Percentile: 0.9, Ratio: TPOTRatio{Value: 1.3}},
+				pct:    TPOTTarget{Percentile: 0.9, Ratio: TPOTRatio{Value: 1.3}},
+				h1:     0.85, h2: 0.85, rate: 5,
 			}
-			slo := SLOAtReplicas(d, q)
-			results := map[string]Result{
-				fnRate:            RateForTPOT(d, target, h),
-				"FillAtRate":      FillAtRate(d, rate),
-				"DecodeAdmission": DecodeAdmission(d, rate),
-				"Knee":            Knee(d),
-				"SLO.Knee":        slo.Knee,
-				"SLO.Rate":        slo.Rate,
-				"SLO.MeanTPOT":    slo.MeanTPOT,
-				fnPercentile:      slo.PercentileTPOT,
-			}
-			for fn, res := range results {
-				affected := touches(name, fn)
+			c.set(&in, v)
+			for fn, res := range in.results() {
+				reads := slices.Contains(c.reads, fn)
 				switch got := res.(type) {
 				case Unanswerable:
-					if !affected {
-						t.Errorf("%s = %g: %s refused (%v) on an input it does not read", name, v, fn, got)
+					if !reads {
+						t.Errorf("%s = %g: %s refused (%v) on an input it does not read", c.input, v, fn, got)
 					}
 				case Answer:
-					if affected {
-						t.Errorf("%s = %g: %s answered %g instead of refusing", name, v, fn, got.Value)
+					if reads {
+						t.Errorf("%s = %g: %s answered %g instead of refusing", c.input, v, fn, got.Value)
 					} else if !Finite(got.Value) {
-						t.Errorf("%s = %g: %s answered a non-finite %g", name, v, fn, got.Value)
+						t.Errorf("%s = %g: %s answered a non-finite %g", c.input, v, fn, got.Value)
 					}
 				case Admission:
-					if affected {
-						t.Errorf("%s = %g: %s answered %+v instead of refusing", name, v, fn, got)
+					if reads {
+						t.Errorf("%s = %g: %s answered %+v instead of refusing", c.input, v, fn, got)
 					}
 				default:
-					t.Errorf("%s = %g: %s returned %#v", name, v, fn, res)
+					t.Errorf("%s = %g: %s returned %#v", c.input, v, fn, res)
 				}
 			}
 		}
-	}
-	// The fix D2 makes in PriceTPOT: a NaN band edge priced OK with a NaN
-	// fill.
-	for _, v := range bad {
+		// The fix D2 makes in PriceTPOT: a NaN band edge priced OK with a NaN
+		// fill.
 		for _, b := range []FillBand{{Lo: v, Hi: 0.8}, {Lo: 0.15, Hi: v}} {
 			if p := PriceTPOT(b, olsSweep().Line, 0.004); p.OK {
 				t.Errorf("PriceTPOT with band %+v: OK with fill %g, want OK false", b, p.Fill)
@@ -306,54 +360,31 @@ func TestProperty_NonFiniteIsRefused(t *testing.T) {
 	}
 }
 
-// fnRate and fnPercentile name the results the target's own inputs reach.
-const (
-	fnRate       = "RateForTPOT"
-	fnPercentile = "SLO.Percentile"
-)
-
-// touches says whether a function's result reads the named input.
-func touches(input, fn string) bool {
-	switch input {
-	case "A", "B", "band lo", "band hi", "C", "KVreq", "OL":
-		return true
-	case "target":
-		return fn == fnRate
-	case "q", "R_q":
-		return fn == fnRate || fn == fnPercentile
-	case "headroom":
-		return fn == fnRate
-	case "rate":
-		return fn == "FillAtRate" || fn == "DecodeAdmission" || fn == "SLO.Rate" || fn == "SLO.MeanTPOT" || fn == fnPercentile
-	}
-	return false
-}
-
 // Every Unanswerable reason has a case that produces it.
 func TestProperty_EveryReasonHasACase(t *testing.T) {
 	d := olsSweep()
 	with := func(f func(*Decode)) Decode { c := d; f(&c); return c }
-	knee := mustAnswer(t, Knee(d)).Value
+	knee := mustAnswer(t, KneeRate(d)).Value
 	cases := map[Reason]Result{
-		NoLine:             Knee(with(func(c *Decode) { c.Line = itl.Model{} })),
-		NoCapacity:         Knee(with(func(c *Decode) { c.CapacityTokens = 0 })),
-		NoBatchCap:         Knee(with(func(c *Decode) { c.ReplicaCap = 0 })),
-		NoTraffic:          Knee(with(func(c *Decode) { c.OutputTokens = 0 })),
-		TokenGapPercentile: RateForTPOT(d, TPOTTarget{Seconds: 0.004, Percentile: 0.9, OverTokenGaps: true}, 0.85),
-		NoTPOTHistogram:    RateForTPOT(d, TPOTTarget{Seconds: 0.004, Percentile: 0.9}, 0.85),
-		TPOTQuantileUnbounded: TPOTRatioFromWindows([]TPOTWindow{{
+		NoLine:             KneeRate(with(func(c *Decode) { c.Line = itl.Model{} })),
+		NoCapacity:         KneeRate(with(func(c *Decode) { c.CapacityTokens = 0 })),
+		NoBatchCap:         KneeRate(with(func(c *Decode) { c.ReplicaCap = 0 })),
+		NoTraffic:          KneeRate(with(func(c *Decode) { c.OutputTokens = 0 })),
+		TokenGapPercentile: rateFor(d, TPOTTarget{Seconds: 0.004, Percentile: 0.9, OverTokenGaps: true}, 0.85),
+		NoTPOTHistogram:    rateFor(d, TPOTTarget{Seconds: 0.004, Percentile: 0.9}, 0.85),
+		TPOTQuantileUnbounded: ratioFrom([]TPOTWindow{{
 			Buckets: []HistogramBucket{{UpperEdge: 0.005, Count: 50}, {UpperEdge: math.Inf(1), Count: 100}},
 			Sum:     1, Count: 100,
 		}}, 0.9),
-		TargetBelowFloor: RateForTPOT(d, TPOTTarget{Seconds: 0.002}, 0.85),
+		TargetBelowFloor: rateFor(d, TPOTTarget{Seconds: 0.002}, 0.85),
 		Saturated:        FillAtRate(d, knee),
-		NoDecodeReplicas: Knee(with(func(c *Decode) { c.Replicas = 0 })),
-		MalformedHistogram: TPOTRatioFromWindows([]TPOTWindow{{
+		NoDecodeReplicas: KneeRate(with(func(c *Decode) { c.Replicas = 0 })),
+		MalformedHistogram: ratioFrom([]TPOTWindow{{
 			Buckets: []HistogramBucket{{UpperEdge: 0.005, Count: 50}, {UpperEdge: 0.002, Count: 100}},
 			Sum:     1, Count: 100,
 		}}, 0.9),
 		TooManySlots: DecodeAdmission(with(func(c *Decode) { c.ReplicaCap, c.CapacityTokens = 1e10, 1e16 }), 1),
-		InvalidInput: RateForTPOT(d, TPOTTarget{Seconds: 0.004}, 1.5),
+		InvalidInput: rateFor(d, TPOTTarget{Seconds: 0.004}, 1.5),
 	}
 	for _, reason := range Reasons() {
 		res, ok := cases[reason]
@@ -402,10 +433,9 @@ func TestProperty_AdmissionMatchesSimulation(t *testing.T) {
 			// replica cap, or the whole requests the band's top holds. A
 			// rounding up would admit a request the band cannot hold.
 			c := int(min(float64(tc.d.ReplicaCap), math.Floor(tc.d.Band.Hi*tc.d.CapacityTokens/tc.d.KVPerRequest)))
-			mu := func(m int) float64 {
-				k := min(max(float64(m)*tc.d.KVPerRequest/tc.d.CapacityTokens, tc.d.Band.Lo), tc.d.Band.Hi)
-				return float64(m) / (tc.d.OutputTokens * tc.d.Line.ITLAt(k))
-			}
+			// The completion rates are the chain's own (chainMu): what the
+			// simulation checks is the chain's queueing, not its ITL reading.
+			mu := func(m int) float64 { return tc.d.chainMu(float64(m)) }
 			rate := tc.frac * mu(c) * float64(tc.d.Replicas)
 			ch := DecodeAdmission(tc.d, rate).(Admission)
 			if ch.Slots != c {
@@ -446,7 +476,13 @@ func (s simResult) exceeds(x float64) float64 {
 func simulate(r *rand.Rand, lam float64, mu func(m int) float64, c, n int) simResult {
 	var now float64
 	inSystem := 0
-	var queue []float64
+	// waiter is an arrival that found every slot taken; counted is false for
+	// one that arrived in the warm-up, whose wait is not recorded.
+	type waiter struct {
+		at      float64
+		counted bool
+	}
+	var queue []waiter
 	waits := make([]float64, 0, n)
 	warm := n / 10
 	arrivals := 0
@@ -465,19 +501,15 @@ func simulate(r *rand.Rand, lam float64, mu func(m int) float64, c, n int) simRe
 					waits = append(waits, 0)
 				}
 			} else {
-				arrival := now
-				if !counted {
-					arrival = math.NaN() // waited, but in the warm-up
-				}
-				queue = append(queue, arrival)
+				queue = append(queue, waiter{at: now, counted: counted})
 			}
 			inSystem++
 			continue
 		}
 		inSystem--
 		if len(queue) > 0 && inSystem >= c {
-			if a := queue[0]; !math.IsNaN(a) {
-				waits = append(waits, now-a)
+			if w := queue[0]; w.counted {
+				waits = append(waits, now-w.at)
 			}
 			queue = queue[1:]
 		}
@@ -553,7 +585,7 @@ func TestProperty_TPOTRatio(t *testing.T) {
 		}
 		slices.Sort(truth)
 		trueRatio := max(1, truth[int(math.Ceil(0.90*float64(len(truth))))-1])
-		res := TPOTRatioFromWindows(windows, q)
+		res := ratioFrom(windows, q)
 		if u, ok := res.(Unanswerable); ok {
 			if u.Reason != TPOTQuantileUnbounded {
 				t.Fatalf("draw %d: %v", draw, u)
@@ -578,20 +610,20 @@ func TestProperty_TPOTRatio(t *testing.T) {
 	// ten requests at 1 ms, one at 100 ms, so the mean is 10.9 ms and the
 	// p90 bucket's edge 2.05 ms.
 	skew := bucketed(append(slices.Repeat([]float64{0.001}, 90), slices.Repeat([]float64{0.1}, 10)...), routerEdges)
-	if got := mustAnswer(t, TPOTRatioFromWindows([]TPOTWindow{skew}, q)); got.Value != 1 {
+	if got := mustAnswer(t, ratioFrom([]TPOTWindow{skew}, q)); got.Value != 1 {
 		t.Errorf("R_q from a quantile below the mean = %g, want 1", got.Value)
 	}
 
 	// The page's resolution note: at a 3.66 ms mean the p90 lands in (2.05, 5]
 	// and reads 1.37, flagged coarse.
 	flat := bucketed(slices.Repeat([]float64{0.00366}, 100), routerEdges)
-	got := mustAnswer(t, TPOTRatioFromWindows([]TPOTWindow{flat}, q))
+	got := mustAnswer(t, ratioFrom([]TPOTWindow{flat}, q))
 	near(t, "R_q on the default edges at 3.66 ms", got.Value, 0.005/0.00366, 1e-12)
 	if !got.HasFlag(CoarseTPOTBucket) {
 		t.Errorf("a (2.05, 5] ms bucket at a 3.66 ms mean is not flagged coarse")
 	}
 	fine := bucketed(slices.Repeat([]float64{0.00366}, 100), []float64{0.0035, 0.00375, 0.004, math.Inf(1)})
-	if got := mustAnswer(t, TPOTRatioFromWindows([]TPOTWindow{fine}, q)); got.HasFlag(CoarseTPOTBucket) {
+	if got := mustAnswer(t, ratioFrom([]TPOTWindow{fine}, q)); got.HasFlag(CoarseTPOTBucket) {
 		t.Errorf("a 0.25 ms bucket at a 3.66 ms mean is flagged coarse")
 	}
 
@@ -604,7 +636,7 @@ func TestProperty_TPOTRatio(t *testing.T) {
 	dip := TPOTWindow{Buckets: []HistogramBucket{
 		{UpperEdge: 0.00205, Count: 99.6}, {UpperEdge: 0.005, Count: 100}, {UpperEdge: math.Inf(1), Count: 99.5},
 	}, Sum: 0.2, Count: 100}
-	near(t, "R_q over a dip", mustAnswer(t, TPOTRatioFromWindows([]TPOTWindow{dip}, 0.999)).Value, 0.005/0.002, 1e-12)
+	near(t, "R_q over a dip", mustAnswer(t, ratioFrom([]TPOTWindow{dip}, 0.999)).Value, 0.005/0.002, 1e-12)
 
 	// The rank is against the +Inf bucket's count, the histogram's own total,
 	// not _count, scraped separately: here _count reads 101 against 100 in
@@ -614,7 +646,7 @@ func TestProperty_TPOTRatio(t *testing.T) {
 	skewCount := TPOTWindow{Buckets: []HistogramBucket{
 		{UpperEdge: 0.00205, Count: 50}, {UpperEdge: 0.005, Count: 99}, {UpperEdge: math.Inf(1), Count: 100},
 	}, Sum: 0.202, Count: 101}
-	near(t, "R_q ranked against +Inf", mustAnswer(t, TPOTRatioFromWindows([]TPOTWindow{skewCount}, 0.99)).Value, 0.005/0.002, 1e-12)
+	near(t, "R_q ranked against +Inf", mustAnswer(t, ratioFrom([]TPOTWindow{skewCount}, 0.99)).Value, 0.005/0.002, 1e-12)
 
 	// Data that cannot be read is a refusal with a data reason (exit 3), not
 	// a usage error; only a percentile outside (0, 1) is the caller's.
@@ -625,16 +657,17 @@ func TestProperty_TPOTRatio(t *testing.T) {
 		"falling edges":     {Buckets: []HistogramBucket{{UpperEdge: 0.005, Count: 1}, {UpperEdge: 0.002, Count: 1}}, Sum: 1, Count: 1},
 		"no sum":            {Buckets: []HistogramBucket{{UpperEdge: math.Inf(1), Count: 1}}, Sum: 0, Count: 1},
 		"an infinite count": {Buckets: []HistogramBucket{{UpperEdge: math.Inf(1), Count: 1}}, Sum: 1, Count: math.Inf(1)},
+		"no buckets":        {Sum: 1, Count: 1},
 	} {
-		if u, ok := TPOTRatioFromWindows([]TPOTWindow{w}, q).(Unanswerable); !ok || u.Reason != MalformedHistogram {
-			t.Errorf("%s: %#v, want MalformedHistogram", name, TPOTRatioFromWindows([]TPOTWindow{w}, q))
+		if u, ok := ratioFrom([]TPOTWindow{w}, q).(Unanswerable); !ok || u.Reason != MalformedHistogram {
+			t.Errorf("%s: %#v, want MalformedHistogram", name, ratioFrom([]TPOTWindow{w}, q))
 		}
 	}
-	if u, ok := TPOTRatioFromWindows([]TPOTWindow{flat}, 1).(Unanswerable); !ok || u.Reason != InvalidInput {
+	if u, ok := ratioFrom([]TPOTWindow{flat}, 1).(Unanswerable); !ok || u.Reason != InvalidInput {
 		t.Errorf("q = 1: want InvalidInput")
 	}
 
-	if res := TPOTRatioFromWindows(nil, q); res.(Unanswerable).Reason != NoTPOTHistogram {
+	if res := ratioFrom(nil, q); res.(Unanswerable).Reason != NoTPOTHistogram {
 		t.Errorf("no windows: %#v", res)
 	}
 }

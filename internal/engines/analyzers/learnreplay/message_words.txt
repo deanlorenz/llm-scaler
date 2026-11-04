@@ -40,6 +40,7 @@
 168h
 1h
 1m
+2
 20060102T150405.000000000Z
 24
 24h
@@ -64,9 +65,11 @@ Analyze
 Applied
 Applying
 ArgsFingerprint
+AssumedTPOTRatio
 AvgInputTokens/AvgOutputTokens/PrefixCacheHitRate
 B
 BaseURL
+BelowFittedBand
 Bound
 C0-agree
 C1-single
@@ -76,6 +79,7 @@ Cannot
 Check
 Closing
 ClusterQueue
+CoarseTPOTBucket
 Collected
 Composite
 CompositeSignal
@@ -134,10 +138,12 @@ Inferencepool
 Intel
 Invalid
 InvalidImageName
+InvalidInput
 It
 JSON
 KEDA
 KV
+KVBoundSlots
 Kubernetes
 Kueue
 LEADER_ELECT
@@ -161,6 +167,7 @@ METRICS_CERT_KEY
 METRICS_CERT_NAME
 METRICS_CERT_PATH
 METRICS_SECURE
+MalformedHistogram
 MeasuredLowConfirmFor
 Metrics
 Minimum
@@ -174,6 +181,12 @@ Name
 NewEngine
 NewTypeInventoryWithUsage
 No
+NoBatchCap
+NoCapacity
+NoDecodeReplicas
+NoLine
+NoTPOTHistogram
+NoTraffic
 NotTriggerScaleUp
 Nothing
 OLS
@@ -225,6 +238,7 @@ Processing
 Prometheus
 Published
 REST_CLIENT_TIMEOUT
+R_q
 Ready
 RecordedValue
 Recording
@@ -250,6 +264,7 @@ SCALING_POLICY_CONFIG_MAP_NAME
 SGLang
 STOP
 Safety
+Saturated
 Saturation
 SaturationOnlyMode
 SaturationSafetyOverride
@@ -272,9 +287,14 @@ T2-default
 T2-failed
 T2-held
 T2-pinned
+TPOT
+TPOTQuantileUnbounded
 Target
+TargetBelowFloor
 The
 This
+TokenGapPercentile
+TooManySlots
 TriggeredScaleUp
 UP
 Unable
@@ -415,6 +435,7 @@ arrivingPromptTokens
 arrivingRead
 as
 asked
+assumed
 assumes
 at
 attainment
@@ -777,6 +798,7 @@ dwell
 e.g
 each
 earlier
+edge
 edges
 effect
 effective
@@ -943,6 +965,7 @@ frozen
 full
 future
 gap
+gaps
 gate
 gates
 generated
@@ -1009,12 +1032,14 @@ heldUntil
 heldUntilStableOrBy
 heldWhy
 here
+hi
 hicache_size
 hierarchical
 high
 highest
 highestGroup
 hint
+histogram
 history
 historyAgeSeconds
 historyKey
@@ -1189,6 +1214,7 @@ kept
 key
 keyOutputTokens
 kind
+knee
 know
 known
 known-failures
@@ -1238,6 +1264,7 @@ later
 latest
 launcher
 layout
+le
 leader-elect
 leader-election-lease-duration
 leader-election-renew-deadline
@@ -1298,6 +1325,7 @@ liveness
 llm-d.ai/role
 llm-d.ai/utilization-share-transfer
 llm_d_epp_flow_control_queue_size
+lo
 load
 loadImbalance
 loadImbalance.idleKvUsage
@@ -1407,6 +1435,7 @@ model_name
 model_path
 model_revision
 model_unresolved
+modelled
 models
 modelsProcessed
 moe_a2a_backend
@@ -1575,12 +1604,15 @@ ones
 only
 onto
 open
+operating
+operating-point
 operation
 operator
 optimization
 optimizer
 optimizer.type
 or
+order
 ordered
 orderedBehindQueue
 oscillate
@@ -1652,12 +1684,14 @@ pendingVariants
 per
 per-model
 per-replica
+per-request
 per-role
 perModel
 perReplicaCapacity
 perReplicaTokensPerSec
 percent
 percentile
+percentiles
 period
 persist
 persisted
@@ -1686,6 +1720,7 @@ pod/
 podGPUs
 pods
 podsOmitted
+point
 pointer
 policies
 policy
@@ -1732,6 +1767,7 @@ price
 priceCase
 priced
 pricedA
+prices
 prior
 prior-live
 priority
@@ -1755,9 +1791,12 @@ provider
 providersSkipped
 published
 publishes
+q
+quantile
 quantization
 quarter
 query
+question
 queue
 queue-scorer
 queueJustifiedReplicas
@@ -1774,6 +1813,7 @@ quota
 quota-limiter
 quotas
 r
+r/s
 raise
 raised
 raisedByRole
@@ -1783,6 +1823,7 @@ range
 rank
 rate
 rather
+ratio
 raw
 rc
 re
@@ -2127,6 +2168,7 @@ slope
 slopeAge
 slopeAgeSeconds
 slopeHeld
+slots
 slow
 slower
 small
@@ -2179,6 +2221,7 @@ stashed
 stashedWindows
 state
 static
+stationary
 statistic
 status
 stayed
@@ -2216,6 +2259,7 @@ success
 successfully
 such
 sum
+summing
 supply
 supported
 sustainFor
@@ -2308,6 +2352,7 @@ tolerance
 too
 too-few-readings
 took
+top
 totalAvail
 totalDecisions
 totalDemand

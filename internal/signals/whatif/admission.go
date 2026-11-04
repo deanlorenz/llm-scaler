@@ -27,10 +27,9 @@ type Admission struct {
 	// Slots is c: the replica cap, or the whole requests the band's top holds
 	// where that is fewer (flagged KVBoundSlots).
 	Slots int
-	// Fill is the mean KV fill the chain spends its time at.
-	Fill float64
-	// Basis carries the knee the chain saturates at and what set the slots.
-	// (The ITL line's tier joins it with the basis of the planner's D3 PR.)
+	// Basis carries the mean KV fill the chain spends its time at (Fill), the
+	// knee it saturates at (KneeRate) and what set the slots (BoundBy). The
+	// ITL line's tier joins it with the basis of the planner's D3 PR.
 	Basis Basis
 	Flags []Flag
 }
@@ -79,8 +78,8 @@ const maxSlots = 1_000_000
 
 // DecodeAdmission prices decode admission at rate requests per second over the
 // fleet, shared evenly across the replicas. It saturates exactly where the
-// knee does (Knee): mu_c is c / (OL * ITL(k_full)), the knee per replica, and
-// at or above it the chain has no stationary state (Saturated).
+// knee does (KneeRate): both are chainMu at the slots, so at or above the knee
+// the chain has no stationary state (Saturated).
 //
 // The slots are the replica's saturation point (the same as the knee's): the
 // replica cap, or the whole requests the band's top holds where that is fewer,
@@ -97,57 +96,60 @@ func DecodeAdmission(d Decode, rate float64) Result {
 	if u := d.check(); u != nil {
 		return *u
 	}
-	if !Finite(rate) || rate < 0 {
-		return refuse(InvalidInput, fmt.Sprintf("rate %g", rate))
+	if u := checkRate(rate); u != nil {
+		return *u
 	}
 	p := d.full()
 	if p.slots > maxSlots {
 		return refuse(TooManySlots, fmt.Sprintf("%g slots on one replica, above the %d the chain holds", p.slots, maxSlots))
 	}
+	// Before the chain allocates: past the knee there is nothing to solve.
+	knee := d.kneeRate()
+	if rate >= knee {
+		return refuse(Saturated, fmt.Sprintf("%g r/s at or above the knee %g r/s", rate, knee))
+	}
 	c := int(p.slots)
+	ch, ok := birthDeath(rate/float64(d.Replicas), func(m int) float64 { return d.chainMu(float64(m)) }, c)
+	if !ok {
+		return refuse(Saturated, fmt.Sprintf("%g r/s per replica: the chain has no stationary state", rate/float64(d.Replicas)))
+	}
 	flags := p.flags()
 	if p.by == BoundBandTop {
 		flags = append(flags, KVBoundSlots)
 	}
-	mu := func(m int) float64 {
-		k := min(max(float64(m)*d.KVPerRequest/d.CapacityTokens, d.Band.Lo), d.Band.Hi)
-		return float64(m) / (d.OutputTokens * d.Line.ITLAt(k))
+	return Admission{
+		WaitProbability: ch.wait, Decay: ch.decay, Slots: c, Flags: flags,
+		Basis: Basis{Fill: ch.seqs * d.KVPerRequest / d.CapacityTokens, KneeRate: knee, BoundBy: []Bound{p.by}},
 	}
-	lam := rate / float64(d.Replicas)
-	knee := d.knee()
-	ch, ok := birthDeath(lam, mu, c)
-	if !ok || rate >= knee {
-		return refuse(Saturated, fmt.Sprintf("%g r/s at or above the knee %g r/s", rate, knee))
-	}
-	ch.Slots, ch.Flags = c, flags
-	ch.Fill *= d.KVPerRequest / d.CapacityTokens
-	ch.Basis = Basis{Fill: ch.Fill, Knee: knee, BoundBy: []Bound{p.by}}
-	return ch
 }
+
+// chain is a solved birth-death chain: the wait probability, the decay of the
+// wait above the slots, and the mean of min(n, c), in sequences.
+type chain struct{ wait, decay, seqs float64 }
 
 // birthDeath solves the chain with arrival rate lam, completion rate mu(m)
 // with m requests in service for m in 1..c, and mu(c) above c. ok is false when
-// lam >= mu(c) or a rate is unusable. Fill is returned in sequences (the mean
-// of min(n, c)); the caller scales it to KV.
+// lam >= mu(c), a rate is unusable, or c is outside [1, maxSlots], the bound
+// that keeps the one state per slot it allocates finite.
 //
 // The stationary weights are products of lam/mu(m), which overflow long before
 // c reaches a large engine's batch cap, so they are summed in logs.
-func birthDeath(lam float64, mu func(m int) float64, c int) (Admission, bool) {
-	if c < 1 || !Finite(lam) || lam < 0 {
-		return Admission{}, false
+func birthDeath(lam float64, mu func(m int) float64, c int) (chain, bool) {
+	if c < 1 || c > maxSlots || !Finite(lam) || lam < 0 {
+		return chain{}, false
 	}
 	muC := mu(c)
 	if !Finite(muC) || !(muC > lam) {
-		return Admission{}, false
+		return chain{}, false
 	}
 	if lam == 0 {
-		return Admission{Decay: muC}, true
+		return chain{decay: muC}, true
 	}
 	logW := make([]float64, c+1)
 	for m := 1; m <= c; m++ {
 		mm := mu(m)
 		if !Finite(mm) || !(mm > 0) {
-			return Admission{}, false
+			return chain{}, false
 		}
 		logW[m] = logW[m-1] + math.Log(lam/mm)
 	}
@@ -168,5 +170,5 @@ func birthDeath(lam float64, mu func(m int) float64, c int) (Admission, bool) {
 	tail := math.Exp(logTail - hi)
 	z += tail
 	seqs += float64(c) * tail
-	return Admission{WaitProbability: tail / z, Decay: muC - lam, Fill: seqs / z}, true
+	return chain{wait: tail / z, decay: muC - lam, seqs: seqs / z}, true
 }

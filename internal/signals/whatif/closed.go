@@ -101,7 +101,7 @@ func (d Decode) full() fullPoint {
 		p.slots, p.by = cp, BoundBatchCap
 	}
 	p.slotFill = p.slots * d.KVPerRequest / d.CapacityTokens
-	p.fill = p.slotFill
+	p.fill = min(p.slotFill, d.Band.Hi) // a rounding above Hi reads Hi, as chainMu does
 	if p.slotFill < d.Band.Lo {
 		p.fill, p.belowBand = d.Band.Lo, true
 	}
@@ -116,10 +116,11 @@ func (p fullPoint) flags() []Flag {
 	return nil
 }
 
-// replicaRate is lambda_rep(k), one replica's request rate at fill k, with
-// the sequences capped at the slots.
+// replicaRate is lambda_rep(k), one replica's request rate at fill k: the
+// sequences resident there, capped at the slots (CappedSequences), each
+// advancing a token every ITL(k), over the output length.
 func (d Decode) replicaRate(k float64) float64 {
-	seqs := min(itl.Sequences(k, d.CapacityTokens, d.KVPerRequest), d.full().slots)
+	seqs := CappedSequences(k, d.CapacityTokens, d.KVPerRequest, d.full().slots)
 	itlSec := d.Line.ITLAt(k)
 	if !(seqs > 0) || !(itlSec > 0) {
 		return 0
@@ -127,10 +128,19 @@ func (d Decode) replicaRate(k float64) float64 {
 	return seqs / (itlSec * d.OutputTokens)
 }
 
-// knee is the fleet's decode knee, N_d * c / (OL * ITL(k_full)).
-func (d Decode) knee() float64 {
-	p := d.full()
-	return float64(d.Replicas) * p.slots / (d.OutputTokens * d.Line.ITLAt(p.fill))
+// chainMu is the rate a replica holding m sequences completes them:
+// m / (OL * ITL(k_m)), with k_m = m*KVreq/C clamped to the band (a fill below
+// it reads the band's bottom). The admission chain's state m completes at
+// chainMu(min(m, c)), and the knee is N_d * chainMu(c): one formula, so the
+// chain and the knee saturate at the same rate by construction.
+func (d Decode) chainMu(m float64) float64 {
+	k := min(max(m*d.KVPerRequest/d.CapacityTokens, d.Band.Lo), d.Band.Hi)
+	return m / (d.OutputTokens * d.Line.ITLAt(k))
+}
+
+// kneeRate is the fleet's knee, N_d * chainMu(c): N_d * c / (OL * ITL(k_full)).
+func (d Decode) kneeRate() float64 {
+	return float64(d.Replicas) * d.chainMu(d.full().slots)
 }
 
 // fillAtReplicaRate is the closed-form fill one replica runs at while it
@@ -153,18 +163,33 @@ func (d Decode) fillAtReplicaRate(lam float64) (k float64, ok bool) {
 	return k, true
 }
 
-// Knee is the rate, in requests per second over the fleet, at which the
-// decode replicas saturate: N_d * c / (OL * ITL(k_full)) (question 2, step 1).
-// Its Basis names whether the band's top or the batch cap set the slots, and
+// KneeRate is the rate, in requests per second over the fleet, at which the
+// decode replicas saturate, N_d * c / (OL * ITL(k_full)) (question 2, step 1):
+// the knee. Basis.KneeRate repeats it, Basis.Fill is k_full, Basis.BoundBy
+// names whether the band's top or the batch cap set the slots, and
 // BelowFittedBand flags a knee read at the band's bottom because the slots
 // fill less than it.
-func Knee(d Decode) Result {
+func KneeRate(d Decode) Result {
 	if u := d.check(); u != nil {
 		return *u
 	}
+	return d.kneeAnswer()
+}
+
+func (d Decode) kneeAnswer() Answer {
 	p := d.full()
-	knee := d.knee()
-	return Answer{Value: knee, Flags: p.flags(), Basis: Basis{Fill: p.fill, Knee: knee, BoundBy: []Bound{p.by}}}
+	knee := d.kneeRate()
+	return Answer{Value: knee, Flags: p.flags(), Basis: Basis{Fill: p.fill, KneeRate: knee, BoundBy: []Bound{p.by}}}
+}
+
+// checkRate refuses a rate that is not a finite, non-negative number of
+// requests per second.
+func checkRate(rate float64) *Unanswerable {
+	if Finite(rate) && rate >= 0 {
+		return nil
+	}
+	u := refuse(InvalidInput, fmt.Sprintf("rate %g, want a finite rate of at least 0", rate))
+	return &u
 }
 
 // FillAtRate is the KV fill each decode replica runs at while the fleet
@@ -174,10 +199,14 @@ func FillAtRate(d Decode, rate float64) Result {
 	if u := d.check(); u != nil {
 		return *u
 	}
-	if !Finite(rate) || rate < 0 {
-		return refuse(InvalidInput, fmt.Sprintf("rate %g", rate))
+	return d.fillAtRate(rate)
+}
+
+func (d Decode) fillAtRate(rate float64) Result {
+	if u := checkRate(rate); u != nil {
+		return *u
 	}
-	knee := d.knee()
+	knee := d.kneeRate()
 	if rate >= knee {
 		return refuse(Saturated, fmt.Sprintf("rate %g r/s at or above the knee %g r/s", rate, knee))
 	}
@@ -185,7 +214,7 @@ func FillAtRate(d Decode, rate float64) Result {
 	if !ok {
 		return refuse(Saturated, fmt.Sprintf("no fill carries %g r/s", rate))
 	}
-	return Answer{Value: k, Basis: Basis{Fill: k, Knee: knee}}
+	return Answer{Value: k, Basis: Basis{Fill: k, KneeRate: knee}}
 }
 
 // TPOTTarget is a TPOT service level: the mean, or a percentile over requests
@@ -239,14 +268,15 @@ func (t TPOTTarget) ratio() (float64, []Flag, *Unanswerable) {
 	return 0, nil, &u
 }
 
-// checkHeadroom refuses a headroom outside (0, 1]: the fraction of the knee
-// the operating point sits at, 1 lifting the cap.
-func checkHeadroom(h float64) *Unanswerable {
-	if h > 0 && h <= 1 {
-		return nil
-	}
-	u := refuse(InvalidInput, fmt.Sprintf("headroom %g, want 0 < headroom <= 1", h))
-	return &u
+// RateQuery is question 1's input beyond the fleet.
+type RateQuery struct {
+	// Target is the TPOT service level.
+	Target TPOTTarget
+	// Headroom places the operating-point cap at Headroom times the knee: the
+	// scaling policy's scaleUpThreshold, 0.85 by default. Valid in (0, 1]; 1
+	// lifts the cap, and the knee alone bounds the rate. Anything else is
+	// InvalidInput.
+	Headroom float64
 }
 
 // RateForTPOT answers question 1 for decode: the largest rate, in requests per
@@ -261,10 +291,11 @@ func checkHeadroom(h float64) *Unanswerable {
 //
 // Basis.Uncapped is the rate the target alone allows, Basis.Fill the fill the
 // answer runs at, and Basis.BoundBy what set the rate.
-func RateForTPOT(d Decode, t TPOTTarget, headroom float64) Result {
+func RateForTPOT(d Decode, q RateQuery) Result {
 	if u := d.check(); u != nil {
 		return *u
 	}
+	t := q.Target
 	if !Finite(t.Seconds) || !(t.Seconds > 0) {
 		return refuse(InvalidInput, fmt.Sprintf("TPOT target %g s", t.Seconds))
 	}
@@ -272,8 +303,8 @@ func RateForTPOT(d Decode, t TPOTTarget, headroom float64) Result {
 	if u != nil {
 		return *u
 	}
-	if u := checkHeadroom(headroom); u != nil {
-		return *u
+	if !(q.Headroom > 0 && q.Headroom <= 1) {
+		return refuse(InvalidInput, fmt.Sprintf("headroom %g, want 0 < headroom <= 1 for question 1", q.Headroom))
 	}
 	floor := d.Line.ITLAt(d.Band.Lo) * r
 	if floor >= t.Seconds {
@@ -286,7 +317,7 @@ func RateForTPOT(d Decode, t TPOTTarget, headroom float64) Result {
 		k, by = p.fill, []Bound{p.by}
 		flags = append(flags, p.flags()...)
 	}
-	knee := d.knee()
+	knee := d.kneeRate()
 	uncapped := float64(d.Replicas) * d.replicaRate(k)
 	if !Finite(uncapped) || !(uncapped > 0) {
 		return refuse(NoLine, fmt.Sprintf("the line prices no rate at fill %g", k))
@@ -294,7 +325,7 @@ func RateForTPOT(d Decode, t TPOTTarget, headroom float64) Result {
 	rate := uncapped
 	// A headroom of 1 is no cap: the knee bounds the rate, and the
 	// operating point is not named.
-	if op := headroom * knee; headroom < 1 && rate >= op {
+	if op := q.Headroom * knee; q.Headroom < 1 && rate >= op {
 		if rate > op {
 			// The cap's own fill, from the closed form. Below the knee it
 			// exists; if it did not, the answer would have no fill to stand
@@ -311,39 +342,43 @@ func RateForTPOT(d Decode, t TPOTTarget, headroom float64) Result {
 		by = append([]Bound{BoundOperatingPoint}, by...)
 	}
 	return Answer{Value: rate, Flags: flags, Basis: Basis{
-		Fill: k, Knee: knee, Floor: floor, Uncapped: uncapped, BoundBy: by,
+		Fill: k, KneeRate: knee, Floor: floor, Uncapped: uncapped, BoundBy: by,
 	}}
 }
 
 // ReplicasQuery is question 2's input beyond the fleet: where to operate, and
-// which TPOT percentile to report besides the mean.
+// which TPOT percentile to report besides the mean. Set exactly one of
+// Headroom and Rate; both set, or neither, is InvalidInput.
 type ReplicasQuery struct {
 	// Headroom places the operating point at Headroom times the knee: the
-	// scaling policy's scaleUpThreshold, 0.85 by default. Used when Rate is 0,
-	// and then it must lie in (0, 1): unlike question 1, where 1 lifts the
-	// cap, question 2 refuses 1 (InvalidInput), because the knee itself is a
-	// point no fill carries.
+	// scaling policy's scaleUpThreshold, 0.85 by default. Valid in (0, 1):
+	// unlike question 1, where 1 lifts the cap, question 2 refuses 1, because
+	// the knee itself is a point no fill carries (ask KneeRate for it).
 	Headroom float64
-	// Rate, when positive, is the operating rate in requests per second over
-	// the fleet, in place of Headroom times the knee (--rate).
+	// Rate is the operating rate in requests per second over the fleet, in
+	// place of Headroom times the knee (--rate). Valid when finite and
+	// positive; at or above the knee it is Saturated.
 	Rate float64
-	// Percentile, when set, asks for the TPOT at that per-request percentile
-	// as well as the mean (TPOTTarget.Percentile, TPOTTarget.Ratio and
-	// TPOTTarget.OverTokenGaps; Seconds is ignored).
-	Percentile TPOTTarget
+	// PercentileTarget, when not nil, asks for the TPOT at that per-request
+	// percentile as well as the mean (its Percentile, Ratio and
+	// OverTokenGaps; Seconds is ignored). Nil asks for the mean only.
+	PercentileTarget *TPOTTarget
 }
 
 // DecodeSLO is question 2's decode answer. Each field is its own Result, so a
 // percentile refused for want of a histogram leaves the mean answered.
 type DecodeSLO struct {
-	// Knee is the saturation rate, requests per second over the fleet.
-	Knee Result
+	// KneeRate is the saturation rate, requests per second over the fleet.
+	KneeRate Result
 	// Rate is the operating rate the TPOTs are priced at.
 	Rate Result
 	// MeanTPOT is the mean TPOT there, in seconds.
 	MeanTPOT Result
-	// PercentileTPOT is the per-request TPOT percentile there, in seconds;
-	// nil when no percentile was asked.
+	// PercentileTPOT is the per-request TPOT percentile there, in seconds.
+	//
+	// NIL WHEN NO PERCENTILE WAS ASKED (ReplicasQuery.PercentileTarget nil):
+	// neither an answer nor a refusal. Check it before a type switch;
+	// ExitCode skips it.
 	PercentileTPOT Result
 }
 
@@ -354,58 +389,45 @@ type DecodeSLO struct {
 // and a fill below the band is read at the band's bottom and flagged
 // BelowFittedBand.
 func SLOAtReplicas(d Decode, q ReplicasQuery) DecodeSLO {
-	if u := d.check(); u != nil {
-		out := DecodeSLO{Knee: *u, Rate: *u, MeanTPOT: *u}
-		if q.Percentile != (TPOTTarget{}) {
-			out.PercentileTPOT = *u
+	// every refuses each asked-for field with u.
+	every := func(out DecodeSLO, u Unanswerable) DecodeSLO {
+		out.Rate, out.MeanTPOT = u, u
+		if q.PercentileTarget != nil {
+			out.PercentileTPOT = u
 		}
 		return out
 	}
-	out := DecodeSLO{Knee: Knee(d)}
-	knee := d.knee()
+	if u := d.check(); u != nil {
+		return every(DecodeSLO{KneeRate: *u}, *u)
+	}
+	out := DecodeSLO{KneeRate: d.kneeAnswer()}
+	knee := d.kneeRate()
 
 	var rate float64
 	var rateBy []Bound
-	var refused *Unanswerable
 	switch {
+	case q.Rate != 0 && q.Headroom != 0:
+		return every(out, refuse(InvalidInput, fmt.Sprintf("rate %g and headroom %g both set; set one", q.Rate, q.Headroom)))
 	case q.Rate != 0:
-		if !Finite(q.Rate) || q.Rate < 0 {
-			u := refuse(InvalidInput, fmt.Sprintf("rate %g", q.Rate))
-			refused = &u
-		}
-		rate = q.Rate
+		rate = q.Rate // fillAtRate refuses a negative or non-finite one
+	// Question 2 operates below the knee: at a headroom of 1 the operating
+	// point is the knee itself, where no fill carries the rate and the
+	// admission wait is unbounded.
+	case !(q.Headroom > 0 && q.Headroom < 1):
+		return every(out, refuse(InvalidInput, fmt.Sprintf("headroom %g, want 0 < headroom < 1 for question 2", q.Headroom)))
 	default:
-		// Question 2 operates below the knee: at a headroom of 1 the
-		// operating point is the knee itself, where no fill carries the rate
-		// and the admission wait is unbounded. Ask for the knee with Knee.
-		if !(q.Headroom > 0 && q.Headroom < 1) {
-			u := refuse(InvalidInput, fmt.Sprintf("headroom %g, want 0 < headroom < 1 for question 2", q.Headroom))
-			refused = &u
-		}
 		rate, rateBy = q.Headroom*knee, []Bound{BoundOperatingPoint}
 	}
-	var k float64
-	if refused == nil {
-		switch res := FillAtRate(d, rate).(type) {
-		case Answer:
-			k = res.Value
-		case Unanswerable:
-			refused = &res
-		}
+	res := d.fillAtRate(rate)
+	if u, refused := res.(Unanswerable); refused {
+		return every(out, u)
 	}
-	if refused != nil {
-		out.Rate, out.MeanTPOT = *refused, *refused
-		if q.Percentile != (TPOTTarget{}) {
-			out.PercentileTPOT = *refused
-		}
-		return out
-	}
-	out.Rate = Answer{Value: rate, Basis: Basis{Fill: k, Knee: knee, BoundBy: rateBy}}
+	k := res.(Answer).Value
+	out.Rate = Answer{Value: rate, Basis: Basis{Fill: k, KneeRate: knee, BoundBy: rateBy}}
 	out.MeanTPOT = d.tpotAt(k, knee, 1, nil)
-	if q.Percentile != (TPOTTarget{}) {
-		p := q.Percentile
+	if p := q.PercentileTarget; p != nil {
 		if p.Percentile == 0 && !p.OverTokenGaps {
-			// A percentile query with no percentile is a caller's mistake,
+			// A percentile asked with no percentile is a caller's mistake,
 			// not a request for the mean twice.
 			out.PercentileTPOT = refuse(InvalidInput, "TPOT percentile 0 asked for")
 			return out
@@ -428,5 +450,5 @@ func (d Decode) tpotAt(k, knee, r float64, flags []Flag) Answer {
 		at = d.Band.Lo
 		flags = append(flags, BelowFittedBand)
 	}
-	return Answer{Value: d.Line.ITLAt(at) * r, Flags: flags, Basis: Basis{Fill: k, Knee: knee, Floor: floor}}
+	return Answer{Value: d.Line.ITLAt(at) * r, Flags: flags, Basis: Basis{Fill: k, KneeRate: knee, Floor: floor}}
 }

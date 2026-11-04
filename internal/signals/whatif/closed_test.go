@@ -43,7 +43,7 @@ func near(t *testing.T, what string, got, want, tol float64) {
 // precision the page prints them at.
 func TestWorkedExample_ReplicasToSLO(t *testing.T) {
 	d := olsSweep()
-	knee := mustAnswer(t, Knee(d))
+	knee := mustAnswer(t, KneeRate(d))
 	near(t, "knee", knee.Value, 13.31, 0.005)
 	near(t, "batch-cap fill", knee.Basis.Fill, 0.732, 0.0005)
 	if len(knee.Basis.BoundBy) != 1 || knee.Basis.BoundBy[0] != BoundBatchCap {
@@ -51,7 +51,7 @@ func TestWorkedExample_ReplicasToSLO(t *testing.T) {
 	}
 
 	slo := SLOAtReplicas(d, ReplicasQuery{Headroom: 0.85,
-		Percentile: TPOTTarget{Percentile: 0.9, Ratio: TPOTRatio{Value: 1.3, Assumed: true}}})
+		PercentileTarget: &TPOTTarget{Percentile: 0.9, Ratio: TPOTRatio{Value: 1.3, Assumed: true}}})
 	rate := mustAnswer(t, slo.Rate)
 	near(t, "operating rate", rate.Value, 11.32, 0.005)
 	near(t, "fill at the operating rate", rate.Basis.Fill, 0.474, 0.0005)
@@ -67,7 +67,7 @@ func TestWorkedExample_ReplicasToSLO(t *testing.T) {
 
 func TestWorkedExample_SLOToRate(t *testing.T) {
 	d := olsSweep()
-	a := mustAnswer(t, RateForTPOT(d, TPOTTarget{Seconds: 0.004}, 0.85))
+	a := mustAnswer(t, rateFor(d, TPOTTarget{Seconds: 0.004}, 0.85))
 	near(t, "TPOT alone", a.Basis.Uncapped, 12.03, 0.005)
 	near(t, "capped rate", a.Value, 11.32, 0.005)
 	// The capped answer stands on the operating point's own fill, not the
@@ -78,7 +78,7 @@ func TestWorkedExample_SLOToRate(t *testing.T) {
 	}
 	// Below the cap: 3.0 ms inverts to 9.47 r/s, and the fill there gives
 	// back 3.00 ms.
-	b := mustAnswer(t, RateForTPOT(d, TPOTTarget{Seconds: 0.003}, 0.85))
+	b := mustAnswer(t, rateFor(d, TPOTTarget{Seconds: 0.003}, 0.85))
 	near(t, "rate at 3 ms", b.Value, 9.47, 0.005)
 	if len(b.Basis.BoundBy) != 1 || b.Basis.BoundBy[0] != BoundTPOT {
 		t.Errorf("bound by %v, want TPOT", b.Basis.BoundBy)
@@ -91,7 +91,7 @@ func TestWorkedExample_SLOToRate(t *testing.T) {
 // 0.90, with a p90 wait of 203 ms there".
 func TestWorkedExample_Admission(t *testing.T) {
 	d := olsSweep()
-	knee := mustAnswer(t, Knee(d)).Value
+	knee := mustAnswer(t, KneeRate(d)).Value
 	at85, ok := DecodeAdmission(d, 0.85*knee).(Admission)
 	if !ok {
 		t.Fatal("no admission at 0.85 of the knee")
@@ -123,15 +123,15 @@ func TestBirthDeathAtConstantRateIsErlangC(t *testing.T) {
 			// pass anything.
 			if want < 1e-280 {
 				// Underflowed in the reference: the chain must agree it is nil.
-				if got.WaitProbability > 1e-270 {
-					t.Errorf("c=%d rho=%g: wait probability %g, Erlang C underflows", c, rho, got.WaitProbability)
+				if got.wait > 1e-270 {
+					t.Errorf("c=%d rho=%g: wait probability %g, Erlang C underflows", c, rho, got.wait)
 				}
 				continue
 			}
-			if math.Abs(got.WaitProbability-want) > 1e-9*want {
-				t.Errorf("c=%d rho=%g: wait probability %.12g, Erlang C %.12g", c, rho, got.WaitProbability, want)
+			if math.Abs(got.wait-want) > 1e-9*want {
+				t.Errorf("c=%d rho=%g: wait probability %.12g, Erlang C %.12g", c, rho, got.wait, want)
 			}
-			near(t, "decay", got.Decay, float64(c)*mu1-lam, 1e-9)
+			near(t, "decay", got.decay, float64(c)*mu1-lam, 1e-9)
 		}
 	}
 }

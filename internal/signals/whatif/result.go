@@ -27,12 +27,13 @@ const (
 	// or intercept that is not positive and finite, or a line that predicts no
 	// positive ITL at the bottom of the band.
 	NoLine Reason = "NoLine"
-	// NoCapacity is no positive, finite KV capacity reading.
+	// NoCapacity is no positive, finite KV capacity reading, or one whose
+	// band top holds no whole request (floor(band.Hi*C/KVreq) < 1).
 	NoCapacity Reason = "NoCapacity"
 	// NoBatchCap is no batch cap known for the replica.
 	NoBatchCap Reason = "NoBatchCap"
-	// NoTraffic is no traffic shape: no positive output length or KV
-	// footprint per request.
+	// NoTraffic is no traffic shape: an output length or a KV footprint per
+	// request that is not positive and finite.
 	NoTraffic Reason = "NoTraffic"
 	// TokenGapPercentile is a percentile over token gaps (ITL), which is not
 	// supported; a percentile over requests of their own TPOT is.
@@ -143,17 +144,14 @@ const (
 	BoundBandTop Bound = "band top"
 )
 
-// Interval is a closed range [Lo, Hi].
-type Interval struct{ Lo, Hi float64 }
-
 // Basis is what an answer rests on, for the operator to check it against.
 // A field that does not apply to the question is 0.
 type Basis struct {
 	// Fill is the KV fill one decode replica runs at for the answer.
 	Fill float64
-	// Knee is the rate, in requests per second over the fleet, at which the
-	// decode replicas saturate.
-	Knee float64
+	// KneeRate is the knee: the rate, in requests per second over the fleet,
+	// at which the decode replicas saturate (KneeRate).
+	KneeRate float64
 	// Floor is the lowest TPOT any number of replicas reaches: the line's
 	// ITL at the bottom of the band, times R_q for a percentile.
 	Floor float64
@@ -165,14 +163,10 @@ type Basis struct {
 }
 
 // Answer is a priced figure: Value in the question's unit (requests per
-// second for a rate, seconds for a TPOT or a wait, a ratio for R_q), its
-// Basis and Flags.
+// second for a rate, seconds for a TPOT), its Basis and Flags. Uncertainty
+// bands join it with the CLI (the planner's D3 PR).
 type Answer struct {
 	Value float64
-	// Band is the figure's uncertainty band, nil until bands are computed
-	// (the block bootstrap of the planner's D3 PR). Nil means "not computed",
-	// never "no uncertainty".
-	Band  *Interval
 	Basis Basis
 	Flags []Flag
 }
@@ -182,4 +176,47 @@ func (Answer) result() {}
 // HasFlag reports whether the answer carries f.
 func (a Answer) HasFlag(f Flag) bool {
 	return slices.Contains(a.Flags, f)
+}
+
+// The planner's exit codes (docs/proposals/slo-capacity-planner.md, "Results
+// and exit codes").
+const (
+	// ExitAnswered is every result answered.
+	ExitAnswered = 0
+	// ExitInternal is an internal error: here, no result to judge.
+	ExitInternal = 1
+	// ExitUsage is a usage or input error: some result is InvalidInput.
+	ExitUsage = 2
+	// ExitRefused is a refusal: some result is Unanswerable for a reason the
+	// data gave, and none is InvalidInput. The output is still printed.
+	ExitRefused = 3
+)
+
+// ExitCode is the exit code the planner ends with for these results, so the
+// CLI applies the contract rather than re-deriving it: ExitUsage if any is
+// InvalidInput (a question asked wrongly outranks what the data says), else
+// ExitRefused if any is refused, else ExitAnswered. A nil result is a question
+// not asked (DecodeSLO.PercentileTPOT) and is skipped; with nothing left the
+// code is ExitInternal.
+func ExitCode(results ...Result) int {
+	asked, refused := false, false
+	for _, r := range results {
+		if r == nil {
+			continue
+		}
+		asked = true
+		if u, ok := r.(Unanswerable); ok {
+			if u.Reason == InvalidInput {
+				return ExitUsage
+			}
+			refused = true
+		}
+	}
+	switch {
+	case !asked:
+		return ExitInternal
+	case refused:
+		return ExitRefused
+	}
+	return ExitAnswered
 }
