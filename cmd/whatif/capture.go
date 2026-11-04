@@ -33,7 +33,10 @@ const defaultTimeout = 150 * time.Second
 // repeated is a flag that may be given more than once.
 type repeated []string
 
-func (r *repeated) String() string     { return strings.Join(*r, ",") }
+// String implements flag.Value: the values given, joined by commas.
+func (r *repeated) String() string { return strings.Join(*r, ",") }
+
+// Set implements flag.Value: one more value.
 func (r *repeated) Set(v string) error { *r = append(*r, v); return nil }
 
 // captureFlags is capture's flags, as given.
@@ -59,7 +62,7 @@ func runCapture(ctx context.Context, args []string, out, warn io.Writer) error {
 	var f captureFlags
 	fs.StringVar(&f.prometheus, "prometheus", "", "the Prometheus base URL (required)")
 	fs.StringVar(&f.tokenFile, "bearer-token-file", "", "a file holding a bearer token, sent to an https Prometheus only, and to its host only")
-	fs.StringVar(&f.caFile, "ca-file", "", "a PEM file of the CAs that sign Prometheus' certificate")
+	fs.StringVar(&f.caFile, "ca-file", "", "a PEM file of the CAs that sign an https Prometheus' certificate, trusted in place of the system's")
 	fs.BoolVar(&f.insecure, "insecure-skip-verify", false, "do not verify Prometheus' certificate (warned about on stderr)")
 	fs.DurationVar(&f.timeout, "timeout", defaultTimeout, "how long one HTTP request to Prometheus may take")
 	fs.StringVar(&f.namespace, "namespace", "", "the namespace whose models to capture (required)")
@@ -74,7 +77,7 @@ func runCapture(ctx context.Context, args []string, out, warn io.Writer) error {
 	fs.IntVar(&f.batchCap, "batch-cap", 0, "the engine's batch cap (--max-num-seqs); 0 leaves the engine's default")
 	fs.IntVar(&f.gpus, "gpus-per-replica", 1, "GPUs per replica, where kube-state-metrics gives none")
 	fs.StringVar(&f.accelerator, "accelerator", "", "the accelerator, where kube-state-metrics gives none")
-	fs.BoolVar(&f.force, "force", false, fmt.Sprintf("capture a window of more than %d steps times queries, all held in memory", whatifsource.MaxStepQueries))
+	fs.BoolVar(&f.force, "force", false, fmt.Sprintf("capture past %d steps times queries, or %d samples held in memory", whatifsource.MaxStepQueries, whatifsource.MaxSamples))
 	fs.StringVar(&f.out, "o", "", "where to write the capture, gzipped JSON lines (required)")
 	if ok, err := parse(fs, args); !ok {
 		return err
@@ -83,26 +86,27 @@ func runCapture(ctx context.Context, args []string, out, warn io.Writer) error {
 	if err != nil {
 		return err
 	}
-	file, err := os.Create(f.out)
-	if err != nil {
-		return usageError{err}
-	}
-	sum, err := whatifsource.Capture(ctx, opts, file)
-	if cerr := file.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		_ = os.Remove(f.out)
-		for _, input := range []error{whatifsource.ErrNoRoleMap, whatifsource.ErrRoleOverlap, whatifsource.ErrWindowTooLarge} {
-			if errors.Is(err, input) {
-				return usageError{err}
-			}
-		}
+	// Written beside -o and renamed over it once whole: a failed or
+	// cancelled capture leaves the file that was there.
+	var sum *whatifsource.Summary
+	err = writeFileAtomic(f.out, func(w io.Writer) error {
+		var err error
+		sum, err = whatifsource.Capture(ctx, opts, w)
+		return err
+	})
+	var u usageError
+	switch {
+	case err == nil:
+	case whatifsource.IsInputError(err):
+		return usageError{fmt.Errorf("capture: %w", err)}
+	case errors.As(err, &u):
+		return usageError{fmt.Errorf("capture: %w", u.error)}
+	default:
 		return fmt.Errorf("capture: %w", err)
 	}
-	fmt.Fprintf(out, "captured %d steps of %s from %s to %s every %s: %d cycles, %d rows, %d variants, %d range queries\n",
+	fmt.Fprintf(out, "captured %d steps of %s from %s to %s every %s: %d cycles, %d rows, %d variants, %d range queries, %d samples\n",
 		sum.Steps, opts.Namespace, opts.From.Format(time.RFC3339), opts.To.Format(time.RFC3339), opts.Step,
-		sum.Cycles, sum.Rows, len(sum.Variants), sum.RangeQueries)
+		sum.Cycles, sum.Rows, len(sum.Variants), sum.RangeQueries, sum.Samples)
 	for _, v := range sum.Variants {
 		role := v.Role
 		if role == "" {
@@ -236,8 +240,13 @@ func (f captureFlags) client(warn io.Writer) (promv1.API, error) {
 	if err != nil || (u.Scheme != "http" && u.Scheme != schemeHTTPS) || u.Host == "" {
 		return nil, usagef("--prometheus %q is not an http or https URL", f.prometheus)
 	}
-	if f.tokenFile != "" && u.Scheme != schemeHTTPS {
-		return nil, usagef("--bearer-token-file is sent to an https Prometheus only, and %s is %s: use https, or drop the token", f.prometheus, u.Scheme)
+	if u.Scheme != schemeHTTPS {
+		switch {
+		case f.tokenFile != "":
+			return nil, usagef("--bearer-token-file is sent to an https Prometheus only, and %s is %s: use https, or drop the token", f.prometheus, u.Scheme)
+		case f.caFile != "" || f.insecure:
+			return nil, usagef("--ca-file and --insecure-skip-verify are for an https Prometheus, and %s is %s", f.prometheus, u.Scheme)
+		}
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if u.Scheme == schemeHTTPS {
@@ -265,7 +274,11 @@ func (f captureFlags) client(warn io.Writer) (promv1.API, error) {
 		if err != nil {
 			return nil, usageError{err}
 		}
-		rt = bearer{base: transport, host: u.Host, token: strings.TrimSpace(string(b))}
+		token := strings.TrimSpace(string(b))
+		if token == "" {
+			return nil, usagef("--bearer-token-file %s holds no token", f.tokenFile)
+		}
+		rt = bearer{base: transport, host: u.Host, token: token}
 	}
 	c, err := api.NewClient(api.Config{Address: f.prometheus, Client: &http.Client{Transport: rt, Timeout: f.timeout}})
 	if err != nil {
@@ -285,8 +298,11 @@ type bearer struct {
 	token string
 }
 
+// RoundTrip implements http.RoundTripper: req with the token when it goes
+// over https to Prometheus' host (compared without case, as a host name
+// is), req as it is otherwise.
 func (b bearer) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL.Scheme == schemeHTTPS && req.URL.Host == b.host {
+	if req.URL.Scheme == schemeHTTPS && strings.EqualFold(req.URL.Host, b.host) {
 		req = req.Clone(req.Context())
 		req.Header.Set("Authorization", "Bearer "+b.token)
 	}

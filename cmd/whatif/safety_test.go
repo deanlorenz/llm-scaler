@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -239,6 +241,7 @@ func TestGenerate_ExitCodes(t *testing.T) {
 	_, err := runCLI("generate", "-in", garbage, "-o", filepath.Join(dir, "out.jsonl"))
 	require.Error(t, err)
 	assert.Equal(t, 2, exitCode(err))
+	assert.Equal(t, 1, strings.Count(err.Error(), "generate:"), "one prefix: %v", err)
 
 	srv := fleetServer(t)
 	capture := filepath.Join(dir, "c.gz")
@@ -248,5 +251,170 @@ func TestGenerate_ExitCodes(t *testing.T) {
 	cancel()
 	_, err = runCLIWarn(ctx, "generate", "-in", capture, "-o", filepath.Join(dir, "out.jsonl"))
 	require.Error(t, err)
+	assert.Equal(t, 1, strings.Count(err.Error(), "generate:"), "one prefix: %v", err)
 	assert.Equal(t, 1, exitCode(err), "%v", err)
+}
+
+// startOf reads the start line's caveats.
+func TestStartOf_ReadsTheCaveats(t *testing.T) {
+	var buf bytes.Buffer
+	rec := learnrec.New(&buf, 0)
+	rec.Record(learnrec.KindStart, cliFrom, learnrec.Start{Commit: "abc", Caveats: []string{"one", "two"}})
+	require.NoError(t, rec.Err())
+	start, err := startOf(buf.Bytes())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"one", "two"}, start.Caveats)
+	assert.Equal(t, "abc", start.Commit)
+	_, err = startOf([]byte{})
+	assert.Error(t, err)
+}
+
+// A failed capture leaves the capture that was at -o, and no temporary
+// file beside it.
+func TestCapture_AFailedRunKeepsThePreviousCapture(t *testing.T) {
+	srv := fleetServer(t)
+	dir := t.TempDir()
+	out := filepath.Join(dir, "c.gz")
+	_, err := runCLI(captureArgs(srv.URL, out)...)
+	require.NoError(t, err)
+	before, err := os.ReadFile(out)
+	require.NoError(t, err)
+	info, err := os.Stat(out)
+	require.NoError(t, err)
+	if os.PathSeparator == '/' {
+		assert.Equal(t, os.FileMode(outputMode), info.Mode().Perm())
+	}
+
+	reg := source.NewSourceRegistry()
+	require.NoError(t, reg.Register("prometheus", source.NewNoOpSource()))
+	registration.RegisterSaturationQueries(reg)
+	kv, err := reg.Get("prometheus").QueryList().Build(registration.QueryKvCacheUsage, map[string]string{source.ParamNamespace: "llm"})
+	require.NoError(t, err)
+	srv.Fail(kv, "query timed out")
+	_, err = runCLI(captureArgs(srv.URL, out)...)
+	require.Error(t, err)
+	assert.Equal(t, 1, exitCode(err))
+	after, err := os.ReadFile(out)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "the failed run overwrote the capture")
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "a temporary file was left: %v", entries)
+}
+
+// The client's inputs are checked: an empty token, and TLS flags for an
+// http Prometheus.
+func TestClient_InputChecks(t *testing.T) {
+	srv := fleetServer(t)
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty")
+	require.NoError(t, os.WriteFile(empty, []byte(" \n\t"), 0o600))
+	_, err := captureFlags{prometheus: "https://prom.example", tokenFile: empty, timeout: time.Second}.client(io.Discard)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "holds no token")
+	assert.Equal(t, 2, exitCode(err))
+	for _, extra := range [][]string{{"--ca-file", empty}, {"--insecure-skip-verify"}} {
+		_, err := runCLI(captureArgs(srv.URL, filepath.Join(dir, "c.gz"), extra...)...)
+		require.Error(t, err, "%v", extra)
+		assert.Contains(t, err.Error(), "are for an https Prometheus")
+		assert.Equal(t, 2, exitCode(err))
+	}
+	assert.Empty(t, srv.Requests())
+}
+
+// recordingRT records each request it is given and answers 200.
+type recordingRT struct{ seen []*http.Request }
+
+func (r *recordingRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.seen = append(r.seen, req)
+	return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+}
+
+// The token goes over https to Prometheus' host, its case aside, and to
+// nothing else: not over http to the same host, not to another host.
+func TestBearer_SendsTheTokenOverHTTPSToItsHostOnly(t *testing.T) {
+	for _, c := range []struct {
+		url  string
+		sent bool
+	}{
+		{"https://prom.example:9090/api/v1/query_range", true},
+		{"https://PROM.Example:9090/api/v1/query_range", true},
+		{"http://prom.example:9090/api/v1/query_range", false},
+		{"https://other.example:9090/api/v1/query_range", false},
+		{"https://prom.example:9091/api/v1/query_range", false},
+	} {
+		base := &recordingRT{}
+		b := bearer{base: base, host: "prom.example:9090", token: "s3cret"}
+		req, err := http.NewRequest(http.MethodGet, c.url, nil)
+		require.NoError(t, err)
+		resp, err := b.RoundTrip(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		require.Len(t, base.seen, 1)
+		want := ""
+		if c.sent {
+			want = "Bearer s3cret"
+		}
+		assert.Equal(t, want, base.seen[0].Header.Get("Authorization"), c.url)
+		assert.Empty(t, req.Header.Get("Authorization"), "the caller's request was changed")
+	}
+}
+
+// A redirect from https to http on the same host does not carry the token.
+func TestClient_AnHTTPSRedirectToHTTPDropsTheToken(t *testing.T) {
+	plain := newAuthSeenPlain(t)
+	prom := newAuthSeen(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plain.URL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+	})
+	token := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(token, []byte("s3cret"), 0o600))
+	f := captureFlags{prometheus: prom.URL, tokenFile: token, caFile: caFile(t, prom.Server), timeout: 10 * time.Second}
+	api, err := f.client(io.Discard)
+	require.NoError(t, err)
+	_, _, err = api.QueryRange(context.Background(), "up", promv1.Range{Start: cliFrom, End: cliFrom, Step: time.Second})
+	require.NoError(t, err)
+	require.NotEmpty(t, plain.headers(), "the redirect was not followed")
+	for _, h := range plain.headers() {
+		assert.Empty(t, h, "the token went over http")
+	}
+}
+
+// newAuthSeenPlain is an http server, on the same host as the https ones,
+// that records the Authorization header and answers an empty matrix.
+func newAuthSeenPlain(t *testing.T) *authSeen {
+	t.Helper()
+	a := &authSeen{}
+	a.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a.mu.Lock()
+		a.seen = append(a.seen, r.Header.Get("Authorization"))
+		a.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[]}}`))
+	}))
+	t.Cleanup(a.Close)
+	return a
+}
+
+// Exit codes by whose fault: nothing the role map attributes is the
+// caller's (2), a failed query Prometheus' (1).
+func TestCapture_ExitCodesByFault(t *testing.T) {
+	srv := fleetServer(t)
+	dir := t.TempDir()
+	_, err := runCLI("capture", "--prometheus", srv.URL, "--namespace", "llm", "--role-of", "decode=app=nothing",
+		"--from", cliFrom.Format(time.RFC3339), "--to", cliFrom.Add(time.Minute).Format(time.RFC3339), "-o", filepath.Join(dir, "a.gz"))
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, whatifsource.ErrNothingAttributed), "%v", err)
+	assert.Equal(t, 2, exitCode(err))
+
+	reg := source.NewSourceRegistry()
+	require.NoError(t, reg.Register("prometheus", source.NewNoOpSource()))
+	registration.RegisterSaturationQueries(reg)
+	kv, err := reg.Get("prometheus").QueryList().Build(registration.QueryKvCacheUsage, map[string]string{source.ParamNamespace: "llm"})
+	require.NoError(t, err)
+	srv.Fail(kv, "query timed out")
+	_, err = runCLI(captureArgs(srv.URL, filepath.Join(dir, "b.gz"))...)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, whatifsource.ErrQueryFailed), "%v", err)
+	assert.Equal(t, 1, exitCode(err))
+	assert.Equal(t, 1, strings.Count(err.Error(), "capture:"), "one prefix: %v", err)
 }

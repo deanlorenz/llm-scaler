@@ -47,9 +47,16 @@ type windowAPI struct {
 	// memoized and cannot change.
 	abort context.CancelCauseFunc
 
-	mu   sync.Mutex
-	at   time.Time
-	memo map[string]*rangeAnswer
+	// maxSamples bounds samples (MaxSamples); zero is no bound (Force).
+	maxSamples int
+
+	mu sync.Mutex
+	at time.Time
+	// memo holds every expression's answer for the whole capture: each
+	// step reads its own instant from it, so nothing is dropped until the
+	// capture ends. samples counts what it holds.
+	memo    map[string]*rangeAnswer
+	samples int
 	// failed is the first range query that failed. Every query a capture
 	// asks is required (Capture), so it fails the capture.
 	failed error
@@ -122,6 +129,11 @@ func (w *windowAPI) Query(ctx context.Context, query string, _ time.Time, _ ...p
 	}
 	at := w.at
 	w.mu.Unlock()
+	// The first caller fetches, under its own ctx; a caller that comes while
+	// it does waits on the Once, and every later one reads the answer, a
+	// failure included: an answer is never asked again. The capture's ctx
+	// is every caller's parent, and a failure aborts it, so a ctx cancelled
+	// under the first caller fails the capture rather than one field.
 	a.once.Do(func() {
 		a.byTime, a.warnings, a.err = w.fetch(ctx, query)
 		if a.err != nil {
@@ -169,11 +181,36 @@ func (w *windowAPI) fetch(ctx context.Context, query string) (map[model.Time]mod
 						"to step (Thanos, Mimir) does; capture from a --from that is a multiple of --step, or turn that alignment off",
 						query, p.Timestamp.Time().UTC().Format(time.RFC3339Nano), w.start.Format(time.RFC3339Nano), w.step)
 				}
+				// Every step's sample shares the stream's label map: one
+				// map per series, not per sample. Nothing writes to it
+				// (the collector copies the labels it keeps).
 				out[p.Timestamp] = append(out[p.Timestamp], &model.Sample{Metric: stream.Metric, Value: p.Value, Timestamp: p.Timestamp})
+			}
+			if err := w.hold(len(stream.Values)); err != nil {
+				return nil, warnings, fmt.Errorf("range query %q: %w", query, err)
 			}
 		}
 	}
 	return out, warnings, nil
+}
+
+// hold counts n more samples held, and refuses a count past maxSamples.
+func (w *windowAPI) hold(n int) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.samples += n
+	if w.maxSamples > 0 && w.samples > w.maxSamples {
+		return fmt.Errorf("%w: past %d samples held in memory; shorten the window, lengthen the step, or pass --force",
+			ErrWindowTooLarge, w.maxSamples)
+	}
+	return nil
+}
+
+// held is how many samples the memo holds.
+func (w *windowAPI) held() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.samples
 }
 
 // onGrid reports whether ts is one of the window's steps, to the

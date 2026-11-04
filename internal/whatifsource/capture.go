@@ -101,28 +101,67 @@ type Options struct {
 	// does not give.
 	GPUsPerReplica int
 	Accelerator    string
-	// Force captures a window larger than MaxStepQueries.
+	// Force captures a window of more than MaxStepQueries steps times
+	// queries, or more than MaxSamples samples.
 	Force bool
 	// RangeQueryPoints bounds the steps of one range query; a longer window
 	// is asked in parts and joined. Zero is Prometheus' bound
 	// (maxPointsPerQuery); tests set it small to split a short window.
 	RangeQueryPoints int
+	// MaxSamples bounds the samples held in memory; zero is MaxSamples.
+	// Tests set it small.
+	MaxSamples int
 }
 
-// MaxStepQueries bounds a capture's steps times the queries it may ask.
-// Every range query's samples are held in memory for the whole capture, one
-// vector per step per query, so this bounds the memory a capture takes:
-// about a day at a 15 s step with every template. A larger window needs
-// Options.Force (--force).
+// MaxStepQueries bounds a capture's steps times the queries it may ask,
+// checked before any query: 12,500 steps, a little over two days at a 15 s
+// step, with the 80 queries a capture with kube-state-metrics registers
+// (67 without). It bounds the load on Prometheus, not memory, which grows
+// with the series too (MaxSamples). A larger window needs Options.Force
+// (--force).
 const MaxStepQueries = 1_000_000
 
-// ErrWindowTooLarge is a window of more steps times queries than
-// MaxStepQueries, without Force.
-var ErrWindowTooLarge = errors.New("the window is too large to hold in memory")
+// MaxSamples bounds the samples a capture holds: every range query's
+// samples stay in memory for the whole capture, one per series per step,
+// at about 60 bytes each, so 20 million is a little over a gigabyte. The
+// count is taken as the answers arrive, and the capture stops at the first
+// answer past it. A larger capture needs Options.Force (--force).
+const MaxSamples = 20_000_000
 
-// ErrRoleOverlap is --role-of selectors that can pick the same Pod: two
-// whose inferred Pod-name prefixes nest, or a Pod two selectors match.
-var ErrRoleOverlap = errors.New("--role-of selectors overlap")
+// The errors a capture fails with, by whose fault it is (IsInputError).
+var (
+	// ErrInvalidOptions is a capture's options that cannot be captured: no
+	// namespace, a step that is not positive, a window that ends first...
+	ErrInvalidOptions = errors.New("invalid capture options")
+	// ErrNoRoleMap is a capture with neither --kube-state-metrics nor
+	// --role-of: nothing can tell a prefill Pod from a decode one.
+	ErrNoRoleMap = errors.New("cannot tell prefill from decode pods: pass --kube-state-metrics, or --role-of ROLE=SELECTOR")
+	// ErrRoleOverlap is --role-of selectors that can pick the same Pod: two
+	// whose inferred Pod-name prefixes nest, or a Pod two selectors match.
+	ErrRoleOverlap = errors.New("--role-of selectors overlap")
+	// ErrWindowTooLarge is a window of more steps times queries than
+	// MaxStepQueries, or more samples than MaxSamples, without Force.
+	ErrWindowTooLarge = errors.New("the window is too large")
+	// ErrNothingAttributed is a window in which no Pod the role map
+	// attributes had a KV-cache series: the namespace, the window or the
+	// selectors are wrong.
+	ErrNothingAttributed = errors.New("no Pod the role map attributes had a KV-cache series")
+	// ErrQueryFailed is a range query Prometheus failed: not the caller's
+	// input, but the server's limit, load or reach.
+	ErrQueryFailed = errors.New("a range query failed")
+)
+
+// IsInputError reports whether err is the caller's input at fault (the
+// options, the role map, the window), rather than Prometheus: cmd/whatif
+// exits 2 for one and 1 for any other.
+func IsInputError(err error) bool {
+	for _, input := range []error{ErrInvalidOptions, ErrNoRoleMap, ErrRoleOverlap, ErrWindowTooLarge, ErrNothingAttributed} {
+		if errors.Is(err, input) {
+			return true
+		}
+	}
+	return false
+}
 
 // Summary is what a capture wrote.
 type Summary struct {
@@ -134,15 +173,23 @@ type Summary struct {
 	// Variants is the window line's variants, and Flags its caveats.
 	Variants []learnreplay.CaptureVariant
 	Flags    []string
-	// RangeQueries is how many range queries were asked.
-	RangeQueries int
+	// RangeQueries is how many range queries were asked, and Samples how
+	// many samples their answers held.
+	RangeQueries, Samples int
 }
 
-// ErrNoRoleMap is a capture with neither --kube-state-metrics nor
-// --role-of: nothing can tell a prefill Pod from a decode one.
-var ErrNoRoleMap = errors.New("cannot tell prefill from decode pods: pass --kube-state-metrics, or --role-of ROLE=SELECTOR")
-
+// validate is check, its errors marked ErrInvalidOptions.
 func (o *Options) validate() error {
+	if err := o.check(); err != nil {
+		if errors.Is(err, ErrNoRoleMap) || errors.Is(err, ErrRoleOverlap) {
+			return err
+		}
+		return fmt.Errorf("%w: %w", ErrInvalidOptions, err)
+	}
+	return nil
+}
+
+func (o *Options) check() error {
 	switch {
 	case o.Prometheus == nil:
 		return errors.New("no Prometheus")
@@ -253,6 +300,13 @@ func Capture(ctx context.Context, opts Options, w io.Writer) (*Summary, error) {
 	ctx, abort := context.WithCancelCause(ctx)
 	defer abort(nil)
 	api := newWindowAPI(opts.Prometheus, opts.From, opts.To, opts.Step, opts.RangeQueryPoints, abort)
+	api.maxSamples = opts.MaxSamples
+	if api.maxSamples <= 0 {
+		api.maxSamples = MaxSamples
+	}
+	if opts.Force {
+		api.maxSamples = 0
+	}
 	src := promsource.NewPrometheusSource(ctx, api, promsource.PrometheusSourceConfig{DefaultTTL: time.Second})
 	defer src.Close()
 	registry := source.NewSourceRegistry()
@@ -273,7 +327,7 @@ func Capture(ctx context.Context, opts Options, w io.Writer) (*Summary, error) {
 		queries += reflect.TypeFor[KSM]().NumField()
 	}
 	if n := len(steps) * queries; n > MaxStepQueries && !opts.Force {
-		return nil, fmt.Errorf("%w: %d steps times %d queries is %d, over the %d a capture holds without --force; "+
+		return nil, fmt.Errorf("%w: %d steps times %d queries is %d, over the %d a capture asks without --force; "+
 			"shorten the window or lengthen the step", ErrWindowTooLarge, len(steps), queries, n, MaxStepQueries)
 	}
 	scan, err := scanWindow(ctx, api, src, opts, steps)
@@ -282,7 +336,7 @@ func Capture(ctx context.Context, opts Options, w io.Writer) (*Summary, error) {
 	}
 	variants, flags := windowVariants(scan, opts)
 	if len(variants) == 0 {
-		return nil, fmt.Errorf("no Pod in namespace %s had a KV-cache series the role map attributes, from %s to %s",
+		return nil, fmt.Errorf("%w, in namespace %s from %s to %s", ErrNothingAttributed,
 			opts.Namespace, opts.From.Format(time.RFC3339), opts.To.Format(time.RFC3339))
 	}
 	start, err := captureStart(opts)
@@ -335,7 +389,7 @@ func Capture(ctx context.Context, opts Options, w io.Writer) (*Summary, error) {
 	if err := gz.Close(); err != nil {
 		return nil, err
 	}
-	sum.RangeQueries = api.ranges()
+	sum.RangeQueries, sum.Samples = api.ranges(), api.held()
 	return sum, nil
 }
 
@@ -352,11 +406,15 @@ func windowSteps(from, to time.Time, step time.Duration) []time.Time {
 // when one failed, whatever err its abort caused downstream (a cancelled
 // context, say); err otherwise.
 func captureErr(api *windowAPI, err error) error {
-	if failed := api.failure(); failed != nil {
-		return fmt.Errorf("%w (every query a capture asks is required: shorten the window, lengthen the step, "+
-			"or raise the server's limit)", failed)
+	failed := api.failure()
+	switch {
+	case failed == nil:
+		return err
+	case errors.Is(failed, ErrWindowTooLarge):
+		return failed
 	}
-	return err
+	return fmt.Errorf("%w: %w (every query a capture asks is required: shorten the window, lengthen the step, "+
+		"or raise the server's limit)", ErrQueryFailed, failed)
 }
 
 // roleSource names where the role map came from.
@@ -511,6 +569,8 @@ func windowVariants(scan *windowScan, opts Options) ([]learnreplay.CaptureVarian
 // parameters are parsed from it as the engine parses a real one, and the
 // collector detects the engine from it.
 func scaleTargetOf(opts Options, variant, modelID string, gpus int, accel string) scaletarget.ScaleTargetAccessor {
+	// The image names are never pulled: this Deployment is never applied.
+	// They are only what inferenceengine.Detect reads the engine from.
 	c := corev1.Container{Name: "vllm", Image: "vllm/vllm-openai", Command: []string{"vllm", "serve", modelID}}
 	batchFlag := "--max-num-seqs"
 	if opts.Engine == inferenceengine.EngineSGLang {

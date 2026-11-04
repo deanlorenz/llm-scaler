@@ -71,6 +71,8 @@ import (
 //
 // The recording's start line carries the capture window's flags as its
 // Caveats, so a golden made from it says what the capture could not see.
+
+// The kinds of a capture's lines after its start line (Generate).
 const (
 	// KindCaptureWindow is a capture's second line, with CaptureWindow.
 	KindCaptureWindow = "capture.Window"
@@ -377,8 +379,11 @@ func (r *replayer) generateModel(ctx context.Context, now time.Time, m genModel,
 	// 7. Saturation first, then the listed analyzers.
 	r.rep.Analyzes[saturation.KindAnalyze]++
 	if _, err := r.sat.Analyze(ctx, in); err != nil {
-		// The engine's cycle fails the model here, and so does this one: the
-		// failure is recorded with the Analyze event.
+		// The engine's cycle fails the model here, and so does this one. The
+		// error is not lost: the analyzer's own recorder writes it into the
+		// Analyze event (saturation.AnalyzeEvent.Error, recording.go), which
+		// is what a replay and the goldens compare; the run goes on to the
+		// next model, as the engine's does.
 		return nil
 	}
 	if r.slo != nil && m.policy.AnalyzerEnabled(domain.SLOAnalyzerName) {

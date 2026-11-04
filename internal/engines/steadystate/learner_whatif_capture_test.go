@@ -102,11 +102,19 @@ type wiVariant struct {
 	kv func(j, i int) float64
 	// until is the last step its Pods report a series, -1 for every step.
 	until int
+	// parked says at which steps its Deployment is at zero; nil for none.
+	parked func(i int) bool
 }
+
+// isParked reports whether v is parked at step i.
+func (v wiVariant) isParked(i int) bool { return v.parked != nil && v.parked(i) }
+
+// wiParkedFrom and wiParkedTo are the steps acme/park is parked whole.
+const wiParkedFrom, wiParkedTo = 4, 6
 
 func wiFleet() []wiVariant {
 	return []wiVariant{
-		{model: "acme/agg", name: "agg-a", role: "", hash: "5f6", pods: 4, gpus: 1, until: -1,
+		{model: "acme/agg", name: "agg-a", role: domain.RoleBoth, hash: "5f6", pods: 4, gpus: 1, until: -1,
 			kv: func(j, i int) float64 { return 0.30 + 0.12*float64(j) + 0.01*float64(i%3) }},
 		{model: "acme/pd", name: "pd-d", role: domain.RoleDecode, hash: "88b", pods: 3, gpus: 2, until: -1,
 			kv: func(j, i int) float64 { return 0.25 + 0.2*float64(j) + 0.01*float64(i%2) }},
@@ -116,10 +124,22 @@ func wiFleet() []wiVariant {
 		// Deployment keeps a replica: the engine holds the model's settle
 		// sightings on every cycle after (onNothingObserved), and so must
 		// Generate.
-		{model: "acme/idle", name: "idle", role: "", hash: "99c", pods: 1, gpus: 1, until: 0,
+		{model: "acme/idle", name: "idle", role: domain.RoleBoth, hash: "99c", pods: 1, gpus: 1, until: 0,
 			kv: func(int, int) float64 { return 0.1 }},
+		// Parked whole partway through the window, and back under the same
+		// Pod name (a StatefulSet's) within the settle tracker's horizon:
+		// the engine's prune forgets the model's settle record while it is
+		// parked (retainSettle), so its replica joins again, and so must
+		// Generate.
+		{model: "acme/park", name: "park", role: domain.RoleBoth, hash: "4d4", pods: 1, gpus: 1, until: -1,
+			kv:     func(_, i int) float64 { return 0.35 + 0.01*float64(i%2) },
+			parked: func(i int) bool { return i >= wiParkedFrom && i <= wiParkedTo }},
 	}
 }
+
+// wiRouterPod is the router's Pod of acme/agg: kube-state-metrics lists it,
+// and it has no KV series. A --role-of app=agg-a picks it by name.
+const wiRouterPod = "agg-a-epp-3e1-0"
 
 func (v wiVariant) pod(j int) string { return fmt.Sprintf("%s-%s-%d", v.name, v.hash, j) }
 
@@ -149,7 +169,7 @@ func wiSeries(t *testing.T, srv *promtest.Server, q func(name string) string) {
 	at := func(v wiVariant, f func(i int) float64) func(time.Time) (float64, bool) {
 		return func(ts time.Time) (float64, bool) {
 			i, ok := wiStepOf(ts)
-			if !ok || (v.until >= 0 && i > v.until) {
+			if !ok || (v.until >= 0 && i > v.until) || v.isParked(i) {
 				return 0, false
 			}
 			return f(i), true
@@ -282,7 +302,13 @@ func wiKSM(srv *promtest.Server) {
 		rs := v.name + "-" + v.hash
 		srv.Add(k.ReplicaSetOwner, promtest.Const(map[string]string{"namespace": wiNS, "replicaset": rs,
 			"owner_kind": "Deployment", "owner_name": v.name}, 1))
-		srv.Add(k.DeploymentReplicas, promtest.Const(map[string]string{"namespace": wiNS, "deployment": v.name}, float64(v.pods)))
+		srv.Add(k.DeploymentReplicas, promtest.Series{Labels: map[string]string{"namespace": wiNS, "deployment": v.name},
+			Value: func(ts time.Time) (float64, bool) {
+				if i, ok := wiStepOf(ts); ok && v.isParked(i) {
+					return 0, true
+				}
+				return float64(v.pods), true
+			}})
 		for j := range v.pods {
 			l := func(extra ...string) map[string]string {
 				m := map[string]string{"namespace": wiNS, "pod": v.pod(j)}
@@ -306,6 +332,25 @@ func wiKSM(srv *promtest.Server) {
 			srv.Add(k.PodGPUs, promtest.Const(map[string]string{"pod": v.pod(j)}, float64(v.gpus)))
 		}
 	}
+	// The router's Pod: Ready, no GPU, no KV series; its own Deployment.
+	r := func(extra ...string) map[string]string {
+		m := map[string]string{"namespace": wiNS, "pod": wiRouterPod}
+		for x := 0; x+1 < len(extra); x += 2 {
+			m[extra[x]] = extra[x+1]
+		}
+		return m
+	}
+	srv.Add(k.ReplicaSetOwner, promtest.Const(map[string]string{"namespace": wiNS, "replicaset": "agg-a-epp-3e1",
+		"owner_kind": "Deployment", "owner_name": "agg-a-epp"}, 1))
+	srv.Add(k.DeploymentReplicas, promtest.Const(map[string]string{"namespace": wiNS, "deployment": "agg-a-epp"}, 1))
+	srv.Add(k.PodNode, promtest.Const(r("node", "n1"), 1))
+	srv.Add(k.PodLabels, promtest.Const(r(), 1))
+	srv.Add(k.PodOwner, promtest.Const(r("owner_kind", "ReplicaSet", "owner_name", "agg-a-epp-3e1"), 1))
+	srv.Add(k.PodRunning, promtest.Const(r(), 1))
+	srv.Add(k.PodReady, promtest.Const(r(), 1))
+	srv.Add(k.PodReadyTime, promtest.Const(r(), unix(wiReady)))
+	srv.Add(k.PodCreated, promtest.Const(r(), unix(wiCreated)))
+	srv.Add(k.PodStarted, promtest.Const(r(), unix(wiCreated)))
 }
 
 // wiPods is the fleet's Pods as the API server holds them.
@@ -369,8 +414,8 @@ func (a atClock) Query(ctx context.Context, q string, _ time.Time, opts ...promv
 }
 
 // recordWindow runs a controller over the fleet, recorded, one cycle per
-// step, and returns its recording.
-func recordWindow(t *testing.T, prom promv1.API) []byte {
+// step, and returns its recording and its settle tracker's verdicts.
+func recordWindow(t *testing.T, prom promv1.API) ([]byte, map[settle.Reason]int64) {
 	t.Helper()
 	ctx := context.Background()
 	base := clocktesting.NewFakePassiveClock(wiStart)
@@ -414,7 +459,7 @@ func recordWindow(t *testing.T, prom promv1.API) []byte {
 		wiCycle(t, ctx, e, base, wiStart.Add(time.Duration(i)*wiStep), models, byModel)
 	}
 	require.NoError(t, e.learnRec.Err())
-	return buf.Bytes()
+	return buf.Bytes(), e.settleTracker().Verdicts()
 }
 
 // wiCycle is one engine cycle in optimize's order (engine.go optimize and
@@ -428,9 +473,19 @@ func wiCycle(t *testing.T, ctx context.Context, e *Engine, base *clocktesting.Fa
 	defer e.ReplicaMetricsCollector.EndCycle()
 	e.beginSLOCycle()
 	defer e.clock.Pin()()
+	step, _ := wiStepOf(at)
+	// The model groups are the variants with replicas; a parked variant is
+	// in none (engine.go ActiveVariantAutoscaling).
 	groups := map[string][]llmdVariantAutoscalingV1alpha1.VariantAutoscaling{}
+	parked := map[string][]string{}
+	activeKeys := map[string]bool{}
+	var active []string
 	for _, m := range models {
 		for _, v := range byModel[m] {
+			if v.isParked(step) {
+				parked[m] = append(parked[m], v.name)
+				continue
+			}
 			groups[utils.GetNamespacedKey(wiNS, m)] = append(groups[utils.GetNamespacedKey(wiNS, m)],
 				llmdVariantAutoscalingV1alpha1.VariantAutoscaling{
 					ObjectMeta: metav1.ObjectMeta{Name: v.name, Namespace: wiNS},
@@ -438,11 +493,31 @@ func wiCycle(t *testing.T, ctx context.Context, e *Engine, base *clocktesting.Fa
 						ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{Kind: "Deployment", Name: v.name, APIVersion: "apps/v1"}},
 				})
 		}
+		if len(groups[utils.GetNamespacedKey(wiNS, m)]) > 0 {
+			activeKeys[utils.GetNamespacedKey(wiNS, m)] = true
+			active = append(active, m)
+		}
 	}
+	// optimizeV2's prune, before the presence stamps.
+	e.retainSettle(activeKeys)
 	e.notePresentVariants(ctx, groups)
+	// notePresentVariants stamps the parked variants it lists from the
+	// variant registry, which this harness has none of; it stamps them
+	// here, after the active ones and in model order, as it would.
+	for _, m := range models {
+		if names := parked[m]; len(names) > 0 {
+			slices.Sort(names)
+			if noter := e.analyzers.saturationCaps().noter; noter != nil {
+				noter.NoteVariantsPresent(wiNS, m, names)
+			}
+			if e.sloAnalyzer != nil {
+				e.sloAnalyzer.NoteVariantsPresent(wiNS, m, names)
+			}
+		}
+	}
 	e.evictStaleLearnedState(ctx)
 	policy := config.ResolveScalingPolicy(map[string]config.ScalingPolicy{config.GlobalDefaultsKey: wiPolicy(t)}, "", wiNS)
-	for _, m := range models {
+	for _, m := range active {
 		targets := map[string]scaletarget.ScaleTargetAccessor{}
 		vas := map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling{}
 		states := make([]domain.VariantReplicaState, 0, len(byModel[m]))
@@ -450,6 +525,9 @@ func wiCycle(t *testing.T, ctx context.Context, e *Engine, base *clocktesting.Fa
 			vas[va.Name] = &va
 		}
 		for _, v := range byModel[m] {
+			if v.isParked(step) {
+				continue
+			}
 			targets[utils.GetNamespacedKey(wiNS, v.name)] = scaletarget.NewDeploymentAccessor(wiDeployment(v))
 			states = append(states, domain.VariantReplicaState{VariantName: v.name, CurrentReplicas: v.pods,
 				DesiredReplicas: v.pods, GPUsPerReplica: v.gpus, Role: v.role, AcceleratorName: wiAccel})
@@ -476,14 +554,20 @@ func wiCycle(t *testing.T, ctx context.Context, e *Engine, base *clocktesting.Fa
 
 // generateWindow captures the fleet's window, each range query in parts of
 // at most points steps (0 for the default), and plays it with Generate.
-func generateWindow(t *testing.T, prom promv1.API, points int) (*learnreplay.Report, []byte) {
+func generateWindow(t *testing.T, prom promv1.API, points int, roleOf ...string) (*learnreplay.Report, []byte) {
 	t.Helper()
 	policy := wiPolicy(t)
-	var buf bytes.Buffer
-	_, err := whatifsource.Capture(context.Background(), whatifsource.Options{
+	opts := whatifsource.Options{
 		Prometheus: prom, Namespace: wiNS, From: wiStart, To: wiStart.Add((wiSteps - 1) * wiStep), Step: wiStep,
 		KubeStateMetrics: true, Policy: &policy, EngineArgs: wiArgs, RangeQueryPoints: points,
-	}, &buf)
+	}
+	for _, r := range roleOf {
+		parsed, err := whatifsource.ParseRoleOf(r)
+		require.NoError(t, err)
+		opts.RoleOf = append(opts.RoleOf, parsed)
+	}
+	var buf bytes.Buffer
+	_, err := whatifsource.Capture(context.Background(), opts, &buf)
 	require.NoError(t, err)
 	r, err := gzip.NewReader(&buf)
 	require.NoError(t, err)
@@ -514,7 +598,7 @@ func wiPromAPI(t *testing.T, srv *promtest.Server) promv1.API {
 // wiRun records the controller over the fleet's window and generates the
 // same window from a capture, its range queries in parts of at most points
 // steps: the engine's recording, Generate's, and the fake Prometheus.
-func wiRun(t *testing.T, points int) (recorded, generated []byte, srv *promtest.Server) {
+func wiRun(t *testing.T, points int, roleOf ...string) (recorded, generated []byte, srv *promtest.Server) {
 	t.Helper()
 	srv = promtest.New()
 	t.Cleanup(srv.Close)
@@ -535,8 +619,8 @@ func wiRun(t *testing.T, points int) (recorded, generated []byte, srv *promtest.
 		return s
 	})
 	prom := wiPromAPI(t, srv)
-	recorded = recordWindow(t, prom)
-	rep, _ := generateWindow(t, prom, points)
+	recorded, verdicts := recordWindow(t, prom)
+	rep, _ := generateWindow(t, prom, points, roleOf...)
 
 	// The run exercised what it is meant to: every analyzer judged, the slo
 	// one with the router, lines published, and a model held.
@@ -544,11 +628,26 @@ func wiRun(t *testing.T, points int) (recorded, generated []byte, srv *promtest.
 	for _, ev := range wiEvents(t, recorded) {
 		run[ev.Kind]++
 	}
-	require.Equal(t, 2*wiSteps+1, run[saturation.KindAnalyze], "two models every cycle, and acme/idle on its first")
-	require.Equal(t, 2*wiSteps+1, run[slo.KindAnalyze], "every analyzed model lists slo")
-	require.Equal(t, 2*wiSteps+1, run[throughput.KindAnalyze])
+	// Two models every cycle, acme/idle on its first, and acme/park when it
+	// is not parked.
+	analyzed := 2*wiSteps + 1 + wiSteps - (wiParkedTo - wiParkedFrom + 1)
+	require.Equal(t, analyzed, run[saturation.KindAnalyze])
+	require.Equal(t, analyzed, run[slo.KindAnalyze], "every analyzed model lists slo")
+	require.Equal(t, analyzed, run[throughput.KindAnalyze])
 	require.Positive(t, run[saturation.KindPublishLine], "no ITL line was published")
 	require.Equal(t, wiSteps-1, run[settle.KindHold], "acme/idle is held on every cycle after its first")
+
+	// The settle tracker reached the same verdicts in both, which the
+	// recording does not show: every replica joined once, and acme/park's
+	// again after its parked steps, forgotten by the prune.
+	pods := 0
+	for _, v := range wiFleet() {
+		pods += v.pods
+	}
+	require.Equal(t, int64(pods+1), verdicts[settle.Joined], "acme/park's replica did not join again")
+	for _, r := range settle.Reasons() {
+		require.Equal(t, verdicts[r], rep.Paths["settle-"+string(r)], "settle verdict %s", r)
+	}
 	return recorded, rep.Recording, srv
 }
 
@@ -570,6 +669,18 @@ func TestWhatifCapture_GenerateReproducesTheControllersRunAcrossSplitRangeQuerie
 		}
 	}
 	require.Len(t, parts, (wiSteps+points-1)/points, "the window was not split")
+	wiSameRun(t, recorded, generated)
+}
+
+// A capture whose role map is --role-of by Pod name: app=agg-a also picks
+// the router's Pod (wiRouterPod), which has no KV series and is not a
+// replica, so the variant's replicas are still the engine's.
+func TestWhatifCapture_GenerateReproducesTheControllersRunWithRolesByName(t *testing.T) {
+	var roles []string
+	for _, v := range wiFleet() {
+		roles = append(roles, v.role+"=app="+v.name)
+	}
+	recorded, generated, _ := wiRun(t, 0, roles...)
 	wiSameRun(t, recorded, generated)
 }
 

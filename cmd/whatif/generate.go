@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/learnreplay"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
@@ -23,7 +25,22 @@ func runGenerate(ctx context.Context, args []string, out, _ io.Writer) error {
 	if *in == "" || *dst == "" {
 		return usagef("generate needs -in and -o")
 	}
-	capture, err := readMaybeGzipped(*in)
+	if err := generate(ctx, *in, *dst, out); err != nil {
+		// The one place generate's errors get their prefix.
+		var u usageError
+		if errors.As(err, &u) {
+			return usageError{fmt.Errorf("generate: %w", u.error)}
+		}
+		return fmt.Errorf("generate: %w", err)
+	}
+	return nil
+}
+
+// generate plays the capture at in and writes the recording to dst: a
+// usage error for a capture it cannot read, any other error for a failure
+// that is not the capture's.
+func generate(ctx context.Context, in, dst string, out io.Writer) error {
+	capture, err := readMaybeGzipped(in)
 	if err != nil {
 		return usageError{err}
 	}
@@ -33,22 +50,25 @@ func runGenerate(ctx context.Context, args []string, out, _ io.Writer) error {
 	case errors.As(err, &bad):
 		return usageError{err}
 	case err != nil:
-		return fmt.Errorf("generate: %w", err)
+		return err
 	}
 	recording := rep.Recording
 	start, err := startOf(recording)
 	if err != nil {
-		return err
+		return fmt.Errorf("the generated recording: %w", err)
 	}
-	if len(*dst) > 3 && (*dst)[len(*dst)-3:] == ".gz" {
+	if strings.HasSuffix(dst, ".gz") {
 		if recording, err = learnreplay.Gzip(recording); err != nil {
-			return err
+			return fmt.Errorf("gzip the recording: %w", err)
 		}
 	}
-	if err := os.WriteFile(*dst, recording, 0o600); err != nil {
+	if err := writeFileAtomic(dst, func(w io.Writer) error {
+		_, err := w.Write(recording)
+		return err
+	}); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "generated %d steps into %s: %d bytes, analyzes %v\n", rep.Applied, *dst, len(recording), rep.Analyzes)
+	fmt.Fprintf(out, "generated %d steps into %s: %d bytes, analyzes %v\n", rep.Applied, dst, len(recording), rep.Analyzes)
 	for _, c := range start.Caveats {
 		fmt.Fprintf(out, "  caveat: %s\n", c)
 	}
@@ -63,9 +83,44 @@ func startOf(recording []byte) (learnrec.Start, error) {
 		return start, err
 	}
 	if len(read.Events) == 0 || read.Events[0].Kind != learnrec.KindStart {
-		return start, errors.New("generate: the generated recording has no start line")
+		return start, errors.New("no start line")
 	}
-	return start, read.Events[0].DecodeData(&start)
+	if err := read.Events[0].DecodeData(&start); err != nil {
+		return start, fmt.Errorf("start line: %w", err)
+	}
+	return start, nil
+}
+
+// outputMode is the mode of every file whatif writes: a capture or a
+// recording holds a cluster's names, so only its owner reads it.
+const outputMode = 0o600
+
+// writeFileAtomic writes path through write, to a temporary file beside it
+// renamed over it once write succeeds, so a failed or cancelled run leaves
+// the file that was there before.
+func writeFileAtomic(path string, write func(w io.Writer) error) (err error) {
+	dir, base := filepath.Dir(path), filepath.Base(path)
+	tmp, err := os.CreateTemp(dir, "."+base+".tmp-*")
+	if err != nil {
+		return usageError{err}
+	}
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	if err := tmp.Chmod(outputMode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := write(tmp); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // readMaybeGzipped reads a file, gunzipping it when it is gzipped.

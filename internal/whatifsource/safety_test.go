@@ -210,3 +210,64 @@ func TestCapture_AWindowTooLargeIsRefused(t *testing.T) {
 	assert.Contains(t, err.Error(), "--force")
 	assert.Empty(t, srv.Requests())
 }
+
+// The samples a capture holds are counted as they arrive, and a capture
+// past MaxSamples stops, unless forced.
+func TestCapture_TheSamplesHeldAreBounded(t *testing.T) {
+	srv := promtest.New()
+	defer srv.Close()
+	baseFleet(t, srv, testPod)
+	opts := roleOfOpts(t, srv)
+	opts.To = t0.Add(4 * 15 * time.Second)
+	opts.MaxSamples = 6
+	_, err := Capture(context.Background(), opts, &bytes.Buffer{})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrWindowTooLarge), "%v", err)
+	assert.True(t, IsInputError(err))
+	assert.Contains(t, err.Error(), "past 6 samples")
+
+	opts.Force = true
+	_, sum := capture(t, opts)
+	assert.Greater(t, sum.Samples, 6, "the forced capture held more than the bound")
+}
+
+// Each error a capture fails with is the caller's input or Prometheus'.
+func TestCapture_ErrorsSayWhoseFaultTheyAre(t *testing.T) {
+	srv := promtest.New()
+	defer srv.Close()
+	for _, c := range []struct {
+		name  string
+		edit  func(o *Options)
+		is    error
+		input bool
+	}{
+		{"no namespace", func(o *Options) { o.Namespace = "" }, ErrInvalidOptions, true},
+		{"a step under a millisecond", func(o *Options) { o.Step = time.Microsecond }, ErrInvalidOptions, true},
+		{"no role map", func(o *Options) { o.RoleOf = nil }, ErrNoRoleMap, true},
+		{"nested prefixes", func(o *Options) {
+			r, err := ParseRoleOf("prefill=app=m-dec-p")
+			require.NoError(t, err)
+			o.RoleOf = append(o.RoleOf, r)
+		}, ErrRoleOverlap, true},
+		{"nothing attributed", func(*Options) {}, ErrNothingAttributed, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			o := roleOfOpts(t, srv)
+			c.edit(&o)
+			_, err := Capture(context.Background(), o, &bytes.Buffer{})
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, c.is), "%v", err)
+			assert.Equal(t, c.input, IsInputError(err))
+		})
+	}
+	t.Run("a failed query", func(t *testing.T) {
+		srv := promtest.New()
+		defer srv.Close()
+		baseFleet(t, srv, testPod)
+		srv.Fail(promQL(t, registration.QueryAvgTTFT), "query timed out")
+		_, err := Capture(context.Background(), roleOfOpts(t, srv), &bytes.Buffer{})
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, ErrQueryFailed), "%v", err)
+		assert.False(t, IsInputError(err))
+	})
+}

@@ -159,7 +159,7 @@ func TestCapture_Errors(t *testing.T) {
 		{"no step", func(o *Options) { o.Step = 0 }, "not positive"},
 		{"ends before it starts", func(o *Options) { o.To = o.From.Add(-time.Second) }, "before it starts"},
 		{"no Prometheus", func(o *Options) { o.Prometheus = nil }, "no Prometheus"},
-		{"nothing attributed", func(o *Options) {}, "no Pod in namespace llm had a KV-cache series"},
+		{"nothing attributed", func(o *Options) {}, "no Pod the role map attributes had a KV-cache series, in namespace llm"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			o := base()

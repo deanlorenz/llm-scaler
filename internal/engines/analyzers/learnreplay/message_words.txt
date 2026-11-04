@@ -1649,6 +1649,7 @@ operator
 optimization
 optimizer
 optimizer.type
+options
 or
 ordered
 orderedBehindQueue
