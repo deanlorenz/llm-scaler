@@ -676,7 +676,7 @@ func TestWhatifCapture_GenerateReproducesTheControllersRunAcrossSplitRangeQuerie
 // the router's Pod (wiRouterPod), which has no KV series and is not a
 // replica, so the variant's replicas are still the engine's.
 func TestWhatifCapture_GenerateReproducesTheControllersRunWithRolesByName(t *testing.T) {
-	var roles []string
+	roles := make([]string, 0, len(wiFleet()))
 	for _, v := range wiFleet() {
 		roles = append(roles, v.role+"=app="+v.name)
 	}

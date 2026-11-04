@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -360,40 +363,96 @@ func TestBearer_SendsTheTokenOverHTTPSToItsHostOnly(t *testing.T) {
 	}
 }
 
-// A redirect from https to http on the same host does not carry the token.
+// A redirect from https to http on the same host and port does not carry
+// the token: only the scheme tells the two requests apart.
 func TestClient_AnHTTPSRedirectToHTTPDropsTheToken(t *testing.T) {
-	plain := newAuthSeenPlain(t)
-	prom := newAuthSeen(t, func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, plain.URL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
-	})
+	var mu sync.Mutex
+	var tlsSeen, plainSeen []string
+	var plainURL string
+	srv := newBothSchemes(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.TLS != nil {
+			tlsSeen = append(tlsSeen, r.Header.Get("Authorization"))
+			http.Redirect(w, r, plainURL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+			return
+		}
+		plainSeen = append(plainSeen, r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[]}}`))
+	}))
+	plainURL = "http://" + srv.addr
 	token := filepath.Join(t.TempDir(), "token")
 	require.NoError(t, os.WriteFile(token, []byte("s3cret"), 0o600))
-	f := captureFlags{prometheus: prom.URL, tokenFile: token, caFile: caFile(t, prom.Server), timeout: 10 * time.Second}
+	f := captureFlags{prometheus: "https://" + srv.addr, tokenFile: token, caFile: srv.caFile, timeout: 10 * time.Second}
 	api, err := f.client(io.Discard)
 	require.NoError(t, err)
 	_, _, err = api.QueryRange(context.Background(), "up", promv1.Range{Start: cliFrom, End: cliFrom, Step: time.Second})
 	require.NoError(t, err)
-	require.NotEmpty(t, plain.headers(), "the redirect was not followed")
-	for _, h := range plain.headers() {
-		assert.Empty(t, h, "the token went over http")
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotEmpty(t, tlsSeen)
+	assert.Equal(t, "Bearer s3cret", tlsSeen[0], "the https request carries the token")
+	require.NotEmpty(t, plainSeen, "the redirect was not followed")
+	for _, h := range plainSeen {
+		assert.Empty(t, h, "the token went over http to the same host and port")
 	}
 }
 
-// newAuthSeenPlain is an http server, on the same host as the https ones,
-// that records the Authorization header and answers an empty matrix.
-func newAuthSeenPlain(t *testing.T) *authSeen {
-	t.Helper()
-	a := &authSeen{}
-	a.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		a.mu.Lock()
-		a.seen = append(a.seen, r.Header.Get("Authorization"))
-		a.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[]}}`))
-	}))
-	t.Cleanup(a.Close)
-	return a
+// bothSchemes is a server that answers https and plain http on one port.
+type bothSchemes struct {
+	addr, caFile string
 }
+
+// newBothSchemes serves h on one port, over TLS when a connection opens
+// with a TLS handshake and in the clear otherwise, with httptest's
+// certificate (127.0.0.1).
+func newBothSchemes(t *testing.T, h http.Handler) bothSchemes {
+	t.Helper()
+	cert := httptest.NewTLSServer(http.NotFoundHandler())
+	ca := caFile(t, cert)
+	cfg := cert.TLS.Clone()
+	cert.Close()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	s := &http.Server{Handler: h, ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = s.Serve(sniffing{Listener: ln, tls: cfg}) }()
+	t.Cleanup(func() { _ = s.Close() })
+	return bothSchemes{addr: ln.Addr().String(), caFile: ca}
+}
+
+// sniffing hands out each connection as TLS when its first byte opens a
+// TLS handshake (0x16), and as it is otherwise.
+type sniffing struct {
+	net.Listener
+	tls *tls.Config
+}
+
+func (s sniffing) Accept() (net.Conn, error) {
+	c, err := s.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	r := bufio.NewReader(c)
+	first, err := r.Peek(1)
+	if err != nil {
+		_ = c.Close()
+		return s.Accept()
+	}
+	pc := peeked{Conn: c, r: r}
+	if first[0] == 0x16 {
+		return tls.Server(pc, s.tls), nil
+	}
+	return pc, nil
+}
+
+// peeked is a connection whose first bytes were read into r.
+type peeked struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (p peeked) Read(b []byte) (int, error) { return p.r.Read(b) }
 
 // Exit codes by whose fault: nothing the role map attributes is the
 // caller's (2), a failed query Prometheus' (1).
