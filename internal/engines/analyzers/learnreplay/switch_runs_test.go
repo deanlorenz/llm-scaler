@@ -505,14 +505,18 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestMuLatch_AWindowBroughtBackFromTheStashComesBackLatched"},
 		{"../saturation", "TestMuLatch_AWindowRestoredAsAPriorAfterARefusedReadingComesBackLatched"},
 	},
-	// Learner PR 5b's start guard on distinct Pods: each runs the switch on
-	// and fails with it off; the first two and the log's also run it off and
-	// assert the parent's figure.
+	// Learner PR 5b's start guard on distinct Pods across a run: each runs
+	// the switch on and fails with it off; (a) to (d) and the lines' also
+	// run it off and assert the parent's figure.
 	saturation.SwitchStartConfirmsByDistinctPod: {
 		{"../saturation", "TestStartConfirm_OnePodRepeatingNeverOpensTheGuard"},
-		{"../saturation", "TestStartConfirm_DistinctPodsOpenTheGuard"},
-		{"../saturation", "TestStartConfirm_APodThatLeavesIsNoLongerCounted"},
-		{"../saturation", "TestStartConfirm_TheRejectionLineCountsDistinctPods"},
+		{"../saturation", "TestStartConfirm_AOneReplicaVariantLearnsASlowerImage"},
+		{"../saturation", "TestStartConfirm_ARestoredEstimateIsCorrectedByRollouts"},
+		{"../saturation", "TestStartConfirm_TwoSteadyPodsAndALaterThirdOpenIt"},
+		{"../saturation", "TestStartConfirm_ALargeStepReachesTheNewLevel"},
+		{"../saturation", "TestStartConfirm_TheMedianIgnoresABlipInTheRun"},
+		{"../saturation", "TestStartConfirm_ARunPodBackInRangeLeavesTheRunOpen"},
+		{"../saturation", "TestStartConfirm_TheLinesCountDistinctPods"},
 	},
 }
 

@@ -222,12 +222,13 @@ type SaturationAnalyzer struct {
 	// implausible for a variant, so a genuine change of hardware is eventually
 	// admitted rather than rejected forever against a stale estimate.
 	startOutliers map[string]int
-	// startOutlierPods is, per start key, the Pods whose start was refused
-	// as implausible since the key last admitted one, keyed like
-	// startSeenPods (key|namespace|pod): the guard opens on
-	// startConfirmPods distinct Pods, not on repeats of one
-	// (start_est.go, SwitchStartConfirmsByDistinctPod).
-	startOutlierPods map[string]map[string]struct{}
+	// startOutlierPods is, per start key, the open run of Pods whose start
+	// was refused as implausible, keyed like startSeenPods
+	// (key|namespace|pod), each with its start: the guard opens on
+	// startConfirmPods distinct Pods across the run, not on repeats of one
+	// (start_est.go, SwitchStartConfirmsByDistinctPod). At most
+	// startConfirmPods-1 Pods per key between cycles.
+	startOutlierPods map[string]map[string]startRunPod
 	// startConfirmsByPod is SwitchStartConfirmsByDistinctPod (learner PR
 	// 5b): on from the constructor; a replay turns it off
 	// (SetSwitchesForReplay), and the guard counts refusals as before.
@@ -561,7 +562,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		startSeconds:           make(map[string]float64),
 		startSeenPods:          make(map[string]time.Time),
 		startOutliers:          make(map[string]int),
-		startOutlierPods:       make(map[string]map[string]struct{}),
+		startOutlierPods:       make(map[string]map[string]startRunPod),
 		startConfirmsByPod:     true,
 		variantSeenAt:          make(map[string]time.Time),
 		now:                    clock.RealClock{}.Now,
@@ -941,12 +942,14 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 	for key := range a.startOutliers {
 		if a.variantIsStale(key, now, variantTimeout) {
 			delete(a.startOutliers, key)
+			delete(a.startOutlierPods, key)
 			evicted.StartOutliers++
 		}
 	}
 	// The same belt for the refused Pods (startOutlierPods), whose keys are
 	// likewise a subset of startSeconds' today: written only under a
-	// measured estimate.
+	// measured estimate. A key the loop above took is gone from it already,
+	// so each key is counted once.
 	for key := range a.startOutlierPods {
 		if a.variantIsStale(key, now, variantTimeout) {
 			delete(a.startOutlierPods, key)
