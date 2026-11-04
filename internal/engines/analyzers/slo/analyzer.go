@@ -584,6 +584,12 @@ func (a *Analyzer) judge(ctx context.Context, input domain.AnalyzerInput, slo *c
 	if a.router != nil {
 		rl = a.router.CollectRouterLatency(ctx, input.ModelID, input.Namespace)
 	}
+	// While a learner recording is on, the router latency may hold only the
+	// recorded histograms. That is no reading: judged, and recorded, as the
+	// nil it was before they were collected.
+	if !rl.Judgeable() {
+		rl = nil
+	}
 	var out []metrics.SLOObjectiveReading
 	if slo.TPOT != nil {
 		r := metrics.SLOObjectiveReading{

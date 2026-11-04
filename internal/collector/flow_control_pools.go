@@ -12,7 +12,6 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/prometheus"
 )
 
@@ -58,10 +57,7 @@ func (c *ReplicaMetricsCollector) CollectFlowControlPools(
 	recording := func(string) string { return constants.QueryTypeLearnerRecording }
 	results, issued, err := c.refreshSharedIssued(ctx, queries, map[string]string{source.ParamNamespace: namespace})
 	if err != nil {
-		reason := prometheus.CategorizePrometheusError(err)
-		for _, q := range issued {
-			metrics.IncMetricsCollectionErrors(recording(q), reason)
-		}
+		reason := countRefreshFailure(issued, err, recording)
 		logger.V(logging.DEBUG).Info("Flow-control pool series unavailable",
 			"modelID", modelID, "namespace", namespace, "reason", reason, "error", err)
 		return nil

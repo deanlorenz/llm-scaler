@@ -129,8 +129,9 @@ func collectParsedRows(t *testing.T, series map[string]model.Value, failed map[s
 
 	c := NewReplicaMetricsCollector(parsedSource{src}, fake.NewClientBuilder().WithScheme(scheme).Build(), reader, nil,
 		scalerLocator(map[string]string{presencePod: "va-1"}))
-	// The TTFT inputs are queried only while a recording is on.
-	c.SetRecordTTFTInputs(true)
+	// The TTFT inputs are queried only in a cycle that records.
+	c.BeginRecordingCycle(true)
+	defer c.EndCycle()
 	got, err := c.CollectReplicaMetrics(context.Background(), "test-model", "test-ns",
 		make(map[string]scaletarget.ScaleTargetAccessor),
 		make(map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling), nil)

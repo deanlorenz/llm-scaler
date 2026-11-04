@@ -63,6 +63,11 @@ const (
 
 	// TTFTInputWindow is the window of the [1m] queries above.
 	TTFTInputWindow = "1m"
+
+	// TTFTLengthWindow is the window of the prompt-length histogram: the
+	// [5m] of QueryAvgInputTokens, so the histogram and the mean cover the
+	// same requests.
+	TTFTLengthWindow = "5m"
 )
 
 // perPodBuckets is the per-pod bucket rates of a vLLM histogram over window:
@@ -86,14 +91,14 @@ func registerTTFTInputQueries(registry *source.QueryList) {
 	registry.MustRegister(source.QueryTemplate{
 		Name:        QueryPromptTokensBuckets,
 		Type:        source.QueryTypePromQL,
-		Template:    perPodBuckets("vllm:request_prompt_tokens_bucket", "5m"),
+		Template:    perPodBuckets("vllm:request_prompt_tokens_bucket", TTFTLengthWindow),
 		Params:      []string{source.ParamNamespace},
 		Description: "Prompt-length histogram per pod (5m rate, one series per bucket)",
 	})
 	registerForEngine(registry, inferenceengine.EngineSGLang, source.QueryTemplate{
 		Name:        QueryPromptTokensBuckets,
 		Type:        source.QueryTypePromQL,
-		Template:    sglangPerPodBuckets("sglang:prompt_tokens_histogram_bucket", "5m"),
+		Template:    sglangPerPodBuckets("sglang:prompt_tokens_histogram_bucket", TTFTLengthWindow),
 		Params:      []string{source.ParamNamespace},
 		Description: "Prompt-length histogram per pod (5m rate, one series per bucket) (SGLang)",
 	})

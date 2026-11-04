@@ -2,6 +2,7 @@ package slo
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"time"
 
@@ -559,6 +560,23 @@ var _ = Describe("judge's sample minimums and labels", func() {
 		out := judge(&domain.RouterLatency{WindowSeconds: 300, TPOTCountRate: 1}, policy(100*time.Millisecond, 0).SLO)
 		Expect(math.IsNaN(out[0].Observed)).To(BeTrue())
 		Expect(out[0].Requests).To(BeNumerically("~", 300, 1e-9))
+	})
+
+	It("judges a router latency holding only the recorded histograms as no reading", func() {
+		// While a learner recording is on, the collector keeps a struct
+		// that holds only the TPOT and flow-control wait histograms. Judged
+		// as it is, it reported 0 TPOT requests, a count where there was
+		// none; it must judge, and be recorded, as the nil it was before.
+		slo := policy(100*time.Millisecond, 3*time.Second).SLO
+		histogramsOnly := &domain.RouterLatency{WindowSeconds: 300,
+			TPOTBuckets:            buckets(0.05, 1, inf, 2),
+			FlowControlWaitBuckets: buckets(0.01, 1, inf, 2)}
+		out, rl, asked := New(fakeRouter{latency: histogramsOnly}, nil).judge(context.Background(),
+			domain.AnalyzerInput{ModelID: "m", Namespace: "ns"}, slo)
+		Expect(asked).To(BeTrue())
+		Expect(rl).To(BeNil(), "recorded as no reading")
+		Expect(fmt.Sprint(out)).To(Equal(fmt.Sprint(judge(nil, slo))))
+		Expect(math.IsNaN(out[0].Requests)).To(BeTrue(), "no TPOT count, not a count of 0")
 	})
 
 	It("labels each objective with its statistic", func() {

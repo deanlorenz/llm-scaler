@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -232,8 +233,27 @@ func mapKey(k reflect.Value) (string, error) {
 	return "", fmt.Errorf("learnrec: cannot encode a map key of %s", k.Type())
 }
 
+// omitZeroFields caches, per struct type, which fields carry OmitZeroTag:
+// reflect.Type to []bool, one per field. A recording encodes the same few
+// types every event, so each type's tags are parsed once.
+var omitZeroFields sync.Map
+
+// omitZero is t's omitzero flags, one per field, from the cache.
+func omitZero(t reflect.Type) []bool {
+	if cached, ok := omitZeroFields.Load(t); ok {
+		return cached.([]bool)
+	}
+	flags := make([]bool, t.NumField())
+	for i := range flags {
+		flags[i] = t.Field(i).Tag.Get("learnrec") == OmitZeroTag
+	}
+	cached, _ := omitZeroFields.LoadOrStore(t, flags)
+	return cached.([]bool)
+}
+
 func encodeStruct(buf *bytes.Buffer, v reflect.Value) error {
 	t := v.Type()
+	omit := omitZero(t)
 	buf.WriteByte('{')
 	first := true
 	for i := 0; i < t.NumField(); i++ {
@@ -241,7 +261,7 @@ func encodeStruct(buf *bytes.Buffer, v reflect.Value) error {
 		if !f.IsExported() {
 			return fmt.Errorf("learnrec: %s has an unexported field %s; a recording would lose it", t, f.Name)
 		}
-		if f.Tag.Get("learnrec") == OmitZeroTag && v.Field(i).IsZero() {
+		if omit[i] && v.Field(i).IsZero() {
 			continue
 		}
 		if !first {

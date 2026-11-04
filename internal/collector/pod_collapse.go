@@ -321,11 +321,11 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	// over the ranks, the means weighted by their own counts where the row
 	// has them and by request rate otherwise (mergeKnownMean), each present
 	// only when every rank had it.
-	pod.PromptTokensBuckets = mergeLengthBuckets(group, func(m domain.ReplicaMetrics) []domain.LengthBucket { return m.PromptTokensBuckets })
-	pod.OutputTokensBuckets = mergeLengthBuckets(group, func(m domain.ReplicaMetrics) []domain.LengthBucket { return m.OutputTokensBuckets })
-	pod.TTFTBuckets = mergeLatencyBuckets(group, func(m domain.ReplicaMetrics) []domain.LatencyBucket { return m.TTFTBuckets })
-	pod.QueueTimeBuckets = mergeLatencyBuckets(group, func(m domain.ReplicaMetrics) []domain.LatencyBucket { return m.QueueTimeBuckets })
-	pod.TPOTBuckets = mergeLatencyBuckets(group, func(m domain.ReplicaMetrics) []domain.LatencyBucket { return m.TPOTBuckets })
+	pod.PromptTokensBuckets = mergeBuckets(group, func(m domain.ReplicaMetrics) []domain.LengthBucket { return m.PromptTokensBuckets })
+	pod.OutputTokensBuckets = mergeBuckets(group, func(m domain.ReplicaMetrics) []domain.LengthBucket { return m.OutputTokensBuckets })
+	pod.TTFTBuckets = mergeBuckets(group, func(m domain.ReplicaMetrics) []domain.LatencyBucket { return m.TTFTBuckets })
+	pod.QueueTimeBuckets = mergeBuckets(group, func(m domain.ReplicaMetrics) []domain.LatencyBucket { return m.QueueTimeBuckets })
+	pod.TPOTBuckets = mergeBuckets(group, func(m domain.ReplicaMetrics) []domain.LatencyBucket { return m.TPOTBuckets })
 	pod.AvgQueueTime, pod.AvgQueueTimeKnown = mergeKnownMean(group, func(m domain.ReplicaMetrics) (float64, bool) {
 		return m.AvgQueueTime, m.AvgQueueTimeKnown
 	}, queueTimeCountRate)

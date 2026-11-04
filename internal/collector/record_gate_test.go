@@ -64,9 +64,9 @@ var recordOnlyNames = []string{
 }
 
 // collectAll runs one cycle of every collection that can issue a
-// record-only query, for two models of one namespace.
-func collectAll(c *ReplicaMetricsCollector) {
-	c.BeginCycle()
+// record-only query, for two models of one namespace, recording or not.
+func collectAll(c *ReplicaMetricsCollector, record bool) {
+	c.BeginRecordingCycle(record)
 	defer c.EndCycle()
 	for _, m := range []string{"model-a", "model-b"} {
 		_, _, _ = c.queryReplicaSeries(context.Background(), m, "ns", nil)
@@ -79,7 +79,7 @@ func TestRecordOnlyQueries_IssuedOnlyWhileRecording(t *testing.T) {
 	src := &askingSource{}
 	c := NewReplicaMetricsCollector(src, nil, nil, nil, nil)
 
-	collectAll(c)
+	collectAll(c, false)
 	for _, q := range recordOnlyNames {
 		assert.Zero(t, src.asked[q], "recording off: %s was asked", q)
 	}
@@ -90,8 +90,7 @@ func TestRecordOnlyQueries_IssuedOnlyWhileRecording(t *testing.T) {
 	}
 
 	src.asked = nil
-	c.SetRecordTTFTInputs(true)
-	collectAll(c)
+	collectAll(c, true)
 	for _, q := range recordOnlyNames {
 		assert.Equal(t, 1, src.asked[q], "recording on: %s asked once per namespace", q)
 	}
@@ -108,6 +107,38 @@ func TestRecordOnlyQueries_IssuedOnlyWhileRecording(t *testing.T) {
 	assert.Equal(t, 16, total)
 }
 
+// The recording flag is the cycle's: on, then off, then on again, each cycle
+// asks exactly what its own flag says, and once a cycle ends nothing outside
+// a cycle asks a record-only query, whatever the last cycle did.
+func TestRecordOnlyQueries_FlagIsTheCyclesOwn(t *testing.T) {
+	src := &askingSource{}
+	c := NewReplicaMetricsCollector(src, nil, nil, nil, nil)
+	askedRecordOnly := func() int {
+		n := 0
+		for _, q := range recordOnlyNames {
+			n += src.asked[q]
+		}
+		src.asked = nil
+		return n
+	}
+	for i, record := range []bool{true, false, true} {
+		collectAll(c, record)
+		want := 0
+		if record {
+			want = len(recordOnlyNames)
+		}
+		assert.Equal(t, want, askedRecordOnly(), "cycle %d (record %v)", i, record)
+	}
+
+	// The last cycle recorded; it has ended, so a caller outside a cycle
+	// must not issue a record-only query.
+	assert.False(t, c.RecordsTTFTInputs(), "the flag outlived its cycle")
+	_, _, _ = c.queryReplicaSeries(context.Background(), "model-a", "ns", nil)
+	c.CollectRouterLatency(context.Background(), "model-a", "ns")
+	assert.Nil(t, c.CollectFlowControlPools(context.Background(), "model-a", "ns"))
+	assert.Zero(t, askedRecordOnly(), "outside a cycle")
+}
+
 // A failed record-only query is counted once per query the collector sent,
 // under learner_recording, not under the scaling queries' types, and not
 // again by a second model reading it from the memo. The slo analyzer's three
@@ -120,8 +151,7 @@ func TestRecordOnlyQueries_FailureCountedOnceUnderItsOwnType(t *testing.T) {
 			return &source.MetricResult{QueryName: q, Error: errors.New("query timed out")}
 		}}
 		c := NewReplicaMetricsCollector(src, nil, nil, nil, nil)
-		c.SetRecordTTFTInputs(recording)
-		collectAll(c)
+		collectAll(c, recording)
 
 		assert.Equal(t, 3.0, errorsOfType(t, registry, constants.QueryTypeRouterLatency),
 			"recording %v: the three slo router queries, once each", recording)
@@ -144,8 +174,7 @@ func TestCollectRouterLatency_RefreshErrorCountedPerIssuedQuery(t *testing.T) {
 		return nil, errors.New("prometheus unreachable")
 	}}
 	c := NewReplicaMetricsCollector(src, nil, nil, nil, nil)
-	c.SetRecordTTFTInputs(true)
-	c.BeginCycle()
+	c.BeginRecordingCycle(true)
 	assert.Nil(t, c.CollectRouterLatency(context.Background(), "model-a", "ns"))
 	c.EndCycle()
 	assert.Equal(t, 3.0, errorsOfType(t, registry, constants.QueryTypeRouterLatency))

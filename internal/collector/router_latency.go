@@ -2,8 +2,6 @@ package collector
 
 import (
 	"context"
-	"math"
-	"strconv"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
@@ -12,7 +10,6 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/prometheus"
 )
 
@@ -44,12 +41,8 @@ func (c *ReplicaMetricsCollector) CollectRouterLatency(
 	if err != nil {
 		// Counted, not only logged: an absent latency series reads the same
 		// whether the router is unscraped or Prometheus is down, and the
-		// collection-error counter is what tells the two apart. Once per
-		// query this call sent.
-		reason := prometheus.CategorizePrometheusError(err)
-		for _, q := range issued {
-			metrics.IncMetricsCollectionErrors(routerQueryType(q), reason)
-		}
+		// collection-error counter is what tells the two apart.
+		reason := countRefreshFailure(issued, err, routerQueryType)
 		logger.V(logging.DEBUG).Info("Router latency unavailable",
 			"modelID", modelID, "namespace", namespace, "reason", reason, "error", err)
 		return nil
@@ -90,12 +83,13 @@ func (c *ReplicaMetricsCollector) CollectRouterLatency(
 			out.TPOTSumRate, out.TPOTCountRate = 0, 0
 		}
 	}
-	// The two histograms ride along for a recording, read by nothing yet:
-	// neither alone makes a reading, so the slo analyzer sees the same nil
-	// it always did.
+	// The two histograms ride along for a recording, read by nothing yet.
+	// Either one keeps the struct, so the recording holds it; the slo
+	// analyzer judges only what RouterLatency.Judgeable says is a reading,
+	// so it sees the same nil it always did.
 	out.TPOTBuckets = routerBuckets(results[registration.QuerySLORouterTPOTBuckets], modelID)
 	out.FlowControlWaitBuckets = routerBuckets(results[registration.QueryFlowControlWaitBuckets], modelID)
-	if len(out.TTFTBuckets) == 0 && out.TPOTCountRate == 0 {
+	if !out.Judgeable() && out.TPOTBuckets == nil && out.FlowControlWaitBuckets == nil {
 		return nil
 	}
 	return out
@@ -118,16 +112,11 @@ func routerQueryType(query string) string {
 func routerBuckets(result *source.MetricResult, modelID string) []domain.LatencyBucket {
 	byBound := map[float64]float64{}
 	for _, v := range modelValues(result, modelID) {
-		le, err := strconv.ParseFloat(v.Labels["le"], 64)
-		if err != nil || math.IsNaN(le) {
-			continue
+		if le, ok := bucketBound(v); ok {
+			byBound[le] += v.Value
 		}
-		byBound[le] += v.Value
 	}
-	if len(byBound) == 0 {
-		return nil
-	}
-	return latencyBuckets(byBound)
+	return sortedBuckets[domain.LatencyBucket](byBound)
 }
 
 // modelValues returns the finite, non-negative values of result that belong to

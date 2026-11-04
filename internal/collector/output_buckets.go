@@ -2,8 +2,6 @@ package collector
 
 import (
 	"context"
-	"math"
-	"strconv"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/registration"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
@@ -46,11 +44,8 @@ func (c *ReplicaMetricsCollector) extractBuckets(ctx context.Context, modelID, n
 		if value.Labels[seriesModelLabel] != modelID {
 			continue
 		}
-		le, err := strconv.ParseFloat(value.Labels["le"], 64)
-		if err != nil || math.IsNaN(le) {
-			continue
-		}
-		if !value.Finite() || !(value.Value >= 0) || math.IsInf(value.Value, 0) {
+		le, ok := bucketBound(value)
+		if !ok {
 			continue
 		}
 		instanceKey, _, _ := c.buildInstanceKey(ctx, namespace, value.Labels)

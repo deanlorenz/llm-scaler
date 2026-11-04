@@ -102,22 +102,21 @@ var recordOnlyReplicaQueries = map[string]bool{
 	registration.QueryTPOTBuckets:         true,
 }
 
-// withoutRecordOnly is names less the record-only queries, in order.
-func withoutRecordOnly(names []string) []string {
-	out := make([]string, 0, len(names))
-	for _, n := range names {
-		if !recordOnlyReplicaQueries[n] {
-			out = append(out, n)
-		}
-	}
-	return out
-}
+// The replica query lists split once, at start: the scaling queries issued
+// every cycle, and the record-only ones issued while recording.
+var (
+	scalingEngineSpecificQueries    = filterQueries(engineSpecificReplicaQueries, false)
+	scalingAgnosticQueries          = filterQueries(agnosticReplicaQueries, false)
+	recordOnlyEngineSpecificQueries = filterQueries(engineSpecificReplicaQueries, true)
+	recordOnlyAgnosticQueries       = filterQueries(agnosticReplicaQueries, true)
+)
 
-// onlyRecordOnly is the record-only queries of names, in order.
-func onlyRecordOnly(names []string) []string {
+// filterQueries is the queries of names that are record-only, or that are
+// not, in order.
+func filterQueries(names []string, recordOnly bool) []string {
 	var out []string
 	for _, n := range names {
-		if recordOnlyReplicaQueries[n] {
+		if recordOnlyReplicaQueries[n] == recordOnly {
 			out = append(out, n)
 		}
 	}

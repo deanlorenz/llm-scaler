@@ -965,7 +965,7 @@ collected.
 whole input, so a model listing three analyzers writes its rows three times
 a cycle. With R1's fields that is an estimated 4 KB more per replica per
 `Analyze`, about 3.3 times the measured 1.7 KB: at a 15 s cycle with 100
-replicas and three analyzers listed, the 256Mi cap fills in about 38 minutes
+replicas and three analyzers listed, the 256Mi cap fills in about 40 minutes
 instead of 2.1 hours. A later PR writes each model's cycle input once, as its
 own event, and has each `Analyze` event name that event's sequence number
 instead of carrying a copy; replay resolves the reference. That brings the

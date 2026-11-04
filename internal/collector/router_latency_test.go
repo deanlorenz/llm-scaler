@@ -247,7 +247,8 @@ func TestCollectRouterLatency_TPOTBuckets(t *testing.T) {
 			return results, nil
 		}}
 		c := NewReplicaMetricsCollector(src, nil, nil, nil, nil)
-		c.SetRecordTTFTInputs(true)
+		c.BeginRecordingCycle(true)
+		defer c.EndCycle()
 		return c.CollectRouterLatency(context.Background(), "model-a", "ns")
 	}
 
@@ -271,6 +272,22 @@ func TestCollectRouterLatency_TPOTBuckets(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Nil(t, got.TPOTBuckets, "a histogram of NaNs is no histogram")
 
-	assert.Nil(t, collect(map[string]*source.MetricResult{registration.QuerySLORouterTPOTBuckets: buckets}),
-		"TPOT buckets alone are not a router reading")
+	// While recording, either histogram alone keeps the struct, so the
+	// recording holds it; it is still no reading for the slo analyzer.
+	got = collect(map[string]*source.MetricResult{registration.QuerySLORouterTPOTBuckets: buckets})
+	require.NotNil(t, got, "the TPOT histogram alone was dropped from the recording")
+	assert.Equal(t, []domain.LatencyBucket{{UpperBound: 0.05, Rate: 0.75}, {UpperBound: math.Inf(1), Rate: 2}}, got.TPOTBuckets)
+	assert.False(t, got.Judgeable(), "TPOT buckets alone are not a router reading")
+	got = collect(map[string]*source.MetricResult{registration.QueryFlowControlWaitBuckets: buckets})
+	require.NotNil(t, got, "the wait histogram alone was dropped from the recording")
+	assert.NotNil(t, got.FlowControlWaitBuckets)
+	assert.False(t, got.Judgeable(), "a wait histogram alone is not a router reading")
+
+	// Not recording, neither histogram is asked for, and nothing else is
+	// there: nil, as before they were collected.
+	src := &mockMetricsSource{refreshFunc: func(context.Context, source.RefreshSpec) (map[string]*source.MetricResult, error) {
+		return map[string]*source.MetricResult{registration.QuerySLORouterTPOTBuckets: buckets,
+			registration.QueryFlowControlWaitBuckets: buckets}, nil
+	}}
+	assert.Nil(t, NewReplicaMetricsCollector(src, nil, nil, nil, nil).CollectRouterLatency(context.Background(), "model-a", "ns"))
 }

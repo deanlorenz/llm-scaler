@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"slices"
 	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -105,6 +104,17 @@ func (c *ReplicaMetricsCollector) refreshSharedIssued(
 	return results, missing, nil
 }
 
+// countRefreshFailure counts a refresh that failed as a whole once for each
+// query of issued, the queries the failed call sent, under the query type
+// typeOf names for it, and returns the failure's reason for the caller's log.
+func countRefreshFailure(issued []string, err error, typeOf func(string) string) string {
+	reason := prometheus.CategorizePrometheusError(err)
+	for _, q := range issued {
+		metrics.IncMetricsCollectionErrors(typeOf(q), reason)
+	}
+	return reason
+}
+
 // countFailedIssued counts each query of issued whose result carries an
 // error, under the query type typeOf names for it: once per query this
 // collection sent, never for a result read from the memo. A query typeOf
@@ -169,9 +179,10 @@ func (c *ReplicaMetricsCollector) queryReplicaSeries(
 	// - Per-request timings: avg ITL, avg service time
 	// - Throughput analyzer: generation token rate, instantaneous KV usage (k*), request rate
 	// - With a learner recording on, the TTFT model's inputs (recordOnlyReplicaQueries)
-	engineSpecific, agnostic := engineSpecificReplicaQueries, agnosticReplicaQueries
-	if !c.RecordsTTFTInputs() {
-		engineSpecific, agnostic = withoutRecordOnly(engineSpecific), withoutRecordOnly(agnostic)
+	recording := c.RecordsTTFTInputs()
+	engineSpecific, agnostic := scalingEngineSpecificQueries, scalingAgnosticQueries
+	if recording {
+		engineSpecific, agnostic = engineSpecificReplicaQueries, agnosticReplicaQueries
 	}
 	queries := buildEngineQueryList(engines, engineSpecific, agnostic)
 
@@ -196,13 +207,18 @@ func (c *ReplicaMetricsCollector) queryReplicaSeries(
 	// operator who turned recording on can tell its failures from the
 	// scaling queries'. The scaling queries' own failures are counted where
 	// they are read, as before.
-	recordOnly := buildEngineQueryList(engines, onlyRecordOnly(engineSpecific), onlyRecordOnly(agnostic))
-	countFailedIssued(issued, results, func(q string) string {
-		if slices.Contains(recordOnly, q) {
-			return constants.QueryTypeLearnerRecording
+	if recording {
+		recordOnly := make(map[string]bool)
+		for _, q := range buildEngineQueryList(engines, recordOnlyEngineSpecificQueries, recordOnlyAgnosticQueries) {
+			recordOnly[q] = true
 		}
-		return ""
-	})
+		countFailedIssued(issued, results, func(q string) string {
+			if recordOnly[q] {
+				return constants.QueryTypeLearnerRecording
+			}
+			return ""
+		})
+	}
 
 	// Re-key engine-specific results under their logical query names so the per-pod
 	// processing (extractPodMetrics) is engine-agnostic. For SGLang-only models this renames the

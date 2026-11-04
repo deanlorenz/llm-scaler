@@ -49,6 +49,15 @@ type RouterLatency struct {
 	FlowControlWaitBuckets []LatencyBucket `learnrec:"omitzero"`
 }
 
+// Judgeable reports whether r is a reading of the router's latency: a TTFT
+// histogram or a TPOT request rate. The two recorded histograms alone
+// (TPOTBuckets, FlowControlWaitBuckets) are not one, so the slo analyzer
+// treats a struct holding only them as no reading, as it did before they
+// were collected. Nil is not judgeable.
+func (r *RouterLatency) Judgeable() bool {
+	return r != nil && (len(r.TTFTBuckets) > 0 || r.TPOTCountRate != 0)
+}
+
 // FlowControlPool is one InferencePool's flow-control layer in the router
 // (the llm-d EPP), over WindowSeconds: how saturated the pool read, and how
 // requests left it. How long they waited is per model

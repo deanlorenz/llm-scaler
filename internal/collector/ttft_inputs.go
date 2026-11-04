@@ -4,11 +4,40 @@ import (
 	"context"
 	"math"
 	"sort"
+	"strconv"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/registration"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
+
+// ttftInputHistograms are the TTFT model's per-pod histograms: each query and
+// the bound-to-rate map it fills.
+var ttftInputHistograms = []struct {
+	query string
+	field func(*podMetricData) *map[float64]float64
+}{
+	{registration.QueryPromptTokensBuckets, func(d *podMetricData) *map[float64]float64 { return &d.promptTokensBuckets }},
+	{registration.QueryTTFTBuckets, func(d *podMetricData) *map[float64]float64 { return &d.ttftBuckets }},
+	{registration.QueryQueueTimeBuckets, func(d *podMetricData) *map[float64]float64 { return &d.queueTimeBuckets }},
+	{registration.QueryTPOTBuckets, func(d *podMetricData) *map[float64]float64 { return &d.tpotBuckets }},
+}
+
+// ttftInputFigures are the TTFT model's per-pod figures read under
+// extractNonNegative's rule: each query and the value and presence bit it
+// fills. The three means, and the queue minimum, which is not a mean but is
+// read the same way (a zero is a queue that emptied in the minute).
+var ttftInputFigures = []struct {
+	query string
+	field func(*podMetricData) (*float64, *bool)
+}{
+	{registration.QueryAvgQueueTime, func(d *podMetricData) (*float64, *bool) { return &d.avgQueueTime, &d.avgQueueTimeKnown }},
+	{registration.QueryAvgPrefillTime, func(d *podMetricData) (*float64, *bool) { return &d.avgPrefillTime, &d.avgPrefillTimeKnown }},
+	{registration.QueryAvgKVTransferTime, func(d *podMetricData) (*float64, *bool) {
+		return &d.avgKVTransferTime, &d.avgKVTransferTimeKnown
+	}},
+	{registration.QueryQueueMin, func(d *podMetricData) (*float64, *bool) { return &d.queueMin, &d.queueMinKnown }},
+}
 
 // extractTTFTInputs reads the series the TTFT model learns from
 // (registration/ttft_inputs.go) into the instances the model-scoped queries
@@ -17,33 +46,22 @@ import (
 // each one absent. Recorded, and read by no analyzer yet.
 func (c *ReplicaMetricsCollector) extractTTFTInputs(ctx context.Context, modelID, namespace string,
 	results map[string]*source.MetricResult, podData map[string]*podMetricData) {
-	for name, field := range map[string]func(*podMetricData) *map[float64]float64{
-		registration.QueryPromptTokensBuckets: func(d *podMetricData) *map[float64]float64 { return &d.promptTokensBuckets },
-		registration.QueryTTFTBuckets:         func(d *podMetricData) *map[float64]float64 { return &d.ttftBuckets },
-		registration.QueryQueueTimeBuckets:    func(d *podMetricData) *map[float64]float64 { return &d.queueTimeBuckets },
-		registration.QueryTPOTBuckets:         func(d *podMetricData) *map[float64]float64 { return &d.tpotBuckets },
-	} {
-		c.extractBuckets(ctx, modelID, namespace, results[name], podData, field)
+	for _, h := range ttftInputHistograms {
+		c.extractBuckets(ctx, modelID, namespace, results[h.query], podData, h.field)
 	}
-	c.extractMean(ctx, modelID, namespace, results[registration.QueryAvgQueueTime], podData,
-		func(d *podMetricData) (*float64, *bool) { return &d.avgQueueTime, &d.avgQueueTimeKnown })
-	c.extractMean(ctx, modelID, namespace, results[registration.QueryAvgPrefillTime], podData,
-		func(d *podMetricData) (*float64, *bool) { return &d.avgPrefillTime, &d.avgPrefillTimeKnown })
-	c.extractMean(ctx, modelID, namespace, results[registration.QueryAvgKVTransferTime], podData,
-		func(d *podMetricData) (*float64, *bool) { return &d.avgKVTransferTime, &d.avgKVTransferTimeKnown })
-	// Not a mean, but read under the same rule: finite and non-negative,
-	// a zero included (the queue emptied in the minute).
-	c.extractMean(ctx, modelID, namespace, results[registration.QueryQueueMin], podData,
-		func(d *podMetricData) (*float64, *bool) { return &d.queueMin, &d.queueMinKnown })
+	for _, f := range ttftInputFigures {
+		c.extractNonNegative(ctx, modelID, namespace, results[f.query], podData, f.field)
+	}
 }
 
-// extractMean reads one per-instance mean into the value and presence bit
-// field returns, for the instances already found. A finite, non-negative
-// value is a reading, a zero included (no wait). A NaN is the 0/0 of a window
-// with no request, and is not one; nor is an infinity, a negative, another
-// model's series or a failed query. Sticky across series under one key, like
-// ITL: once a series is read, a later unusable one leaves it.
-func (c *ReplicaMetricsCollector) extractMean(ctx context.Context, modelID, namespace string,
+// extractNonNegative reads one per-instance figure into the value and
+// presence bit field returns, for the instances already found. A finite,
+// non-negative value is a reading, a zero included (no wait). A NaN is the 0/0
+// of a window with no request, and is not one; nor is an infinity, a
+// negative, another model's series or a failed query. Sticky across series
+// under one key, like ITL: once a series is read, a later unusable one leaves
+// it.
+func (c *ReplicaMetricsCollector) extractNonNegative(ctx context.Context, modelID, namespace string,
 	result *source.MetricResult, podData map[string]*podMetricData, field func(*podMetricData) (*float64, *bool)) {
 	if result == nil || result.HasError() {
 		return
@@ -52,7 +70,7 @@ func (c *ReplicaMetricsCollector) extractMean(ctx context.Context, modelID, name
 		if value.Labels[seriesModelLabel] != modelID {
 			continue
 		}
-		if !value.Finite() || !(value.Value >= 0) {
+		if !value.Finite() || value.Value < 0 {
 			continue
 		}
 		instanceKey, _, _ := c.buildInstanceKey(ctx, namespace, value.Labels)
@@ -64,38 +82,58 @@ func (c *ReplicaMetricsCollector) extractMean(ctx context.Context, modelID, name
 	}
 }
 
-// lengthBuckets is a histogram read by extractBuckets as the row carries it,
-// sorted by bound; nil stays nil.
-func lengthBuckets(byBound map[float64]float64) []domain.LengthBucket {
-	if byBound == nil {
+// bucketBound is the upper bound of one histogram bucket series, and whether
+// the series is a usable bucket: its le label parses to a number that is not
+// NaN ("+Inf" is a bound), and its rate is a finite, non-negative number. A
+// NaN rate the Prometheus source stored as 0 is not usable (Finite reads its
+// flag).
+func bucketBound(value source.MetricValue) (float64, bool) {
+	le, err := strconv.ParseFloat(value.Labels["le"], 64)
+	if err != nil || math.IsNaN(le) {
+		return 0, false
+	}
+	if !value.Finite() || value.Value < 0 {
+		return 0, false
+	}
+	return le, true
+}
+
+// bucket is the shape every histogram bucket in a row has: domain.LengthBucket
+// (tokens) and domain.LatencyBucket (seconds).
+type bucket interface {
+	~struct {
+		UpperBound float64
+		Rate       float64
+	}
+}
+
+// rawBucket is bucket's underlying struct, which each bucket type converts
+// to and from.
+type rawBucket = struct {
+	UpperBound float64
+	Rate       float64
+}
+
+// sortedBuckets is a histogram as a row carries it: one bucket per bound,
+// sorted by bound. Nil when byBound holds no bound, so an absent histogram
+// is never an empty one.
+func sortedBuckets[B bucket](byBound map[float64]float64) []B {
+	if len(byBound) == 0 {
 		return nil
 	}
-	out := make([]domain.LengthBucket, 0, len(byBound))
+	out := make([]B, 0, len(byBound))
 	for le, rate := range byBound {
-		out = append(out, domain.LengthBucket{UpperBound: le, Rate: rate})
+		out = append(out, B(rawBucket{UpperBound: le, Rate: rate}))
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].UpperBound < out[j].UpperBound })
+	sort.Slice(out, func(i, j int) bool { return rawBucket(out[i]).UpperBound < rawBucket(out[j]).UpperBound })
 	return out
 }
 
-// latencyBuckets is lengthBuckets for a histogram of seconds.
-func latencyBuckets(byBound map[float64]float64) []domain.LatencyBucket {
-	if byBound == nil {
-		return nil
-	}
-	out := make([]domain.LatencyBucket, 0, len(byBound))
-	for le, rate := range byBound {
-		out = append(out, domain.LatencyBucket{UpperBound: le, Rate: rate})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].UpperBound < out[j].UpperBound })
-	return out
-}
-
-// mergeLengthBuckets is one pod's histogram from its ranks': each bound's
-// rate summed, since a request any rank served is one the pod served. Nil
-// unless every rank had a histogram: a rank without one would read as a
-// rank that served nothing.
-func mergeLengthBuckets(group []domain.ReplicaMetrics, field func(domain.ReplicaMetrics) []domain.LengthBucket) []domain.LengthBucket {
+// mergeBuckets is one pod's histogram from its ranks': each bound's rate
+// summed, since a request any rank served is one the pod served. Nil unless
+// every rank had a histogram: a rank without one would read as a rank that
+// served nothing.
+func mergeBuckets[B bucket](group []domain.ReplicaMetrics, field func(domain.ReplicaMetrics) []B) []B {
 	byBound := map[float64]float64{}
 	for _, m := range group {
 		bs := field(m)
@@ -103,25 +141,10 @@ func mergeLengthBuckets(group []domain.ReplicaMetrics, field func(domain.Replica
 			return nil
 		}
 		for _, b := range bs {
-			byBound[b.UpperBound] += b.Rate
+			byBound[rawBucket(b).UpperBound] += rawBucket(b).Rate
 		}
 	}
-	return lengthBuckets(byBound)
-}
-
-// mergeLatencyBuckets is mergeLengthBuckets for a histogram of seconds.
-func mergeLatencyBuckets(group []domain.ReplicaMetrics, field func(domain.ReplicaMetrics) []domain.LatencyBucket) []domain.LatencyBucket {
-	byBound := map[float64]float64{}
-	for _, m := range group {
-		bs := field(m)
-		if bs == nil {
-			return nil
-		}
-		for _, b := range bs {
-			byBound[b.UpperBound] += b.Rate
-		}
-	}
-	return latencyBuckets(byBound)
+	return sortedBuckets[B](byBound)
 }
 
 // queueTimeCountRate is the rate of requests the rank's queue-time histogram

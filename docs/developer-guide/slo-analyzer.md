@@ -22,6 +22,27 @@ hands the optimizer `namedResults[0]`, saturation's.
 | `internal/metrics` (`slo_metrics.go`) | `PublishSLO`, `SweepSLO`, `DeleteSLOModel` |
 | `internal/engines/steadystate` | the engine's calls into it (below) |
 
+**Behaviour change with the TTFT recorder (R1), recording on or off.** A
+router histogram bucket that Prometheus returns as NaN or Inf used to read
+as a bucket of rate 0: the Prometheus source stores a non-finite sample as 0
+and flags it, and `modelValues` checked the value alone. It now reads the
+flag (`source.MetricValue.Finite`) and drops the bucket. So a window with
+non-finite buckets can be judged differently after an upgrade:
+
+- a TTFT histogram whose buckets are all non-finite used to read as a
+  model that served nobody, or as a reading; it now has no buckets, so the
+  objective is unjudged, and an SLO judged "met" can read "unjudged";
+- one non-finite bucket among finite ones used to enter the histogram as a
+  zero at its bound; it is now left out, and the quantile is taken from the
+  others.
+The TPOT `_sum`/`_count` pair reads the same rule; a non-finite one already
+read as no reading.
+
+The slo analyzer judges only a `RouterLatency` that `Judgeable` says is a
+reading (a TTFT histogram or a TPOT request rate). While a recording is on,
+`CollectRouterLatency` can return one holding only the recorded histograms;
+the analyzer treats it as the nil it was before they existed.
+
 ## One cycle
 
 1. `optimize` (`engine.go`) calls `beginSLOCycle` once it is past its error

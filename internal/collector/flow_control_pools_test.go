@@ -36,7 +36,8 @@ func collectPools(t *testing.T, results map[string]*source.MetricResult, err err
 		return results, err
 	}}
 	c := NewReplicaMetricsCollector(src, nil, nil, nil, nil)
-	c.SetRecordTTFTInputs(true)
+	c.BeginRecordingCycle(true)
+	defer c.EndCycle()
 	return c.CollectFlowControlPools(context.Background(), "model-a", "ns"), params
 }
 
@@ -148,7 +149,8 @@ func fcSample(v float64, labels ...string) *model.Sample {
 }
 
 // parsedRouterCollector is a collector reading series through the real
-// Prometheus source, with a learner recording on.
+// Prometheus source, in a cycle with a learner recording on, ended when the
+// test is.
 func parsedRouterCollector(t *testing.T, series map[string]model.Value) *ReplicaMetricsCollector {
 	t.Helper()
 	cfg := prometheus.DefaultPrometheusSourceConfig()
@@ -156,7 +158,8 @@ func parsedRouterCollector(t *testing.T, series map[string]model.Value) *Replica
 	src := prometheus.NewPrometheusSource(context.Background(), &promStub{series: series}, cfg)
 	t.Cleanup(src.Close)
 	c := NewReplicaMetricsCollector(parsedSource{src}, nil, nil, nil, nil)
-	c.SetRecordTTFTInputs(true)
+	c.BeginRecordingCycle(true)
+	t.Cleanup(c.EndCycle)
 	return c
 }
 

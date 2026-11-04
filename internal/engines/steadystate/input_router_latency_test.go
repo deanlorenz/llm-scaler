@@ -5,8 +5,10 @@ import (
 	"context"
 	"math"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -55,7 +57,7 @@ func TestInputBuilder_CollectsTheRouterLatencyAndPoolsEveryCycle(t *testing.T) {
 
 	e := &Engine{analyzers: testAnalyzers(nil)}
 	e.ReplicaMetricsCollector = collector.NewReplicaMetricsCollector(routerAndPoolSource{}, nil, nil, nil, nil)
-	e.ReplicaMetricsCollector.SetRecordTTFTInputs(true)
+	e.ReplicaMetricsCollector.BeginRecordingCycle(true)
 	in := e.buildAnalyzerInput(context.Background(), "m", "ns", nil, policy, nil, nil, nil, nil, nil, 0)
 	if in.RouterLatency == nil {
 		t.Fatal("no router latency collected")
@@ -78,7 +80,7 @@ func TestInputBuilder_CollectsTheRouterLatencyAndPoolsEveryCycle(t *testing.T) {
 	// A router that exports nothing is nil, not a zero latency.
 	silent := &Engine{analyzers: testAnalyzers(nil)}
 	silent.ReplicaMetricsCollector = collector.NewReplicaMetricsCollector(emptyMetricsSource{}, nil, nil, nil, nil)
-	silent.ReplicaMetricsCollector.SetRecordTTFTInputs(true)
+	silent.ReplicaMetricsCollector.BeginRecordingCycle(true)
 	in = silent.buildAnalyzerInput(context.Background(), "m", "ns", nil, policy, nil, nil, nil, nil, nil, 0)
 	if in.RouterLatency != nil || in.FlowControlPools != nil {
 		t.Errorf("silent router: router %v, pools %v; want nil", in.RouterLatency, in.FlowControlPools)
@@ -148,5 +150,24 @@ func TestInputBuilder_RouterAndPoolQueriesOnlyWhileRecording(t *testing.T) {
 	cycle(e)
 	if len(src.asked) != 0 {
 		t.Errorf("recorder stopped: asked %v, want nothing", src.asked)
+	}
+
+	// On again, then a recorder that reaches its byte cap mid-run: the cycle
+	// after it stops writing asks nothing.
+	small := learnrec.New(&bytes.Buffer{}, 512)
+	e.learnRec = small
+	src.asked = nil
+	cycle(e)
+	if src.asked[registration.QueryFlowControlPoolModels] != 1 {
+		t.Errorf("recording on again: asked %v", src.asked)
+	}
+	for i := 0; small.Active() && i < 100; i++ {
+		small.Record("filler", time.Time{}, strings.Repeat("x", 256))
+	}
+	require.False(t, small.Active(), "precondition: the recorder reached its cap")
+	src.asked = nil
+	cycle(e)
+	if len(src.asked) != 0 {
+		t.Errorf("recorder at its cap: asked %v, want nothing", src.asked)
 	}
 }

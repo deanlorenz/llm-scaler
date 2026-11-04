@@ -134,8 +134,8 @@ func (e *Engine) buildAnalyzerInput(
 	// analyzer asks its router source as before, and reads the same results
 	// from the collector's cycle memo.
 	if c := e.ReplicaMetricsCollector; c != nil && c.RecordsTTFTInputs() {
-		input.RouterLatency = e.ReplicaMetricsCollector.CollectRouterLatency(ctx, modelID, namespace)
-		input.FlowControlPools = e.ReplicaMetricsCollector.CollectFlowControlPools(ctx, modelID, namespace)
+		input.RouterLatency = c.CollectRouterLatency(ctx, modelID, namespace)
+		input.FlowControlPools = c.CollectFlowControlPools(ctx, modelID, namespace)
 	}
 	return input
 }
