@@ -1683,7 +1683,7 @@ each switch on alone against all off; base f7b4f7e47, the same tree as main's
 
 | switch | outputs it moves | how |
 | --- | --- | --- |
-| `throughput-itl-steady-gate` | `results.csv` and `variant-capacities.csv` of all three; `composite-holds.csv`, `composite-release.csv` and `composite-variants.csv` of `engine` | each variant's first cycles have no throughput capacity (10 readings first), and the line after them is the window's pinned or full fit, not one cycle's rows |
+| `throughput-itl-steady-gate` | `results.csv` and `variant-capacities.csv` of all three; `composite-holds.csv`, `composite-release.csv` and `composite-variants.csv` of `engine` | each variant's first cycles have no throughput capacity (10 readings first), and the line after them is the window's pinned or full fit, not one cycle's rows. Since the review's above-band fallback, one more `mu-paths` row: `variant-02` at 09:00:45 is priced from above the band (`T2-above-band`, `TotalDemand` 540 where it was 0), the fixture's only fallback cycle |
 | `throughput-itl-keeps-the-window-on-gps-mismatch` | `variant-capacities.csv` of all three | the in-process rows trip the GPS check; kept, the window reaches a full fit where the clear had emptied it |
 
 What else 4b-1 built:
