@@ -124,6 +124,9 @@ func TestTTFTMeansThroughPrometheusParse(t *testing.T) {
 		{"AvgKVTransferTime", registration.QueryAvgKVTransferTime, func(m domain.ReplicaMetrics) (float64, bool) {
 			return m.AvgKVTransferTime, m.AvgKVTransferTimeKnown
 		}},
+		// Not a mean, but read under the same rule: a zero is a queue that
+		// emptied in the minute, a NaN or an absent series no reading.
+		{"QueueMin", registration.QueryQueueMin, func(m domain.ReplicaMetrics) (float64, bool) { return m.QueueMin, m.QueueMinKnown }},
 	}
 	for _, mean := range means {
 		t.Run(mean.name, func(t *testing.T) {
@@ -278,5 +281,40 @@ func TestMergePodInstances_TTFTInputs(t *testing.T) {
 	}
 	if got.AvgQueueTimeKnown || got.AvgQueueTime != 0 {
 		t.Errorf("a rank without a mean left the pod one: %v (known %v)", got.AvgQueueTime, got.AvgQueueTimeKnown)
+	}
+
+	// With each rank's queue-time histogram, its +Inf bucket (the requests
+	// that left the queue) weights the mean, not the request rate:
+	// (0.1 x 6 + 0.3 x 2) / 8.
+	withCount := func(rate, queueTime, queued float64) domain.ReplicaMetrics {
+		m := rank(rate, queueTime, true, a)
+		m.QueueTimeBuckets = []domain.LatencyBucket{{UpperBound: 1, Rate: queued / 2}, {UpperBound: math.Inf(1), Rate: queued}}
+		return m
+	}
+	got = collapseToPods([]domain.ReplicaMetrics{withCount(1, 0.1, 6), withCount(3, 0.3, 2)})[0]
+	if !got.AvgQueueTimeKnown || math.Abs(got.AvgQueueTime-0.15) > 1e-12 {
+		t.Errorf("AvgQueueTime by queue count = %v (known %v), want 0.15 known", got.AvgQueueTime, got.AvgQueueTimeKnown)
+	}
+	// One rank without the histogram: the whole pod falls back to request
+	// rate, never a mix of the two weights.
+	got = collapseToPods([]domain.ReplicaMetrics{withCount(1, 0.1, 6), rank(3, 0.3, true, a)})[0]
+	if !got.AvgQueueTimeKnown || math.Abs(got.AvgQueueTime-0.25) > 1e-12 {
+		t.Errorf("AvgQueueTime falling back = %v (known %v), want 0.25 known", got.AvgQueueTime, got.AvgQueueTimeKnown)
+	}
+}
+
+// QueueMin merges by sum, each rank's least summed (a floor under the pod's
+// own least), and is known only when every rank read one.
+func TestMergePodInstances_QueueMin(t *testing.T) {
+	rank := func(v float64, known bool) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{PodName: "p", ModelID: "m", QueueMin: v, QueueMinKnown: known}
+	}
+	got := collapseToPods([]domain.ReplicaMetrics{rank(2, true), rank(0, true), rank(1, true)})[0]
+	if !got.QueueMinKnown || got.QueueMin != 3 {
+		t.Errorf("QueueMin = %v (known %v), want 3 known", got.QueueMin, got.QueueMinKnown)
+	}
+	got = collapseToPods([]domain.ReplicaMetrics{rank(2, true), rank(0, false)})[0]
+	if got.QueueMinKnown || got.QueueMin != 0 {
+		t.Errorf("a rank without one left the pod one: %v (known %v)", got.QueueMin, got.QueueMinKnown)
 	}
 }

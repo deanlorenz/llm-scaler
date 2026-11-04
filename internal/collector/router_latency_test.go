@@ -56,8 +56,10 @@ func TestCollectRouterLatency_PicksItsModelAndMergesBuckets(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Equal(t, map[string]string{source.ParamNamespace: "ns"}, gotParams)
 	assert.Equal(t, registration.SLORouterWindowSeconds, got.WindowSeconds)
-	sort.Slice(got.TTFTBuckets, func(i, j int) bool { return got.TTFTBuckets[i].UpperBound < got.TTFTBuckets[j].UpperBound })
 	require.Len(t, got.TTFTBuckets, 2)
+	assert.True(t, sort.SliceIsSorted(got.TTFTBuckets, func(i, j int) bool {
+		return got.TTFTBuckets[i].UpperBound < got.TTFTBuckets[j].UpperBound
+	}), "sorted by bound: %v", got.TTFTBuckets)
 	assert.Equal(t, 1.0, got.TTFTBuckets[0].UpperBound)
 	assert.Equal(t, 0.75, got.TTFTBuckets[0].Rate)
 	assert.True(t, math.IsInf(got.TTFTBuckets[1].UpperBound, 1))
@@ -197,6 +199,13 @@ func TestCollectRouterLatency_CountsAFailedQuery(t *testing.T) {
 	assert.Nil(t, NewReplicaMetricsCollector(failing, nil, nil, nil, nil).
 		CollectRouterLatency(context.Background(), "model-a", "ns"))
 
+	assert.Equal(t, 3.0, errorsOfType(t, registry, constants.QueryTypeRouterLatency), "one per failed query")
+	assert.Zero(t, errorsOfType(t, registry, constants.QueryTypeLearnerRecording), "recording off: nothing record-only ran")
+}
+
+// errorsOfType is the collection-error count under queryType.
+func errorsOfType(t *testing.T, registry *promclient.Registry, queryType string) float64 {
+	t.Helper()
 	mfs, err := registry.Gather()
 	require.NoError(t, err)
 	var counted float64
@@ -206,13 +215,13 @@ func TestCollectRouterLatency_CountsAFailedQuery(t *testing.T) {
 		}
 		for _, m := range mf.GetMetric() {
 			for _, l := range m.GetLabel() {
-				if l.GetName() == constants.LabelQueryType && l.GetValue() == constants.QueryTypeRouterLatency {
+				if l.GetName() == constants.LabelQueryType && l.GetValue() == queryType {
 					counted += m.GetCounter().GetValue()
 				}
 			}
 		}
 	}
-	assert.Equal(t, 4.0, counted, "one per failed query")
+	return counted
 }
 
 // TestCollectRouterLatency_TPOTBuckets pins the per-request TPOT histogram the
@@ -237,7 +246,9 @@ func TestCollectRouterLatency_TPOTBuckets(t *testing.T) {
 		src := &mockMetricsSource{refreshFunc: func(context.Context, source.RefreshSpec) (map[string]*source.MetricResult, error) {
 			return results, nil
 		}}
-		return NewReplicaMetricsCollector(src, nil, nil, nil, nil).CollectRouterLatency(context.Background(), "model-a", "ns")
+		c := NewReplicaMetricsCollector(src, nil, nil, nil, nil)
+		c.SetRecordTTFTInputs(true)
+		return c.CollectRouterLatency(context.Background(), "model-a", "ns")
 	}
 
 	got := collect(map[string]*source.MetricResult{

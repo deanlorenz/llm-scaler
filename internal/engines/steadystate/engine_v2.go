@@ -127,11 +127,13 @@ func (e *Engine) buildAnalyzerInput(
 		ArrivalRate:     arrivalRate,
 	}
 	// The router's latency and flow-control pools, every cycle whatever the
-	// policy lists, so a learner recording carries them for the TTFT model
-	// (docs/proposals/analyzer-learner.md, 2.9). No analyzer reads them: the
-	// slo analyzer asks its router source as before, and reads the same
-	// results from the collector's cycle memo.
-	if e.ReplicaMetricsCollector != nil {
+	// policy lists, while a learner recording is on, so the recording
+	// carries them for the TTFT model (docs/proposals/analyzer-learner.md,
+	// 2.9). Off, neither is queried: they would cost up to eight queries per
+	// namespace a cycle that nothing reads. No analyzer reads them: the slo
+	// analyzer asks its router source as before, and reads the same results
+	// from the collector's cycle memo.
+	if c := e.ReplicaMetricsCollector; c != nil && c.RecordsTTFTInputs() {
 		input.RouterLatency = e.ReplicaMetricsCollector.CollectRouterLatency(ctx, modelID, namespace)
 		input.FlowControlPools = e.ReplicaMetricsCollector.CollectFlowControlPools(ctx, modelID, namespace)
 	}

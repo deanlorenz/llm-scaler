@@ -41,6 +41,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -108,6 +109,28 @@ type ReplicaMetricsCollector struct {
 	// namespace per cycle. Nil outside a cycle, like cycleResults.
 	cyclePods map[string]namespacePods
 	cycleMu   sync.Mutex
+
+	// recordTTFT turns on the queries only a learner recording reads
+	// (SetRecordTTFTInputs). Off by default: they cost queries and nothing
+	// scales on them.
+	recordTTFT atomic.Bool
+}
+
+// SetRecordTTFTInputs turns on or off the queries whose results only a
+// learner recording reads (docs/proposals/analyzer-learner.md, 2.9): the
+// per-pod TTFT inputs (recordOnlyReplicaQueries), the router's TPOT and
+// flow-control wait histograms, and the flow-control pools. Off, none of
+// them is issued, and the rows, the router latency and the pools carry none
+// of their fields. The engine sets it once per cycle from whether its
+// recorder is writing (Engine.beginCollectorCycle).
+func (c *ReplicaMetricsCollector) SetRecordTTFTInputs(on bool) {
+	c.recordTTFT.Store(on)
+}
+
+// RecordsTTFTInputs reports whether the record-only queries are on
+// (SetRecordTTFTInputs).
+func (c *ReplicaMetricsCollector) RecordsTTFTInputs() bool {
+	return c.recordTTFT.Load()
 }
 
 // NewReplicaMetricsCollector creates a new replica metrics collector.

@@ -12,11 +12,16 @@ import (
 // slo-capacity-planner-ttft.md, "The router queue"). The series exist only
 // while the EPP's flowControl feature gate is on.
 //
-// The wait histogram, the saturation gauge and the outcome counter carry the
-// pool (inference_pool) and no model. The pool is joined to a model by the
+// The saturation gauge and the outcome counter carry the pool
+// (inference_pool) and no model. The pool is joined to a model by the
 // flow-control queue gauge, which carries both (QueryFlowControlPoolModels),
 // and only where that gauge names one model for the pool: the guard the
-// arrival rate takes on the same gauge (arrivalModelLabel).
+// arrival rate takes on the same gauge (arrivalModelLabel). The wait
+// histogram carries the model (model_name, target_model_name) as well as the
+// pool, so it is read per model, with the router latency.
+//
+// All of them are issued only while a learner recording is on (collector
+// SetRecordTTFTInputs).
 //
 // Only the current llm_d_epp_* names: the deprecated inference_extension_*
 // alias carries no inference_pool label, so it cannot be split by pool.
@@ -26,9 +31,12 @@ const (
 	// target_model_name), value ignored.
 	QueryFlowControlPoolModels = "flow_control_pool_models"
 	// QueryFlowControlWaitBuckets is the flow-control queue wait histogram
-	// per pool, as per-second bucket rates, summed over priority and outcome.
+	// per model, as per-second bucket rates, of the requests dispatched
+	// (outcome="Dispatched"): only a dispatched request's wait is part of a
+	// TTFT. Summed over fairness_id, priority and pool.
 	QueryFlowControlWaitBuckets = "flow_control_wait_buckets"
-	// QueryFlowControlPoolSaturation is the pool's saturation score per stage,
+	// QueryFlowControlPoolSaturation is the pool's saturation score per stage
+	// (prefill, decode, and effective, the larger, which gates dispatch),
 	// averaged over the window, the highest over the router's replicas.
 	QueryFlowControlPoolSaturation = "flow_control_pool_saturation"
 	// QueryFlowControlOutcomes is the rate of requests leaving the queue per
@@ -47,8 +55,8 @@ const (
 		`llm_d_epp_flow_control_queue_size{namespace="{{.namespace}}",inference_pool!=""})`
 	// Rate inside the sum, as the router latency queries take it, so a
 	// counter reset on one EPP replica cannot read as a burst.
-	flowControlWaitBuckets = `sum by (inference_pool, le) (` +
-		`rate(llm_d_epp_flow_control_request_queue_duration_seconds_bucket{namespace="{{.namespace}}"}[` + FlowControlWindow + `]))`
+	flowControlWaitBuckets = `sum by (model_name, target_model_name, le) (` +
+		`rate(llm_d_epp_flow_control_request_queue_duration_seconds_bucket{namespace="{{.namespace}}",outcome="Dispatched"}[` + FlowControlWindow + `]))`
 	// A max over the router's replicas: each scores the same endpoints, so
 	// they agree up to scrape timing, and a sum would add their scores.
 	flowControlPoolSaturation = `max by (inference_pool, stage) (` +
@@ -57,8 +65,9 @@ const (
 		`rate(llm_d_epp_flow_control_requests_total{namespace="{{.namespace}}"}[` + FlowControlWindow + `]))`
 )
 
-// RegisterFlowControlPoolQueries registers the per-pool flow-control queries.
-// The engine collects them every cycle for every model.
+// RegisterFlowControlPoolQueries registers the flow-control queries. The
+// engine collects them every cycle for every model while a learner recording
+// is on, and not otherwise.
 func RegisterFlowControlPoolQueries(sourceRegistry *source.SourceRegistry) {
 	metricsSource := sourceRegistry.Get("prometheus")
 	if metricsSource == nil {
@@ -70,7 +79,7 @@ func RegisterFlowControlPoolQueries(sourceRegistry *source.SourceRegistry) {
 		{QueryFlowControlPoolModels, flowControlPoolModels,
 			"Models each InferencePool's flow-control queue serves, to join the per-pool series to a model"},
 		{QueryFlowControlWaitBuckets, flowControlWaitBuckets,
-			"Router (EPP) flow-control queue wait histogram bucket rates per InferencePool"},
+			"Router (EPP) flow-control queue wait histogram bucket rates per model, dispatched requests"},
 		{QueryFlowControlPoolSaturation, flowControlPoolSaturation,
 			"Router (EPP) flow-control saturation per InferencePool and stage, averaged over the window"},
 		{QueryFlowControlOutcomes, flowControlOutcomes,

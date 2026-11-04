@@ -1,15 +1,21 @@
 package steadystate
 
 import (
+	"bytes"
 	"context"
 	"math"
+	"reflect"
+	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/registration"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 )
 
 // routerAndPoolSource answers the router latency and flow-control pool
@@ -41,14 +47,15 @@ func (routerAndPoolSource) Refresh(_ context.Context, spec source.RefreshSpec) (
 }
 
 // The input builder collects the router latency and the flow-control pools
-// every cycle, whatever the policy lists, so a learner recording carries
-// them for the TTFT model (analyzer-learner.md, 2.9). An engine with no
-// collector leaves both nil.
+// every cycle while a learner recording is on, whatever the policy lists, so
+// the recording carries them for the TTFT model (analyzer-learner.md, 2.9).
+// An engine with no collector leaves both nil.
 func TestInputBuilder_CollectsTheRouterLatencyAndPoolsEveryCycle(t *testing.T) {
 	policy := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70}
 
 	e := &Engine{analyzers: testAnalyzers(nil)}
 	e.ReplicaMetricsCollector = collector.NewReplicaMetricsCollector(routerAndPoolSource{}, nil, nil, nil, nil)
+	e.ReplicaMetricsCollector.SetRecordTTFTInputs(true)
 	in := e.buildAnalyzerInput(context.Background(), "m", "ns", nil, policy, nil, nil, nil, nil, nil, 0)
 	if in.RouterLatency == nil {
 		t.Fatal("no router latency collected")
@@ -58,8 +65,7 @@ func TestInputBuilder_CollectsTheRouterLatencyAndPoolsEveryCycle(t *testing.T) {
 	}
 	want := []domain.FlowControlPool{{WindowSeconds: registration.FlowControlWindowSeconds,
 		DecodeSaturation: 0.5, DecodeSaturationKnown: true}}
-	if len(in.FlowControlPools) != 1 || in.FlowControlPools[0].DecodeSaturation != want[0].DecodeSaturation ||
-		!in.FlowControlPools[0].DecodeSaturationKnown || in.FlowControlPools[0].WaitBuckets != nil {
+	if !reflect.DeepEqual(in.FlowControlPools, want) {
 		t.Errorf("FlowControlPools = %+v, want %+v", in.FlowControlPools, want)
 	}
 
@@ -72,8 +78,75 @@ func TestInputBuilder_CollectsTheRouterLatencyAndPoolsEveryCycle(t *testing.T) {
 	// A router that exports nothing is nil, not a zero latency.
 	silent := &Engine{analyzers: testAnalyzers(nil)}
 	silent.ReplicaMetricsCollector = collector.NewReplicaMetricsCollector(emptyMetricsSource{}, nil, nil, nil, nil)
+	silent.ReplicaMetricsCollector.SetRecordTTFTInputs(true)
 	in = silent.buildAnalyzerInput(context.Background(), "m", "ns", nil, policy, nil, nil, nil, nil, nil, 0)
 	if in.RouterLatency != nil || in.FlowControlPools != nil {
 		t.Errorf("silent router: router %v, pools %v; want nil", in.RouterLatency, in.FlowControlPools)
+	}
+}
+
+// askedSource is routerAndPoolSource that also notes every query it was
+// asked for.
+type askedSource struct {
+	routerAndPoolSource
+	mu    sync.Mutex
+	asked map[string]int
+}
+
+func (s *askedSource) Refresh(ctx context.Context, spec source.RefreshSpec) (map[string]*source.MetricResult, error) {
+	s.mu.Lock()
+	if s.asked == nil {
+		s.asked = map[string]int{}
+	}
+	for _, q := range spec.Queries {
+		s.asked[q]++
+	}
+	s.mu.Unlock()
+	return s.routerAndPoolSource.Refresh(ctx, spec)
+}
+
+// The recording gate (analyzer-learner.md, 2.9): the engine turns the
+// record-only queries on for a cycle exactly when its recorder is writing
+// (beginCollectorCycle). Off, building the input issues none of the router
+// or flow-control queries; on, it issues each once; once the recorder has
+// stopped, none again.
+func TestInputBuilder_RouterAndPoolQueriesOnlyWhileRecording(t *testing.T) {
+	policy := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70}
+	recordOnly := []string{registration.QuerySLORouterTTFTBuckets, registration.QuerySLORouterTPOTSum,
+		registration.QuerySLORouterTPOTCount, registration.QuerySLORouterTPOTBuckets, registration.QueryFlowControlWaitBuckets,
+		registration.QueryFlowControlPoolModels, registration.QueryFlowControlPoolSaturation, registration.QueryFlowControlOutcomes}
+
+	cycle := func(e *Engine) {
+		e.beginCollectorCycle()
+		defer e.ReplicaMetricsCollector.EndCycle()
+		// Two models in one namespace: the second reads the memo.
+		for _, model := range []string{"m", "m2"} {
+			e.buildAnalyzerInput(context.Background(), model, "ns", nil, policy, nil, nil, nil, nil, nil, 0)
+		}
+	}
+
+	src := &askedSource{}
+	e := &Engine{analyzers: testAnalyzers(nil)}
+	e.ReplicaMetricsCollector = collector.NewReplicaMetricsCollector(src, nil, nil, nil, nil)
+
+	cycle(e)
+	if len(src.asked) != 0 {
+		t.Errorf("recording off: asked %v, want nothing", src.asked)
+	}
+
+	rec := learnrec.New(&bytes.Buffer{}, 0)
+	e.learnRec = rec
+	cycle(e)
+	for _, q := range recordOnly {
+		if src.asked[q] != 1 {
+			t.Errorf("recording on: %s asked %d times, want once", q, src.asked[q])
+		}
+	}
+
+	require.NoError(t, rec.Close())
+	src.asked = nil
+	cycle(e)
+	if len(src.asked) != 0 {
+		t.Errorf("recorder stopped: asked %v, want nothing", src.asked)
 	}
 }

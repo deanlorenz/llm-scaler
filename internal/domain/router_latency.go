@@ -20,8 +20,8 @@ type RouterLatency struct {
 	// WindowSeconds is the rate window the figures below were taken over.
 	WindowSeconds float64
 
-	// TTFTBuckets is the cumulative TTFT histogram, as per-second rates, in no
-	// particular order. Empty when the router exports no TTFT series for the
+	// TTFTBuckets is the cumulative TTFT histogram, as per-second rates,
+	// sorted by bound. Nil when the router exports no TTFT series for the
 	// model.
 	TTFTBuckets []LatencyBucket
 
@@ -39,11 +39,20 @@ type RouterLatency struct {
 	// recording while nil, so a recording made before it existed is written
 	// again byte for byte.
 	TPOTBuckets []LatencyBucket `learnrec:"omitzero"`
+
+	// FlowControlWaitBuckets is the router's flow-control queue wait
+	// histogram, seconds, of this model's dispatched requests, as per-second
+	// bucket rates over the same window, sorted by bound: the router-queue
+	// part of the TTFT above. Nil when flow control is off or the query
+	// failed. Collected only while a learner recording is on, read by
+	// nothing yet, and left out of a recording while nil.
+	FlowControlWaitBuckets []LatencyBucket `learnrec:"omitzero"`
 }
 
 // FlowControlPool is one InferencePool's flow-control layer in the router
-// (the llm-d EPP), over WindowSeconds: how long requests waited in it, how
-// saturated the pool read, and how requests left it.
+// (the llm-d EPP), over WindowSeconds: how saturated the pool read, and how
+// requests left it. How long they waited is per model
+// (RouterLatency.FlowControlWaitBuckets).
 //
 // These series carry the pool (inference_pool) and no model, so a pool is
 // joined to a model only when the pool serves that one model alone: the
@@ -58,22 +67,18 @@ type FlowControlPool struct {
 	// WindowSeconds is the rate window of the figures below.
 	WindowSeconds float64 `learnrec:"omitzero"`
 
-	// WaitBuckets is the flow-control queue wait histogram, seconds, as
-	// per-second bucket rates, sorted by bound, summed over priority and
-	// outcome. Nil when absent.
-	WaitBuckets []LatencyBucket `learnrec:"omitzero"`
-
-	// Saturation is the pool's saturation score as the gate reads it,
-	// averaged over the window, for a series with no stage or a stage other
-	// than prefill and decode; PrefillSaturation and DecodeSaturation are the
-	// P/D stages' own. At 1 the gate stops dispatching. The highest over the
-	// router's replicas. Each Known bit says the series was read finite.
-	Saturation             float64 `learnrec:"omitzero"`
-	SaturationKnown        bool    `learnrec:"omitzero"`
-	PrefillSaturation      float64 `learnrec:"omitzero"`
-	PrefillSaturationKnown bool    `learnrec:"omitzero"`
-	DecodeSaturation       float64 `learnrec:"omitzero"`
-	DecodeSaturationKnown  bool    `learnrec:"omitzero"`
+	// EffectiveSaturation is the pool's saturation score as the gate reads
+	// it (stage "effective", the larger of the two below), averaged over the
+	// window; PrefillSaturation and DecodeSaturation are the P/D stages' own
+	// (stages "prefill" and "decode"). At 1 the gate stops dispatching; a
+	// pool with no endpoint reads 1. The highest over the router's
+	// replicas. Each Known bit says the series was read finite.
+	EffectiveSaturation      float64 `learnrec:"omitzero"`
+	EffectiveSaturationKnown bool    `learnrec:"omitzero"`
+	PrefillSaturation        float64 `learnrec:"omitzero"`
+	PrefillSaturationKnown   bool    `learnrec:"omitzero"`
+	DecodeSaturation         float64 `learnrec:"omitzero"`
+	DecodeSaturationKnown    bool    `learnrec:"omitzero"`
 
 	// DispatchedRate, RejectedRate and EvictedRate are the requests per
 	// second that left the queue by each outcome (the outcome label's

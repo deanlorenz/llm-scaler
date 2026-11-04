@@ -896,7 +896,7 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	// Open the collector's cycle so the models grouped below share one execution
 	// of each namespace-scoped query instead of one per model.
 	if e.ReplicaMetricsCollector != nil {
-		e.ReplicaMetricsCollector.BeginCycle()
+		e.beginCollectorCycle()
 		defer e.ReplicaMetricsCollector.EndCycle()
 	}
 

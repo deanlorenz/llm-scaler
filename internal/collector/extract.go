@@ -110,6 +110,8 @@ type podMetricData struct {
 	avgPrefillTimeKnown    bool
 	avgKVTransferTime      float64
 	avgKVTransferTimeKnown bool
+	queueMin               float64
+	queueMinKnown          bool
 }
 
 // extractPodMetrics reads every series the replica queries returned into one

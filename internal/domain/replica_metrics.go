@@ -488,8 +488,18 @@ type ReplicaMetrics struct {
 	// while it is zero (learnrec.OmitZeroTag), so a recording made before
 	// they existed reads back and is written again byte for byte.
 	//
-	// They are recorded as read, for a not-Ready Pod too: the row's Ready
-	// says whether to use them. A histogram is the per-second rate of
+	// They are recorded as read, for a not-Ready Pod too, and only while a
+	// learner recording is on (collector SetRecordTTFTInputs); off, every
+	// one is zero and unknown. Neither guard that cleans a row's timings
+	// reaches them: the not-Ready guard (attributeInstance) drops AvgITL,
+	// AvgTTFT and AvgServiceTime and their bits, and the uptime guard drops
+	// an AvgTTFT or AvgServiceTime longer than the Pod has run; the
+	// histograms, AvgQueueTime,
+	// AvgPrefillTime, AvgKVTransferTime and QueueMin are kept as read in
+	// both cases. A consumer must not rely on Ready alone: a Pod Ready this cycle
+	// may have spent the window not serving, so a mean or histogram over
+	// [1m] or [5m] can cover its warm-up; check ReadySince against the
+	// window too. A histogram is the per-second rate of
 	// requests at or under each bound, cumulative, over the window its query
 	// names, sorted by bound; the +Inf bucket carries the total. A bucket
 	// whose bound does not parse or whose rate is not a finite non-negative
@@ -548,6 +558,16 @@ type ReplicaMetrics struct {
 	// fallback source for the TPOT ratio where the router's is missing.
 	// vLLM request_time_per_output_token_seconds only. Nil when absent.
 	TPOTBuckets []LatencyBucket `learnrec:"omitzero"`
+	// QueueMin is the least the engine's waiting-request gauge read over
+	// the last minute, requests: above zero, the engine had work waiting the
+	// whole minute (a busy minute). vLLM num_requests_waiting, each rank's
+	// least summed over the pod's ranks, which is a floor under the least of
+	// the pod's own queue; SGLang num_queue_reqs. QueueMinKnown is set when
+	// it was read from a present, finite, non-negative series (a zero is a
+	// queue that emptied); a pod whose ranks did not all report one is not
+	// known.
+	QueueMin      float64 `learnrec:"omitzero"`
+	QueueMinKnown bool    `learnrec:"omitzero"`
 }
 
 // ITLState is which of three readings a replica's AvgITL is.

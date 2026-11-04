@@ -16,11 +16,14 @@ import (
 
 const (
 	// DefaultCapBytes is one recording's cap: 256Mi. The acceptance run
-	// (internal/engines/steadystate, learner_recording_test.go) measures
+	// (internal/engines/steadystate, learner_recording_test.go) measured
 	// about 1.7 KB per replica per cycle for each analyzer a model lists, each
-	// Analyze carrying its input. At a 15 s cycle, with saturation alone, 8
-	// replicas reach the cap in about 3.4 days and 100 in about 6.5 hours;
-	// with saturation, slo and throughput, in about 27 and 2.1 hours.
+	// Analyze carrying its input, before the TTFT inputs
+	// (docs/proposals/analyzer-learner.md, 2.9) were recorded. Those add an
+	// estimated 4 KB per replica per Analyze, not measured: about 5.6 KB,
+	// 3.3 times as much. At a 15 s cycle, with saturation alone, 8 replicas
+	// then reach the cap in about a day and 100 in about 2 hours; with
+	// saturation, slo and throughput, in about 8 hours and 38 minutes.
 	DefaultCapBytes int64 = 256 << 20
 
 	// MinCapBytes is the smallest cap a recording may have: below it a

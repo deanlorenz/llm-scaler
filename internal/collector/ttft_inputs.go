@@ -31,6 +31,10 @@ func (c *ReplicaMetricsCollector) extractTTFTInputs(ctx context.Context, modelID
 		func(d *podMetricData) (*float64, *bool) { return &d.avgPrefillTime, &d.avgPrefillTimeKnown })
 	c.extractMean(ctx, modelID, namespace, results[registration.QueryAvgKVTransferTime], podData,
 		func(d *podMetricData) (*float64, *bool) { return &d.avgKVTransferTime, &d.avgKVTransferTimeKnown })
+	// Not a mean, but read under the same rule: finite and non-negative,
+	// a zero included (the queue emptied in the minute).
+	c.extractMean(ctx, modelID, namespace, results[registration.QueryQueueMin], podData,
+		func(d *podMetricData) (*float64, *bool) { return &d.queueMin, &d.queueMinKnown })
 }
 
 // extractMean reads one per-instance mean into the value and presence bit
@@ -120,20 +124,69 @@ func mergeLatencyBuckets(group []domain.ReplicaMetrics, field func(domain.Replic
 	return latencyBuckets(byBound)
 }
 
-// mergeKnownMean is one pod's mean from its ranks', weighted by request rate
-// as service time is (weightedByRequestRate), and known only when every rank
-// read one. Unknown, the mean is 0, so the value never carries a reading the
-// bit denies.
-func mergeKnownMean(group []domain.ReplicaMetrics, field func(domain.ReplicaMetrics) (float64, bool)) (float64, bool) {
+// queueTimeCountRate is the rate of requests the rank's queue-time histogram
+// counted, its +Inf bucket; NaN when the rank has no such bucket, which makes
+// weightedBy weight the pod by request rate instead.
+func queueTimeCountRate(m domain.ReplicaMetrics) float64 {
+	for _, b := range m.QueueTimeBuckets {
+		if math.IsInf(b.UpperBound, 1) {
+			return b.Rate
+		}
+	}
+	return math.NaN()
+}
+
+// mergeKnownSum is one pod's figure from its ranks' as a sum, known only
+// when every rank read one: the queue minimum, where the sum of each rank's
+// least is the least the pod's own queue (the ranks' sum) can have been.
+func mergeKnownSum(group []domain.ReplicaMetrics, field func(domain.ReplicaMetrics) (float64, bool)) (float64, bool) {
+	var sum float64
+	for _, m := range group {
+		v, known := field(m)
+		if !known {
+			return 0, false
+		}
+		sum += v
+	}
+	return sum, true
+}
+
+// mergeKnownMean is one pod's mean from its ranks', weighted by weight, and
+// known only when every rank read one. Unknown, the mean is 0, so the value
+// never carries a reading the bit denies.
+//
+// A mean's exact weight is the rate of the observations it averages, per
+// rank. weight gives that where the row carries it; nil, or a rank it gives
+// none for (NaN), weights the whole pod by request rate instead, the
+// completions a second, as service time is (weightedBy, weightedByRequestRate):
+//
+//   - AvgQueueTime by queueTimeCountRate, the +Inf bucket of the rank's own
+//     queue-time histogram: the requests that left the queue, exactly;
+//   - AvgPrefillTime by request rate: every completed request prefilled once
+//     on the pod that served it, so the two rates differ only by requests in
+//     flight at the window's edges;
+//   - AvgKVTransferTime by request rate, which is NOT its count: the NIXL
+//     mean is per transfer, and a request may need several transfers, or none
+//     on a pod that did not prefill it. The transfer count is not queried.
+//
+// A pod of one rank, the common case, is its rank's mean whatever the weight.
+func mergeKnownMean(group []domain.ReplicaMetrics, field func(domain.ReplicaMetrics) (float64, bool),
+	weight func(domain.ReplicaMetrics) float64) (float64, bool) {
 	for _, m := range group {
 		if _, known := field(m); !known {
 			return 0, false
 		}
 	}
-	v := weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 {
+	value := func(m domain.ReplicaMetrics) float64 {
 		x, _ := field(m)
 		return x
-	})
+	}
+	var v float64
+	if weight == nil {
+		v = weightedByRequestRate(group, value)
+	} else {
+		v = weightedBy(group, value, weight)
+	}
 	if math.IsNaN(v) || math.IsInf(v, 0) {
 		return 0, false
 	}

@@ -52,6 +52,16 @@ func (e *Engine) stopLearnerRecording() {
 	}
 }
 
+// beginCollectorCycle opens the collector's cycle, with the queries only a
+// learner recording reads on exactly when the recorder is writing this
+// cycle: not when recording is off, and not once its cap or an error has
+// stopped it (learnrec.Recorder.Active). It is the one place the collector
+// learns whether to issue them.
+func (e *Engine) beginCollectorCycle() {
+	e.ReplicaMetricsCollector.SetRecordTTFTInputs(e.learnRec.Active())
+	e.ReplicaMetricsCollector.BeginCycle()
+}
+
 // attachLearnerRecorder hands rec, nil included, to the capacity store and
 // every built-in analyzer registered.
 func (e *Engine) attachLearnerRecorder(rec *learnrec.Recorder) {

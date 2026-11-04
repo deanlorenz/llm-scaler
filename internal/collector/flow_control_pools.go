@@ -2,9 +2,7 @@ package collector
 
 import (
 	"context"
-	"math"
 	"sort"
-	"strconv"
 	"strings"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -23,10 +21,17 @@ import (
 const poolLabel = "inference_pool"
 
 // CollectFlowControlPools collects the flow-control layer of each
-// InferencePool that serves modelID alone in namespace: the wait histogram,
-// the saturation by stage and the outcome rates, over
-// registration.FlowControlWindow. Recorded for the TTFT model and read by
-// nothing yet.
+// InferencePool that serves modelID alone in namespace: the saturation by
+// stage and the outcome rates, over registration.FlowControlWindow. Recorded
+// for the TTFT model and read by nothing yet, so it issues nothing and
+// returns nil unless a learner recording is on (SetRecordTTFTInputs). The
+// wait histogram carries the model, and is read per model with the router
+// latency (RouterLatency.FlowControlWaitBuckets).
+//
+// effective is the stage the gate reads: the larger of prefill and decode
+// (llm-d-inference-scheduler, flow_control_pool_saturation). A pool with no
+// endpoint reads 1.0 on its effective stage, so a 1.0 is either a full pool
+// or an empty one.
 //
 // A pool is joined to the model when the flow-control queue gauge names the
 // pool with this model and no other (registration.QueryFlowControlPoolModels).
@@ -41,27 +46,34 @@ func (c *ReplicaMetricsCollector) CollectFlowControlPools(
 	ctx context.Context,
 	modelID, namespace string,
 ) []domain.FlowControlPool {
+	if !c.RecordsTTFTInputs() {
+		return nil
+	}
 	logger := ctrl.LoggerFrom(ctx)
 	queries := []string{
 		registration.QueryFlowControlPoolModels,
-		registration.QueryFlowControlWaitBuckets,
 		registration.QueryFlowControlPoolSaturation,
 		registration.QueryFlowControlOutcomes,
 	}
-	results, err := c.refreshShared(ctx, queries, map[string]string{source.ParamNamespace: namespace})
+	recording := func(string) string { return constants.QueryTypeLearnerRecording }
+	results, issued, err := c.refreshSharedIssued(ctx, queries, map[string]string{source.ParamNamespace: namespace})
 	if err != nil {
 		reason := prometheus.CategorizePrometheusError(err)
-		metrics.IncMetricsCollectionErrors(constants.QueryTypeFlowControlPools, reason)
+		for _, q := range issued {
+			metrics.IncMetricsCollectionErrors(recording(q), reason)
+		}
 		logger.V(logging.DEBUG).Info("Flow-control pool series unavailable",
 			"modelID", modelID, "namespace", namespace, "reason", reason, "error", err)
 		return nil
 	}
+	// Counted once, by the call that sent the query, not by every model
+	// that reads it from the cycle's memo.
+	countFailedIssued(issued, results, recording)
 	for _, q := range queries {
 		if r := results[q]; r != nil && r.HasError() {
-			reason := prometheus.CategorizePrometheusError(r.Error)
-			metrics.IncMetricsCollectionErrors(constants.QueryTypeFlowControlPools, reason)
 			logger.V(logging.DEBUG).Info("Flow-control pool query failed",
-				"modelID", modelID, "namespace", namespace, "query", q, "reason", reason)
+				"modelID", modelID, "namespace", namespace, "query", q,
+				"reason", prometheus.CategorizePrometheusError(r.Error))
 		}
 	}
 
@@ -74,36 +86,24 @@ func (c *ReplicaMetricsCollector) CollectFlowControlPools(
 		byPool[p] = &domain.FlowControlPool{WindowSeconds: registration.FlowControlWindowSeconds}
 	}
 
-	waits := map[string]map[float64]float64{}
-	for _, v := range finiteValues(results[registration.QueryFlowControlWaitBuckets]) {
-		pool := v.Labels[poolLabel]
-		if byPool[pool] == nil {
-			continue
-		}
-		le, err := strconv.ParseFloat(v.Labels["le"], 64)
-		if err != nil || math.IsNaN(le) || v.Value < 0 {
-			continue
-		}
-		if waits[pool] == nil {
-			waits[pool] = map[float64]float64{}
-		}
-		waits[pool][le] += v.Value
-	}
-	for pool, byBound := range waits {
-		byPool[pool].WaitBuckets = latencyBuckets(byBound)
-	}
-
 	for _, v := range finiteValues(results[registration.QueryFlowControlPoolSaturation]) {
 		p := byPool[v.Labels[poolLabel]]
 		if p == nil {
 			continue
 		}
-		value, known := &p.Saturation, &p.SaturationKnown
+		var value *float64
+		var known *bool
 		switch strings.ToLower(v.Labels["stage"]) {
+		case "effective":
+			value, known = &p.EffectiveSaturation, &p.EffectiveSaturationKnown
 		case "prefill":
 			value, known = &p.PrefillSaturation, &p.PrefillSaturationKnown
 		case "decode":
 			value, known = &p.DecodeSaturation, &p.DecodeSaturationKnown
+		default:
+			// A stage the router does not export today: not one of the
+			// three, so not read as any of them.
+			continue
 		}
 		if !*known || v.Value > *value {
 			*value = v.Value

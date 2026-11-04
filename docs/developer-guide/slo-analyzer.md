@@ -16,7 +16,7 @@ hands the optimizer `namedResults[0]`, saturation's.
 | package | what |
 | --- | --- |
 | `internal/config` (`slo.go`) | `SLOPolicy`, `SLOObjective`, `SLODuration`, `SLOPercentile`; `Validate`, `SLOSummary`, `SLOMisconfiguration` |
-| `internal/collector` (`router_latency.go`), `registration/slo.go` | `CollectRouterLatency`: the router's TTFT histogram and TPOT `_sum`/`_count`, per model, over 5 minutes |
+| `internal/collector` (`router_latency.go`), `registration/slo.go` | `CollectRouterLatency`: the router's TTFT histogram and TPOT `_sum`/`_count`, per model, over 5 minutes, for each model whose policy lists the analyzer. While a learner recording is on, the engine also calls it for every model every cycle, and it adds the router's TPOT histogram and the flow-control wait histogram (`registration/flow_control_pools.go`), which only the recording reads |
 | `internal/engines/analyzers/slo` | the analyzer: `analyzer.go` (cycle, fleet, line, judging, state), `price.go` (TPOT pricing), `histogram.go` (quantile, attainment, sample minimum), `transient.go` (exclusion) |
 | `internal/signals/itl` (`tracker.go`) | `Tracker`: the ITL windows and intercepts, shared with the saturation analyzer |
 | `internal/metrics` (`slo_metrics.go`) | `PublishSLO`, `SweepSLO`, `DeleteSLOModel` |

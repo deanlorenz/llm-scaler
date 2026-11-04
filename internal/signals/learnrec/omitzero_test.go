@@ -60,8 +60,8 @@ func TestCodec_R1FieldsAreLeftOutWhileZero(t *testing.T) {
 		reflect.TypeFor[domain.ReplicaMetrics](): {"QueueLengthKnown", "AvgServiceTimeKnown", "AvgTTFTKnown",
 			"PromptTokensBuckets", "OutputTokensBuckets", "TTFTBuckets", "AvgQueueTime", "AvgQueueTimeKnown",
 			"QueueTimeBuckets", "AvgPrefillTime", "AvgPrefillTimeKnown", "AvgKVTransferTime",
-			"AvgKVTransferTimeKnown", "TPOTBuckets"},
-		reflect.TypeFor[domain.RouterLatency](): {"TPOTBuckets"},
+			"AvgKVTransferTimeKnown", "TPOTBuckets", "QueueMin", "QueueMinKnown"},
+		reflect.TypeFor[domain.RouterLatency](): {"TPOTBuckets", "FlowControlWaitBuckets"},
 		reflect.TypeFor[Input]():                {"RouterLatency", "FlowControlPools"},
 	}
 	for typ, added := range r1 {
@@ -113,4 +113,21 @@ func TestCodec_R1FieldsAreLeftOutWhileZero(t *testing.T) {
 	out = Input{}
 	require.NoError(t, Unmarshal(b, &out))
 	assert.Equal(t, in, out)
+
+	// A zero read is not a zero omitted: the bit is written, the value is
+	// not, and both read back. A queue that never waited (AvgQueueTime 0,
+	// known) stays known, and stays apart from no reading at all.
+	in.ReplicaMetrics[0].AvgQueueTime, in.ReplicaMetrics[0].AvgQueueTimeKnown = 0, true
+	b, err = Marshal(in)
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"AvgQueueTimeKnown":true`)
+	assert.NotContains(t, string(b), `"AvgQueueTime":`)
+	out = Input{}
+	require.NoError(t, Unmarshal(b, &out))
+	assert.Equal(t, in, out)
+	assert.True(t, out.ReplicaMetrics[0].AvgQueueTimeKnown)
+	assert.Zero(t, out.ReplicaMetrics[0].AvgQueueTime)
+	again, err = Marshal(out)
+	require.NoError(t, err)
+	assert.Equal(t, string(b), string(again))
 }

@@ -43,6 +43,7 @@ var engineSpecificReplicaQueries = []string{
 	registration.QueryTTFTBuckets,
 	registration.QueryAvgQueueTime,
 	registration.QueryQueueTimeBuckets,
+	registration.QueryQueueMin,
 }
 
 // agnosticReplicaQueries are the logical query names collected per replica that
@@ -84,6 +85,43 @@ var ttftAgnosticQueries = []string{
 	registration.QueryAvgPrefillTime,
 	registration.QueryAvgKVTransferTime,
 	registration.QueryTPOTBuckets,
+}
+
+// recordOnlyReplicaQueries are the replica queries above whose results only
+// a learner recording reads: the TTFT model's inputs. They are issued only
+// while the collector records them (SetRecordTTFTInputs), so a controller
+// that records nothing pays nothing for them.
+var recordOnlyReplicaQueries = map[string]bool{
+	registration.QueryPromptTokensBuckets: true,
+	registration.QueryTTFTBuckets:         true,
+	registration.QueryAvgQueueTime:        true,
+	registration.QueryQueueTimeBuckets:    true,
+	registration.QueryQueueMin:            true,
+	registration.QueryAvgPrefillTime:      true,
+	registration.QueryAvgKVTransferTime:   true,
+	registration.QueryTPOTBuckets:         true,
+}
+
+// withoutRecordOnly is names less the record-only queries, in order.
+func withoutRecordOnly(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if !recordOnlyReplicaQueries[n] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// onlyRecordOnly is the record-only queries of names, in order.
+func onlyRecordOnly(names []string) []string {
+	var out []string
+	for _, n := range names {
+		if recordOnlyReplicaQueries[n] {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // capacityQueueQueries are the agnostic queries partitioned by model_name like

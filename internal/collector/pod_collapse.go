@@ -318,7 +318,8 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 		func(m domain.ReplicaMetrics) float64 { return m.RequestRate * m.AvgInputTokens })
 
 	// The TTFT model's inputs (ttft_inputs.go): each bound's rate summed
-	// over the ranks, the means weighted as service time is, each present
+	// over the ranks, the means weighted by their own counts where the row
+	// has them and by request rate otherwise (mergeKnownMean), each present
 	// only when every rank had it.
 	pod.PromptTokensBuckets = mergeLengthBuckets(group, func(m domain.ReplicaMetrics) []domain.LengthBucket { return m.PromptTokensBuckets })
 	pod.OutputTokensBuckets = mergeLengthBuckets(group, func(m domain.ReplicaMetrics) []domain.LengthBucket { return m.OutputTokensBuckets })
@@ -327,12 +328,17 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	pod.TPOTBuckets = mergeLatencyBuckets(group, func(m domain.ReplicaMetrics) []domain.LatencyBucket { return m.TPOTBuckets })
 	pod.AvgQueueTime, pod.AvgQueueTimeKnown = mergeKnownMean(group, func(m domain.ReplicaMetrics) (float64, bool) {
 		return m.AvgQueueTime, m.AvgQueueTimeKnown
-	})
+	}, queueTimeCountRate)
 	pod.AvgPrefillTime, pod.AvgPrefillTimeKnown = mergeKnownMean(group, func(m domain.ReplicaMetrics) (float64, bool) {
 		return m.AvgPrefillTime, m.AvgPrefillTimeKnown
-	})
+	}, nil)
 	pod.AvgKVTransferTime, pod.AvgKVTransferTimeKnown = mergeKnownMean(group, func(m domain.ReplicaMetrics) (float64, bool) {
 		return m.AvgKVTransferTime, m.AvgKVTransferTimeKnown
+	}, nil)
+	// Summed, as the pod's queue length is: each rank's least summed is a
+	// floor under the pod's own least, and tighter than the largest rank's.
+	pod.QueueMin, pod.QueueMinKnown = mergeKnownSum(group, func(m domain.ReplicaMetrics) (float64, bool) {
+		return m.QueueMin, m.QueueMinKnown
 	})
 
 	pod.Metadata = mergeMetadata(group)

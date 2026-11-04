@@ -1281,9 +1281,11 @@ const (
 	QueryTypePodList = "pod_list"
 	// QueryTypeRouterLatency is the router TTFT/TPOT read by the slo analyzer.
 	QueryTypeRouterLatency = "router_latency"
-	// QueryTypeFlowControlPools is the router's flow-control series per
-	// InferencePool (wait, saturation, outcomes), recorded for the TTFT model.
-	QueryTypeFlowControlPools = "flow_control_pools"
+	// QueryTypeLearnerRecording is every query only a learner recording
+	// reads (the TTFT model's inputs: per pod, the router's TPOT and
+	// flow-control wait histograms, the flow-control pools). They run only
+	// while recording is on, so a failure here never touches scaling.
+	QueryTypeLearnerRecording = "learner_recording"
 )
 
 // Value for the LabelUnit Prometheus label: the metric carries an absolute

@@ -114,9 +114,39 @@ func TestTTFTInputQueries(t *testing.T) {
 			t.Errorf("%s is vLLM-only and must not be engine-specific", name)
 		}
 	}
-	for _, name := range []string{QueryPromptTokensBuckets, QueryTTFTBuckets, QueryAvgQueueTime, QueryQueueTimeBuckets} {
+	for _, name := range []string{QueryPromptTokensBuckets, QueryTTFTBuckets, QueryAvgQueueTime, QueryQueueTimeBuckets,
+		QueryQueueMin} {
 		if !IsEngineSpecific(name) {
 			t.Errorf("%s has an SGLang variant and must be engine-specific", name)
+		}
+	}
+}
+
+// QueueMin is each engine's waiting gauge at its least over the minute, per
+// pod: vLLM's per rank (engine) summed over the pod's ranks, as the queue
+// length sums their peaks; SGLang's a max over duplicate series.
+func TestQueueMinQuery(t *testing.T) {
+	v := builtQueries(t, inferenceengine.EngineVLLM, QueryQueueMin)[QueryQueueMin]
+	for _, want := range []string{
+		"sum by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (min_over_time(",
+		`vllm:num_requests_waiting{namespace="ns"}[1m]`,
+	} {
+		if !strings.Contains(v, want) {
+			t.Errorf("vLLM QueueMin lacks %q: %s", want, v)
+		}
+	}
+	s := builtQueries(t, inferenceengine.EngineSGLang, QueryQueueMin)[QueryQueueMin]
+	for _, want := range []string{
+		"max by (model_name, instance, pod) (min_over_time(",
+		`sglang:num_queue_reqs{namespace="ns"}[1m]`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("SGLang QueueMin lacks %q: %s", want, s)
+		}
+	}
+	for _, q := range []string{v, s} {
+		if strings.Contains(q, "max_over_time") || strings.Contains(q, "by_reason") {
+			t.Errorf("QueueMin must read the whole gauge at its least: %s", q)
 		}
 	}
 }
@@ -138,16 +168,18 @@ func TestSLORouterTPOTBucketsQuery(t *testing.T) {
 	}
 }
 
-// The flow-control pool queries read the current llm_d_epp_* names, in the
-// namespace, keyed by pool; the join query names each pool's models.
+// The flow-control queries read the current llm_d_epp_* names, in the
+// namespace. The pool queries are keyed by pool, and the join query names
+// each pool's models; the wait histogram is keyed by model, of dispatched
+// requests only, the only waits a TTFT contains.
 func TestFlowControlPoolQueries(t *testing.T) {
 	built := builtQueries(t, inferenceengine.EngineVLLM, QueryFlowControlPoolModels, QueryFlowControlWaitBuckets,
 		QueryFlowControlPoolSaturation, QueryFlowControlOutcomes)
 	for name, wants := range map[string][]string{
 		QueryFlowControlPoolModels: {"by (inference_pool, model_name, target_model_name)",
 			`llm_d_epp_flow_control_queue_size{namespace="ns",inference_pool!=""}`},
-		QueryFlowControlWaitBuckets: {"sum by (inference_pool, le) (rate(",
-			`llm_d_epp_flow_control_request_queue_duration_seconds_bucket{namespace="ns"}[` + FlowControlWindow + `]`},
+		QueryFlowControlWaitBuckets: {"sum by (model_name, target_model_name, le) (rate(",
+			`llm_d_epp_flow_control_request_queue_duration_seconds_bucket{namespace="ns",outcome="Dispatched"}[` + FlowControlWindow + `]`},
 		QueryFlowControlPoolSaturation: {"max by (inference_pool, stage) (avg_over_time(",
 			`llm_d_epp_flow_control_pool_saturation{namespace="ns"}[` + FlowControlWindow + `]`},
 		QueryFlowControlOutcomes: {"sum by (inference_pool, outcome) (rate(",

@@ -482,6 +482,8 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		AvgPrefillTimeKnown:    data.avgPrefillTimeKnown,
 		AvgKVTransferTime:      data.avgKVTransferTime,
 		AvgKVTransferTimeKnown: data.avgKVTransferTimeKnown,
+		QueueMin:               data.queueMin,
+		QueueMinKnown:          data.queueMinKnown,
 		TPOTBuckets:            latencyBuckets(data.tpotBuckets),
 		Metadata: &domain.ReplicaMetricsMetadata{
 			CollectedAt:     collectedAt,

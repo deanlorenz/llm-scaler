@@ -20,7 +20,8 @@ const (
 	// QuerySLORouterTPOTBuckets is that histogram's per-second bucket rates,
 	// per model: the distribution of per-request TPOT behind the mean.
 	// Recorded for the TTFT and TPOT models and read by nothing yet
-	// (docs/proposals/analyzer-learner.md, 2.9).
+	// (docs/proposals/analyzer-learner.md, 2.9), so issued only while a
+	// learner recording is on.
 	QuerySLORouterTPOTBuckets = "slo_router_tpot_buckets"
 
 	// SLORouterWindow is the rate window of the four queries above. Five
@@ -56,9 +57,10 @@ const (
 )
 
 // RegisterSLOQueries registers the router latency queries the slo analyzer
-// reads. The engine collects them every cycle for every model, into
-// AnalyzerInput.RouterLatency, whatever the policy lists; the slo analyzer
-// reads the cycle's results from the collector's memo.
+// reads. They run for a model whose policy lists that analyzer; while a
+// learner recording is on, the engine also collects them every cycle for
+// every model, into AnalyzerInput.RouterLatency, and the slo analyzer reads
+// that cycle's results from the collector's memo.
 func RegisterSLOQueries(sourceRegistry *source.SourceRegistry) {
 	metricsSource := sourceRegistry.Get("prometheus")
 	if metricsSource == nil {

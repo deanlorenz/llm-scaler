@@ -53,6 +53,14 @@ const (
 	// histogram is missing. vLLM only.
 	QueryTPOTBuckets = "tpot_buckets"
 
+	// QueryQueueMin is the least the engine's waiting-request gauge read
+	// over the last minute, per instance: a minute in which it never fell
+	// to zero is a minute the engine always had work waiting. vLLM
+	// num_requests_waiting, each rank's minimum summed over the instance's
+	// ranks as QueryQueueLength sums their peaks; SGLang num_queue_reqs, a
+	// max over duplicate series as its QueryQueueLength takes it.
+	QueryQueueMin = "queue_min"
+
 	// TTFTInputWindow is the window of the [1m] queries above.
 	TTFTInputWindow = "1m"
 )
@@ -135,6 +143,23 @@ func registerTTFTInputQueries(registry *source.QueryList) {
 		Template:    sglangPerPodBuckets("sglang:queue_time_seconds_bucket", TTFTInputWindow),
 		Params:      []string{source.ParamNamespace},
 		Description: "Engine queue wait histogram per pod (1m rate, one series per bucket) (SGLang)",
+	})
+
+	registry.MustRegister(source.QueryTemplate{
+		Name: QueryQueueMin,
+		Type: source.QueryTypePromQL,
+		Template: `sum by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (` +
+			`min_over_time(vllm:num_requests_waiting{namespace="{{.namespace}}"}[` + TTFTInputWindow + `])))`,
+		Params:      []string{source.ParamNamespace},
+		Description: "Least queue length per pod over the last minute",
+	})
+	registerForEngine(registry, inferenceengine.EngineSGLang, source.QueryTemplate{
+		Name: QueryQueueMin,
+		Type: source.QueryTypePromQL,
+		Template: `max by (model_name, instance, pod) (` +
+			`min_over_time(sglang:num_queue_reqs{namespace="{{.namespace}}"}[` + TTFTInputWindow + `]))`,
+		Params:      []string{source.ParamNamespace},
+		Description: "Least queue length per pod over the last minute (SGLang)",
 	})
 
 	registry.MustRegister(source.QueryTemplate{

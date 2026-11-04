@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -387,7 +388,8 @@ func ttftInput() domain.AnalyzerInput {
 		QueueTimeBuckets: []domain.LatencyBucket{{UpperBound: 0.3, Rate: 2.25}, {UpperBound: inf, Rate: 2.5}},
 		AvgPrefillTime:   0.0625, AvgPrefillTimeKnown: true,
 		AvgKVTransferTime: 0.0075, AvgKVTransferTimeKnown: true,
-		TPOTBuckets: []domain.LatencyBucket{{UpperBound: 0.025, Rate: 2}, {UpperBound: inf, Rate: 2.5}}}
+		TPOTBuckets: []domain.LatencyBucket{{UpperBound: 0.025, Rate: 2}, {UpperBound: inf, Rate: 2.5}},
+		QueueMin:    1, QueueMinKnown: true}
 	return domain.AnalyzerInput{ModelID: "m", Namespace: "ns",
 		Config: &config.ScalingPolicy{KvCacheThreshold: 0.8, QueueLengthThreshold: 5,
 			SLO: &config.SLOPolicy{TPOT: &config.SLOObjective{Target: config.SLODuration{Duration: 50 * time.Millisecond}}}},
@@ -397,9 +399,10 @@ func ttftInput() domain.AnalyzerInput {
 		RouterLatency: &domain.RouterLatency{WindowSeconds: 300,
 			TTFTBuckets: []domain.LatencyBucket{{UpperBound: 1, Rate: 2}, {UpperBound: inf, Rate: 2.5}},
 			TPOTSumRate: 0.0625, TPOTCountRate: 2.5,
-			TPOTBuckets: []domain.LatencyBucket{{UpperBound: 0.05, Rate: 2.25}, {UpperBound: inf, Rate: 2.5}}},
+			TPOTBuckets:            []domain.LatencyBucket{{UpperBound: 0.05, Rate: 2.25}, {UpperBound: inf, Rate: 2.5}},
+			FlowControlWaitBuckets: []domain.LatencyBucket{{UpperBound: 0.01, Rate: 2}, {UpperBound: inf, Rate: 2.5}}},
 		FlowControlPools: []domain.FlowControlPool{{WindowSeconds: 300,
-			WaitBuckets:       []domain.LatencyBucket{{UpperBound: 0.01, Rate: 2}, {UpperBound: inf, Rate: 2.5}},
+			EffectiveSaturation: 0.875, EffectiveSaturationKnown: true,
 			PrefillSaturation: 0.375, PrefillSaturationKnown: true, DecodeSaturation: 0.875, DecodeSaturationKnown: true,
 			DispatchedRate: 2.5, RejectedRate: 0.125, OutcomesKnown: true}},
 	}
@@ -408,8 +411,9 @@ func ttftInput() domain.AnalyzerInput {
 // ttftFieldNames are the R1 field names as a recording writes them.
 var ttftFieldNames = []string{"QueueLengthKnown", "AvgServiceTimeKnown", "AvgTTFTKnown", "PromptTokensBuckets",
 	"OutputTokensBuckets", "TTFTBuckets", "AvgQueueTime", "AvgQueueTimeKnown", "QueueTimeBuckets", "AvgPrefillTime",
-	"AvgPrefillTimeKnown", "AvgKVTransferTime", "AvgKVTransferTimeKnown", "TPOTBuckets", "RouterLatency",
-	"FlowControlPools", "WaitBuckets", "PrefillSaturation", "DecodeSaturation", "DispatchedRate", "OutcomesKnown"}
+	"AvgPrefillTimeKnown", "AvgKVTransferTime", "AvgKVTransferTimeKnown", "TPOTBuckets", "QueueMin", "QueueMinKnown",
+	"RouterLatency", "FlowControlWaitBuckets", "FlowControlPools", "EffectiveSaturation", "PrefillSaturation",
+	"DecodeSaturation", "DispatchedRate", "OutcomesKnown"}
 
 // Part 3 (analyzer-learner.md, 2.9): every Analyze records the TTFT model's
 // inputs with the rest of its input, and a replay reads them back and
@@ -480,23 +484,106 @@ func stripTTFT(in domain.AnalyzerInput) domain.AnalyzerInput {
 		m.AvgQueueTime, m.AvgQueueTimeKnown = 0, false
 		m.AvgPrefillTime, m.AvgPrefillTimeKnown = 0, false
 		m.AvgKVTransferTime, m.AvgKVTransferTimeKnown = 0, false
+		m.QueueMin, m.QueueMinKnown = 0, false
 		rows[i] = m
 	}
 	in.ReplicaMetrics = rows
 	return in
 }
 
-// A recording made before R1 replays byte for byte: every committed golden
-// was recorded before R1, and each Analyze input it holds, each slo event
-// with the router latency it served, and each row the throughput analyzer
-// observed reads back and is written again with the same bytes. That is what
-// a replay of it records, so the new fields stay absent from it and move no
-// output.
+// olderZeros is again decoded, less every key recorded lacks whose value is
+// a zero: a field added after recorded was written, which the codec writes
+// now and an older build did not (a golden recorded before the policy's
+// Passive, or before a row's LentSince or AvgOutputTokensSquared). The keys
+// removed are added to dropped. Any other difference, a value changed or a
+// key recorded holds and again lacks, is left for the comparison to find.
+func olderZeros(t *testing.T, recorded, again []byte, dropped map[string]bool) (want, got any) {
+	t.Helper()
+	decode := func(b []byte) any {
+		d := json.NewDecoder(bytes.NewReader(b))
+		d.UseNumber()
+		var v any
+		require.NoError(t, d.Decode(&v))
+		return v
+	}
+	want, got = decode(recorded), decode(again)
+	var prune func(w, g any)
+	prune = func(w, g any) {
+		switch g := g.(type) {
+		case map[string]any:
+			wm, _ := w.(map[string]any)
+			for k, gv := range g {
+				wv, ok := wm[k]
+				if !ok && isJSONZero(gv) {
+					delete(g, k)
+					dropped[k] = true
+					continue
+				}
+				prune(wv, gv)
+			}
+		case []any:
+			wl, _ := w.([]any)
+			for i := range g {
+				if i < len(wl) {
+					prune(wl[i], g[i])
+				}
+			}
+		}
+	}
+	prune(want, got)
+	return want, got
+}
+
+// isJSONZero is whether v is what the codec writes for a zero Go value.
+func isJSONZero(v any) bool {
+	switch v := v.(type) {
+	case nil:
+		return true
+	case bool:
+		return !v
+	case string:
+		return v == "" || v == "0001-01-01T00:00:00Z"
+	case json.Number:
+		f, err := v.Float64()
+		return err == nil && f == 0
+	case []any:
+		return len(v) == 0
+	case map[string]any:
+		for _, e := range v {
+			if !isJSONZero(e) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// requireSameUpToOlderZeros fails unless again is recorded written again,
+// up to olderZeros, and holds no R1 field: those are left out while zero.
+func requireSameUpToOlderZeros(t *testing.T, recorded, again []byte, dropped map[string]bool, msg string, args ...any) {
+	t.Helper()
+	if string(recorded) == string(again) {
+		return
+	}
+	want, got := olderZeros(t, recorded, again, dropped)
+	require.Equal(t, want, got, append([]any{msg}, args...)...)
+}
+
+// A recording made before R1 replays unchanged: every committed golden was
+// recorded before R1, and each Analyze input it holds, each slo event with
+// the router latency it served, and each row the throughput analyzer
+// observed reads back and is written again with the same values, and with no
+// R1 field. That is what a replay of it records, so the new fields stay
+// absent from it and move no output. Byte for byte, except a golden recorded
+// by a build older than a field added before R1, which a re-encoding writes
+// as its zero (olderZeros); those keys are logged.
 func TestCoverage_PreR1GoldensRecordTheSameBytes(t *testing.T) {
 	m, err := ReadManifest(goldenDir)
 	require.NoError(t, err)
 	require.NotEmpty(t, m.Goldens)
 	inputs := 0
+	dropped := map[string]bool{}
 	for _, g := range m.Goldens {
 		gz, err := os.ReadFile(filepath.Join(goldenDir, filepath.FromSlash(g.Recording)))
 		require.NoError(t, err, g.Name)
@@ -517,7 +604,7 @@ func TestCoverage_PreR1GoldensRecordTheSameBytes(t *testing.T) {
 				input = d.Input
 				again, err := learnrec.Marshal(d)
 				require.NoError(t, err)
-				require.Equal(t, string(ev.Data), string(again), "%s seq %d: the slo event", g.Name, ev.Seq)
+				requireSameUpToOlderZeros(t, ev.Data, again, dropped, "%s seq %d: the slo event", g.Name, ev.Seq)
 			case throughput.KindAnalyze:
 				var d throughput.AnalyzeEvent
 				require.NoError(t, ev.DecodeData(&d), g.Name)
@@ -529,7 +616,10 @@ func TestCoverage_PreR1GoldensRecordTheSameBytes(t *testing.T) {
 				require.NoError(t, d.Metrics.Decode(&rows), g.Name)
 				again, err := learnrec.Marshal(rows)
 				require.NoError(t, err)
-				require.Equal(t, string(d.Metrics), string(again), "%s seq %d: the observed rows", g.Name, ev.Seq)
+				requireSameUpToOlderZeros(t, d.Metrics, again, dropped, "%s seq %d: the observed rows", g.Name, ev.Seq)
+				for _, name := range ttftFieldNames {
+					require.NotContains(t, string(again), `"`+name+`":`, "%s seq %d: a zero %s was written", g.Name, ev.Seq, name)
+				}
 				continue
 			default:
 				continue
@@ -538,14 +628,18 @@ func TestCoverage_PreR1GoldensRecordTheSameBytes(t *testing.T) {
 			require.NoError(t, err, g.Name)
 			again, err := learnrec.Marshal(learnrec.InputOf(in))
 			require.NoError(t, err)
-			require.Equal(t, string(input), string(again), "%s seq %d: the input", g.Name, ev.Seq)
+			requireSameUpToOlderZeros(t, input, again, dropped, "%s seq %d: the input", g.Name, ev.Seq)
 			for _, name := range ttftFieldNames {
 				require.NotContains(t, string(input), `"`+name+`":`, "%s seq %d: a golden recorded before R1 holds %s", g.Name, ev.Seq, name)
+				require.NotContains(t, string(again), `"`+name+`":`, "%s seq %d: a zero %s was written", g.Name, ev.Seq, name)
 			}
 			inputs++
 		}
 	}
 	// An empty walk passes every check above.
 	require.Greater(t, inputs, 100, "the walk read %d inputs", inputs)
-	t.Logf("%d goldens, %d inputs written again byte for byte", len(m.Goldens), inputs)
+	for _, name := range ttftFieldNames {
+		require.False(t, dropped[name], "R1 field %s was written as a zero", name)
+	}
+	t.Logf("%d goldens, %d inputs written again; zero fields older goldens lack: %v", len(m.Goldens), inputs, slices.Sorted(maps.Keys(dropped)))
 }

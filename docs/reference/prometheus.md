@@ -593,7 +593,7 @@ across a restart, are otherwise visible only in the logs.
 - **Type**: Counter
 - **Description**: Total number of metrics collection errors
 - **Labels**:
-  - `query_type`: Type of metrics query that failed. `pod_list` is the controller's per-namespace Pod listing, a Kubernetes API read rather than a Prometheus query
+  - `query_type`: Type of metrics query that failed. `pod_list` is the controller's per-namespace Pod listing, a Kubernetes API read rather than a Prometheus query. `router_latency` is the router's TTFT histogram and TPOT mean the `slo` analyzer reads. `learner_recording` is a query only a learner recording reads (the TTFT inputs: per-pod histograms and means, the router's TPOT and flow-control wait histograms, the flow-control pools); these run only while `LEARNER_RECORDING_DIR` names a directory, so the series never appears otherwise, and a failure there leaves scaling untouched. A `router_latency` or `learner_recording` failure is counted once per query the controller ran, not once per model that read its result in the same cycle
   - `reason`: Reason for the error. For `pod_list`: `forbidden`, `unavailable` or `other`
 - **Use Case**: Track metrics collection failures and identify problematic queries. A failed `pod_list` makes the controller treat every Pod in that namespace as Ready and present for the cycle, so a not-Ready Pod's saturated reading can become its variant's k2; a steady rate of `pod_list` errors (`reason="forbidden"` after an RBAC change) is worth an alert
 - **Example**:
