@@ -57,6 +57,7 @@ import (
 	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/clock"
 )
 
 // BridgeResolver answers which variant a warm-pool Pod is lent to right now,
@@ -113,6 +114,10 @@ type ReplicaMetricsCollector struct {
 	// that asked for it.
 	cycleRecord bool
 	cycleMu     sync.Mutex
+	// clock is what collectedAt is read from: the instant the rows are
+	// stamped with, their freshness is judged at and a Pod's uptime is
+	// measured to. Nil reads the wall clock (now).
+	clock clock.PassiveClock
 }
 
 // RecordsTTFTInputs reports whether the open cycle issues the queries whose
@@ -139,6 +144,23 @@ func NewReplicaMetricsCollector(metricsSource source.MetricsSource, k8sClient cl
 	}
 }
 
+// SetClock sets the clock the collector stamps its rows with. A capture of a
+// past window (internal/whatifsource) collects as of each step's instant,
+// so the rows read fresh and a Pod's uptime is measured at that instant, not
+// at the wall clock's. Nil restores the wall clock.
+func (c *ReplicaMetricsCollector) SetClock(clk clock.PassiveClock) {
+	c.clock = clk
+}
+
+// now is the collector's clock reading: the wall clock unless SetClock set
+// another.
+func (c *ReplicaMetricsCollector) now() time.Time {
+	if c.clock == nil {
+		return time.Now()
+	}
+	return c.clock.Now()
+}
+
 // SetBridgeResolver names where the warm pool's lending is read from. The
 // engine wires the decision store here; a collector without one attributes
 // every Pod by its owner walk alone.
@@ -161,7 +183,7 @@ func (c *ReplicaMetricsCollector) bridgeFor(namespace, pod string) (string, time
 	if c.bridges == nil {
 		return "", time.Time{}, false
 	}
-	return c.bridges.LendFor(namespace, pod, warmPoolLendingMaxAge, time.Now())
+	return c.bridges.LendFor(namespace, pod, warmPoolLendingMaxAge, c.now())
 }
 
 // BeginCycle opens an optimize cycle, arming the memo that lets every model in a
@@ -391,7 +413,7 @@ func (c *ReplicaMetricsCollector) collectReplicaMetrics(
 
 	// Build replica metrics from pod data
 	replicaMetrics := make([]domain.ReplicaMetrics, 0, len(podData))
-	collectedAt := time.Now()
+	collectedAt := c.now()
 
 	// Pods attributed through the FMA pairing rather than their own owner chain,
 	// summarised once after the loop.
