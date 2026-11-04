@@ -1517,13 +1517,25 @@ passed through `prefillBounds`). Nothing sizes from it.
 
 | Figure | From | Refused |
 | --- | --- | --- |
-| `V_P`, computed tokens/s | busy minutes (median of at least 5; needs the queue's minimum over the minute, which no query reads yet), else the peak under a queue sustained over 3 minutes, else the back-pressure bound (at least 2 readings). The last two are lower bounds | `NoPrefillCapacity`; `SGLangNoComputedTokens` on SGLang |
-| `a`, seconds | an untrimmed fit of `AvgServiceTime` against the effective prompt (`PrefillComputedTokenRate / RequestRate`) over low-load minutes (no queue, occupancy at most 0.1, prompt steady within 10% for 2 minutes), plus the least `AvgTTFT - AvgServiceTime`. `1/slope` is logged as `slopeBound`, an upper bound on `V_P` for validation only | aggregated, fewer than 5 minutes, prompts spanning less than 1.5x, a non-positive slope or intercept |
-| `f` | the busiest pod's share of computed tokens over the mean, less the expected max of `N_p` Poisson counts, over minutes with at least 100 requests a pod; median of at least 5 | `OnePod`, `NoComputedTokens`, `TooFewImbalanceMinutes` |
+| `V_P`, computed tokens/s | busy minutes (median of at least 5; needs the queue's minimum over the minute, which no query reads yet), else the peak under a queue sustained over 3 minutes, else the back-pressure bound (at least 2 readings). The last two are lower bounds. In a default production install only the peak under a queue is live: busy minutes need `QueueMin` (recorder PR R1), and the bound needs `enablePrefillThroughputBound` | `NoPrefillCapacity`; `SGLangNoComputedTokens` on SGLang |
+| `a`, seconds | an untrimmed fit of `AvgServiceTime` against the effective prompt (`PrefillComputedTokenRate / RequestRate`) over low-load minutes (no queue, occupancy at most 0.1, prompt steady within 10% of every reading in the last 2 minutes, with at least one there), plus the least `AvgTTFT - AvgServiceTime`. `1/slope` is logged as `slopeBound`, an upper bound on `V_P` for validation only. On `ols-sweep`: intercept about 8.4 ms, overhead about 2.7 ms, `a` about 11.0 ms, `slopeBound` about 520k tok/s | aggregated, fewer than 5 minutes, prompts spanning less than 1.5x, a non-positive slope or intercept |
+| `f` | the busiest pod's share of computed tokens over the mean, less the expected max of `N_p` Poisson counts, over minutes with at least 100 requests a pod on average; median of at least 5. It reads low on a real imbalance at few requests (2:1:1:1 reads about 1.50 for 1.6 at 100 a pod) and high on equal pods with variable prompts (about 1.03 at `Cs²` = 1); `imbalance.go` says why | `OnePod`, `NoComputedTokens`, `TooFewImbalanceMinutes` |
+
+"Cannot over-state" holds up to the noise of `rate()`: the peak under a queue
+is the max, over up to 6 hours, of each 3-minute run's least one-minute rate,
+about 120 runs a replica, so it keeps the luckiest one.
 
 A row is read only from a Ready, non-bridge replica settled for 2 minutes on
 the settle tracker. Samples are spaced a minute apart and kept 6 hours; the
-state is not persisted and not forgotten by `llm-d.ai/forget-learned-state`.
+state is not persisted. It is keyed by the variant key's fields (namespace,
+model, variant, the accelerator read through `stableAcceleratorFor`, which
+touches nothing, and GPUs) and the engine arguments (`ArgsTag`, behind `#`),
+so a redeploy under other arguments starts its own `V_P`, `a` and `f` and the
+old key ages out; an image change alone does not.
+`llm-d.ai/forget-learned-state` forgets it: `forgetVariant` drops the
+variant's keys (not counted in its return), and `forgetLearnedState` drops
+every key. The back-pressure bound is stashed for the cycle that read it
+only: a cycle whose pricing fails clears it too.
 The line is `prefill-capacity-observed`, at `--v=3`, one per prefill variant
 per cycle. The replay switch is `prefill-capacity-observe`; it moves no
 golden output.

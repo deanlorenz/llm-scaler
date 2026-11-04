@@ -1,11 +1,13 @@
 package saturation
 
 import (
+	"fmt"
 	"maps"
 	"slices"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/prefill"
 )
 
@@ -27,6 +29,28 @@ import (
 // writes no state any output reads.
 const SwitchPrefillCapacityObserve = "prefill-capacity-observe"
 
+// prefillObserveKey names a prefill variant's observed state: the variant
+// key's fields (itlWindowKey), and the engine arguments it runs (windowArgs)
+// behind stashKey's separator when they are known. V_P is a max over the
+// samples a key keeps, for prefill.Retention, so a key that outlived a
+// redeploy with a lower --max-num-batched-tokens kept the old engine's peak:
+// with the arguments in the key, the new engine starts its own state and the
+// old one ages out. Only the arguments: like every window the arguments
+// bound, an image alone does not start a new key; an operator resets one
+// with llm-d.ai/forget-learned-state (forgetVariant).
+//
+// The accelerator is read through stableAcceleratorFor, which touches
+// nothing: observing must not keep the accelerator memo alive.
+func (a *SaturationAnalyzer) prefillObserveKey(namespace, modelID, variant, accelerator string, gpuCount int,
+	params *capacity.EngineParams) string {
+	key := fmt.Sprintf("%s|%s|%s|%s|%d", namespace, modelID, variant,
+		a.stableAcceleratorFor(namespace, variant, accelerator), gpuCount)
+	if args := windowArgs(params); args != "" {
+		key = stashKey(key, args)
+	}
+	return key
+}
+
 // prefillBoundStashKey names a variant's back-pressure bound for the cycle
 // in progress (notePrefillBound writes it, observePrefill reads it).
 func prefillBoundStashKey(namespace, modelID, variant string) string {
@@ -43,13 +67,14 @@ func (a *SaturationAnalyzer) stashPrefillBound(rm domain.ReplicaMetrics, tokens 
 		prefill.Bound{Tokens: tokens, Samples: samples}
 }
 
-// observePrefill observes each prefill variant's rows of the cycle and logs
-// what its key has learned. After priceReplicas, so the bound each variant's
-// replicas read this cycle is stashed.
-func (c *cycle) observePrefill() {
+// takePrefillBounds returns and clears the bounds stashed for the cycle's
+// variants, and whether the observation is on. Every cycle clears them, the
+// ones whose pricing failed too (Analyze), so a bound is only ever read by
+// the cycle that stashed it.
+func (c *cycle) takePrefillBounds() (map[string]prefill.Bound, bool) {
 	a := c.a
 	a.mu.Lock()
-	on := a.prefillObserve
+	defer a.mu.Unlock()
 	bounds := map[string]prefill.Bound{}
 	for _, variant := range slices.Sorted(maps.Keys(c.rolesByVariant)) {
 		k := prefillBoundStashKey(c.input.Namespace, c.input.ModelID, variant)
@@ -58,7 +83,15 @@ func (c *cycle) observePrefill() {
 			delete(a.prefillBounds, k)
 		}
 	}
-	a.mu.Unlock()
+	return bounds, a.prefillObserve
+}
+
+// observePrefill observes each prefill variant's rows of the cycle and logs
+// what its key has learned. After priceReplicas, so the bound each variant's
+// replicas read this cycle is stashed.
+func (c *cycle) observePrefill() {
+	a := c.a
+	bounds, on := c.takePrefillBounds()
 	if !on {
 		return
 	}
@@ -71,11 +104,12 @@ func (c *cycle) observePrefill() {
 	view := &prefill.Settle{View: a.settleView(), Model: settleModel(c.input.Namespace, c.input.ModelID)}
 	for _, variant := range slices.Sorted(maps.Keys(rows)) {
 		var engine inferenceengine.Engine
-		if params := engineParamsFor(a, c.input.Namespace, c.input.ModelID, variant); params != nil {
+		params := engineParamsFor(a, c.input.Namespace, c.input.ModelID, variant)
+		if params != nil {
 			engine = params.Engine
 		}
-		key := a.itlWindowKey(c.input.Namespace, c.input.ModelID, variant, c.accelByVariant[variant],
-			c.gpusByVariant[variant])
+		key := a.prefillObserveKey(c.input.Namespace, c.input.ModelID, variant, c.accelByVariant[variant],
+			c.gpusByVariant[variant], params)
 		est := a.prefillObserver.Observe(prefill.Cycle{
 			Key: key, Engine: engine, Disaggregated: true, Rows: rows[variant],
 			DownstreamSaturated: c.decodeSaturated, Bound: bounds[variant],

@@ -3,6 +3,7 @@ package prefill
 import (
 	"math"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -119,7 +120,10 @@ type Settle struct {
 // Cycle is one cycle of one variant's prefill rows.
 type Cycle struct {
 	// Key names the variant's state: its rows, from cycle to cycle, are
-	// one key's.
+	// one key's. It must change with anything V_P is a property of, the
+	// engine arguments included: V_P is a max over Retention, so a key that
+	// outlives a change keeps the old engine's peak (the saturation analyzer
+	// names it in prefillObserveKey).
 	Key string
 	// Engine is the inference engine the variant runs; empty when unknown.
 	Engine inferenceengine.Engine
@@ -250,6 +254,23 @@ func (o *Observer) Keys() int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return len(o.keys)
+}
+
+// Forget drops every key that begins with prefix, "" dropping them all, and
+// returns how many it dropped. The caller ends a key's name with a separator
+// so that one variant's prefix does not match another's ("v|" against
+// "v2|").
+func (o *Observer) Forget(prefix string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	n := 0
+	for k := range o.keys {
+		if strings.HasPrefix(k, prefix) {
+			delete(o.keys, k)
+			n++
+		}
+	}
+	return n
 }
 
 // Observe admits one cycle of a variant's rows and returns what the key has
@@ -404,9 +425,12 @@ func finitePositive(x float64) bool {
 }
 
 // steady reports whether ieff is within MaxPromptDrift of every prompt length
-// the replica read in the SteadyFor before now.
+// the replica read in the SteadyFor before now, and it read at least one: a
+// row with no history to compare against is not shown steady, so a replica's
+// first row, or its first after a gap of SteadyFor, is not fitted.
 func (ps *podState) steady(ieff float64, now time.Time) bool {
 	cutoff := now.Add(-SteadyFor)
+	seen := false
 	for _, p := range ps.prompts {
 		if !p.at.Before(now) || p.at.Before(cutoff) {
 			continue
@@ -414,8 +438,9 @@ func (ps *podState) steady(ieff float64, now time.Time) bool {
 		if !(math.Abs(p.ieff-ieff) <= MaxPromptDrift*p.ieff) {
 			return false
 		}
+		seen = true
 	}
-	return true
+	return seen
 }
 
 // notePrompt records the row's prompt length and forgets what is older than

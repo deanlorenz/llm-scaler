@@ -18,6 +18,20 @@ import (
 // admitted (settled) and read a computed-token rate and a request rate:
 // shares over a subset of the pods are not shares of the variant's work.
 // f is the median of the minutes, over at least MinImbalanceMinutes.
+//
+// The de-bias is exact only for equal pods, and it errs both ways
+// (slo-capacity-planner-ttft.md, "Where it is most wrong"):
+//
+//   - Low on a real imbalance. The excess subtracted is the equal pods'
+//     chance excess, but a pod clearly busier than the rest is the busiest
+//     whatever the draw, so little of that excess is in its share. Four pods
+//     at 2:1:1:1 (f 1.6) read about 1.50 at 100 requests a pod, about 6% low,
+//     and about 1.57 at 1500. A low f over-promises TTFT.
+//   - High on equal pods with variable prompts. The share is of computed
+//     tokens, whose count per pod varies by about sqrt(1+Cs^2) times the
+//     request count's, Cs the prompt length's coefficient of variation; the
+//     de-bias takes off only the request count's part. Four equal pods with
+//     exponential prompts (Cs^2 = 1) at 100 requests a pod read about 1.03.
 
 // MinRequestsPerPodMinute is the fewest requests per pod per minute, on
 // average, a minute must carry for its shares to be read.

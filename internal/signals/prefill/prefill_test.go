@@ -237,9 +237,10 @@ func lowLoadMinutes(s0, c float64, prompts ...float64) []Cycle {
 	return out
 }
 
-// steadyPrompts is each prompt length held for four minutes, so every
-// level after the first steady-gates its first two minutes out and keeps
-// two: eight minutes over three levels.
+// steadyPrompts is each prompt length held for four minutes. The first
+// level's first minute has no history and is not steady; every later level
+// steady-gates its first two minutes out and keeps two: seven minutes over
+// three levels.
 func steadyPrompts(levels ...float64) []float64 {
 	out := make([]float64, 0, 4*len(levels))
 	for _, l := range levels {
@@ -299,7 +300,19 @@ func TestFixed_AStepInPromptLengthIsNotSteady(t *testing.T) {
 	est := run(NewObserver(), cs...)
 	require.Empty(t, est.ARefused)
 	assert.InDelta(t, 0.0105, est.A, 1e-12)
-	assert.Equal(t, 8, est.ASamples)
+	assert.Equal(t, 7, est.ASamples)
+}
+
+// A row with no prompt history to compare against is not steady: the
+// replica's first row, and its first after SteadyFor with none.
+func TestFixed_NoPromptHistoryIsNotSteady(t *testing.T) {
+	ps := &podState{}
+	assert.False(t, ps.steady(1000, t0), "no history at all")
+	ps.notePrompt(1000, t0)
+	assert.False(t, ps.steady(1000, t0), "a prompt read at now is not history")
+	assert.True(t, ps.steady(1050, t0.Add(minute)), "within MaxPromptDrift of the last minute")
+	assert.False(t, ps.steady(1200, t0.Add(minute)), "beyond it")
+	assert.False(t, ps.steady(1000, t0.Add(SteadyFor+time.Second)), "the history is older than SteadyFor")
 }
 
 // The refusals of a, each by its state.
@@ -360,8 +373,9 @@ func TestFixed_PropertyRecoversRandomPods(t *testing.T) {
 		least := math.Inf(1)
 		for i, l := range prompts {
 			ov := 0.002 + 0.01*rng.Float64()
-			// The minutes the steady gate admits (steadyPrompts).
-			if i < 4 || i%4 >= 2 {
+			// The minutes the steady gate admits (steadyPrompts): not the
+			// first, which has no history.
+			if (i > 0 && i < 4) || i%4 >= 2 {
 				least = math.Min(least, ov)
 			}
 			cs = append(cs, cycle(time.Time{}, lowLoad(l, s0+c*l, 0.5, ov)))
@@ -493,6 +507,62 @@ func TestImbalance_ABusierPodIsMeasured(t *testing.T) {
 		require.Empty(t, est.FRefused)
 		require.InDelta(t, 1.6, est.F, 0.05, "seed %d", seed)
 	}
+}
+
+// At the fewest requests f is read at, the de-bias reads a real imbalance
+// low: the busier pod is the busiest whatever the draw, and the equal pods'
+// chance excess, about 0.10 for four pods at 100 requests, comes off it
+// anyway. 2:1:1:1 (f 1.6) reads about 1.50 over seeds, against about 1.57 at
+// 1500 (TestImbalance_ABusierPodIsMeasured). The bias is documented, not
+// corrected (imbalance.go); this pins its direction and size.
+func TestImbalance_ABusierPodReadsLowAtFewRequests(t *testing.T) {
+	fs := make([]float64, 0, 20)
+	for seed := range uint64(20) {
+		rng := rand.New(rand.NewPCG(seed, 5))
+		est := run(NewObserver(), sharedMinutes(rng, 30, MinRequestsPerPodMinute, 2, 1, 1, 1)...)
+		require.Empty(t, est.FRefused)
+		fs = append(fs, est.F)
+	}
+	assert.InDelta(t, 1.50, median(fs), 0.03, "the median over seeds")
+	assert.Less(t, median(fs), 1.6-0.05, "it reads low, not true")
+}
+
+// Equal pods with variable prompt lengths read above 1: the share is of
+// computed tokens, whose count per pod varies sqrt(1+Cs^2) times as much as
+// the request count, and the de-bias takes off only the request count's
+// excess. With exponential prompts (Cs^2 = 1) at 100 requests a pod, the
+// excess left is about (sqrt(2)-1) of the Poisson one; every seed reads
+// within 0.10 of 1, the median within that excess and 0.01.
+func TestImbalance_EqualPodsWithVariablePromptsReadNearOne(t *testing.T) {
+	const m = MinRequestsPerPodMinute
+	left := (math.Sqrt2 - 1) * poissonMaxExcess(4, m)
+	fs := make([]float64, 0, 20)
+	for seed := range uint64(20) {
+		rng := rand.New(rand.NewPCG(seed, 7))
+		cs := make([]Cycle, 30)
+		for i := range cs {
+			rows := make([]domain.ReplicaMetrics, 4)
+			for j := range rows {
+				count := poisson(rng, m)
+				tokens := 0.0
+				for range count {
+					tokens += 1000 * rng.ExpFloat64()
+				}
+				rm := base("p-" + string(rune('a'+j)))
+				rm.RequestRate = float64(count) / 60
+				rm.PrefillComputedTokenRate = tokens / 60
+				rows[j] = rm
+			}
+			cs[i] = cycle(time.Time{}, rows...)
+		}
+		est := run(NewObserver(), cs...)
+		require.Empty(t, est.FRefused)
+		require.GreaterOrEqual(t, est.F, 1.0)
+		require.Less(t, est.F, 1.10, "seed %d: equal pods read f %.3f", seed, est.F)
+		fs = append(fs, est.F)
+	}
+	assert.Greater(t, median(fs), 1.01, "variable prompts read high: the median over seeds")
+	assert.Less(t, median(fs), 1+left+0.01, "by about what the de-bias leaves")
 }
 
 // The refusals of f, each by its state.
@@ -672,6 +742,29 @@ func TestInputs_EachReadingRefusesNaN(t *testing.T) {
 }
 
 // --- retention ---
+
+// Forget drops the keys under a prefix and only those; "" drops them all.
+// A forgotten key starts again: its peak is gone.
+func TestObserver_ForgetDropsTheKeysUnderAPrefix(t *testing.T) {
+	o := NewObserver()
+	for _, k := range []string{"ns|m|v|H100|1", "ns|m|v|H100|1#args", "ns|m|v2|H100|1"} {
+		for i, c := range queuedMinutes(20000, 20000, 20000) {
+			c.Key, c.Now = k, t0.Add(time.Duration(i)*minute)
+			o.Observe(c)
+		}
+	}
+	require.Equal(t, 3, o.Keys())
+	assert.Equal(t, 2, o.Forget("ns|m|v|"))
+	assert.Equal(t, 1, o.Keys(), "v2 is kept")
+
+	c := queuedMinutes(10000)[0]
+	c.Key, c.Now = "ns|m|v|H100|1", t0.Add(3*minute)
+	est := o.Observe(c)
+	assert.Equal(t, NoPrefillCapacity, est.VPRefused, "the forgotten key has no peak")
+
+	assert.Equal(t, 2, o.Forget(""))
+	assert.Zero(t, o.Keys())
+}
 
 // A key with no cycle for Retention is forgotten; one observed is kept.
 func TestObserver_ForgetsAKeyPastRetention(t *testing.T) {

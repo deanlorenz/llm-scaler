@@ -112,6 +112,9 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 
 	caps, err := c.priceReplicas(ctx)
 	if err != nil {
+		// The bounds stashed before the error are this cycle's: the next
+		// cycle must not observe them as its own.
+		c.takePrefillBounds()
 		return nil, err
 	}
 	// After the last replica is priced: k2's and mu's reports and

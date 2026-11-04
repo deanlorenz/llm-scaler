@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,9 +28,9 @@ var olsSweepRecording = filepath.Join("..", "..", "engines", "analyzers", "learn
 
 // replayOLSSweep feeds every Analyze input of the recording to an observer,
 // with the settle tracker observed from the same rows as the engine observes
-// it, and returns the prefill variant's last estimate and how many cycles
-// it saw.
-func replayOLSSweep(t *testing.T) (Estimate, int) {
+// it, and returns the prefill variant's last estimate, how many cycles it
+// saw, and every prefill row it was fed.
+func replayOLSSweep(t *testing.T) (Estimate, int, []domain.ReplicaMetrics) {
 	t.Helper()
 	gz, err := os.ReadFile(olsSweepRecording)
 	require.NoError(t, err)
@@ -43,6 +44,7 @@ func replayOLSSweep(t *testing.T) (Estimate, int) {
 	tr := settle.NewTracker()
 	o := NewObserver()
 	var est Estimate
+	var all []domain.ReplicaMetrics
 	cycles := 0
 	for _, ev := range rec.Events {
 		switch ev.Kind {
@@ -85,9 +87,39 @@ func replayOLSSweep(t *testing.T) (Estimate, int) {
 			Key: "prefill", Engine: inferenceengine.EngineVLLM, Disaggregated: true, Rows: rows,
 			Settle: &Settle{View: tr, Model: model}, Now: ev.Now,
 		})
+		all = append(all, rows...)
 		cycles++
 	}
-	return est, cycles
+	return est, cycles, all
+}
+
+// lowLoadLine is the fixed cost of the recording's prefill pod, worked out
+// apart from the observer: every prefill row that is Ready, has no queue,
+// reads a computed-token rate, a request rate and a service time, and is
+// occupied (request rate times service time) at most 0.1, fitted by the
+// closed-form least squares of the service time against the effective prompt
+// (computed tokens over requests); and the least AvgTTFT - AvgServiceTime of
+// those rows. It has no settle, no steady gate and no one-sample-a-minute
+// fold: what those add must not move a figure by more than the tolerance.
+func lowLoadLine(rows []domain.ReplicaMetrics) (intercept, slope, overhead float64, n int) {
+	var sx, sy, sxx, sxy float64
+	overhead = math.Inf(1)
+	for _, rm := range rows {
+		if !rm.Ready || rm.QueueLength != 0 || !rm.PrefillComputedTokenRateKnown || !rm.RequestRateKnown ||
+			!(rm.RequestRate > 0) || !(rm.PrefillComputedTokenRate > 0) || !(rm.AvgServiceTime > 0) ||
+			rm.RequestRate*rm.AvgServiceTime > 0.1 {
+			continue
+		}
+		x, y := rm.PrefillComputedTokenRate/rm.RequestRate, rm.AvgServiceTime
+		sx, sy, sxx, sxy = sx+x, sy+y, sxx+x*x, sxy+x*y
+		n++
+		if rm.AvgTTFT >= rm.AvgServiceTime {
+			overhead = math.Min(overhead, rm.AvgTTFT-rm.AvgServiceTime)
+		}
+	}
+	k := float64(n)
+	slope = (k*sxy - sx*sy) / (k*sxx - sx*sx)
+	return (sy - slope*sx) / k, slope, overhead, n
 }
 
 // On ols-sweep, P1 fits a and refuses V_P and f
@@ -95,19 +127,28 @@ func replayOLSSweep(t *testing.T) (Estimate, int) {
 // "What is derivable today": the one prefill pod never queued, so it
 // supports a and the low-load slope, not V_P or f).
 func TestOLSSweep_FitsAAndRefusesVPAndF(t *testing.T) {
-	est, cycles := replayOLSSweep(t)
+	est, cycles, rows := replayOLSSweep(t)
 	require.Equal(t, 226, cycles, "the recording's Analyze cycles")
 
-	// a: the page measured 10.1 ms at low load; the overhead
-	// AvgTTFT - AvgServiceTime is never below 2.5 ms with no queue.
+	// a: the intercept and the overhead each against lowLoadLine's, within
+	// 0.5 ms, and a as their sum. About 8.5 ms plus 2.5 ms: 11.0 ms. (The
+	// page once said 10.1 ms: that intercept was fitted against
+	// AvgInputTokens, the long-window prompt, not the minute the service time
+	// covers, and with no overhead.)
+	intercept, slope, overhead, n := lowLoadLine(rows)
+	require.GreaterOrEqual(t, n, 100, "the independent fit's rows")
+	require.InDelta(t, 0.0085, intercept, 0.0005, "the independent intercept")
+	require.InDelta(t, 0.0025, overhead, 0.0005, "the independent overhead")
 	require.Empty(t, est.ARefused)
 	assert.GreaterOrEqual(t, est.ASamples, MinFixedSamples)
-	assert.InDelta(t, 0.0101, est.A, 0.002, "a")
 	assert.True(t, est.AOverheadKnown)
-	assert.GreaterOrEqual(t, est.AOverhead, 0.0025)
+	assert.InDelta(t, intercept, est.AIntercept, 0.0005, "a's intercept")
+	assert.InDelta(t, overhead, est.AOverhead, 0.0005, "a's overhead")
+	assert.InDelta(t, intercept+overhead, est.A, 0.0005, "a: the intercept plus the least overhead")
 	assert.GreaterOrEqual(t, est.APromptMax, MinPromptSpread*est.APromptMin)
 	// The slope bound is a validation signal, far above the 30k tok/s the
-	// pod was offered at its peak.
+	// pod was offered at its peak: about 520k tok/s.
+	assert.InEpsilon(t, 1/slope, est.SlopeBound, 0.1, "the slope bound")
 	assert.Greater(t, est.SlopeBound, 30000.0)
 
 	// V_P: no busy minute (none can be recognised without the queue's
@@ -119,6 +160,7 @@ func TestOLSSweep_FitsAAndRefusesVPAndF(t *testing.T) {
 	// f: one prefill pod.
 	assert.Equal(t, OnePod, est.FRefused)
 	assert.Zero(t, est.F)
-	t.Logf("ols-sweep: a %.4f s (intercept %.4f, overhead %.4f) over %d minutes, prompts %.0f..%.0f; slope bound %.0f tok/s; V_P %s; f %s",
+	t.Logf("ols-sweep: a %.5f s (intercept %.5f, overhead %.5f) over %d minutes, prompts %.0f..%.0f; slope bound %.0f tok/s; V_P %s; f %s",
 		est.A, est.AIntercept, est.AOverhead, est.ASamples, est.APromptMin, est.APromptMax, est.SlopeBound, est.VPRefused, est.FRefused)
+	t.Logf("independent: intercept %.5f, overhead %.5f, slope bound %.0f tok/s, over %d rows", intercept, overhead, 1/slope, n)
 }

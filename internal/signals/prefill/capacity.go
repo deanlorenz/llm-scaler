@@ -24,6 +24,13 @@ import (
 //
 // Otherwise NoPrefillCapacity. SGLang always refuses: it publishes no
 // computed-token series.
+//
+// "Cannot over-state" holds up to the noise of rate(). Each sample is a
+// one-minute rate, and the peak is the max, over every replica and up to
+// Retention (about 120 runs of three minutes on one replica), of each run's
+// least minute. A minimum of three cuts a single high minute, but the max
+// over that many runs still keeps the luckiest one: the peak can read above
+// V_P by about the spread of a one-minute rate, never by more.
 
 // MinBusyMinutes is the fewest busy minutes V_P is taken from.
 const MinBusyMinutes = 5
