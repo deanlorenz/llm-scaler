@@ -82,6 +82,8 @@ func (a *SaturationAnalyzer) forgetVariant(namespace, modelID, variant, token st
 		}
 	}
 	a.forgotten[name] = forgetMark{token: token, seen: a.now()}
+	// A bound stashed for the variant, which no cycle took.
+	delete(a.prefillBounds, prefillBoundStashKey(namespace, modelID, variant))
 	a.mu.Unlock()
 
 	// The prefill observation (prefill_observe.go): its keys begin with the

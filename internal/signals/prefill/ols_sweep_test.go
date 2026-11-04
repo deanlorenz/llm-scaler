@@ -131,7 +131,8 @@ func TestOLSSweep_FitsAAndRefusesVPAndF(t *testing.T) {
 	require.Equal(t, 226, cycles, "the recording's Analyze cycles")
 
 	// a: the intercept and the overhead each against lowLoadLine's, within
-	// 0.5 ms, and a as their sum. About 8.5 ms plus 2.5 ms: 11.0 ms. (The
+	// 0.25 ms, and a as their sum: 8.36 ms plus 2.68 ms, 11.04 ms, against
+	// the independent 8.46 and 2.54. (The
 	// page once said 10.1 ms: that intercept was fitted against
 	// AvgInputTokens, the long-window prompt, not the minute the service time
 	// covers, and with no overhead.)
@@ -142,9 +143,9 @@ func TestOLSSweep_FitsAAndRefusesVPAndF(t *testing.T) {
 	require.Empty(t, est.ARefused)
 	assert.GreaterOrEqual(t, est.ASamples, MinFixedSamples)
 	assert.True(t, est.AOverheadKnown)
-	assert.InDelta(t, intercept, est.AIntercept, 0.0005, "a's intercept")
-	assert.InDelta(t, overhead, est.AOverhead, 0.0005, "a's overhead")
-	assert.InDelta(t, intercept+overhead, est.A, 0.0005, "a: the intercept plus the least overhead")
+	assert.InDelta(t, intercept, est.AIntercept, 0.00025, "a's intercept")
+	assert.InDelta(t, overhead, est.AOverhead, 0.00025, "a's overhead")
+	assert.InDelta(t, intercept+overhead, est.A, 0.00025, "a: the intercept plus the least overhead")
 	assert.GreaterOrEqual(t, est.APromptMax, MinPromptSpread*est.APromptMin)
 	// The slope bound is a validation signal, far above the 30k tok/s the
 	// pod was offered at its peak: about 520k tok/s.

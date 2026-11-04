@@ -610,6 +610,8 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 			"variantStamps", history.VariantStamps,
 			"stashedWindows", history.StashedWindows,
 			"batchCaps", history.BatchCaps,
+			"prefillObservations", history.PrefillObservations,
+			"prefillBounds", history.PrefillBounds,
 			"capacityRecords", records,
 
 			"recordTimeout", capacity.EvictionTimeout)

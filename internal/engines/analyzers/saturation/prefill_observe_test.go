@@ -15,6 +15,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/prefill"
 )
 
 // The prefill observation through Analyze (prefill_observe.go): the switch
@@ -93,6 +94,117 @@ func TestPrefillObserve_AnSGLangVariantIsRefusedVP(t *testing.T) {
 	assert.Contains(t, last, `"vp"=0`)
 }
 
+// The back-pressure bound scenario (prefill_bound_test.go's fixture): a P/D
+// model whose prefill queues behind a saturated decode, so the bound is
+// learned, and then serves a doubled load with an empty queue.
+const (
+	boundPrefillVariant = "prefill-v"
+	boundPrefillKv      = int64(1_149_312)
+	boundPrompt         = 6000.0
+	// boundTokens is the bound the scenario learns, in computed tokens/s:
+	// the first and highest of its two readings.
+	boundTokens = 4 * boundPrompt
+)
+
+func boundDecode(pod string, tokensInUse int64, queue int) domain.ReplicaMetrics {
+	rm := makeReplicaMetrics(pod, decodeVariant, tokensInUse, runKvCapacity, queue, boundPrompt, 1000)
+	rm.RequestRate = 4.73
+	rm.GenerationTokenRate = rm.RequestRate * rm.AvgOutputTokens
+	return rm
+}
+
+func boundDecodeFull() []domain.ReplicaMetrics {
+	return []domain.ReplicaMetrics{boundDecode("decode-0", 970_475, 36), boundDecode("decode-1", 1_039_474, 81)}
+}
+
+func boundDecodeCoping() []domain.ReplicaMetrics {
+	return []domain.ReplicaMetrics{boundDecode("decode-0", 300_000, 0), boundDecode("decode-1", 280_000, 0)}
+}
+
+func boundPrefillRow(queue int, tokens int64, computed float64) domain.ReplicaMetrics {
+	rm := makeReplicaMetrics("prefill-0", boundPrefillVariant, tokens, boundPrefillKv, queue, boundPrompt, 1)
+	rm.RequestRate, rm.RequestRateKnown = computed/boundPrompt, true
+	rm.PrefillComputedTokenRate, rm.PrefillComputedTokenRateKnown = computed, true
+	return rm
+}
+
+var boundStates = []domain.VariantReplicaState{
+	{VariantName: decodeVariant, Role: domain.RoleDecode, AcceleratorName: "H200", CurrentReplicas: 2, GPUsPerReplica: 1},
+	{VariantName: boundPrefillVariant, Role: domain.RolePrefill, AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1},
+}
+
+// boundRun is one analyzer driven through the bound scenario, its clock and
+// its observed lines.
+type boundRun struct {
+	t     *testing.T
+	a     *SaturationAnalyzer
+	clock time.Time
+	lines []string
+	ctx   context.Context
+}
+
+func newBoundRun(t *testing.T, observe bool) *boundRun {
+	t.Helper()
+	r := &boundRun{t: t, a: NewSaturationAnalyzer(capacity.NewStore()), clock: propStart}
+	require.NoError(t, r.a.SetSwitchesForReplay(map[string]bool{SwitchPrefillCapacityObserve: observe}))
+	r.a.now = func() time.Time { return r.clock }
+	r.ctx = ctrl.LoggerInto(context.Background(),
+		funcr.New(func(prefix, args string) { r.lines = append(r.lines, prefix+" "+args) },
+			funcr.Options{Verbosity: int(perReplicaLogLevel)}))
+	return r
+}
+
+// analyze runs one cycle under ctx and returns its result (AnalyzedAt
+// cleared) and its observed lines.
+func (r *boundRun) analyze(ctx context.Context, rows []domain.ReplicaMetrics, lambda float64, bound bool) (*domain.AnalyzerResult, []string, error) {
+	in := makeAnalyzerInput(rows, boundStates)
+	in.ArrivalRate = lambda
+	in.Config.(*config.ScalingPolicy).EnablePrefillThroughputBound = bound
+	r.lines = nil
+	res, err := r.a.Analyze(ctx, in)
+	if res != nil {
+		res.AnalyzedAt = time.Time{}
+	}
+	return res, observedLines(r.lines), err
+}
+
+// learn runs the two cycles that learn the bound: decode saturated, prefill
+// queued behind it, each reading a little lower than the last.
+func (r *boundRun) learn(bound bool) []domain.AnalyzerResult {
+	out := make([]domain.AnalyzerResult, 0, 2)
+	for i := range 2 {
+		r.clock = r.clock.Add(ThroughputSampleSpacing)
+		res, _, err := r.analyze(r.ctx, append(boundDecodeFull(),
+			boundPrefillRow(30, 357_800, boundTokens*(1-0.01*float64(i)))), runLambda, bound)
+		require.NoError(r.t, err)
+		out = append(out, *res)
+	}
+	return out
+}
+
+// scenario runs the whole scenario and returns each cycle's result and
+// observed lines: learn; the load doubles while decode is still saturated,
+// prefill's queue empty, so the prefill hold stands on decodeSaturated;
+// decode recovers, and the bound orders prefill before its queue forms.
+func (r *boundRun) scenario(bound bool) ([]domain.AnalyzerResult, [][]string) {
+	out := r.learn(bound)
+	lines := [][]string{nil, nil}
+	step := func(rows []domain.ReplicaMetrics) {
+		res, obs, err := r.analyze(r.ctx, rows, 2*runLambda, bound)
+		require.NoError(r.t, err)
+		out = append(out, *res)
+		lines = append(lines, obs)
+	}
+	r.clock = r.clock.Add(15 * time.Second)
+	step(append(boundDecodeFull(), boundPrefillRow(0, 20_000, 2*runLambda*boundPrompt)))
+	r.clock = r.clock.Add(DecodeSaturationMemory + time.Second)
+	for range 3 {
+		r.clock = r.clock.Add(15 * time.Second)
+		step(append(boundDecodeCoping(), boundPrefillRow(0, 20_000, 2*runLambda*boundPrompt)))
+	}
+	return out, lines
+}
+
 // The observation writes no state any output reads: the same cycles give the
 // same results with the switch on and off. The scenario makes prefill's
 // demand depend on both inputs the observation shares with pricing, so an
@@ -102,73 +214,80 @@ func TestPrefillObserve_AnSGLangVariantIsRefusedVP(t *testing.T) {
 // still saturated). Two mutants of observePrefill fail here: one clearing
 // c.decodeSaturated, one deleting the bound's windows.
 func TestPrefillObserve_MovesNoResult(t *testing.T) {
-	const (
-		prefillVariant = "prefill-v"
-		prefillKv      = int64(1_149_312)
-		prompt         = 6000.0
-	)
-	decode := func(pod string, tokensInUse int64, queue int) domain.ReplicaMetrics {
-		rm := makeReplicaMetrics(pod, decodeVariant, tokensInUse, runKvCapacity, queue, prompt, 1000)
-		rm.RequestRate = 4.73
-		rm.GenerationTokenRate = rm.RequestRate * rm.AvgOutputTokens
-		return rm
-	}
-	decodeFull := func() []domain.ReplicaMetrics {
-		return []domain.ReplicaMetrics{decode("decode-0", 970_475, 36), decode("decode-1", 1_039_474, 81)}
-	}
-	decodeCoping := func() []domain.ReplicaMetrics {
-		return []domain.ReplicaMetrics{decode("decode-0", 300_000, 0), decode("decode-1", 280_000, 0)}
-	}
-	prefillRow := func(queue int, tokens int64, computed float64) domain.ReplicaMetrics {
-		rm := makeReplicaMetrics("prefill-0", prefillVariant, tokens, prefillKv, queue, prompt, 1)
-		rm.RequestRate, rm.RequestRateKnown = computed/prompt, true
-		rm.PrefillComputedTokenRate, rm.PrefillComputedTokenRateKnown = computed, true
-		return rm
-	}
-	states := []domain.VariantReplicaState{
-		{VariantName: decodeVariant, Role: domain.RoleDecode, AcceleratorName: "H200", CurrentReplicas: 2, GPUsPerReplica: 1},
-		{VariantName: prefillVariant, Role: domain.RolePrefill, AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1},
-	}
-	results := func(observe, bound bool) []domain.AnalyzerResult {
-		a := NewSaturationAnalyzer(capacity.NewStore())
-		require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchPrefillCapacityObserve: observe}))
-		clock := propStart
-		a.now = func() time.Time { return clock }
-		var out []domain.AnalyzerResult
-		run := func(rows []domain.ReplicaMetrics, lambda float64) {
-			in := makeAnalyzerInput(rows, states)
-			in.ArrivalRate = lambda
-			in.Config.(*config.ScalingPolicy).EnablePrefillThroughputBound = bound
-			res, err := a.Analyze(context.Background(), in)
-			require.NoError(t, err)
-			res.AnalyzedAt = time.Time{}
-			out = append(out, *res)
-		}
-		// Decode saturated, prefill queued behind it: two spaced readings
-		// of the bound, each a little lower than the last.
-		for i := range 2 {
-			clock = clock.Add(ThroughputSampleSpacing)
-			run(append(decodeFull(), prefillRow(30, 357_800, 4*prompt*(1-0.01*float64(i)))), runLambda)
-		}
-		// The load doubles while decode is still saturated, prefill's queue
-		// empty: the prefill hold stands on decodeSaturated.
-		clock = clock.Add(15 * time.Second)
-		run(append(decodeFull(), prefillRow(0, 20_000, 2*runLambda*prompt)), 2*runLambda)
-		// Decode recovers: the bound orders prefill before its queue forms.
-		clock = clock.Add(DecodeSaturationMemory + time.Second)
-		for range 3 {
-			clock = clock.Add(15 * time.Second)
-			run(append(decodeCoping(), prefillRow(0, 20_000, 2*runLambda*prompt)), 2*runLambda)
-		}
-		return out
-	}
-	off := results(false, true)
+	off, _ := newBoundRun(t, false).scenario(true)
 	// The premises: the bound moves prefill's demand, and the held cycle's is
 	// below the first recovered cycle's at the same load.
-	require.NotEqual(t, results(false, false), off, "the bound must move a result")
+	noBound, _ := newBoundRun(t, false).scenario(false)
+	require.NotEqual(t, noBound, off, "the bound must move a result")
 	require.Less(t, off[2].RoleDemand[domain.RolePrefill], off[3].RoleDemand[domain.RolePrefill],
 		"decode's saturation must hold prefill")
-	assert.Equal(t, off, results(true, true))
+	on, _ := newBoundRun(t, true).scenario(true)
+	assert.Equal(t, off, on)
+}
+
+// The bound reaches the observation through Analyze: every cycle after it is
+// learned observes V_P from it, in computed tokens/s, with its two readings.
+// The scenario's prefill never queues for three minutes in a row, so the
+// bound is the only source.
+func TestPrefillObserve_TheBoundIsObservedThroughAnalyze(t *testing.T) {
+	_, lines := newBoundRun(t, true).scenario(true)
+	for i := 2; i < len(lines); i++ {
+		require.Len(t, lines[i], 1, "cycle %d", i)
+		l := lines[i][0]
+		assert.Contains(t, l, `"vpSource"="back-pressure-bound"`, "cycle %d", i)
+		assert.Contains(t, l, `"vp"=24000`, "cycle %d: the bound in tokens/s", i)
+		assert.Contains(t, l, `"vpSamples"=2`, "cycle %d: its two readings", i)
+		assert.Contains(t, l, `"vpLowerBound"=true`, "cycle %d", i)
+	}
+}
+
+// doneAfter is a context that is cancelled from its (n+1)th Done call on,
+// so a cycle's pricing fails part way through its rows.
+type doneAfter struct {
+	context.Context
+	n    int
+	done chan struct{}
+}
+
+func newDoneAfter(ctx context.Context, n int) *doneAfter {
+	d := &doneAfter{Context: ctx, n: n, done: make(chan struct{})}
+	close(d.done)
+	return d
+}
+
+func (d *doneAfter) Done() <-chan struct{} {
+	d.n--
+	if d.n < 0 {
+		return d.done
+	}
+	return nil
+}
+
+func (d *doneAfter) Err() error {
+	if d.n < 0 {
+		return context.Canceled
+	}
+	return nil
+}
+
+// A cycle whose pricing fails after the prefill replica read the bound
+// leaves nothing for the next cycle: with the bound off, the next cycle
+// stashes none of its own, and its observation has no back-pressure bound.
+func TestPrefillObserve_AFailedCycleLeavesNoBound(t *testing.T) {
+	r := newBoundRun(t, true)
+	r.learn(true)
+	r.clock = r.clock.Add(15 * time.Second)
+	// The prefill row first: the cycle is cancelled on the row after it.
+	rows := append([]domain.ReplicaMetrics{boundPrefillRow(0, 20_000, 2*runLambda*boundPrompt)}, boundDecodeFull()...)
+	_, _, err := r.analyze(newDoneAfter(r.ctx, 1), rows, 2*runLambda, true)
+	require.ErrorIs(t, err, context.Canceled)
+
+	r.clock = r.clock.Add(15 * time.Second)
+	_, obs, err := r.analyze(r.ctx, rows, 2*runLambda, false)
+	require.NoError(t, err)
+	require.Len(t, obs, 1)
+	assert.NotContains(t, obs[0], `"vpSource"="back-pressure-bound"`, "the failed cycle's bound was inherited")
+	assert.Contains(t, obs[0], `"vpRefused"="NoPrefillCapacity"`)
 }
 
 // observeHarness drives the P/D model of prefillObserveRun one cycle at a
@@ -273,4 +392,139 @@ func TestPrefillObserve_AForgetEndsTheState(t *testing.T) {
 			assert.Contains(t, h.cycle(20000), `"vpRefused"="NoPrefillCapacity"`, "the peak is forgotten")
 		})
 	}
+}
+
+// Forgetting variant prefill leaves its sibling prefill-2 alone: the prefix
+// ends at the variant's separator, so "prefill" does not match "prefill-2".
+func TestPrefillObserve_ForgettingAVariantLeavesItsSibling(t *testing.T) {
+	params := &capacity.EngineParams{Engine: inferenceengine.EngineVLLM, MaxNumBatchedTokens: 8192, EffectiveMaxBatchedTokens: 8192}
+	variants := []string{"prefill", "prefill-2"}
+	store := capacity.NewStore()
+	for _, v := range variants {
+		store.Update("test-ns", "test-model", v, capacity.Record{EngineParams: params}, propStart)
+	}
+	a := NewSaturationAnalyzer(store)
+	require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchPrefillCapacityObserve: true}))
+	clock := propStart
+	a.now = func() time.Time { return clock }
+	var lines []string
+	ctx := ctrl.LoggerInto(context.Background(),
+		funcr.New(func(prefix, args string) { lines = append(lines, prefix+" "+args) },
+			funcr.Options{Verbosity: int(perReplicaLogLevel)}))
+	states := []domain.VariantReplicaState{
+		{VariantName: "decode", Role: domain.RoleDecode, AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1},
+		{VariantName: "prefill", Role: domain.RolePrefill, AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1},
+		{VariantName: "prefill-2", Role: domain.RolePrefill, AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1},
+	}
+	// cycle runs one cycle, each prefill pod queued at 20000 tokens/s, and
+	// returns each variant's observed line.
+	cycle := func() map[string]string {
+		rows := make([]domain.ReplicaMetrics, 0, 1+len(variants))
+		rows = append(rows, makeReplicaMetrics("decode-0", "decode", 5000, 16000, 0, 4000, 500))
+		for _, v := range variants {
+			pre := makeReplicaMetrics(v+"-0", v, 0, 16000, 3, 4000, 1)
+			pre.PrefillComputedTokenRate, pre.PrefillComputedTokenRateKnown = 20000, true
+			pre.RequestRate, pre.RequestRateKnown = 5, true
+			rows = append(rows, pre)
+		}
+		lines = nil
+		_, err := a.Analyze(ctx, makeAnalyzerInput(rows, states))
+		require.NoError(t, err)
+		clock = clock.Add(time.Minute)
+		out := map[string]string{}
+		for _, l := range observedLines(lines) {
+			for _, v := range variants {
+				if strings.Contains(l, `"variant"="`+v+`"`) {
+					out[v] = l
+				}
+			}
+		}
+		require.Len(t, out, 2)
+		return out
+	}
+	var last map[string]string
+	for range 5 {
+		last = cycle()
+	}
+	for _, v := range variants {
+		require.Contains(t, last[v], `"vp"=20000`, v)
+	}
+	// A bound stashed for each, as a cycle that never took it would leave.
+	a.mu.Lock()
+	for _, v := range variants {
+		a.prefillBounds[prefillBoundStashKey("test-ns", "test-model", v)] =
+			stashedBound{bound: prefill.Bound{Tokens: 1, Samples: 2}, at: clock}
+	}
+	a.mu.Unlock()
+	a.ForgetVariant("test-ns", "test-model", "prefill", "t1")
+	assert.NotContains(t, a.prefillBounds, prefillBoundStashKey("test-ns", "test-model", "prefill"),
+		"the forgotten variant's stashed bound")
+	assert.Contains(t, a.prefillBounds, prefillBoundStashKey("test-ns", "test-model", "prefill-2"))
+	store.Update("test-ns", "test-model", "prefill", capacity.Record{EngineParams: params}, clock)
+	got := cycle()
+	assert.Contains(t, got["prefill"], `"vpRefused"="NoPrefillCapacity"`, "the forgotten variant")
+	assert.Contains(t, got["prefill-2"], `"vp"=20000`, "the sibling keeps its peak")
+}
+
+// The eviction sweep forgets the observation's keys with no cycle for
+// prefill.Retention, and bounds stashed for a cycle that never took them, and
+// counts both: without it a key outlived its variant until the next Observe,
+// which a model with no prefill variant left never makes.
+func TestPrefillObserve_TheEvictionSweepForgetsIdleState(t *testing.T) {
+	h := newObserveHarness(t, &capacity.EngineParams{Engine: inferenceengine.EngineVLLM})
+	h.cycle(20000)
+	require.Equal(t, 1, h.a.prefillObserver.Len())
+	h.a.mu.Lock()
+	h.a.prefillBounds[prefillBoundStashKey("test-ns", "other-model", "prefill")] =
+		stashedBound{bound: prefill.Bound{Tokens: 1, Samples: 2}, at: h.clock}
+	h.a.mu.Unlock()
+
+	ev := h.a.EvictStaleHistory()
+	assert.Zero(t, ev.PrefillObservations, "a key seen within Retention stays")
+	assert.Zero(t, ev.PrefillBounds, "a bound stashed just now stays")
+
+	h.clock = h.clock.Add(prefill.Retention + time.Minute)
+	ev = h.a.EvictStaleHistory()
+	assert.Equal(t, 1, ev.PrefillObservations)
+	assert.Equal(t, 1, ev.PrefillBounds)
+	assert.True(t, ev.Any())
+	assert.Zero(t, h.a.prefillObserver.Len())
+	assert.Empty(t, h.a.prefillBounds)
+}
+
+// A cycle takes its model's stashed bounds, those of variants it does not
+// have too, and leaves another model's.
+func TestPrefillObserve_ACycleClearsItsModelsUntakenBounds(t *testing.T) {
+	h := newObserveHarness(t, &capacity.EngineParams{Engine: inferenceengine.EngineVLLM})
+	gone := prefillBoundStashKey("test-ns", "test-model", "gone")
+	other := prefillBoundStashKey("test-ns", "other-model", "prefill")
+	h.a.mu.Lock()
+	for _, k := range []string{gone, other} {
+		h.a.prefillBounds[k] = stashedBound{bound: prefill.Bound{Tokens: 1, Samples: 2}, at: h.clock}
+	}
+	h.a.mu.Unlock()
+	h.cycle(20000)
+	assert.NotContains(t, h.a.prefillBounds, gone, "a variant the cycle does not have")
+	assert.Contains(t, h.a.prefillBounds, other, "another model's")
+}
+
+// The stash keeps a variant's highest bound of the cycle: its replicas can
+// read different windows (one per input bucket), each a floor on the true
+// rate. A stash from an earlier time is replaced whatever its value.
+func TestPrefillObserve_TheStashKeepsTheHighestBoundOfTheCycle(t *testing.T) {
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	clock := propStart
+	a.now = func() time.Time { return clock }
+	rm := makeReplicaMetrics("prefill-0", "prefill", 0, 16000, 3, 4000, 1)
+	key := prefillBoundStashKey(rm.Namespace, rm.ModelID, rm.VariantName)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.stashPrefillBound(rm, 20000, 2)
+	a.stashPrefillBound(rm, 10000, 5)
+	assert.Equal(t, prefill.Bound{Tokens: 20000, Samples: 2}, a.prefillBounds[key].bound, "a lower reading does not replace it")
+	a.stashPrefillBound(rm, 30000, 3)
+	assert.Equal(t, prefill.Bound{Tokens: 30000, Samples: 3}, a.prefillBounds[key].bound, "a higher one does")
+	clock = clock.Add(time.Minute)
+	a.stashPrefillBound(rm, 1000, 2)
+	assert.Equal(t, prefill.Bound{Tokens: 1000, Samples: 2}, a.prefillBounds[key].bound, "a new cycle's replaces it")
 }

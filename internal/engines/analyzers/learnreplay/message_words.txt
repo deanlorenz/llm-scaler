@@ -178,6 +178,7 @@ No
 NoComputedTokens
 NoPrefillCapacity
 NoPromptSpread
+NoPromptVariance
 NonPositiveIntercept
 NonPositiveSlope
 NotTriggerScaleUp
@@ -540,6 +541,7 @@ busiestPod
 busiestRankKvUsage
 busiestRankQueue
 busy-minutes
+busyMinutes
 but
 by
 byRole
@@ -1329,6 +1331,7 @@ localQueueDemand
 locator.New
 long
 longer
+longestQueuedRun
 loop
 lose
 lost
@@ -1741,6 +1744,7 @@ prefillBounds
 prefillDemandAfter
 prefillDemandBefore
 prefillKnown
+prefillObservations
 prefillRefused
 prefillStepsPerToken
 prefix-cache-scorer
@@ -1795,6 +1799,7 @@ queueMean
 queueOverThreshold
 queueThreshold
 queued
+queuedMinutes
 queuedRequests
 quiet
 quota

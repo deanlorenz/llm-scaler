@@ -76,9 +76,12 @@ const (
 	// minutes.
 	TooFewLowLoadMinutes Refusal = "TooFewLowLoadMinutes"
 	// NoPromptSpread is a whose low-load minutes do not span MinPromptSpread
-	// in prompt length, so the fixed cost and the per-token cost cannot be
-	// told apart.
+	// in prompt length with two minutes at each end, so the fixed cost and
+	// the per-token cost cannot be told apart.
 	NoPromptSpread Refusal = "NoPromptSpread"
+	// NoPromptVariance is a fit whose low-load minutes all read one prompt
+	// length, so no line can be drawn through them.
+	NoPromptVariance Refusal = "NoPromptVariance"
 	// NonPositiveSlope is a low-load fit whose per-token cost is not above
 	// zero.
 	NonPositiveSlope Refusal = "NonPositiveSlope"
@@ -153,13 +156,28 @@ type Cycle struct {
 type Estimate struct {
 	// VP is the prefill capacity in computed tokens/s, zero when refused;
 	// VPSource where it came from and VPRefused why there is none.
-	// VPLowerBound says the source is a lower bound (sources 2 and 3).
 	// VPSamples is how many minutes (or bound readings) it rests on.
+	//
+	// VPLowerBound says the source is a lower bound (sources 2 and 3): the
+	// true V_P is at or above VP. For the peak under a queue it is a bound
+	// only up to the noise of a one-minute rate(): the peak is the max of
+	// many runs' least minutes, so it can read above V_P by about that
+	// noise (capacity.go). The name is kept, not softened, because the
+	// direction is what a reader acts on: a lower bound under-promises, and
+	// the noise is a stated limit of it, not a different kind of figure.
 	VP           float64
 	VPSource     Source
 	VPLowerBound bool
 	VPRefused    Refusal
 	VPSamples    int
+	// VPQueuedMinutes, VPLongestQueuedRun and VPBusyMinutes say why V_P was
+	// refused or where it stands: the samples kept that held a queue on
+	// some sample, the longest run of them (a peak needs PeakRun), and the
+	// busy minutes (which need Cycle.QueueMin; busy minutes need
+	// MinBusyMinutes). Read over every replica of the key.
+	VPQueuedMinutes    int
+	VPLongestQueuedRun int
+	VPBusyMinutes      int
 	// SlopeBound is 1/slope of the low-load fit of service time against
 	// prompt length: an upper bound on V_P, a validation signal only. Zero
 	// with no fit. VPAboveSlopeBound flags a V_P above it.
@@ -249,11 +267,21 @@ func NewObserver() *Observer {
 	return &Observer{keys: map[string]*keyState{}}
 }
 
-// Keys is how many keys the observer holds.
-func (o *Observer) Keys() int {
+// Len is how many keys the observer holds.
+func (o *Observer) Len() int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return len(o.keys)
+}
+
+// Sweep forgets the keys with no cycle for Retention as of now, and returns
+// how many. Observe sweeps too, but only while some variant is observed: a
+// caller's periodic eviction calls this so that keys outlive neither their
+// variant nor every variant of the observer.
+func (o *Observer) Sweep(now time.Time) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.sweep(now)
 }
 
 // Forget drops every key that begins with prefix, "" dropping them all, and
@@ -350,13 +378,16 @@ func (o *Observer) Observe(c Cycle) Estimate {
 	return est
 }
 
-// sweep forgets the keys with no cycle for Retention.
-func (o *Observer) sweep(now time.Time) {
+// sweep forgets the keys with no cycle for Retention, and returns how many.
+func (o *Observer) sweep(now time.Time) int {
+	n := 0
 	for k, ks := range o.keys {
 		if now.Sub(ks.lastSeen) > Retention {
 			delete(o.keys, k)
+			n++
 		}
 	}
+	return n
 }
 
 // settled reports whether the replica of rm has been settled for SteadyFor
@@ -422,6 +453,11 @@ func effectivePrompt(rm domain.ReplicaMetrics, sglang bool) (float64, bool) {
 // finitePositive reports whether x is finite and above zero; NaN is not.
 func finitePositive(x float64) bool {
 	return x > 0 && !math.IsInf(x, 1)
+}
+
+// isFinite reports whether x is neither NaN nor infinite.
+func isFinite(x float64) bool {
+	return !math.IsNaN(x) && !math.IsInf(x, 0)
 }
 
 // steady reports whether ieff is within MaxPromptDrift of every prompt length

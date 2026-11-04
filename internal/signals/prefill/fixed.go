@@ -1,6 +1,9 @@
 package prefill
 
-import "math"
+import (
+	"math"
+	"slices"
+)
 
 // The fixed cost a (slo-capacity-planner-ttft.md, "What is derivable today"
 // and "Prefill capacity").
@@ -34,7 +37,8 @@ const MinFixedSamples = 5
 
 // MinPromptSpread is the least ratio of the longest to the shortest
 // effective prompt the low-load minutes must span for the fit to separate
-// the fixed cost from the per-token cost.
+// the fixed cost from the per-token cost, read between the second shortest
+// and the second longest so that each end holds two minutes.
 const MinPromptSpread = 1.5
 
 // fixed sets a on est from the key's low-load samples.
@@ -61,16 +65,23 @@ func (est *Estimate) fixed(ks *keyState, disaggregated bool) {
 		est.ARefused = TooFewLowLoadMinutes
 		return
 	}
-	lo, hi := xs[0], xs[0]
-	for _, x := range xs[1:] {
-		lo, hi = math.Min(lo, x), math.Max(hi, x)
-	}
+	sorted := slices.Sorted(slices.Values(xs))
+	lo, hi := sorted[0], sorted[len(sorted)-1]
 	est.APromptMin, est.APromptMax = lo, hi
-	if !(hi >= MinPromptSpread*lo) {
+	// The spread must hold without the one most extreme minute at either
+	// end: at least two minutes at each end of it, so one outlying prompt
+	// length cannot set the slope alone.
+	if !(sorted[len(sorted)-2] >= MinPromptSpread*sorted[1]) {
 		est.ARefused = NoPromptSpread
 		return
 	}
 	intercept, slope := ols(xs, ys)
+	if math.IsNaN(slope) {
+		// Unreachable past the spread test; kept apart from a fitted slope
+		// that is not positive, which is a different finding.
+		est.ARefused = NoPromptVariance
+		return
+	}
 	if !(slope > 0) || !isFinite(slope) {
 		est.ARefused = NonPositiveSlope
 		return

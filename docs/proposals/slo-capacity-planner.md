@@ -270,7 +270,7 @@ From the `ols-sweep` golden: the last published line (`A` = 0.004438,
 one decode pod. `IL` = `OL` = 1000, no prefix hits. `a` = 10.1 ms plus the
 2.5 ms overhead, from the golden. (That 10.1 ms is an intercept fitted
 against the long-window prompt mean; P1's fit against the effective prompt
-gives about 8.4 ms, so `a` about 11.0 ms, not 12.6
+gives 8.36 ms and the overhead 2.68 ms, so `a` is 11.04 ms, not 12.6
 ([end-to-end TTFT](slo-capacity-planner-ttft.md#what-is-derivable-today)).
 The example is left as computed: `a` enters only the request's own
 latency, not utilization or the knee, so the TTFT figures and the TTFT

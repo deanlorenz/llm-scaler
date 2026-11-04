@@ -1,7 +1,6 @@
 package prefill
 
 import (
-	"math"
 	"slices"
 	"time"
 )
@@ -27,8 +26,8 @@ import (
 //
 // "Cannot over-state" holds up to the noise of rate(). Each sample is a
 // one-minute rate, and the peak is the max, over every replica and up to
-// Retention (about 120 runs of three minutes on one replica), of each run's
-// least minute. A minimum of three cuts a single high minute, but the max
+// Retention (up to 358 overlapping three-minute windows on one replica), of
+// each window's least minute. A minimum of three cuts a single high minute, but the max
 // over that many runs still keeps the luckiest one: the peak can read above
 // V_P by about the spread of a one-minute rate, never by more.
 
@@ -53,7 +52,10 @@ func (est *Estimate) capacity(ks *keyState, c Cycle, sglang bool) {
 		est.VPRefused = SGLangRefused
 		return
 	}
-	if v, n := busyMedian(ks); n >= MinBusyMinutes {
+	est.VPQueuedMinutes, est.VPLongestQueuedRun = queuedRuns(ks)
+	v, n := busyMedian(ks)
+	est.VPBusyMinutes = n
+	if n >= MinBusyMinutes {
 		est.VP, est.VPSource, est.VPSamples = v, SourceBusyMinutes, n
 		return
 	}
@@ -114,6 +116,30 @@ func peakUnderQueue(ks *keyState) (float64, bool) {
 	return best, found
 }
 
+// queuedRuns is how many samples of the key's replicas held a queue with a
+// rate read, and the longest run of them on one replica, by the rule
+// peakUnderQueue reads runs by.
+func queuedRuns(ks *keyState) (queued, longest int) {
+	for _, name := range ks.podNames() {
+		run := 0
+		var last time.Time
+		for _, s := range ks.pods[name].samples {
+			if !s.queued || !s.rateOK || !(s.rate > 0) {
+				run = 0
+				continue
+			}
+			if run > 0 && s.at.Sub(last) > MaxRunGap {
+				run = 0
+			}
+			run++
+			queued++
+			last = s.at
+			longest = max(longest, run)
+		}
+	}
+	return queued, longest
+}
+
 // median is the median of xs, which it sorts; NaN never reaches it.
 func median(xs []float64) float64 {
 	slices.Sort(xs)
@@ -122,9 +148,4 @@ func median(xs []float64) float64 {
 		return xs[n/2]
 	}
 	return (xs[n/2-1] + xs[n/2]) / 2
-}
-
-// isFinite reports whether x is neither NaN nor infinite.
-func isFinite(x float64) bool {
-	return !math.IsNaN(x) && !math.IsInf(x, 0)
 }

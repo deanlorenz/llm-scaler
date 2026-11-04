@@ -440,6 +440,13 @@ func TestSettle_NotReadyAndBridgesAreRefused(t *testing.T) {
 }
 
 // --- f ---
+//
+// The imbalance tests are seeded, and what each seed reads depends on the
+// order sharedMinutes and poisson draw from the generator: per minute, per
+// pod, Knuth's uniforms in turn (and, with variable prompts, one exponential
+// per request after the count). A change to either order changes every
+// figure the bounds below were set against; re-derive them over the seeds
+// rather than widening a bound for one.
 
 // sharedMinutes is minutes cycles over pods whose weights split m requests
 // per pod per minute on average, each request of 1000 tokens, the counts
@@ -753,9 +760,9 @@ func TestObserver_ForgetDropsTheKeysUnderAPrefix(t *testing.T) {
 			o.Observe(c)
 		}
 	}
-	require.Equal(t, 3, o.Keys())
+	require.Equal(t, 3, o.Len())
 	assert.Equal(t, 2, o.Forget("ns|m|v|"))
-	assert.Equal(t, 1, o.Keys(), "v2 is kept")
+	assert.Equal(t, 1, o.Len(), "v2 is kept")
 
 	c := queuedMinutes(10000)[0]
 	c.Key, c.Now = "ns|m|v|H100|1", t0.Add(3*minute)
@@ -763,7 +770,7 @@ func TestObserver_ForgetDropsTheKeysUnderAPrefix(t *testing.T) {
 	assert.Equal(t, NoPrefillCapacity, est.VPRefused, "the forgotten key has no peak")
 
 	assert.Equal(t, 2, o.Forget(""))
-	assert.Zero(t, o.Keys())
+	assert.Zero(t, o.Len())
 }
 
 // A key with no cycle for Retention is forgotten; one observed is kept.
@@ -773,8 +780,164 @@ func TestObserver_ForgetsAKeyPastRetention(t *testing.T) {
 	c := cycle(t0.Add(Retention/2), base("p-0"))
 	c.Key = "other"
 	o.Observe(c)
-	assert.Equal(t, 2, o.Keys())
+	assert.Equal(t, 2, o.Len())
 	c.Now = t0.Add(Retention + time.Minute)
 	o.Observe(c)
-	assert.Equal(t, 1, o.Keys())
+	assert.Equal(t, 1, o.Len())
+}
+
+// --- round 2 ---
+
+// The expected max of n standard normals, against its closed forms for two
+// pods (1/sqrt(pi)) and three (3/(2*sqrt(pi))), and the tabulated 1.029375
+// for four.
+func TestNormalMaxMean(t *testing.T) {
+	assert.InDelta(t, 1/math.Sqrt(math.Pi), normalMaxMean(2), 1e-9)
+	assert.InDelta(t, 1.5/math.Sqrt(math.Pi), normalMaxMean(3), 1e-9)
+	assert.InDelta(t, 1.029375, normalMaxMean(4), 1e-6)
+}
+
+// At GaussianMaxMean the normal approximation agrees with the exact sum
+// within 0.5% of the excess, for 2 to 64 pods (the worst measured, 0.33%,
+// at 64; 0.09% at 4); the error left is the
+// Poisson's skew, about (E[Z_max^2]-1)/(6m) against an excess of
+// z_n/sqrt(m).
+func TestPoissonMaxExcess_TheNormalApproximationAgreesAtTheThreshold(t *testing.T) {
+	for _, n := range []int{2, 3, 4, 8, 16, 64} {
+		exact := poissonMaxExcess(n, GaussianMaxMean)
+		approx := normalMaxMean(n) / math.Sqrt(GaussianMaxMean)
+		assert.InEpsilon(t, exact, approx, 0.005, "n=%d: exact %.6g, normal %.6g", n, exact, approx)
+		t.Logf("n=%d: exact %.6g, normal %.6g, relative %.2g", n, exact, approx, math.Abs(approx-exact)/exact)
+		// Just above it the approximation is what is returned.
+		assert.Equal(t, normalMaxMean(n)/math.Sqrt(math.Nextafter(GaussianMaxMean, math.Inf(1))),
+			poissonMaxExcess(n, math.Nextafter(GaussianMaxMean, math.Inf(1))))
+	}
+}
+
+// A huge rate returns fast and finite: the exact sum would run about
+// 24*sqrt(1e8) = 240,000 terms per call under the observer's lock.
+func TestPoissonMaxExcess_AHugeRateIsFastAndFinite(t *testing.T) {
+	start := time.Now()
+	for range 100 {
+		x := poissonMaxExcess(8, 1e8)
+		require.True(t, isFinite(x))
+		require.Greater(t, x, 0.0)
+	}
+	assert.Less(t, time.Since(start), time.Second, "100 calls at m = 1e8")
+	assert.InDelta(t, normalMaxMean(8)/1e4, poissonMaxExcess(8, 1e8), 1e-12)
+}
+
+// The boundaries, by literal: the back-pressure bound is a source from two
+// readings and not one, and busy minutes from five and not four.
+func TestCapacity_TheThresholdsAreTwoBoundReadingsAndFiveBusyMinutes(t *testing.T) {
+	for samples, want := range map[int]Source{1: "", 2: SourceBackPressureBound} {
+		c := cycle(t0, base("p-0"))
+		c.Bound = Bound{Tokens: 20000, Samples: samples}
+		assert.Equal(t, want, NewObserver().Observe(c).VPSource, "%d bound readings", samples)
+	}
+	for minutes, want := range map[int]Source{4: SourcePeakUnderQueue, 5: SourceBusyMinutes} {
+		rates := []float64{30000, 31000, 29000, 30500, 29500}[:minutes]
+		cs := queuedMinutes(rates...)
+		for i := range cs {
+			cs[i].QueueMin = map[string]int{"p-0": 1}
+		}
+		est := run(NewObserver(), cs...)
+		assert.Equal(t, want, est.VPSource, "%d busy minutes", minutes)
+		assert.Equal(t, minutes, est.VPBusyMinutes)
+	}
+}
+
+// A refused V_P says which source fell short: the queued minutes, the longest
+// run of them, and the busy minutes.
+func TestCapacity_ARefusalSaysWhatWasSeen(t *testing.T) {
+	cs := queuedMinutes(20000, 20000)
+	cs = append(cs, cycle(time.Time{}, base("p-0")), queuedMinutes(20000)[0])
+	est := run(NewObserver(), cs...)
+	assert.Equal(t, NoPrefillCapacity, est.VPRefused)
+	assert.Equal(t, 3, est.VPQueuedMinutes)
+	assert.Equal(t, 2, est.VPLongestQueuedRun)
+	assert.Zero(t, est.VPBusyMinutes, "no QueueMin was read")
+}
+
+// A replica keeps maxSamples samples. 400 queued minutes a minute apart end
+// at minute 399, so Retention keeps minutes 39 to 399, 361 samples, and the
+// cap keeps 360: the peak at minutes 39 to 41 is gone with minute 39, the
+// one sample only the cap drops.
+func TestObserver_KeepsMaxSamplesPerReplica(t *testing.T) {
+	rates := make([]float64, 400)
+	for i := range rates {
+		rates[i] = 20000
+		if i >= 39 && i < 39+PeakRun {
+			rates[i] = 50000
+		}
+	}
+	o := NewObserver()
+	est := run(o, queuedMinutes(rates...)...)
+	assert.Len(t, o.keys["k"].pods["p-0"].samples, maxSamples)
+	assert.Equal(t, 360, maxSamples)
+	assert.Equal(t, 20000.0, est.VP, "the peak older than the cap is gone")
+}
+
+// A sample older than Retention is pruned while its replica is still seen:
+// a peak six hours old is not V_P.
+func TestObserver_PrunesSamplesPastRetention(t *testing.T) {
+	cs := queuedMinutes(50000, 50000, 50000)
+	// Unqueued rows every 30 minutes keep the key and the replica.
+	for at := 30 * minute; at <= Retention; at += 30 * minute {
+		c := cycle(t0.Add(at), base("p-0"))
+		cs = append(cs, c)
+	}
+	for i := range PeakRun {
+		c := queuedMinutes(20000)[0]
+		c.Now = t0.Add(Retention + time.Duration(5+i)*minute)
+		cs = append(cs, c)
+	}
+	o := NewObserver()
+	est := run(o, cs...)
+	assert.Equal(t, 20000.0, est.VP)
+	for _, s := range o.keys["k"].pods["p-0"].samples {
+		assert.False(t, s.at.Before(t0.Add(5*minute)), "a sample past Retention is kept: %v", s.at)
+	}
+}
+
+// A replica with no row for Retention is forgotten from its key, which
+// another replica keeps alive.
+func TestObserver_ForgetsAReplicaPastRetention(t *testing.T) {
+	cs := queuedMinutes(50000, 50000, 50000)
+	for at := 30 * minute; at <= Retention+30*minute; at += 30 * minute {
+		cs = append(cs, cycle(t0.Add(at), base("p-1")))
+	}
+	o := NewObserver()
+	est := run(o, cs...)
+	assert.NotContains(t, o.keys["k"].pods, "p-0")
+	assert.Contains(t, o.keys["k"].pods, "p-1")
+	assert.Equal(t, NoPrefillCapacity, est.VPRefused, "the forgotten replica's peak went with it")
+}
+
+// Sweep forgets a key with no cycle for Retention without a cycle of its own,
+// and says how many it forgot.
+func TestObserver_SweepForgetsIdleKeys(t *testing.T) {
+	o := NewObserver()
+	o.Observe(cycle(t0, base("p-0")))
+	assert.Zero(t, o.Sweep(t0.Add(Retention)))
+	assert.Equal(t, 1, o.Len())
+	assert.Equal(t, 1, o.Sweep(t0.Add(Retention+time.Second)))
+	assert.Zero(t, o.Len())
+}
+
+// One outlying prompt length cannot make the spread: the second shortest and
+// the second longest must span MinPromptSpread.
+func TestFixed_OneOutlyingPromptIsNoSpread(t *testing.T) {
+	cs := lowLoadMinutes(0.008, 2e-6, 1000, 1000, 1000, 1000, 1000, 1000)
+	// One 6000-token minute, made steady by two loaded minutes before it at
+	// the same length (occupancy 0.6, not low load, but their prompts are its
+	// history, all of the last SteadyFor).
+	loaded := lowLoad(6000, 0.02, 30, 0.0025)
+	cs = append(cs, cycle(time.Time{}, loaded), cycle(time.Time{}, loaded),
+		cycle(time.Time{}, lowLoad(6000, 0.008+2e-6*6000, 1, 0.0025)))
+	est := run(NewObserver(), cs...)
+	assert.Equal(t, NoPromptSpread, est.ARefused)
+	assert.Equal(t, 6, est.ASamples, "the outlying minute is admitted")
+	assert.Equal(t, 1000.0, est.APromptMin)
+	assert.Equal(t, 6000.0, est.APromptMax)
 }

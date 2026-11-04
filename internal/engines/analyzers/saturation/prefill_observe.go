@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
+	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
@@ -57,31 +59,70 @@ func prefillBoundStashKey(namespace, modelID, variant string) string {
 	return namespace + "|" + modelID + "|" + variant
 }
 
+// stashedBound is a back-pressure bound stashed for the cycle in progress,
+// with when it was stashed (for the eviction sweep).
+type stashedBound struct {
+	bound prefill.Bound
+	at    time.Time
+}
+
 // stashPrefillBound keeps the bound notePrefillBound read for the variant,
-// in computed tokens/s, for observePrefill. Called with a.mu held.
+// in computed tokens/s, for observePrefill. It is written once per replica
+// priced from the bound, and the replicas of one variant can read different
+// windows (one per input bucket): the highest is kept, as the bound's own
+// window keeps its highest reading, each being a floor on the true rate.
+// Called with a.mu held.
 func (a *SaturationAnalyzer) stashPrefillBound(rm domain.ReplicaMetrics, tokens float64, samples int) {
 	if !a.prefillObserve {
 		return
 	}
-	a.prefillBounds[prefillBoundStashKey(rm.Namespace, rm.ModelID, rm.VariantName)] =
-		prefill.Bound{Tokens: tokens, Samples: samples}
+	k := prefillBoundStashKey(rm.Namespace, rm.ModelID, rm.VariantName)
+	now := a.now()
+	if prev, ok := a.prefillBounds[k]; ok && prev.at.Equal(now) && prev.bound.Tokens >= tokens {
+		return
+	}
+	a.prefillBounds[k] = stashedBound{bound: prefill.Bound{Tokens: tokens, Samples: samples}, at: now}
+}
+
+// prefillBoundsStaleAfter is how old a stashed bound is when the eviction
+// sweep drops it. A bound is stashed and taken within one Analyze; one left
+// longer belongs to a cycle that never took it.
+const prefillBoundsStaleAfter = time.Minute
+
+// evictPrefillObservationLocked sweeps the observation's keys with no cycle
+// for prefill.Retention and the stashed bounds no cycle took, and returns
+// how many of each. Callers hold a.mu; the observer's lock is its own.
+func (a *SaturationAnalyzer) evictPrefillObservationLocked(now time.Time) (keys, bounds int) {
+	keys = a.prefillObserver.Sweep(now)
+	for k, sb := range a.prefillBounds {
+		if now.Sub(sb.at) > prefillBoundsStaleAfter {
+			delete(a.prefillBounds, k)
+			bounds++
+		}
+	}
+	return keys, bounds
 }
 
 // takePrefillBounds returns and clears the bounds stashed for the cycle's
-// variants, and whether the observation is on. Every cycle clears them, the
+// model, and whether the observation is on. Every cycle clears them, the
 // ones whose pricing failed too (Analyze), so a bound is only ever read by
-// the cycle that stashed it.
+// the cycle that stashed it; and it clears the model's entries for variants
+// the cycle does not have, which no cycle would take.
 func (c *cycle) takePrefillBounds() (map[string]prefill.Bound, bool) {
 	a := c.a
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	bounds := map[string]prefill.Bound{}
-	for _, variant := range slices.Sorted(maps.Keys(c.rolesByVariant)) {
-		k := prefillBoundStashKey(c.input.Namespace, c.input.ModelID, variant)
-		if b, ok := a.prefillBounds[k]; ok {
-			bounds[variant] = b
-			delete(a.prefillBounds, k)
+	prefix := prefillBoundStashKey(c.input.Namespace, c.input.ModelID, "")
+	for k, sb := range a.prefillBounds {
+		variant, ok := strings.CutPrefix(k, prefix)
+		if !ok || prefillBoundStashKey(c.input.Namespace, c.input.ModelID, variant) != k {
+			continue
 		}
+		if _, ours := c.rolesByVariant[variant]; ours {
+			bounds[variant] = sb.bound
+		}
+		delete(a.prefillBounds, k)
 	}
 	return bounds, a.prefillObserve
 }
@@ -124,6 +165,8 @@ func (c *cycle) observePrefill() {
 			"a", est.A, "aIntercept", est.AIntercept, "aOverhead", est.AOverhead,
 			"aOverheadKnown", est.AOverheadKnown, "aRefused", string(est.ARefused), "aSamples", est.ASamples,
 			"aPromptMin", est.APromptMin, "aPromptMax", est.APromptMax,
+			"queuedMinutes", est.VPQueuedMinutes, "longestQueuedRun", est.VPLongestQueuedRun,
+			"busyMinutes", est.VPBusyMinutes,
 			"f", est.F, "fRefused", string(est.FRefused), "fSamples", est.FSamples,
 			"downstreamSaturated", c.decodeSaturated,
 			"admitted", est.Admitted, "refused", est.Refused)

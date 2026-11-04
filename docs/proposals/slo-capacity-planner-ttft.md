@@ -58,9 +58,9 @@ Three derivations matter here:
   `AvgServiceTime − (OL − 1)·ITLPerToken` subtracts two large numbers. The
   per-stage `request_prefill_time_seconds` is needed.
 - **`ols-sweep`** has one prefill pod that never queued. It supports `a`
-  and the low-load slope, not `V_P` or `f`. `a` is about 11.0 ms: an
-  intercept of about 8.4 ms, fitted against the effective prompt over
-  low-load minutes, plus the least overhead, about 2.6 ms. An earlier
+  and the low-load slope, not `V_P` or `f`. `a` is 11.04 ms: an
+  intercept of 8.36 ms, fitted against the effective prompt over low-load
+  minutes, plus the least overhead, 2.68 ms. An earlier
   revision said 10.1 ms: that was an intercept fitted against
   `AvgInputTokens`, the long-window prompt mean, not the minute the service
   time covers, and it left the overhead out.
@@ -273,7 +273,7 @@ that is itself wrong (the exponential tail, Poisson arrivals, an omitted
 | Proxy hop before the EPP | Over-promises by that hop |
 | `T_xfer` omitted (not collected) | Over-promises |
 | `V_P` from a lower bound | Under-promises |
-| `V_P` from the peak under a queue: a max over about 120 three-minute minimums of a one-minute `rate()` | Over-promises, by about the noise of a one-minute rate |
+| `V_P` from the peak under a queue: a max over up to 358 overlapping 3-minute windows' minimums of a one-minute `rate()` | Over-promises, by about the noise of a one-minute rate |
 | `f` de-biased for Poisson arrivals, on a real imbalance | Over-promises: the busiest pod's share holds little chance excess, but the equal pods' excess is subtracted anyway. Four pods at 2:1:1:1 (`f` 1.6) read about 1.50 at 100 requests a pod (6% low) and about 1.57 at 1500 |
 | `f` from computed-token shares with variable prompts | Under-promises: a pod's token count varies about `√(1+Cs²)` times its request count, and only the request count's excess is subtracted. Four equal pods with `Cs²` = 1 read about 1.03 at 100 requests a pod |
 | Worst-pod percentile | Under-promises |

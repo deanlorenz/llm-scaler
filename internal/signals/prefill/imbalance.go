@@ -40,6 +40,35 @@ const MinRequestsPerPodMinute = 100
 // MinImbalanceMinutes is the fewest minutes f is taken from.
 const MinImbalanceMinutes = 5
 
+// GaussianMaxMean is the mean count per pod above which poissonMaxExcess
+// uses the normal approximation instead of the exact sum.
+const GaussianMaxMean = 1e4
+
+// normalMaxMean is the expected max of n standard normals: the integral over
+// x > 0 of 1 - Phi(x)^n less the integral over x < 0 of Phi(x)^n, folded
+// onto x > 0 as 1 - Phi(x)^n - Phi(-x)^n, which is smooth, and summed by
+// Simpson's rule over [0, 10] at a step of 0.01. Beyond 10 the integrand is
+// below float64's resolution for any n a variant has.
+func normalMaxMean(n int) float64 {
+	const lim, steps = 10.0, 1000
+	h := lim / steps
+	f := func(x float64) float64 {
+		// Phi(-x), read directly so the tail keeps its precision; 1 -
+		// Phi(x)^n as -expm1(n*log1p(-Phi(-x))) for the same reason.
+		down := 0.5 * math.Erfc(x/math.Sqrt2)
+		return -math.Expm1(float64(n)*math.Log1p(-down)) - math.Pow(down, float64(n))
+	}
+	sum := f(0) + f(lim)
+	for i := 1; i < steps; i++ {
+		w := 2.0
+		if i%2 == 1 {
+			w = 4
+		}
+		sum += w * f(float64(i)*h)
+	}
+	return sum * h / 3
+}
+
 // share is one replica's work this cycle.
 type share struct {
 	rate       float64
@@ -131,9 +160,17 @@ func anyRate(shares []share) bool {
 // mean the busiest of n equally loaded pods reads by chance alone. Summed
 // over k from 12 standard deviations either side of m, outside which the
 // terms are below float64's resolution.
+//
+// The sum runs about 24·sqrt(m) terms, under the observer's lock, so above
+// GaussianMaxMean it is replaced by the normal approximation: E[max] is m
+// plus sqrt(m) times the expected max of n standard normals, a cost that does
+// not grow with m. TestPoissonMaxExcess pins how far the two differ there.
 func poissonMaxExcess(n int, m float64) float64 {
 	if n < 2 || !(m > 0) || !isFinite(m) {
 		return 0
+	}
+	if m > GaussianMaxMean {
+		return normalMaxMean(n) / math.Sqrt(m)
 	}
 	sd := math.Sqrt(m)
 	lo := math.Max(0, math.Floor(m-12*sd))
