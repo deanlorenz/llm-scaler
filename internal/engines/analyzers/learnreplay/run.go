@@ -129,7 +129,13 @@ func (r *replayer) driven(kind string) bool {
 // analyzer the run did not have, a cancelled ctx); a divergence is a
 // Mismatch in the report. In Fidelity mode the replay's own recording is
 // compared with the original event by event.
+//
+// In Generate mode recording is a capture instead (generate.go), and the
+// report's Recording is the run generated from it.
 func Replay(ctx context.Context, recording []byte, opts Options) (*Report, error) {
+	if opts.Mode == Generate {
+		return generate(ctx, recording, opts)
+	}
 	read, err := learnrec.Read(recording)
 	if err != nil {
 		return nil, err
