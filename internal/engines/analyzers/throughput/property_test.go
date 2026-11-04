@@ -13,7 +13,6 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/internal/learnertest"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 )
 
@@ -172,7 +171,7 @@ func throughputCases(newA propAnalyzer) []learnertest.Case {
 	cheap := learnertest.CheapSeeds
 	// The engine-rig cases of learner PR 4b-2 (property_settle_test.go)
 	// first, then the line's own.
-	return append(settleCases(newA), []learnertest.Case{
+	cases := append(settleCases(newA), []learnertest.Case{
 		c(learnertest.ClassTransient, "joiner-warm-up", direct, cheap, checkJoinerWarmUp(newA)),
 		c(learnertest.ClassTransient, "load-step", direct, cheap, checkLoadStep(newA)),
 		c(learnertest.ClassTransient, "controller-restart", direct, cheap, checkRestart(newA)),
@@ -194,8 +193,9 @@ func throughputCases(newA propAnalyzer) []learnertest.Case {
 		c(learnertest.ClassEdges, "band-edges-non-default", direct, 1, checkBandEdges(newA, nonDefaultBand, 0.05, 0.90)),
 		c(learnertest.ClassEdges, "steady-for-default", direct, 1, checkSteadyFor(newA, nil, itl.DefaultSteadyFor)),
 		c(learnertest.ClassEdges, "steady-for-10m", direct, 1, checkSteadyFor(newA, nonDefaultSteady, 10*time.Minute)),
-		c(learnertest.ClassEdges, "sequence-cap", direct, 1, checkSequenceCap(newA)),
 	}...)
+	// Then the cap admission's, learner PR 4b-3 (property_cap_test.go).
+	return append(cases, capCases(newA)...)
 }
 
 // The non-default policies 2.6 asks the edges to run at.
@@ -674,27 +674,6 @@ func checkSteadyFor(newA propAnalyzer, cfg domain.AnalyzerConfig, steadyFor time
 		at := time.Duration(first-step) * learnertest.Cycle
 		return learnertest.Holds(at >= steadyFor && at <= steadyFor+2*learnertest.Cycle, learnertest.KindWrongSide,
 			"first full fit %s after the step, against steadyFor %s", at, steadyFor)
-	}
-}
-
-// Edges, the sequence cap: a replica above the band at its stated cap
-// (llm-d.ai/max-num-seqs 64, 64 running, requests waiting, no preemption)
-// is a reading (#287, #293). Learner PR 4b-3 adds the admission to this
-// line; until then the ledger lists the case.
-func checkSequenceCap(newA propAnalyzer) func(uint64) error {
-	return func(uint64) error {
-		store := capacity.NewStore()
-		store.Update("ns", "m", "v1", capacity.Record{EngineParams: &capacity.EngineParams{Engine: "vllm", DeclaredBatchCap: 64}},
-			learnertest.Start)
-		r := newPropRun(newA().WithCapacityStore(store))
-		row := lineRow("pod-a", 0.90, propITL(0.90), learnertest.Start.Add(-time.Hour))
-		row.RunningRequests, row.QueueLength = 64, 5
-		row.PreemptionRate, row.PreemptionRateKnown = 0, true
-		if _, _, err := r.step([]domain.ReplicaMetrics{row}); err != nil {
-			return err
-		}
-		return learnertest.Holds(r.windowLen() == 1, learnertest.KindNotLearned,
-			"a replica at its sequence cap above the band was refused: the window holds %d readings", r.windowLen())
 	}
 }
 

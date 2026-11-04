@@ -168,6 +168,7 @@ stack](guides/testing-with-llm-d/) · [benchmark the scaling manager](guides/ben
 - **[Which component owns which number](developer-guide/signal-dataflow.md)** — the chain from a metric scrape to a replica count, and where every parameter in the arithmetic comes from
 - **[Throughput analyzer](developer-guide/throughput-analyzer.md)** · **[saturation demand floor](developer-guide/saturation-demand-floor.md)** · **[pod scraping source](developer-guide/pod-scraping-source.md)**
 - **[slo analyzer and the ITL tracker](developer-guide/slo-analyzer.md)** — one cycle of the observe-only SLO analyzer, its engine hooks, and the line fit it shares with saturation
+- **[What-if capture and Generate](developer-guide/whatif-capture.md)** — a past window in Prometheus made into a learner recording: which query fills which input, and the engine's call order Generate keeps
 - **[Analyzer checklists](developer-guide/analyzer-checklists.md)** — what a new analyzer must show before it graduates
 - **[Analyzer evidence](developer-guide/analyzer-evidence.md)** — what each scaling signal was measured to do, and on which run
 - **[Benchmark internals](developer-guide/benchmark-guide.md)** · **[two-variant benchmark](developer-guide/two-variant-wva-benchmark.md)** · **[recorded results](developer-guide/benchmark-results.md)** · **[an example k2 decision report](developer-guide/benchmark-k2-decisions-example.md)**

@@ -34,12 +34,14 @@ var messageWords = func() map[string]bool {
 
 // MessageWordSources are the directories, from the module root, whose
 // string literals make messageWords: the analyzers, the engine that calls
-// them, the signals and capacity store they read, the policy, and the
-// domain types. The analyzers wrap no client library's errors (router
-// latency is served from the recording), so no library's texts are needed.
+// them, the signals and capacity store they read, the policy, the domain
+// types, and the what-if capture, whose flags a generated recording carries
+// (learnrec.Start.Caveats). The analyzers wrap no client library's errors
+// (router latency is served from the recording), so no library's texts are
+// needed.
 var MessageWordSources = []string{
 	"internal/engines", "internal/signals", "internal/config", "internal/domain",
-	"internal/inferenceengine", "internal/accelerator",
+	"internal/inferenceengine", "internal/accelerator", "internal/whatifsource",
 }
 
 // MessageWords reads the words of every string literal in the non-test Go
@@ -51,6 +53,9 @@ func MessageWords(root string) (string, error) {
 		err := filepath.WalkDir(filepath.Join(root, filepath.FromSlash(src)), func(p string, d fs.DirEntry, err error) error {
 			if err == nil && d.IsDir() && filepath.ToSlash(p) == filepath.ToSlash(filepath.Join(root, "internal/engines/analyzers/learnreplay")) {
 				return filepath.SkipDir // its own literals are its tables, not messages
+			}
+			if err == nil && d.IsDir() && filepath.ToSlash(p) == filepath.ToSlash(filepath.Join(root, "internal/whatifsource/promtest")) {
+				return filepath.SkipDir // a fake Prometheus for tests writes nothing a recording holds
 			}
 			if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
 				return err

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -31,7 +32,7 @@ var workedShape = []string{"--assume-input-tokens", "1000", "--assume-output-tok
 func runCmd(t *testing.T, args ...string) (string, int) {
 	t.Helper()
 	var out bytes.Buffer
-	err := run(context.Background(), args, &out)
+	err := run(context.Background(), args, &out, io.Discard)
 	if err == nil {
 		return out.String(), 0
 	}
@@ -337,7 +338,7 @@ func TestExitCodeInternal(t *testing.T) {
 		slices.Concat([]string{"replicas-to-slo", "--recording", olsSweep}, workedShape),
 		slices.Concat([]string{"slo-to-rate", "--recording", olsSweep, "--tpot", "4ms", "-o", "json"}, workedShape),
 	} {
-		err := run(context.Background(), args, failingWriter{})
+		err := run(context.Background(), args, failingWriter{}, io.Discard)
 		if code := exitCode(err); code != 1 {
 			t.Errorf("%v: exit %d (%v), want 1", args, code, err)
 		}
@@ -367,7 +368,7 @@ func TestExitCodeReplayFailure(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if code := exitCode(run(ctx, []string{"replicas-to-slo", "--recording", olsSweep}, &bytes.Buffer{})); code != 1 {
+	if code := exitCode(run(ctx, []string{"replicas-to-slo", "--recording", olsSweep}, &bytes.Buffer{}, io.Discard)); code != 1 {
 		t.Errorf("a cancelled replay: exit %d, want 1", code)
 	}
 }
