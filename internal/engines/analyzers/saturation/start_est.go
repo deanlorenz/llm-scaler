@@ -1,6 +1,7 @@
 package saturation
 
 import (
+	"maps"
 	"strings"
 	"time"
 
@@ -59,8 +60,33 @@ const (
 	// Without it a variant redeployed onto genuinely slower hardware would have
 	// every sample rejected forever against an estimate that no longer describes
 	// it -- the guard above would become the bug it was added to prevent.
+	//
+	// Read only with SwitchStartConfirmsByDistinctPod off: counted per
+	// refusal, one Pod reporting its age on four cycles opens it.
+	// startConfirmPods replaces it.
 	maxConsecutiveStartOutliers = 3
+
+	// startConfirmPods is how many distinct Pods must report a start over
+	// maxStartOutlierFactor times the estimate before the guard takes the
+	// world to have changed (SwitchStartConfirmsByDistinctPod).
+	//
+	// Unmeasured: 3 matches maxConsecutiveStartOutliers, the count it
+	// replaces, and run T's scale-ups of 4 and 5 Pods, so a real change of
+	// image or node is admitted within one scale-up. What it is counted in is
+	// the point: one Pod whose Ready condition blipped reports its age every
+	// cycle, and counting cycles let that one Pod open the guard on its
+	// fourth.
+	startConfirmPods = 3
 )
+
+// SwitchStartConfirmsByDistinctPod is the replay switch for learner PR 5b
+// (analyzer-learner.md, PR 5, change B): the start guard opens when
+// startConfirmPods distinct Pods have reported a start over
+// maxStartOutlierFactor times the estimate, and one Pod repeating never
+// opens it. Off, it opens after maxConsecutiveStartOutliers refusals,
+// counted per refusal, so one Pod reporting its age on four cycles folds
+// it. On from the constructor; a replay turns it off (SetSwitchesForReplay).
+const SwitchStartConfirmsByDistinctPod = "start-confirms-by-distinct-pod"
 
 // noteReplicaStart folds this cycle's observed start times into the per-variant
 // estimate, publishes both the observation and the estimate, and forgets the
@@ -92,6 +118,10 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 		pod     string
 		sample  float64
 		against float64
+		// distinct is how many distinct Pods the key has refused, this one
+		// included, when byPod (SwitchStartConfirmsByDistinctPod) is set.
+		distinct int
+		byPod    bool
 	}
 	var rejected []outlier
 	observed := 0
@@ -104,20 +134,28 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 	// never visit a key that has no window.
 	a.noteVariantSeen(key, a.now())
 	for _, rm := range replicas {
-		if rm.VariantName != variantName || rm.FromWarmPool || rm.PodName == "" {
+		if seen, ok := startPodKey(key, variantName, rm); ok {
+			present[seen] = struct{}{}
+		}
+	}
+	// Refused Pods that no longer report are forgotten BEFORE this cycle's
+	// samples are judged: a Pod that has gone is no longer evidence that
+	// this variant's starts changed, and pruned after the loop it would
+	// still count toward the Pods that open the guard on the cycle it left.
+	if pods := a.startOutlierPods[key]; pods != nil {
+		maps.DeleteFunc(pods, func(k string, _ struct{}) bool {
+			_, still := present[k]
+			return !still
+		})
+		if len(pods) == 0 {
+			delete(a.startOutlierPods, key)
+		}
+	}
+	for _, rm := range replicas {
+		seen, ok := startPodKey(key, variantName, rm)
+		if !ok {
 			continue
 		}
-		// Qualified by the variant's window key AND the namespace. A bare Pod
-		// name is not unique: a StatefulSet or LeaderWorkerSet reuses
-		// deterministic names across incarnations, and the same release in two
-		// namespaces gives two Pods the same name -- either of which would have
-		// one variant's measurement suppress another's silently. Including the
-		// window key also means a variant whose key changes (its accelerator
-		// resolving differently, its GPU count changing) re-measures from the
-		// Pods it can already see instead of falling back to the seed for the
-		// life of those Pods.
-		seen := key + "|" + rm.Namespace + "|" + rm.PodName
-		present[seen] = struct{}{}
 
 		// Re-stamp, ABOVE the StartSeconds gate below. The entry is what says
 		// "this Pod's start is already in the estimate", and it used to be
@@ -148,16 +186,31 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 		if !(rm.StartSeconds > 0) {
 			continue
 		}
+		// The guard compares with the measured estimate, the only one
+		// startSeconds holds: a sample is never refused against a figure no
+		// Pod of this key measured.
 		cur, measured := a.startSeconds[key]
-		if measured && cur > 0 && rm.StartSeconds > maxStartOutlierFactor*cur &&
-			a.startOutliers[key] < maxConsecutiveStartOutliers {
-			a.startOutliers[key]++
-			rejected = append(rejected, outlier{rm.PodName, rm.StartSeconds, cur})
-			// NOT recorded as seen: if the next cycle still reports it, it is
-			// counted toward the consecutive run above rather than forgotten.
-			continue
+		if measured && cur > 0 && rm.StartSeconds > maxStartOutlierFactor*cur {
+			if a.startConfirmsByPod {
+				if o, refused := a.refuseStartOutlier(key, seen); refused {
+					if o.first {
+						rejected = append(rejected, outlier{rm.PodName, rm.StartSeconds, cur, o.distinct, true})
+					}
+					// NOT recorded as seen, as below.
+					continue
+				}
+			} else if a.startOutliers[key] < maxConsecutiveStartOutliers {
+				a.startOutliers[key]++
+				rejected = append(rejected, outlier{rm.PodName, rm.StartSeconds, cur, 0, false})
+				// NOT recorded as seen: if the next cycle still reports it, it is
+				// counted toward the consecutive run above rather than forgotten.
+				continue
+			}
 		}
+		// An admitted sample ends the run of refusals, whichever way they
+		// were counted: the guard needs consecutive evidence, as before.
 		a.startOutliers[key] = 0
+		delete(a.startOutlierPods, key)
 		a.startSeenPods[seen] = a.now()
 		observed++
 
@@ -192,17 +245,70 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 	}
 	metrics.SetReplicaStartSecondsEstimate(namespace, variantName, est, measured)
 	for _, o := range rejected {
-		logger.V(logging.DEFAULT).Info("replica-start-outlier-rejected",
-			"namespace", namespace, "variant", variantName, "pod", o.pod,
+		kv := []any{"namespace", namespace, "variant", variantName, "pod", o.pod,
 			"sampleSeconds", o.sample, "estimateSeconds", o.against,
-			"factor", maxStartOutlierFactor,
-			"reason", "the Ready condition re-transitions, so a probe blip reports the pod's age")
+			"factor", maxStartOutlierFactor}
+		if o.byPod {
+			kv = append(kv, "distinctPods", o.distinct, "needed", startConfirmPods)
+		}
+		logger.V(logging.DEFAULT).Info("replica-start-outlier-rejected", append(kv,
+			"reason", "the Ready condition re-transitions, so a probe blip reports the pod's age")...)
 	}
 	if observed > 0 {
 		logger.V(logging.DEFAULT).Info("replica-start-measured",
 			"namespace", namespace, "variant", variantName, "observations", observed,
 			"estimateSeconds", est, "source", startSource(measured))
 	}
+}
+
+// startPodKey is the key a replica's start is counted under
+// (key|namespace|pod), and false for a replica whose start is not one of this
+// variant's: another variant's row, a warm-pool bridge, or a row with no Pod.
+//
+// Qualified by the variant's window key AND the namespace. A bare Pod name is
+// not unique: a StatefulSet or LeaderWorkerSet reuses deterministic names
+// across incarnations, and the same release in two namespaces gives two Pods
+// the same name -- either of which would have one variant's measurement
+// suppress another's silently. Including the window key also means a variant
+// whose key changes (its accelerator resolving differently, its GPU count
+// changing) re-measures from the Pods it can already see instead of falling
+// back to the seed for the life of those Pods.
+func startPodKey(key, variantName string, rm domain.ReplicaMetrics) (string, bool) {
+	if rm.VariantName != variantName || rm.FromWarmPool || rm.PodName == "" {
+		return "", false
+	}
+	return key + "|" + rm.Namespace + "|" + rm.PodName, true
+}
+
+// startRefusal is what refuseStartOutlier decided of one Pod's sample.
+type startRefusal struct {
+	// distinct is how many distinct Pods the key has refused, this one
+	// included.
+	distinct int
+	// first says this Pod was not refused before in the run, so it is the
+	// sighting the rejection is logged on. A Pod whose Ready condition
+	// blipped reports its age every cycle until it leaves the collector's
+	// credible range, and one line per cycle says nothing the first did not.
+	first bool
+}
+
+// refuseStartOutlier remembers that the Pod seen (key|namespace|pod) reported
+// a start over maxStartOutlierFactor times key's estimate, and says whether
+// the sample is refused: it is while fewer than startConfirmPods distinct Pods
+// have, this one included. The one that makes startConfirmPods is admitted,
+// and the caller ends the run (noteReplicaStart). The same Pod reporting again
+// adds nothing, so one Pod never opens the guard however many cycles it
+// reports. Callers hold a.mu.
+func (a *SaturationAnalyzer) refuseStartOutlier(key, seen string) (startRefusal, bool) {
+	pods := a.startOutlierPods[key]
+	if pods == nil {
+		pods = make(map[string]struct{}, startConfirmPods)
+		a.startOutlierPods[key] = pods
+	}
+	_, again := pods[seen]
+	pods[seen] = struct{}{}
+	r := startRefusal{distinct: len(pods), first: !again}
+	return r, r.distinct < startConfirmPods
 }
 
 // startSecondsByRole is how long one replica of each role takes to become Ready,

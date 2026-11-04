@@ -2365,6 +2365,60 @@ above are f82a55480's.
   restore-then-run. A document captured from a real controller may be added
   beside them.
 
+#### 5b as built
+
+Built on main 0fec87b18 (5a merged). Change B only, behind
+`saturation.SwitchStartConfirmsByDistinctPod` (`start-confirms-by-distinct-pod`),
+on from the constructor.
+
+- **The rule.** `D/start_est.go` keeps, per start key, the pods refused as
+  over `maxStartOutlierFactor` (3) times the estimate (`startOutlierPods`,
+  keyed like `startSeenPods`). A refused pod is not counted as seen, as
+  before, so it reports again next cycle; again it adds nothing to the set.
+  The sample that makes `startConfirmPods` (3, a named constant marked
+  unmeasured) distinct pods is admitted and folded at α 0.3. The parent
+  opened after three refusals and admitted the fourth sample, whoever sent
+  them; one pod reporting its age on four cycles moved 70 s to 859 s.
+- **Where the plan was open, the narrowest reading.**
+  - The pod that makes N is admitted, not the next sample: "the guard opens
+    when N distinct pods are over 3x".
+  - Any admitted sample ends the run, as it reset the parent's counter. The
+    guard still needs consecutive evidence; only what is counted changed.
+    Without the reset, three pods blipping hours apart, each still running,
+    would open it.
+  - The set is pruned against the cycle's pods **before** the samples are
+    judged. Pruned after, as `startSeenPods` is, a pod that left this cycle
+    still counted toward the three on that cycle.
+  - "Never with P": in 5b `startSeconds` holds measured figures only, so the
+    guard already compares with the measurement. 5c, which publishes a
+    blend, must keep the guard on m.
+  - The set is working state (`learnedMap.working`): not in the snapshot,
+    not cleared by a flush, dropped by a forget and by the variant sweep. After
+    a restart a refused pod is refused again from an empty set, which errs
+    the safe way.
+- **The log.** `replica-start-outlier-rejected` gains `distinctPods` and
+  `needed`, and is logged once per pod per run, not every cycle: a blipped
+  pod reports its age every cycle until the collector stops reporting it,
+  past an hour. Off, the line is the parent's.
+- **Zero golden diff.** Measured alone against all off, the switch moves no
+  output of any recording (`TestGoldens_TheSwitchRuns`). Its row is in
+  `replaySwitches` with no outputs, held by its unit tests (`heldBy`). 4b-2's
+  six switches stay in that table here rather than moving to `earlierSeams`,
+  so #460 and #465, which rewrite the table's head, do not conflict with
+  this PR.
+- **Tests** (`D/start_confirm_test.go`). The plan's negative control (one pod
+  at 2700 s for 20 cycles keeps 70; off, cycle 4 gives 859), three distinct
+  pods open it at 0.7·70 + 0.3·300, a pod that left is not counted, an
+  in-range start ends the run, the log's fields and once-per-pod, and the
+  sweep and forget drop the set. The property edge `start-time/confirmations-3`,
+  which pinned the parent's "one pod taken on cycle 4", is replaced by
+  `one-pod-repeating` (not taken on cycle 3, 4 or 20) and `distinct-pods-3`
+  (taken at 3 pods, not 2). Mutants, each killed: refusals counted
+  instead of pods, no prune, no reset on an in-range start, N off by one,
+  a line per refusal, the sweep leaving the set, the map unregistered, the
+  switch off by default, and the parent (switch off everywhere), which fails
+  every test `heldBy` names.
+
 ## 8. Risks and limits
 
 - **One shared bug.** A defect in the settle tracker reaches every learner at

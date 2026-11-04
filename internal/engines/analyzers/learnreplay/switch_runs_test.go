@@ -113,6 +113,16 @@ var replaySwitches = map[string][]string{
 	throughput.SwitchITLRestartUnderName:             nil,
 	throughput.SwitchITLIdleOnEvidence:               nil,
 	throughput.SwitchITLReadsFinitePodMean:           nil,
+
+	// Learner PR 5b, on main after 5a (0fec87b18): the start guard opens on
+	// distinct Pods. 4b-2's six above stay this table's rows rather than
+	// moving to earlierSeams here, so the PRs open beside this one (#460,
+	// #465) that rewrite the table's head do not conflict with it; whichever
+	// merges with them moves them. Measured alone against all off, it moves
+	// nothing: it changes only when a start over three times the estimate
+	// is admitted, and no output any recording replays differs on it. Its
+	// unit tests hold it (heldBy).
+	saturation.SwitchStartConfirmsByDistinctPod: nil,
 }
 
 // learner4b1Seams is learner PR 4b-1's switches, earlier seams now (merged
@@ -482,6 +492,15 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestMuLatch_AWindowRestoredAfterARefusedReadingComesBackLatched"},
 		{"../saturation", "TestMuLatch_AWindowBroughtBackFromTheStashComesBackLatched"},
 		{"../saturation", "TestMuLatch_AWindowRestoredAsAPriorAfterARefusedReadingComesBackLatched"},
+	},
+	// Learner PR 5b's start guard on distinct Pods: each runs the switch on
+	// and fails with it off; the first two and the log's also run it off and
+	// assert the parent's figure.
+	saturation.SwitchStartConfirmsByDistinctPod: {
+		{"../saturation", "TestStartConfirm_OnePodRepeatingNeverOpensTheGuard"},
+		{"../saturation", "TestStartConfirm_DistinctPodsOpenTheGuard"},
+		{"../saturation", "TestStartConfirm_APodThatLeavesIsNoLongerCounted"},
+		{"../saturation", "TestStartConfirm_TheRejectionLineCountsDistinctPods"},
 	},
 }
 

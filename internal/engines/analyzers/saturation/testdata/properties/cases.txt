@@ -89,7 +89,8 @@ edges/shape-hold/hold-disabled
 edges/shape-hold/tolerance-20pct
 edges/shared-line/reuse-switch
 edges/start-time/alpha-030
-edges/start-time/confirmations-3
+edges/start-time/distinct-pods-3
+edges/start-time/one-pod-repeating
 edges/start-time/outlier-3x
 edges/start-time/outlier-3x-at
 edges/start-time/zero-sample

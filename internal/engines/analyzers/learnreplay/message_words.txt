@@ -766,6 +766,7 @@ discarded
 discarding
 discover
 discovery
+distinctPods
 do
 docs/developer-guide/testing.md
 docs/reference/operations.md
@@ -2209,8 +2210,10 @@ staleness
 stalled
 standard
 start
+start-confirms-by-distinct-pod
 startEstimateSeconds
 startEstimates
+startOutlierPods
 startOutliers
 startSeconds
 startSeenPods

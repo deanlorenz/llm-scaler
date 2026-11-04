@@ -175,7 +175,8 @@ func edgeCases() []propCase {
 		edgeCase("shape-hold", "tolerance-20pct", tunedDefault, nil, edge3("a change declared at an output change of", probeShapeTolerance, 0.19, shapeTolerance, 0.21, [3]bool{false, false, true})),
 		// Start time.
 		edgeCase("start-time", "outlier-3x-at", tunedDefault, nil, edge3("a sample taken at a multiple of the estimate of", probeStartOutlier, 2.99, 3, 3.01, [3]bool{true, true, false})),
-		edgeCase("start-time", "confirmations-3", tunedDefault, nil, edge3("one outlier pod taken on cycle", probeStartConfirm, 3, 4, 5, [3]bool{false, true, true})),
+		edgeCase("start-time", "one-pod-repeating", tunedDefault, nil, edge3("one outlier pod taken on cycle", probeStartConfirm, 3, 4, 20, [3]bool{false, false, false})),
+		edgeCase("start-time", "distinct-pods-3", tunedDefault, nil, edge3("outlier pods taken at distinct pods", probeStartConfirmPods, 2, 3, 4, [3]bool{false, true, true})),
 		edgeCase("start-time", "alpha-030", tunedDefault, nil, checkStartAlpha),
 		edgeCase("start-time", "zero-sample", tunedDefault, nil, edge3("a sample of s moves the estimate", probeStartZero, -1, 0, 1, [3]bool{false, false, true})),
 	}
@@ -744,8 +745,9 @@ func probeStartOutlier(_ *rand.Rand, x float64) (bool, error) {
 }
 
 // probeStartConfirm: an estimate of 100 s, then one pod at 5x it, read on n
-// cycles: refused three times, and taken on the fourth (the count is per
-// rejected sample, so one pod repeating passes on its fourth cycle).
+// cycles: never taken, however many (learner PR 5b,
+// SwitchStartConfirmsByDistinctPod). Before 5b the count was per refused
+// sample, and one pod repeating passed on its fourth cycle.
 func probeStartConfirm(_ *rand.Rand, n float64) (bool, error) {
 	s := newStartRig()
 	s.add(100)
@@ -753,6 +755,19 @@ func probeStartConfirm(_ *rand.Rand, n float64) (bool, error) {
 	for range int(n) - 1 {
 		s.a.noteReplicaStart(s.key, "test-ns", "v", s.pods, logr.Discard())
 		est = s.a.startSeconds[s.key]
+	}
+	return est != 100, nil
+}
+
+// probeStartConfirmPods: an estimate of 100 s, then n distinct pods at 5x
+// it, one more each cycle, the earlier ones still reporting: refused until
+// the startConfirmPods-th (3), which is taken.
+func probeStartConfirmPods(_ *rand.Rand, n float64) (bool, error) {
+	s := newStartRig()
+	s.add(100)
+	est := 100.0
+	for range int(n) {
+		est = s.add(500)
 	}
 	return est != 100, nil
 }

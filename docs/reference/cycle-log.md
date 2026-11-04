@@ -191,12 +191,20 @@ became Ready: `namespace`, `variant`, `observations` (replicas counted this
 cycle), `estimateSeconds` (the estimate now in force) and `source` (`measured`,
 or `seed` while the default is in force).
 
-`replica-start-outlier-rejected` is logged when one replica's start is much
-longer than the estimate and is left out: `namespace`, `variant`, `pod`,
-`sampleSeconds`, `estimateSeconds` and `factor`. A readiness probe that fails
-and recovers reports the pod's age as its start time, which is the usual cause.
-After three rejections in a row the next sample is accepted, so a variant that
-really got slower moves its estimate.
+`replica-start-outlier-rejected` is logged when one replica's start is more
+than `factor` (3) times the estimate and is left out: `namespace`, `variant`,
+`pod`, `sampleSeconds`, `estimateSeconds`, `factor`, `distinctPods` (how many
+different pods have been left out so far, this one included) and `needed`
+(how many it takes, 3). A readiness probe that fails and recovers reports the
+pod's age as its start time, which is the usual cause.
+
+- Each pod is logged once, not on every cycle it reports.
+- When `needed` different pods have been left out, the last one's start is
+  accepted, so a variant that really got slower moves its estimate.
+- One pod reporting again and again never counts as more than one, so a
+  single blip never moves the estimate.
+- A start inside the bound clears the count, and a pod that goes away stops
+  counting.
 
 ### `learner-start`
 
