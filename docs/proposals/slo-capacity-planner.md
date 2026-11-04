@@ -457,7 +457,7 @@ is made.**
 | Recordings | Prefill-stress (30k prompts, 3 prefill pods, decode below its ceiling, fixed replicas); the staircase warm-ups, flow control off and on | — | R1 |
 | Capture | The `ols-sweep-slo` window, from its Prometheus snapshot | — | R2 |
 | D1 | Move the decode pricing into `whatif` at layer 32. Proof: vectors captured from `main` before the move, frozen, asserted bit-identical; the fails-on-main rule is waived for a pure move | none move | — |
-| D2 | Closed form, TPOT inversions, the admission chain, `Answer`/`Unanswerable`, property cases. Deletes D1's frozen vectors and `TestMovedPricingIsBitIdentical` if it changes a moved function (regenerable from bf493785a) | none | D1 |
+| D2 | Closed form, TPOT inversions, the admission chain, `Answer`/`Unanswerable`, property cases. Deletes D1's frozen vectors and `TestMovedPricingIsBitIdentical` if it changes a moved function (regenerable from bf493785a). Also D2: `PriceTPOT` with a NaN band edge returns `OK: true` with a NaN fill (only `PricingK` checks the band); `DerivedMu.CapAtMeasured`, set only by the saturation analyzer, and the string `Why` codes are candidates to move out or type | none | D1 |
 | D3 | Accessors, the replay function, bands, basis, `cmd/whatif` from a recording or snapshot, footer, exit codes | none | D2 |
 | D4 | Standalone answers from `--prometheus`; no switch (adapter only) | none | D3, R2 |
 | P1 | `internal/signals/prefill`, observing: `V_P`, `a`, `f`; logs only; switch `prefill-capacity-observe`. On `ols-sweep` it fits `a` and refuses `V_P` and `f` | none | — |

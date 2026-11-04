@@ -71,7 +71,7 @@ type Pricing struct {
 // (vllm:inter_token_latency_seconds, sum over count), so no tail model stands
 // between the two.
 func PriceTPOT(band FillBand, line itl.Model, targetSeconds float64) Pricing {
-	if !finite(line.A) || !finite(line.B) || !finite(targetSeconds) {
+	if !Finite(line.A) || !Finite(line.B) || !Finite(targetSeconds) {
 		return Pricing{}
 	}
 	if !(line.A > 0) || !(targetSeconds > 0) {
@@ -81,7 +81,7 @@ func PriceTPOT(band FillBand, line itl.Model, targetSeconds float64) Pricing {
 	if targetSeconds <= line.ITLAt(band.Lo) {
 		return Pricing{Target: k, OK: true}
 	}
-	if !finite(k) {
+	if !Finite(k) {
 		return Pricing{}
 	}
 	return Pricing{Fill: min(max(k, band.Lo), band.Hi), Target: k, Feasible: true, OK: true}
@@ -124,7 +124,7 @@ func ReplicaTokenRate(line itl.Model, k, capacityTokens, kvPerRequest float64, m
 		return 0
 	}
 	rate := seqs / itlSec
-	if !finite(rate) {
+	if !Finite(rate) {
 		return 0
 	}
 	return rate
@@ -174,6 +174,9 @@ func RealisedFill(band FillBand, line itl.Model, k, scaleUp, capacityTokens, kvP
 	return max(hi, band.Lo)
 }
 
-func finite(x float64) bool {
+// Finite reports whether x is a number the pricing can use: neither NaN nor
+// infinite. NaN fails every comparison, so a guard written as !(x > 0) already
+// rejects it, but not +Inf; this rejects both.
+func Finite(x float64) bool {
 	return !math.IsNaN(x) && !math.IsInf(x, 0)
 }

@@ -251,7 +251,7 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 	// An output length nobody has reported yet is not a demand of zero: it is
 	// no demand at all, and a combiner must read it as undefined. So the demand
 	// is left out, and every generating variant below reports no data.
-	shapeKnown := fleet.shape.AvgOutputTokens > 0 && finite(fleet.shape.AvgOutputTokens)
+	shapeKnown := fleet.shape.AvgOutputTokens > 0 && whatif.Finite(fleet.shape.AvgOutputTokens)
 	demand := fleet.demand(input)
 	if shapeKnown {
 		result.TotalDemand = demand
@@ -490,7 +490,7 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	vc.PerReplicaCapacity = rate
 	vc.Reason = "slo-" + source
 	reading.Fill = fill
-	if k := whatif.RealisedFill(band, line, fill, scaleUp, capTokens, fleet.shape.KVreq, maxSeqs); finite(k) {
+	if k := whatif.RealisedFill(band, line, fill, scaleUp, capTokens, fleet.shape.KVreq, maxSeqs); whatif.Finite(k) {
 		reading.PredictedITL = line.ITLAt(k)
 	}
 	return vc, reading, d
@@ -834,7 +834,7 @@ func readFleet(input domain.AnalyzerInput) fleetReading {
 			continue
 		}
 		f.generatingReplicas++
-		if finite(rm.RequestRate) && rm.RequestRate > 0 {
+		if whatif.Finite(rm.RequestRate) && rm.RequestRate > 0 {
 			f.requestRate += rm.RequestRate
 		}
 	}
@@ -848,8 +848,8 @@ func readFleet(input domain.AnalyzerInput) fleetReading {
 		}
 		// A row with any non-finite shape figure is no reading of the shape: one
 		// NaN summed in would turn the whole fleet's shape into NaN.
-		if !(w > 0) || !finite(w) || !finite(rm.AvgOutputTokens) || !(rm.AvgOutputTokens > 0) ||
-			!finite(rm.AvgInputTokens) || !finite(rm.PrefixCacheHitRate) {
+		if !(w > 0) || !whatif.Finite(w) || !whatif.Finite(rm.AvgOutputTokens) || !(rm.AvgOutputTokens > 0) ||
+			!whatif.Finite(rm.AvgInputTokens) || !whatif.Finite(rm.PrefixCacheHitRate) {
 			continue
 		}
 		in += w * rm.AvgInputTokens
@@ -868,11 +868,11 @@ func readFleet(input domain.AnalyzerInput) fleetReading {
 // backlogDrainSeconds. Zero when the output length is unknown.
 func (f fleetReading) demand(input domain.AnalyzerInput) float64 {
 	o := f.shape.AvgOutputTokens
-	if !(o > 0) || !finite(o) {
+	if !(o > 0) || !whatif.Finite(o) {
 		return 0
 	}
 	lambda := input.ArrivalRate
-	if !(lambda > 0) || !finite(lambda) {
+	if !(lambda > 0) || !whatif.Finite(lambda) {
 		lambda = f.requestRate
 	}
 	d := lambda * o
@@ -923,9 +923,4 @@ func (f fleetReading) engineRanks(variant string) int64 {
 		return 1
 	}
 	return max(int64(math.Round(float64(sum)/float64(n))), 1)
-}
-
-// finite reports whether x is neither NaN nor infinite.
-func finite(x float64) bool {
-	return !math.IsNaN(x) && !math.IsInf(x, 0)
 }

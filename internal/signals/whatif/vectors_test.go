@@ -23,10 +23,17 @@ import (
 //
 // The vectors in testdata were captured from those analyzers on main before
 // the move, by commit bf493785a ("test(whatif): freeze the decode pricing's
-// outputs on main"); checking that commit out and running its capture tests
-// with WHATIF_WRITE_VECTORS=1 regenerates them, byte for byte. Each holds one
-// call's inputs and outputs, floats as the hex of their IEEE-754 bits.
-// Replaying the inputs here must give back every output bit for bit.
+// outputs on main"). The capture tests exist only at that commit, in
+// internal/engines/analyzers/slo and .../saturation (vectors_capture_test.go):
+// check it out and run
+//
+//	WHATIF_WRITE_VECTORS=1 go test ./internal/engines/analyzers/slo/ \
+//	    ./internal/engines/analyzers/saturation/ \
+//	    -run 'TestDecodePricingVectors|TestMuFromITLVectors'
+//
+// to write them again, byte for byte. Each holds one call's inputs and
+// outputs, floats as the hex of their IEEE-754 bits. Replaying the inputs
+// here must give back every output bit for bit.
 //
 // They pin the code as it was, not as it should be. A PR that changes any of
 // these functions on purpose -- starting with D2 -- deletes the vectors and
@@ -138,6 +145,10 @@ func replay(v vector) (vector, error) {
 		out.OF = fbits(RealisedFill(FillBand{Lo: f[0], Hi: f[1]}, itl.Model{A: f[2], B: f[3]},
 			f[4], f[5], f[6], f[7], v.I[0]))
 	case "PricingK":
+		// The one integer is deliberate: the capture recorded whether the
+		// call came from a nil policy (0) or a set one (1), and the band from
+		// ITLBand either way. PricingK takes the numbers alone, so the replay
+		// reads it only to check the record's shape.
 		if err := need(4, 1); err != nil {
 			return v, err
 		}
@@ -178,6 +189,7 @@ func readVectors(path string) ([]vector, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = zr.Close() }()
 	var vs []vector
 	sc := bufio.NewScanner(zr)
 	sc.Buffer(make([]byte, 0, 1<<16), 1<<20)

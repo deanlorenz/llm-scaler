@@ -30,10 +30,13 @@ command -v go >/dev/null 2>&1 || { echo "FATAL: go is required to run this check
 #
 # Layers are spaced by ten so that a package CAN be ranked between two of them
 # where the order is real, without renumbering the layers around it.
-# internal/signals/floor is the case: it composes the packages that only
-# measure, so an edge from one of them back to it is an inversion, and at one
-# shared number the check could not see it. Nothing else moves -- aggregation
-# and the measuring signals packages stay equals, as the proposal has them.
+# Two packages are ranked that way. internal/signals/floor (31) composes the
+# packages that only measure, so an edge from one of them back to it is an
+# inversion, and at one shared number the check could not see it.
+# internal/signals/whatif (32) prices from what they measure and sits above
+# floor (docs/proposals/slo-capacity-planner.md, "Packaging"). Nothing else
+# moves -- aggregation and the measuring signals packages stay equals, as the
+# proposal has them.
 layer_of() {
     case "$1" in
         internal/engines/steadystate|internal/engines/scalefromzero) echo 70 ;;
