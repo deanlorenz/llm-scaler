@@ -633,6 +633,7 @@ func (g *BorrowGovernor) budgetOf(c BorrowCycle, ch *SharedPoolChunk, cohorts ma
 	// the cycle lowers it) is what it borrows from the pool, a lower bound of
 	// what it holds past its kept part; freeing is counted up to it.
 	past := namespaceBorrowed(c.Constraints, c.Gated)
+	passive := passiveModels(c.Requests)
 	freed := map[string]map[string]int{}
 	for _, d := range decisions {
 		acc := accs[d.Namespace+"/"+d.VariantName]
@@ -652,7 +653,9 @@ func (g *BorrowGovernor) budgetOf(c BorrowCycle, ch *SharedPoolChunk, cohorts ma
 		// not for the lender: those do not count. Terminating pods (held past
 		// current) are freeing already.
 		freeing := max(0, heldOf(s)-d.CurrentReplicas)
-		if !yielded(d) {
+		// A passive model's lower target is a would-be figure: nothing
+		// lowers it, so it frees nothing. Its terminating pods are real.
+		if !yielded(d) && !passive[d.Namespace+"/"+d.ModelID] {
 			freeing += max(0, d.CurrentReplicas-d.TargetReplicas)
 		}
 		if freed[d.Namespace] == nil {
@@ -911,6 +914,9 @@ func (g *BorrowGovernor) lenderCandidates(c BorrowCycle, key LenderKey, l kueue.
 				}
 				continue // Kueue preempts it for the lender
 			}
+		}
+		if req.Passive {
+			continue // nothing lowers a passive model: no GPU comes of a release from it
 		}
 		cand := lenderCandidate{req: req, priority: math.MaxInt64, cost: cost}
 		if known {

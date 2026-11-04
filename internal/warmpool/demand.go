@@ -38,6 +38,11 @@ type Demand struct {
 	Decisions *decision.Store
 	Client    client.Client
 	Datastore datastore.Datastore
+	// Passive reports whether a variant (by its ScaledObject's name) is
+	// passive: the controller observes it and changes none of its replica
+	// counts, so the planner plans no copy and no borrow for it. Nil passes
+	// every variant.
+	Passive func(namespace, variant string) bool
 	// GPUMemoryUtilization overrides what the ordinary replicas ask for, and
 	// exists because the two are sizing different things.
 	//
@@ -111,6 +116,9 @@ func (d *Demand) Variants(ctx context.Context) ([]policy.VariantDemand, error) {
 		}
 		if registry.ScalesAWarmPool(entry.Metadata) {
 			continue // the pool's own ScaledObject; it is not a model to warm
+		}
+		if d.Passive != nil && d.Passive(entry.Namespace, entry.Name) {
+			continue // observed, never scaled: nothing to warm or borrow for it
 		}
 		target := types.NamespacedName{Namespace: entry.Namespace, Name: entry.Target.Name}
 

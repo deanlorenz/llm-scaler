@@ -82,11 +82,14 @@ func TestITLLine_AShapeChangeDoesNotPriceTheOldShapesA(t *testing.T) {
 		}
 		return rows
 	}
+	ctx, buf := logContext()
 	r := newLineRun(t, NewThroughputAnalyzer().WithSlopeHoldFor(time.Hour))
+	r.ctx = ctx
 	for range 12 {
 		r.step(fleet(1024, 256, oldA))
 	}
 	require.InDelta(t, oldA, r.slope(), 0.002, "premise: the old shape's line")
+	require.Len(t, lineLogs(buf.String()), 2, "premise: silent on the first cycles, then live: %s", buf)
 
 	reasons := []string{}
 	for range 6 {
@@ -103,6 +106,13 @@ func TestITLLine_AShapeChangeDoesNotPriceTheOldShapesA(t *testing.T) {
 	// fourth cycle.
 	require.Equal(t, []string{itlReasonT2Failed, itlReasonT2Failed, itlReasonT2Failed,
 		itlReasonT2Default, itlReasonT2Default, itlReasonT2Default}, reasons)
+	// The log says so: one line when the shape change silenced the line,
+	// naming it, and one when the new shape's fit brought it back.
+	logs := lineLogs(buf.String())
+	require.Len(t, logs, 4, "%s", buf)
+	require.Contains(t, logs[2], `"silent": true, "cause": "shape-change"`)
+	require.Contains(t, logs[3], `"silent": false, "cause": "", "source": "T2-default"`)
+	require.Contains(t, logs[3], `"held": 12`, "the new shape's four cycles of three readings")
 }
 
 // The GPS diagnostic judges each replica at the k paired with its ITL
@@ -200,11 +210,17 @@ func TestITLLine_TheLineLogsWhenItGoesSilentAndComesBack(t *testing.T) {
 	}
 	log := buf.String()
 	require.Equal(t, 2, logLinesWith(log, "throughput analyzer: ITL line"), "want one line silent, one back: %s", log)
-	require.Contains(t, log, `"silent": true`)
-	require.Contains(t, log, `"silent": false`)
-	require.Contains(t, log, `"source": "T2-above-band"`)
-	require.Contains(t, log, `"aboveBand": 3`)
-	require.Contains(t, log, `"inBand": 0`)
+	logs := lineLogs(log)
+	require.Contains(t, logs[0], `"silent": true, "cause": "restart"`)
+	require.Contains(t, logs[1], `"silent": false, "cause": "", "source": "T2-above-band"`)
+	for _, l := range logs {
+		require.Contains(t, l, `"aboveBand": 3`)
+		require.Contains(t, l, `"inBand": 0`)
+	}
+	// Silent on the first cycle, three readings above the band; back on the
+	// fourth, with twelve. The band's window holds none on either.
+	require.Contains(t, logs[0], `"held": 0, "aboveBandHeld": 3`)
+	require.Contains(t, logs[1], `"held": 0, "aboveBandHeld": 12`)
 }
 
 // logContext is a context whose logger writes, at the shipped verbosity, to

@@ -308,7 +308,8 @@ func (e *Engine) recordBorrowDraws(optimizer allocation.ScalingOptimizer, decisi
 	keep := func(in []allocation.BorrowDraw) []allocation.BorrowDraw {
 		var out []allocation.BorrowDraw
 		for _, d := range in {
-			if e.cyclePlanned[utils.GetNamespacedKey(d.Namespace, d.ModelID)] {
+			// A passive model draws nothing: its would-be growth is never ordered.
+			if e.cyclePlanned[utils.GetNamespacedKey(d.Namespace, d.ModelID)] || e.modelPassive(d.Namespace, d.ModelID) {
 				continue
 			}
 			if t, ok := targets[d.Namespace+"/"+d.Variant]; ok {

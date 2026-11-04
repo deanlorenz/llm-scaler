@@ -105,9 +105,15 @@ type variantState struct {
 	lastTotalSupply      float64
 	lastDemand           float64
 	// reading is what the line's tracker read this cycle (itl_line.go),
-	// with SwitchITLSteadyGate on; hasReading is set once it has read.
+	// with SwitchITLSteadyGate on; hasReading is set when it read this
+	// cycle, and cleared on a cycle with no healthy row, which reads
+	// nothing: such a cycle has no line, not the last cycle's.
 	reading    itl.Reading
 	hasReading bool
+	// shapeChanged is set by a shape change and cleared when the line is
+	// next live, and everLive once the line has been live: what names the
+	// cause of a silent line (silenceCause). SwitchITLSteadyGate only.
+	shapeChanged, everLive bool
 	// gpsMismatched is whether the variant's last GPS check found a
 	// mismatch, so its summary line logs only when that changes
 	// (SwitchITLKeepsWindowOnGPSMismatch).
@@ -202,6 +208,9 @@ func (a *ThroughputAnalyzer) observe(
 		state := a.getOrCreateVariantState(key)
 		state.lastSanityReport = report
 		state.lastObservedAt = now
+		// Read again below, or not at all this cycle: a cycle that skips
+		// the variant keeps no reading from the last.
+		state.reading, state.hasReading = itl.Reading{}, false
 
 		if report.Has(SanityIssueNoReplicas) {
 			ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("throughput analyzer: no replicas, skipping variant",
@@ -252,6 +261,7 @@ func (a *ThroughputAnalyzer) observe(
 				// is the above-band fallback or silent.
 				a.lines.ClearWindow(key)
 				a.lines.ForgetSlope(key)
+				state.shapeChanged = true
 			}
 		}
 

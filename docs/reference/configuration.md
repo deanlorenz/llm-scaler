@@ -64,6 +64,7 @@ from the release notes. See
 | `WVA_FMA_LAUNCHER_METRICS` | Apply a PodMonitor that scrapes FMA launcher pods, which nothing else does — they declare no container ports, so a port-name endpoint generates no target for them. Applied to the **workload** namespace (`WVA_WATCH_NS`, else `WVA_NS`), and skipped if another PodMonitor already scrapes launchers there. See [FMA launcher pods](operations.md#fma-launcher-pods) | `false` |
 | `DEPLOY_LLMD_NS` | Create an empty llm-d namespace up front, for a demo that wants it before anything is deployed. `deploy/install-epp.sh` creates its own when it deploys EPP, and the scaling manager does not watch namespaces | `false` |
 | `ENABLE_SCALE_TO_ZERO` | Allow a model to be parked at zero replicas, and enable the EPP `flowControl` gate that makes waking it possible | `true` |
+| `WVA_PASSIVE` | Run the controller **passive**: it computes, logs and publishes everything and changes no replica count. Written to `WVA_PASSIVE` in `wva-manager-config`, read at start. Unset, a re-install keeps the live value, and keeps `passive` on the scaling-policy `default` entry too, both written into what it applies. A controller that read another value at start is restarted. A scaling-policy entry overrides it per namespace, tier or model ([passive](scaling-policy.md#passive)) | unset: keep the live value, else `false` |
 | `SKIP_CHECKS` | Turn the preflight's refusals (no model servers in the namespace, model servers or EPP not scraped, missing permissions) into warnings: findings are still reported. It does not skip the guard against a second install on the cluster, or the post-install verification | `false` |
 | `SCALER_BACKEND` | `keda` or `none` (use a pre-installed backend) | `keda` |
 | `KEDA_NAMESPACE` | Namespace KEDA is installed in. Set explicitly, it is also the namespace the external-scaler NetworkPolicy admits. Unset, that namespace is detected, never guessed; with no answer **no NetworkPolicy is applied**, and the installer warns that `:9090` is reachable from every Pod and prints the fix for the install's shape. How it is detected, and which existing policies are left as `state UNKNOWN`: [the external-scaler NetworkPolicy](upgrade-and-uninstall.md#the-external-scaler-networkpolicy). The policy is an admin-phase object (`make setup-prereqs`); `make check-prereqs` and `INSTALL_PHASE=wva` treat it as optional. `make verify-deployment` warns when the policy and KEDA's namespace differ, and prints `No NetworkPolicy: scaler port open` when there is none | `keda-system` for the KEDA install; detected for the NetworkPolicy |
@@ -1073,6 +1074,36 @@ reports it as an optional prerequisite. See
 [troubleshooting](troubleshooting.md#capacity-priced-high-after-a-restart) for
 what the log lines mean when it does not work, and how to flush the store.
 
+### The throughput analyzer's line
+
+Read this before you list `throughput` in a scaling policy without
+`saturation`.
+
+The throughput analyzer prices each variant from its ITL line. While the
+line is silent (`T2-failed`), the analyzer orders no scale-up and leaves the
+scale-down vote. The `throughput analyzer: ITL line` log line says when the
+line goes silent and why: see [the cycle log](cycle-log.md#reason-values-reason-field)
+and [troubleshooting](troubleshooting.md#symptom-index).
+
+- **A policy that lists `throughput` alone has no saturation floor.** With
+  `saturation` listed, a silent throughput line leaves the role to
+  saturation. Without it, nothing else sizes the role, so a silent line
+  holds the role where it is: it neither grows nor shrinks until the line
+  comes back.
+- **The line is silent after a controller restart and after a shape
+  change.** The learned-state snapshot (`LEARNED_STATE_SNAPSHOT`) does not
+  carry this line, and a shape change empties its window and drops its held
+  slope. It comes back once its window holds 10
+  readings, 3 of them settled: about 4 cycles with 3 replicas inside the
+  band, 10 cycles with one. Replicas below the band add no readings, so a
+  lightly loaded fleet stays silent longer.
+- **A variant that starts above the band is priced from above it.** With no
+  line from the band and no slope to hold, the line is fitted from readings
+  at k of at least 0.85 (`T2-above-band`). It errs one way only: it prices a
+  higher ITL than the true line, so it orders more replicas, never fewer.
+  The band's first fit replaces it. A fleet that sits above the band but
+  under k 0.85 gets no line at all (`cause` `all-above-band-below-ksat`).
+
 ## Optional: scaling band after `make deploy-e2e-infra`
 
 If `SCALE_UP_THRESHOLD` and/or `SCALE_DOWN_BOUNDARY` are set in the environment, the Makefile patches the `wva-scaling-policy-config` ConfigMap after install. Note the patch replaces the whole `default` entry, so it writes `analyzerName: saturation` alongside the band.
@@ -1085,7 +1116,7 @@ decides whether a change needs a restart.
 **Static**: read once at startup, so a change needs a restart. The metrics and
 probe addresses, leader election, the Prometheus URL and its TLS material, the
 feature flags, **the optimization interval** (`GLOBAL_OPT_INTERVAL`), **the
-learned-state horizons** (`LEARNED_STATE_*`, read when the analyzer is built)
+learned-state horizons** (`LEARNED_STATE_*`, read when the analyzer is built), **the controller-wide passive switch** (`WVA_PASSIVE`; the `passive` key on a scaling-policy entry is live)
 and **the Prometheus cache settings**. The interval and cache settings look
 dynamic but are not: only test code changes them after load.
 

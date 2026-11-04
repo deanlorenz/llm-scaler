@@ -111,6 +111,9 @@ type Reading struct {
 	// AboveBandHeld is the above-band window's size after pruning; zero
 	// without the fallback.
 	AboveBandHeld int
+	// AboveBandUnderKSat counts the AboveBand readings at a k under
+	// DefaultKSat: above the band, and too low for the fallback to keep.
+	AboveBandUnderKSat int
 	// Held is the window's size after pruning.
 	Held int
 	// SteadyHeld is how many steady readings the full fit may use, and Ready
@@ -270,6 +273,9 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 			r.BelowBand++
 		case k > hi && !adm.atSequenceCap(rm):
 			r.AboveBand++
+			if k < DefaultKSat {
+				r.AboveBandUnderKSat++
+			}
 			// Kept for the fallback only, stamped as a reading in the band
 			// is, and only at a k of at least the one the line is priced at
 			// (fitAboveBand: what makes the fallback one-sided).

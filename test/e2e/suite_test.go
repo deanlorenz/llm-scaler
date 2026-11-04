@@ -376,7 +376,7 @@ func cleanupTestResources(ctx context.Context, k8sClient *kubernetes.Clientset, 
 	isTestResource := func(name string) bool {
 		prefixes := []string{
 			"test-", "smoke-", "saturation-", "error-test-", "target-condition-",
-			"scale-from-zero-", "sfz-", "throughput-", "multi-analyzer-",
+			"scale-from-zero-", "sfz-", "throughput-", "multi-analyzer-", "passive-",
 		}
 		for _, p := range prefixes {
 			if strings.HasPrefix(name, p) {

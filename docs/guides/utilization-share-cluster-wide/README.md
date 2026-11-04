@@ -544,6 +544,11 @@ everything else on the cluster that uses KEDA, so it is your call; with
 
 ## Turn on sharing
 
+> **A passive model puts its share group in shadow.** If one model of a group
+> is [passive](../../reference/scaling-policy.md#passive), the whole group
+> plans and moves nothing, and `wva_utilization_share_passive_shadow` is 1.
+> Make the model active, or keep it out of the group, to share again.
+
 ### Step 13: Name a model namespace
 
 The commands from here on take one model namespace. Any of them will do. They

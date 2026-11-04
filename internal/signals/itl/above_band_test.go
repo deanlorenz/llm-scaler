@@ -9,9 +9,10 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
-// aboveRows is n Ready replicas of variant v, Ready since an hour before
+// aboveRows is three Ready replicas of variant v, Ready since an hour before
 // start, each at k on the line 0.05 k + 0.010.
-func aboveRows(n int, k float64, start time.Time) []domain.ReplicaMetrics {
+func aboveRows(k float64, start time.Time) []domain.ReplicaMetrics {
+	const n = 3
 	out := make([]domain.ReplicaMetrics, 0, n)
 	for i := range n {
 		out = append(out, domain.ReplicaMetrics{PodName: fmt.Sprintf("pod-%d", i), VariantName: "v", Ready: true,
@@ -31,7 +32,7 @@ func TestTracker_AboveBandFallbackFitsAKeyThatNeverFitted(t *testing.T) {
 		adm := Admission{AboveBandFallback: fallback}
 		first = -1
 		for c := range 8 {
-			last = tr.Observe("k", "v", aboveRows(3, 0.90, start), adm, start.Add(time.Duration(c)*15*time.Second))
+			last = tr.Observe("k", "v", aboveRows(0.90, start), adm, start.Add(time.Duration(c)*15*time.Second))
 			if last.Tier != "" && first < 0 {
 				first = c
 			}
@@ -65,7 +66,7 @@ func TestTracker_AboveBandFallbackFitsAKeyThatNeverFitted(t *testing.T) {
 	adm := Admission{AboveBandFallback: true}
 	var r Reading
 	for c := range 4 {
-		r = tr.Observe("k", "v", aboveRows(3, 0.40, start), adm, now.Add(time.Duration(c)*15*time.Second))
+		r = tr.Observe("k", "v", aboveRows(0.40, start), adm, now.Add(time.Duration(c)*15*time.Second))
 	}
 	if r.AboveBandFit || r.Tier != TierPinnedB {
 		t.Fatalf("the band's readings did not replace the fallback: %+v", r)
@@ -83,13 +84,13 @@ func TestTracker_AboveBandFallbackNeverReplacesAHeldSlope(t *testing.T) {
 	adm := Admission{AboveBandFallback: true, SlopeHoldFor: 40 * time.Minute}
 	now := start
 	for range 6 {
-		tr.Observe("k", "v", aboveRows(3, 0.40, start), adm, now)
+		tr.Observe("k", "v", aboveRows(0.40, start), adm, now)
 		now = now.Add(15 * time.Second)
 	}
 	reasons := map[string]int{}
 	var lastBandFit time.Time
 	for now.Before(start.Add(80 * time.Minute)) {
-		r := tr.Observe("k", "v", aboveRows(3, 0.90, start), adm, now)
+		r := tr.Observe("k", "v", aboveRows(0.90, start), adm, now)
 		switch {
 		case r.AboveBandFit:
 			reasons["above"]++
@@ -117,7 +118,7 @@ func TestTracker_ForgetSlopeDropsOnlyTheSlope(t *testing.T) {
 	start := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 	tr := NewTracker()
 	for c := range 6 {
-		tr.Observe("k", "v", aboveRows(3, 0.40, start), Admission{}, start.Add(time.Duration(c)*15*time.Second))
+		tr.Observe("k", "v", aboveRows(0.40, start), Admission{}, start.Add(time.Duration(c)*15*time.Second))
 	}
 	tr.SetBaseline("k", 0.007)
 	tr.ForgetSlope("k")
@@ -142,8 +143,9 @@ func TestFitAboveBand_NeverPricesUnderTheTrueLine(t *testing.T) {
 	ks := []float64{0.86, 0.90, 0.94}
 	noise := []float64{-0.02, 0.01, 0.02, -0.01, 0}
 	for _, b := range []float64{0.004, 0.010} {
-		var obs []Observation
-		for i := range 15 {
+		const readings = 15
+		obs := make([]Observation, 0, readings)
+		for i := range readings {
 			k := ks[i%len(ks)]
 			obs = append(obs, Observation{K: k, ITLSec: (a*k + b) * (1 + noise[i%len(noise)])})
 		}
@@ -173,7 +175,7 @@ func TestTracker_AboveBandFallbackKeepsOnlyReadingsAtThePrice(t *testing.T) {
 	tr := NewTracker()
 	var r Reading
 	for c := range 6 {
-		r = tr.Observe("k", "v", aboveRows(3, 0.82, start), Admission{AboveBandFallback: true}, start.Add(time.Duration(c)*15*time.Second))
+		r = tr.Observe("k", "v", aboveRows(0.82, start), Admission{AboveBandFallback: true}, start.Add(time.Duration(c)*15*time.Second))
 	}
 	if r.AboveBand != 3 || r.AboveBandHeld != 0 || r.Tier != "" {
 		t.Fatalf("readings at k 0.82 were kept for the fallback: %+v", r)

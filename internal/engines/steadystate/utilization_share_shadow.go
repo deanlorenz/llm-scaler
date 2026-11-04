@@ -285,7 +285,11 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		ev := allocation.EvaluateShare(allocation.ShareCapSpare(g.Roles, us.MaxHeadroomReplicas),
 			g.Committed, g.Thresholds, g.Budget, us.Tolerance)
 		var act shareActuation
-		if !us.Shadow {
+		// A group with a passive model plans in shadow: a transfer moves
+		// replicas between its models, and a passive model moves none.
+		passiveShadow := !us.Shadow && e.groupPassive(g)
+		shadow := us.Shadow || passiveShadow
+		if !shadow {
 			act = e.actuateUtilizationShare(ctx, logger, us, g, ev, scaleTargets, now)
 			e.stageShareHistory(ctx, logger, shareGroupKey(g), act.timings, now)
 			if act.evaluation != nil {
@@ -301,6 +305,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			Scope:           scope,
 			SpareGPUs:       ev.Spare,
 			ReplicasToMove:  ev.ReplicasToMove,
+			PassiveShadow:   passiveShadow,
 		}
 		var table []string
 		var actionable []string
@@ -339,7 +344,10 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		st.reportFloorHeavy(logger, shareGroupKey(g), floorExcess, g.Budget)
 		st.reportOverQuota(logger, shareGroupKey(g), g.OverQuota, g.Budget)
 		mode := "Utilization share: would rebalance (shadow)"
-		if !us.Shadow {
+		if passiveShadow {
+			mode = "Utilization share: would rebalance (shadow: the group holds a passive model)"
+		}
+		if !shadow {
 			mode = "Utilization share: rebalancing"
 			seen[shareGroupKey(g)] = true
 			if overrides == nil {

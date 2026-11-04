@@ -510,6 +510,8 @@ func buildScaledObject(namespace, name, scaleTargetName, variantName string, min
 	}
 	// After the options, so it lands on whatever triggers they left behind.
 	applyWVATriggerMetadata(so)
+	// After the metadata, so a foreign trigger does not get a modelID.
+	applyPendingTriggers(so)
 	applyExternalScalerTLS(so)
 	return so
 }

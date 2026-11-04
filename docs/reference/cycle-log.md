@@ -344,7 +344,40 @@ The throughput analyzer uses:
 | `T1-ols` | capacity from Tier-1 OLS fit (observation window ready) |
 | `T2-pinned` | capacity from Tier-2 constrained OLS with a prior fitted B |
 | `T2-default` | capacity from Tier-2 constrained OLS with the default baseline B (cold start) |
-| `T2-failed` | both tiers failed (all replicas idle or no usable ITL signal); variant skipped this cycle |
+| `T2-held` | the last fitted slope, held because the window is too short to fit a new one: the fleet sits below the band or above it, or its replicas are still settling. B is the variant's measured intercept, or the default. The hold ends when the slope is older than `LEARNED_STATE_BUCKET_RETENTION` (7 days by default), or when the variant's engine arguments change. A shape change drops it |
+| `T2-above-band` | no line from the band and no slope to hold, so the line is fitted from settled readings above the band at k of at least 0.85 (10 readings, 3 settled, as in the band), with B at the least ITL among them. This is a variant that never fitted, under load that keeps every replica above the band: a controller restart into saturation, or a variant that starts there. It errs one way only: it prices a higher ITL than the true line, so a lower per-replica capacity and more replicas. On readings of the true line it never under-provisions. Its slope is never held and its B never stored; the first fit in the band replaces it |
+| `T2-failed` | no line this cycle; the variant is skipped. The causes: fewer than 10 readings in the window, or fewer than 3 settled; every reading above the band at k under 0.85 (nothing the fallback may use); a shape change, which empties the window and drops the held slope; a controller restart, which starts with no line; or no healthy row this cycle (stale metrics, no ITL, no KV capacity, no request shape). The `throughput analyzer: ITL line` line below names which |
+
+When a variant's line goes silent (`T2-failed`) or comes back, the throughput
+analyzer logs one line at the default level. It logs only on the change, not
+every cycle:
+
+```text
+INFO  throughput analyzer: ITL line  {"namespace": "default", "modelID": "my-model", "variant": "decode",
+  "silent": true, "cause": "too-few-readings", "source": "T2-failed", "inBand": 3, "aboveBand": 0,
+  "belowBand": 0, "settling": 0, "held": 6, "aboveBandHeld": 0}
+```
+
+| Field | Meaning |
+|---|---|
+| `silent` | `true` when the line went silent, `false` when it came back |
+| `cause` | why the line is silent; empty when it came back. See the next table |
+| `source` | the `reason` of this cycle's line: `T2-failed` when silent, else the tier it came back on |
+| `inBand` | this cycle's readings inside the band |
+| `aboveBand` | this cycle's rows above the band (not counted in the band) |
+| `belowBand` | this cycle's rows below the band: replicas too lightly loaded to teach the line |
+| `settling` | this cycle's readings from replicas still settling (just joined, or load just came back) |
+| `held` | readings the band's window holds. The line needs 10, with 3 settled |
+| `aboveBandHeld` | readings the above-band window holds, at k of at least 0.85. The fallback needs 10, with 3 settled |
+
+| `cause` | Meaning |
+|---|---|
+| `no-healthy-rows` | no row of the variant was healthy this cycle, so nothing was read. Every count is 0 |
+| `fit-declined` | the window had enough readings, but they gave no usable slope (flat or falling) |
+| `shape-change` | the request shape changed. The window was emptied and the held slope dropped; the line waits for 10 readings at the new shape |
+| `all-above-band-below-ksat` | every row was above the band at k under 0.85. Neither the band nor the fallback may use them |
+| `restart` | the line has not been live since the controller started, or since the variant appeared |
+| `too-few-readings` | fewer than 10 readings, or fewer than 3 settled, and no slope to hold. Read `held`, `belowBand` and `settling` to see why |
 
 Other analyzers may set their own values or leave `reason` empty.
 

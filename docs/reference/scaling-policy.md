@@ -262,6 +262,177 @@ the scale-from-zero capacity check; declaring none leaves both off. (The old
 `enableLimiter` gated only the first, so a quota could be declared and never
 enforced, while scale-from-zero consulted a limiter nobody asked for.)
 
+### `passive`
+
+A passive model is observed, never scaled. The controller computes, logs and
+publishes everything for it, as it does for any model, and changes none of its
+replica counts. Use it to try the scaling manager next to what scales a model
+today, or to stop it acting on one model without removing it.
+
+```yaml
+passive: true    # or false; absent inherits
+```
+
+| layer, most specific first | where |
+| --- | --- |
+| per-model entry | an entry whose body names the model |
+| tier | the tier the variant names, else `default.defaultPolicy` |
+| `default` entry | the namespace's own `wva-scaling-policy-config` when it has one, else the controller's |
+| `WVA_PASSIVE` | `wva-manager-config`, controller-wide, read at start ([configuration](configuration.md#deployment-flags)) |
+
+The key is live. The external scaler applies an edit at KEDA's next call
+about the variant (every `pollingInterval`, and every HPA sync); the engine
+applies it at its next cycle. A switch can therefore move the count, or stop
+it, before the engine has run: the scaler logs every change it answers from,
+once (`Passive mode entered` / `left`, with `scaledObject`). `WVA_PASSIVE` is
+not live: an edit logs `restart required` and a `PassiveRestartRequired` event, and
+`make deploy-wva` restarts the controller for you. When a model's variants
+name different tiers, the model is passive if any of them is, a variant that
+names none counting as the `default` entry. A per-model `passive: false` is
+above every tier, so it wins.
+
+Passive controller, one model scaling:
+
+```yaml
+# wva-manager-config: WVA_PASSIVE: "true"
+data:
+  meta_llama-70b.prod: |
+    model_id: meta/llama-70b
+    namespace: prod
+    passive: false
+```
+
+Scaling controller, one model observed:
+
+```yaml
+data:
+  ibm_granite-13b.prod: |
+    model_id: ibm/granite-13b
+    namespace: prod
+    passive: true
+```
+
+**What KEDA is told.** It depends on the model's ScaledObject:
+
+| the ScaledObject | mode | the trigger answers | what moves the count |
+| --- | --- | --- | --- |
+| our trigger alone | `hold` | the target's live `spec.replicas`, clamped to `minReplicaCount`/`maxReplicaCount`; active when that is above 0 | you: `kubectl scale` or a manifest change sticks. See [how exact the hold is](#how-exact-the-hold-is) |
+| our trigger beside others (prometheus, cpu, ...) | `observe` | `0`, and inactive | KEDA, from the other triggers |
+| beside others, with a `scalingModifiers` formula naming our trigger | `observe-unsafe` | as `observe` | **unsupported**: the formula takes our 0 in. A warning is logged once |
+
+`hold` holds because the trigger is `AverageValue` with target 1: an answer equal
+to the current count makes the HPA keep it, through any stabilization window. A
+model at zero stays at zero until you scale it. If the count cannot be read,
+`hold` answers an error, never "active", so a failed read does not wake a model
+at zero. `observe` never wins: the HPA takes the highest proposal over its
+metrics, and KEDA activates when any trigger is active. It never answers an
+error, which would hold every scale-down; a standby replica gives the same
+answer.
+
+A model with no trigger of ours is not seen at all. To observe one that KEDA
+scales on its own triggers, add ours beside them: in `observe` it changes
+nothing.
+
+#### How exact the hold is
+
+`hold` answers the count you set; the HPA, not the controller, makes the last
+call, and in three cases it moves the count:
+
+- **A rollout at 9 or more replicas, when an HPA sync lands at exactly
+  `spec`+1 pods.** Within a 10% tolerance the HPA proposes the pods that exist
+  (`status.replicas`), not our answer. Our answer is `spec`; `spec`+1 pods is
+  inside the tolerance only at `spec` 9 or more, and then the HPA scales up by
+  one. `spec`+2 or more is outside it at any count below 18, and the HPA keeps
+  our answer.
+  - With the default `maxSurge` of 25%, the surge at 10 replicas is 3 pods:
+    `status.replicas` jumps from 10 to 13, outside the tolerance, and passes
+    through 11 only briefly on the way down. Measured on kind at 10 replicas:
+    two rollouts, no drift (10, 13, then 10 again within 9 s).
+  - `maxSurge: 1` at 9 or more replicas holds `status.replicas` at exactly
+    `spec`+1 for the whole rollout, so every sync can add a replica while it
+    lasts, each new count with a surge pod of its own. Drift is then likely.
+  - At 8 or fewer, or with `maxSurge: 0`, nothing moves.
+- **A pod that cannot be created at 11 or more replicas** (quota, no node). The
+  HPA proposes one fewer. The 300 s scale-down window holds it, so the count
+  drops only if the pod stays missing longer than the window.
+- **`spec.fallback` on the ScaledObject.** If the count cannot be read, `hold`
+  answers an error, and after `failureThreshold` errors KEDA sets
+  `fallback.replicas`. The controller warns once per held variant that has one.
+
+For a count that must not move at all, use KEDA's own
+`autoscaling.keda.sh/paused-replicas: "<n>"` on the ScaledObject: KEDA then sets
+`n`, removes the HPA, and acts on no answer.
+
+A `kubectl scale` from zero is seen within 5 s on an `external-push` trigger
+(the stream re-reads a held count it reports inactive), and at the next poll on
+an `external` one. Until then KEDA reads the model inactive, and scales it back
+to zero if its `cooldownPeriod` ends first.
+
+**What it does not do for a passive model:**
+
+- the warm pool plans no copy and no borrow for it, and does not load or wake
+  one. Returning a copy it already serves, and unloading one, still happen:
+  they give capacity back;
+- the scale-from-zero engine takes no action, so a passive model at zero is not
+  woken by queued requests;
+- a utilization-share group that holds a passive model plans in shadow: no new
+  transfer, no pod mark, no history write, and
+  `wva_utilization_share_passive_shadow` is 1. Its other models get the
+  ordinary optimizer's targets. A transfer already in flight is held for the 2
+  minutes a missing group is held, then dropped, and its pod marks removed:
+  that cleanup is the one write the share still makes;
+- no node hole is held and no borrowed Kueue capacity is drawn for its would-be
+  growth, and the Kueue release paths neither count its would-be shrink as
+  freed nor lower it for a lender or a reclaim;
+- events say `PassiveRecommendation` ("would scale from 3 to 5 replicas"),
+  never `ScaledUp`, `ScaledDown` or `ScaledToZero`;
+- the sticky scale-down hold and its carry are off: they protect a published
+  scale-down that KEDA is acting on, and nothing acts on this one.
+
+**What stays live:** `wva_desired_replicas` is what the controller would do, next
+to `wva_current_replicas`, the actual count. The analyzers, the learned state,
+the limiter and the share evaluation run as for any model.
+`wva_passive_mode{mode}` says which mode each variant is in, a passive one at
+zero replicas included ([metrics](prometheus.md#passive-mode)). The log says
+`Passive mode entered` and `Passive mode left`, with the layer that decided it
+(`source`): once from the engine, at its cycle, and once from the external
+scaler, at the KEDA call that first answers in the new mode. The cycle's
+decision line for a passive variant is `Passive: decision published, not
+applied`, and at verbosity 3 `Passive: would scale` per variant per cycle. To compare, join on
+`exported_namespace` (the workload's namespace; `namespace` is the
+controller's):
+
+```promql
+max by (exported_namespace, variant_name) (wva_desired_replicas)
+  - max by (exported_namespace, variant_name) (wva_current_replicas)
+  and on(exported_namespace, variant_name)
+  max by (exported_namespace, variant_name) (wva_passive_mode{mode=~"hold|observe|observe-unsafe"} == 1)
+```
+
+**The limiter.** The models that scale are allocated first, as if the passive
+models were absent, under either optimizer: a passive model counts against the budget
+at its real usage, which the limiter already reads, and its would-be growth
+takes nothing from a model that scales. Its would-be count is then computed from
+what is left, at the level of the pools (node fit and cohort borrowing are not
+modelled for it). Without a limiter the models do not compete, and the
+would-be counts are the ones a single pass would give. Read it as "what it would get after the models that scale".
+
+**Leaving passive** uses the HPA's own behavior, with no ramp of the
+controller's. Under the installer's ScaledObject: a scale-up applies at the
+next sync and can double every 5 s; a scale-down waits the 300 s window,
+because every recent recommendation was the held count. A model whose
+scale-to-zero retention ran out while passive parks after KEDA's
+`cooldownPeriod`.
+
+**Learning.** In `hold` the fleet never moves, so the analyzers learn at one
+replica count: a fit needs the load to vary, and no replica start is ever
+measured. In `observe` KEDA moves the fleet, and the analyzers learn from real
+changes, start times included. Nothing they learn depends on who ordered the
+change (see the [proposal](../proposals/passive-mode.md#learning)).
+
+KEDA's own `autoscaling.keda.sh/paused` is reported in the log, not acted on:
+while it is set, KEDA acts on no answer at all.
+
 ### `limiters` (cluster-default only, live)
 
 The `default` entry selects the GPU limiter. It is the **only source** (no
