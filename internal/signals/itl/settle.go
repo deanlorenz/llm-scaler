@@ -130,8 +130,11 @@ func (a Admission) forgetAfter() time.Duration {
 // a replica whose settle began long before a key made anew (an operator's
 // forget, new engine arguments) does not wait again. A start the key read
 // later is a settle whatever waits says.
+//
+// restartOnly reports that the settle is that wait alone: a start read on
+// the key's first Observe, made a settle by waits.
 func (rt *replicaTrace) settlingOnTracker(adm Admission, rm domain.ReplicaMetrics, keyFirst time.Time,
-	now time.Time, s Steadiness) bool {
+	now time.Time, s Steadiness) (settling, restartOnly bool) {
 	start := adm.Settle.start(rm, adm, s.IdleRows, rt.idleReturn)
 	waits := adm.WaitsAfterRestart
 	// Only forward: a start that moves back is an event the tracker no
@@ -141,7 +144,32 @@ func (rt *replicaTrace) settlingOnTracker(adm Admission, rm domain.ReplicaMetric
 		rt.settleStart, rt.settleSeen = start, now
 	}
 	if rt.settleSeen.After(keyFirst) {
-		return now.Sub(rt.settleSeen) < s.For
+		return now.Sub(rt.settleSeen) < s.For, false
 	}
-	return waits && !rt.settleStart.IsZero() && now.Sub(rt.settleStart) < s.For
+	settling = waits && !rt.settleStart.IsZero() && now.Sub(rt.settleStart) < s.For
+	return settling, settling
+}
+
+// aboveBandSettling is the settle stamp of a reading the above-band window
+// keeps (Admission.AboveBandFallback): the band's stamp, settling, without
+// the wait after a controller restart (restartOnly, Admission.WaitsAfterRestart).
+// The fallback pins B at the least ITL among its readings and prices at a k
+// of at least DefaultKSat, so it is one-sided (fitAboveBand): a warm-up
+// reading of a replica that was serving before the restart sits above the
+// true line and can only raise the price. Waiting steadyFor for it after a
+// restart bought nothing and kept the line silent under need. A replica that
+// became Ready less than steadyFor ago is still kept out (justReady): a
+// joiner keeps its stamp.
+func aboveBandSettling(settling, restartOnly bool, rm domain.ReplicaMetrics, now time.Time, s Steadiness) bool {
+	if restartOnly {
+		return justReady(rm, now, s)
+	}
+	return settling
+}
+
+// justReady reports whether the replica of rm became Ready less than s.For
+// before now, by its Pod's Ready time: a joiner, whose ITL still covers its
+// warm-up. An unknown Ready time is not one.
+func justReady(rm domain.ReplicaMetrics, now time.Time, s Steadiness) bool {
+	return !rm.ReadySince.IsZero() && now.Sub(rm.ReadySince) < s.For
 }

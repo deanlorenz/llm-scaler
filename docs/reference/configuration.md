@@ -886,6 +886,9 @@ analyzer's) does not refit for
 - **The slo analyzer** has no learned-state restore. Its line waits after
   every restart, with the snapshot on or off; its figures are published as
   no line until it refits. It does not size the fleet.
+- **The throughput analyzer** has no learned-state restore either. Its ITL
+  line waits after every restart too, and the analyzer is silent until the
+  line refits: see [the throughput analyzer's line](#the-throughput-analyzers-line).
 
 What is restored, and what is not:
 
@@ -1086,7 +1089,28 @@ and [troubleshooting](troubleshooting.md#symptom-index).
   slope. It comes back once its window holds 10
   readings, 3 of them settled: about 4 cycles with 3 replicas inside the
   band, 10 cycles with one. Replicas below the band add no readings, so a
-  lightly loaded fleet stays silent longer.
+  lightly loaded fleet stays silent longer. After a controller restart or
+  leader change every replica first waits its settle,
+  [`steadyGate.steadyFor`](scaling-policy.md#analyzertuningsteadygate-which-itl-readings-teach-the-line)
+  (2 minutes by default), as for the saturation and slo lines: none of its
+  readings in the band counts as settled until then, so the line comes
+  back no sooner than `steadyFor`, and then once the window holds 10
+  readings, 3 of them settled. Measured in simulation at 15 s cycles with
+  `steadyFor` at 2 minutes: with 3 or 4 replicas in the band, silent for 2
+  to 2.5 minutes (8 to 10 cycles); with one, 2.5 minutes (10 cycles). It
+  grows with `steadyFor`, and with fewer replicas once 10 readings take
+  longer than `steadyFor` to arrive. The above-band line (below) does not
+  wait: with 4 replicas all above the band it came back after 45 seconds
+  (3 cycles). A pod that became Ready less than `steadyFor` before the
+  restart still waits on either line.
+- **With `throughput` listed alone, nothing sizes the role while the line
+  is silent.** For that silence after a restart (2 to 2.5 minutes at the
+  defaults above, longer with a longer `steadyFor`) the role is held where
+  it is. A role under need stays under need until the line is back, and
+  only then does it order the pods it needs, which still have to start.
+  Whole-node pods that take minutes to start add that start to the time
+  under need. With `saturation` listed too, saturation sizes the role
+  during the silence.
 - **A variant that starts above the band is priced from above it.** With no
   line from the band and no slope to hold, the line is fitted from readings
   at k of at least 0.85 (`T2-above-band`). It errs one way only: it prices a

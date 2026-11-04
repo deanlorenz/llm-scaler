@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
 )
 
 // aboveRows is three Ready replicas of variant v, Ready since an hour before
@@ -70,6 +72,46 @@ func TestTracker_AboveBandFallbackFitsAKeyThatNeverFitted(t *testing.T) {
 	}
 	if r.AboveBandFit || r.Tier != TierPinnedB {
 		t.Fatalf("the band's readings did not replace the fallback: %+v", r)
+	}
+}
+
+// The above-band window does not wait after a controller restart
+// (aboveBandSettling): with WaitsAfterRestart, the fallback still prices on
+// the tenth reading, cycle 3, on the key's own trace and on the settle
+// tracker. A replica that became Ready less than steadyFor ago is still kept
+// out by its Ready time: Ready 15 s before the restart, its readings settle
+// until cycle 7, and the fallback prices there.
+func TestTracker_AboveBandFallbackDoesNotWaitAfterARestart(t *testing.T) {
+	start := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	const cycle = 15 * time.Second
+	first := func(tracked bool, ready time.Time) int {
+		tr := NewTracker()
+		st := settle.NewTracker()
+		st.SetInterval(cycle)
+		adm := Admission{AboveBandFallback: true, WaitsAfterRestart: true}
+		if tracked {
+			adm.Settle = &Settle{View: st, Model: "ns/m"}
+		}
+		for c := range 16 {
+			now := start.Add(time.Duration(c) * cycle)
+			rows := aboveRows(0.90, start)
+			for i := range rows {
+				rows[i].ReadySince = ready
+			}
+			st.Observe("ns/m", settlerow.Of(rows, nil), now)
+			if tr.Observe("k", "v", rows, adm, now).Tier != "" {
+				return c
+			}
+		}
+		return -1
+	}
+	for _, tracked := range []bool{false, true} {
+		if got := first(tracked, start.Add(-time.Hour)); got != 3 {
+			t.Errorf("tracked %v: the fallback's first line on cycle %d, want 3: it waited the restart", tracked, got)
+		}
+		if got := first(tracked, start.Add(-cycle)); got != 7 {
+			t.Errorf("tracked %v: replicas Ready 15 s before the restart: the fallback's first line on cycle %d, want 7", tracked, got)
+		}
 	}
 }
 

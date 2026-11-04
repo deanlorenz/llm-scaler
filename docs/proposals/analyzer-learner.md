@@ -1865,6 +1865,176 @@ The recipe keeps its step 4 grep: the recording is taken on 4b-0, where the
 clear still runs, and its count of clears is the evidence above, measured
 on the line itself.
 
+#### 4b-2 as built
+
+Status: built on `feat/learner-4b2`, on main after 4b-1 merged (#456,
+1c9a34fe8). The line reads each replica's settle from the engine's
+settle tracker (`T/settle.go`), which 4b-0 wired (`WithSettleView`) and
+4b-1 withheld. An analyzer given no view -- a test that drives `Analyze`
+alone, a replay of a recording with no `start.ThroughputConfig` -- observes
+a tracker of its own, as the slo analyzer does, and stands for a controller
+that has watched the fleet: nothing waits after a restart.
+
+**The switches, split as 4a split them.** The table above names one switch
+for the move, with "restart under its name, idle on evidence, the absence
+tolerance, the Finite pod mean" inside it. Each of those moves the fleet on
+its own, and 4a's review split them out for the saturation and slo lines
+(`itl-restart-under-its-name-settles` and `itl-idle-needs-evidence` in
+9b52db281). 4b-2 takes the same six, prefixed `throughput-`:
+
+| switch | changes against 4b-1's own trace | which way the fleet can move |
+| --- | --- | --- |
+| `throughput-itl-reads-the-settle-tracker` | the settle start is the tracker's: joined, back past the tolerance (`settle.Rejoined`), lent, a new revision under the same name (`settle.RolledOut`), Ready again after a not-Ready row. Its own differences: a gap between two of the model's cycles past the tolerance (a paused controller, a clock jump) settles every replica, and a rollout that keeps the Pod's name settles; the own trace saw neither | fewer readings after a gap or an in-place rollout: **silent more often** (the risky side, 4.4), and a rollout's warm-up kept out: **down** |
+| `throughput-itl-waits-after-controller-restart` | the engine's tracker is new with the controller and reads every replica on its first cycle as `settle.Joined`; on, those replicas wait `steadyFor` from that sight. Off, as 4b-1, they are taken as settled. Only with an engine view and on the tracker (the move on): the analyzer alone never waits, nor does the line's own trace. The above-band fallback's readings do not wait (round-1 review, below) | **silent** for `steadyFor` plus the ten readings in the band (cycle 8 on a three-replica variant at 15 s); a joiner whose warm-up straddles the restart is kept out: **down** against the parent's over-order |
+| `throughput-itl-keeps-the-settle-through-a-missing-row` | one missing row keeps the settle up to the tolerance (2.5 intervals, at least 1 min). Off, as 4b-1, the replica starts over | more readings, **live more often**; a replica restarted inside the tolerance with nothing to show it (no not-Ready row, no new Ready time) is admitted while warm: **up**, the cost side |
+| `throughput-itl-restart-under-its-name-settles` | a new Ready time under the same name settles. Off, only a not-Ready row shows the restart | a fast restart's warm-up kept out of A: **down** (the parent over-orders) |
+| `throughput-itl-idle-needs-evidence` | idle only on evidence (KV known 0, and ITL known-empty or generation rate known 0; prefill by its request rate). Off, a row with neither ITL nor k is idle | a failed scrape no longer settles a busy replica: **live more often**; an idle replica whose gauges are unknown is not idle, so its return's warm-up is admitted: **up** |
+| `throughput-itl-reads-the-finite-pod-mean` | a Pod with an Absent rank is no reading. Off, its Finite ranks' mean was one | fewer readings: **silent more often** on a fleet of such pods; and **either way** on the line: the pod's fill counts the Absent rank and its ITL does not, so the reading sat left of its line (an idle rank, A too steep, over-order) or right of it (a busy rank, A too flat, under-order) |
+
+**A lend moves nothing on this line.** A warm-pool lend is a new key on the
+tracker (`settle.Lent`), but the analyzer drops lent rows before the line
+(`ownReplicasOnly`) and `itl.Tracker` refuses a `FromWarmPool` row, on either
+path (`TestITLSettle_ALentPodIsNoReadingOnEitherPath`). **A rejoin** past
+the tolerance settles on either path, as 4b-1's own trace with the absence
+rule did (`TestITLSettle_AnAbsencePastTheToleranceStartsTheSettleAgain`);
+the move's only rejoin of its own is the gap between cycles above.
+
+**`throughput-itl-waits-after-controller-restart` is 4b-2's**, as the Order
+table has it, not later: it is defined against the engine's view, which
+4b-2 is the first to read, and with the view and the move on, leaving it
+off would read a controller restart as a fleet that was watched.
+
+Negative controls, each through `Analyze` on the engine's rig
+(`T/settle_test.go`), run against 4b-1's tip with the switch names shimmed:
+the restart, settling cycles `nil` against `[0..7]`; one missing row,
+`[11..18]` against `[0..7]`; a new Ready time under the name, `nil` against
+`[0..7, 10..17]`; a new revision under the name, the same; a 3 min gap
+between cycles, the same; a scrape that read nothing, `[12..19]` against
+`[0..7]`; a Pod with an Absent rank, 3 readings offered against 2. Each test
+also runs its switch off on this tree and asserts the parent's result.
+
+Property cases (`T/property_settle_test.go`, on the engine's rig, a new
+tracker per controller): `transient/throughput-itl/controller-restart-with-a-joiner`
+(a replica joins two cycles before a controller restart, its warm-up lasting
+six cycles) fails on 100 of 100 seeds with the wait off and on 4b-1's tip
+(seed 1: priced 0.2698 s against 0.0564 s, 378.6 %), and passes with it on;
+`joiner-warm-up-on-the-engine-tracker` and
+`missed-row-on-the-engine-tracker` pass on either path and are guards.
+
+Closed-loop probe (`TestThroughputProbe_AControllerRestartOnTheEngineTrackerWaitsItsSettle`),
+the restart case of 4b-1 on the engine's rig, need 9: a step 2 min after
+the restart, final 10, under need for 30 s, silent 10 cycles (2.5 min)
+from the restart on, against final 9, 0 s and 2 cycles with the wait off;
+a step 15 s after, which pushes every replica above the band inside the
+wait, final 10, under need for 30 s, silent 3 cycles (45 s), the same as
+with the wait off. Both inside the probe's 5 min, on the SLO side as 4.4
+says. Before the round-1 review the 15 s case was under need for 1m45s and
+silent 8 cycles (2 min): the restart wait held the above-band fallback too.
+
+**Goldens.** No committed recording gives the throughput analyzer the
+engine's view (the in-process three predate `ThroughputConfig`), so the
+restart wait moves none until `throughput-sweep-restart` lands, and is held
+by its unit tests (`heldBy`). Measured after the round-1 review, each alone
+against all off from main's goldens: none of the six moves a golden, and
+all on reproduces main's goldens byte for byte, so each is held by its unit
+tests. Before the review the move moved `acceptance/variant-capacities.csv`
+(3 of 149 rows changed bytes) and `engine/variant-capacities.csv` (2 of
+139, where this section said 1): on the cycles
+after a clock jump past an hour, model-01, the first model analyzed, read
+the gap on the analyzer's own tracker as an absence (`settle.Rejoined`) and
+held its slope (`T2-held`) where the key's own trace refitted (`T1-ols`).
+That was the eviction order, not the move (S3 below). The acceptance
+fixture no longer reaches the held slope, which the engine fixture alone
+reaches, as in 4b-1. The engine's own recording test
+(`steadystate/learner_recording_test.go`), whose throughput analyzer has the
+engine's view, prices 8 variants where 4b-1 priced 21: the band's line waits
+after the controller start and after each day the clock jumps, as the slo
+line does, and the 4 of the 8 that are pd-d's are priced from above the
+band (`T2-above-band`) inside that wait. Before the review it priced 4.
+
+**Round-1 review.**
+
+- **S1: the above-band fallback does not wait after a restart.**
+  Decision: the restart wait stamps only the band's readings. A reading
+  the above-band window keeps is stamped as settling only for a settle that
+  is not the restart's (`itl`'s `aboveBandSettling`): a joiner, a return
+  after idling, or a replica that became Ready less than `steadyFor` before
+  the cycle, by its Pod's Ready time, so a pod that just became Ready is
+  still kept out. Why: the fallback pins B at the least ITL among its
+  readings and prices at a k of at least 0.85, so it never prices a higher
+  mu than the truth (4b-1 as built); a warm-up reading of a replica that was
+  serving before the restart sits above the line and can only raise its
+  price. Waiting `steadyFor` for it bought nothing and kept the line silent
+  under need. Measured on the probe above, 15 s case: under need 1m45s and
+  silent 8 cycles with the stamp, 30 s and 3 cycles without. Negative
+  control: with the stamp put back, the probe returns to 1m45s and fails.
+  The property case `known-truth/throughput-itl/above-band-fallback` (no
+  engine view) still holds on 100 of 100 seeds; a new engine-rig case,
+  `known-truth/throughput-itl/above-band-fallback-after-a-restart`, runs the
+  same fleet from a restart, its first two cycles 30 % over the line, and
+  holds the one-sided margin on 100 of 100 seeds with the fallback pricing
+  inside the wait. With the stamp put back it fails on 100 of 100 (the
+  fallback first prices on cycle 8). `itl`'s
+  `TestTracker_AboveBandFallbackDoesNotWaitAfterARestart` holds both sides:
+  cycle 3 with the replicas Ready an hour before, cycle 7 with them Ready
+  15 s before the restart, on the key's own trace and on the tracker.
+- **S3: the analyzer's own tracker after a long gap.** The own tracker
+  forgets a model not analyzed for `ownSettleTimeout` (1 h), inside
+  `observe`, after the model analyzed first that cycle has observed. So
+  after a gap past an hour that model read the gap as an absence and
+  settled, and every later model, evicted meanwhile, was first-seen and
+  did not: the result depended on the order. `observeOwnSettle` now makes a
+  model last seen more than `ownSettleTimeout` ago first-seen whatever the
+  order: it forgets the model's observations, observes it backdated, and
+  drops its line keys' replica traces (`itl.Tracker.ForgetTraces`), keeping
+  their windows and held slope, as the eviction keeps them for that model.
+  Part of the move: off, the line reads no tracker. Test:
+  `TestITLSettle_AfterALongGapTheAnalyzerAloneSettlesEveryModelAlike`, two
+  identical models and a 2 h gap; before the fix the first settled on
+  cycles 8 to 15 (`pinned-B` for 11 cycles) and the second never. A no-op
+  `observeOwnSettle` fails it and four other `TestITLSettle_` tests. The
+  goldens came back to main's (above).
+- **The slo analyzer has the same logic, not fixed here** (`slo/settle.go`:
+  first-seen only on a model's first sight, forgotten after `stateTimeout`).
+  Its eviction runs only from `EvictStale`, which the engine and the replay
+  call at the top of the cycle, so there every model reads a long gap
+  alike. A caller that never calls it, or calls it between two models'
+  `Analyze` calls, gets the order or the gap read as an absence. Its
+  switches and goldens are 4a's, so a follow-up issue carries it: make a
+  model last seen past the timeout first-seen in its `observeOwnSettle`, as
+  here.
+- **N1: the restart wait reads the tracker only.** `WaitsAfterRestart` was
+  set with an engine view whatever the move said, and on the key's own
+  trace it made every replica of a key made anew wait `steadyFor`, not only
+  a controller restart. It is now set only with the move on
+  (`throughput.settleAdmission`). Four `TestITLSettle_` tests whose switch-off
+  runs read the own trace now expect no restart settle there, and
+  `TestITLSettle_TheOwnTraceDoesNotWaitAfterARestart` fails with the old
+  setting. The saturation and slo analyzers set it as before.
+- **N2:** `WithOptimizationInterval` sets the interval of the analyzer's own
+  tracker too, so its absence tolerance follows the controller's interval.
+
+**Round-2 review.** The own-tracker path after a long gap now treats a
+model the tracker does not hold (never seen, or evicted inside another
+model's `observe`) the same as a stale one, and forgets the traces of
+every line key of the model by prefix, absent variants included, all under
+`a.mu` and all behind `throughput-itl-reads-the-settle-tracker`. The order
+and absent-variant tests are guards: the round-1 code also passed them,
+because `observe` evicts a variant state at the same timeout and the line's
+keys with it; the new path does not rest on the two timeouts staying equal.
+Mutants killed: the stale path with the switch off
+(`TestITLSettle_AfterALongGapWithTheMoveOffTheOwnTraceIsKept`, an idle run
+before the gap that 4b-1's own trace keeps), the eviction keeping the
+model on the tracker or keeping its stamp
+(`TestITLSettle_TheEvictionForgetsAModelOnTheOwnTracker`), and no
+`ForgetTraces` (four tests). The probe figures the reference pages quote
+are pinned exactly, the control included (`itl.Admission.AboveBandWaitsAfterRestart`,
+set only by negative controls): in the band, 30 s under need and 10 silent
+cycles; above it, 30 s and 3; the stamp put back, 1m45s and 8. On the
+settle rig, three steady replicas price first on cycle 8 after a restart
+and one replica on cycle 10, not 8 + 10: readings taken during the settle
+count towards the ten, and only three must be settled.
+
 ## 8. Risks and limits
 
 - **One shared bug.** A defect in the settle tracker reaches every learner at

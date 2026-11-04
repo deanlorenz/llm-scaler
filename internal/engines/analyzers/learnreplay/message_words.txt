@@ -2265,11 +2265,17 @@ throughput-demand-floor
 throughput-demand-floor-total
 throughput-itl-above-band
 throughput-itl-held
+throughput-itl-idle-needs-evidence
+throughput-itl-keeps-the-settle-through-a-missing-row
 throughput-itl-keeps-the-window-on-gps-mismatch
 throughput-itl-ols
 throughput-itl-pinned
+throughput-itl-reads-the-finite-pod-mean
+throughput-itl-reads-the-settle-tracker
+throughput-itl-restart-under-its-name-settles
 throughput-itl-settling
 throughput-itl-steady-gate
+throughput-itl-waits-after-controller-restart
 throughput.Analyze
 throughput.Observe
 throughputHeld

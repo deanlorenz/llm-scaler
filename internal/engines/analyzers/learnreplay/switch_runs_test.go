@@ -79,13 +79,45 @@ import (
 // as the base goldens were written (analyzer-learner.md, 2.5).
 //
 // Since learner PR 4b-1 the rows above (#275's two switches, #438's) are
-// earlier seams (earlierSeams), and this PR's are the throughput analyzer's
-// two: its ITL line on the shared tracker (throughput.SwitchITLSteadyGate)
-// and the GPS-mismatch clear dropped
-// (throughput.SwitchITLKeepsWindowOnGPSMismatch). Its base is f7b4f7e47
-// (4b-0). The fixtures that run the throughput analyzer are the in-process
-// three (acceptance, engine, mu-paths); no cluster recording does yet.
-// Measured, each alone against all off:
+// earlier seams (earlierSeams); 4b-1's own two are learner4b1Seams.
+//
+// Since learner PR 4b-2 this PR's are the throughput analyzer's ITL line on
+// the engine's settle tracker, six switches, as learner PR 4a split the
+// saturation and slo lines' (throughput/settle.go). Its base is main after
+// 4b-1 merged (1c9a34fe8, #456), whose goldens are 4b-1's all-on run. The
+// fixtures that run the throughput analyzer are the in-process three
+// (acceptance, engine, mu-paths), and none was recorded with the analyzer
+// given the engine's view (start.ThroughputConfig is absent): the replay
+// builds it with none, and its line reads the tracker the analyzer observes
+// itself. Measured, each alone against all off:
+//
+//   - SwitchITLReadsSettle moves nothing. The PR first measured it moving
+//     acceptance/variant-capacities.csv and engine/variant-capacities.csv
+//     (3 and 2 rows changed bytes):
+//     after a clock jump past an hour, the analyzer's own tracker read the
+//     gap as an absence (settle.Rejoined) for model-01, the first model
+//     analyzed, and its line settled, while every later model, evicted
+//     meanwhile, was first-seen and did not. Its review made a model the
+//     own tracker has not seen for ownSettleTimeout first-seen whatever the
+//     order (throughput/settle.go, observeOwnSettle), and the goldens came
+//     back byte for byte to main's. Its unit tests hold it.
+//   - SwitchITLWaitsAfterRestart moves nothing: an analyzer with no engine
+//     view never waits. It moves the throughput-sweep-restart recording when
+//     that lands (recorded on 4b-0, with the view). Its unit tests hold it.
+//   - The other four move nothing, as their 4a twins moved nothing; their
+//     unit tests hold them.
+var replaySwitches = map[string][]string{
+	throughput.SwitchITLReadsSettle:                  nil,
+	throughput.SwitchITLWaitsAfterRestart:            nil,
+	throughput.SwitchITLKeepsSettleThroughMissingRow: nil,
+	throughput.SwitchITLRestartUnderName:             nil,
+	throughput.SwitchITLIdleOnEvidence:               nil,
+	throughput.SwitchITLReadsFinitePodMean:           nil,
+}
+
+// learner4b1Seams is learner PR 4b-1's switches, earlier seams now (merged
+// into earlierSeams), with the outputs 4b-1 measured each to move, each
+// alone against all off from f7b4f7e47 (4b-0):
 //
 //   - The steady gate moves the throughput rows of results.csv and
 //     variant-capacities.csv in all three, and, through the composite, the
@@ -96,7 +128,7 @@ import (
 //   - The GPS-mismatch switch alone moves the throughput rows of
 //     variant-capacities.csv in all three: the in-process rows trip the check,
 //     and kept, the window reaches a full fit where the clear had emptied it.
-var replaySwitches = map[string][]string{
+var learner4b1Seams = map[string][]string{
 	throughput.SwitchITLSteadyGate: {
 		"acceptance/results.csv", "acceptance/variant-capacities.csv",
 		"engine/composite-holds.csv", "engine/composite-release.csv", "engine/composite-variants.csv",
@@ -169,8 +201,8 @@ func switchPackage(name string) string {
 // stays on, at its constructor default, in this PR's runs; off alone, from
 // all on, it may move only what it named. A seam's row goes with the seam,
 // in the PR, or cleanup PR, that deletes it with zero golden diff. Learner
-// PR 4a's rows are learner4aSeams, merged in.
-var earlierSeams = withSeams(learner4aSeams, map[string][]string{
+// PR 4a's rows are learner4aSeams, and 4b-1's learner4b1Seams, merged in.
+var earlierSeams = withSeams(learner4b1Seams, withSeams(learner4aSeams, map[string][]string{
 	// #275 (two switches) and #438, this file's own rows before learner PR
 	// 4b-1 (see replaySwitches).
 	saturation.SwitchZeroReplicaDataParallel: nil,
@@ -253,7 +285,7 @@ var earlierSeams = withSeams(learner4aSeams, map[string][]string{
 		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
 		"engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
 	},
-})
+}))
 
 // withSeams is rows with more's rows added; a name in both is a row given
 // twice, and panics.
@@ -298,6 +330,32 @@ var heldBy = map[string][]heldTest{
 		{"../slo", "TestForget_TheAnnotationForgetsTheLine"},
 		{"../slo", "TestForget_DropsTheAcceleratorMemo"},
 		{"../slo", "TestForget_ReportsEachForgottenKey"},
+	},
+	// Learner PR 4b-2's throughput line on the engine's settle tracker: each
+	// test runs the switch on and off through Analyze on the engine's rig.
+	// The move names no output; its tests hold its two own rules directly
+	// (a rollout under the same name, a gap between cycles).
+	throughput.SwitchITLReadsSettle: {
+		{"../throughput", "TestITLSettle_ANewRevisionUnderTheSameNameStartsTheSettle"},
+		{"../throughput", "TestITLSettle_AGapBetweenCyclesPastTheToleranceSettlesAgain"},
+	},
+	throughput.SwitchITLWaitsAfterRestart: {
+		{"../throughput", "TestITLSettle_AControllerRestartWaitsTheSettle"},
+		{"../throughput", "TestITLSettle_AfterAControllerRestartTheLineIsSilentForTheSettle"},
+		{"../throughput", "TestThroughputPropertySettleMutants"},
+		{"../throughput", "TestThroughputProbe_AControllerRestartOnTheEngineTrackerWaitsItsSettle"},
+	},
+	throughput.SwitchITLKeepsSettleThroughMissingRow: {
+		{"../throughput", "TestITLSettle_OneMissingRowKeepsTheSettle"},
+	},
+	throughput.SwitchITLRestartUnderName: {
+		{"../throughput", "TestITLSettle_ANewReadyTimeUnderTheSameNameStartsTheSettle"},
+	},
+	throughput.SwitchITLIdleOnEvidence: {
+		{"../throughput", "TestITLSettle_AScrapeThatReadNothingIsNotIdle"},
+	},
+	throughput.SwitchITLReadsFinitePodMean: {
+		{"../throughput", "TestITLSettle_APodWithAnAbsentRankIsNoReading"},
 	},
 	saturation.SwitchITLKeepsSettleThroughMissingRow: {
 		{"../saturation", "TestITLSettle_OneMissingRowKeepsTheSettle"},
@@ -479,17 +537,19 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch of this PR names, as the
-// base commit's goldens hold it (f7b4f7e47, learner PR 4b-0).
+// base commit's goldens hold it (main at 1c9a34fe8, learner PR 4b-1 merged). It also
+// holds the base digests of the outputs a 4b-2 switch could move that the
+// expectation does not name, so the measured rows need no new lookup.
 var switchBase = map[string]string{
-	"acceptance/results.csv":            "948487bf37d359a8bd3d7967fa4394a2558409844030ab153ea661132e535915",
-	"acceptance/variant-capacities.csv": "b4932d51ae2e081430e2161eb6f3c3bdd9a839f84ad77f035fc4ad47ce325346",
-	"engine/composite-holds.csv":        "c26c788b73e0a292e70789ed60520fd9c83254c0dc3c294f29283c297d518dc7",
-	"engine/composite-release.csv":      "4fc0b13906d8d1fdb039493b3cc6182cb7cce1b3af61bdfb2975d8b23e9a6fe5",
-	"engine/composite-variants.csv":     "43bb85189c577d3c09508de664d37c55c5302fa22cb41f03f1d581722b3f078f",
-	"engine/results.csv":                "61718c5eee24d49ae90051c0c42ba862587dc9ee2436e04f467593bc1d1455f4",
-	"engine/variant-capacities.csv":     "c97cb118dda1a6abb54296e45650437cb7f8d86e78970645e5116362547a0f05",
-	"mu-paths/results.csv":              "f87ec1d3d61babdba014fc786e2a4e52e2b947bcdce15ab6f20cdcfa619c450b",
-	"mu-paths/variant-capacities.csv":   "62b4c7881d656e45126691ef86e4af91e35925a7e361c69b02076f008a48ec94",
+	"acceptance/results.csv":            "7aef7e7391f761fe984f89720d61b0583048b330989c449098dce8ec2d285981",
+	"acceptance/variant-capacities.csv": "47ad82ad3c017924b6cc5398d9578ddd28ab95fdc547adcec6decb69abcc91b3",
+	"engine/composite-holds.csv":        "ce02c822639f90959858c2ddc1e4681dc5b65d281a13d033520cfaa9945d3e0c",
+	"engine/composite-release.csv":      "f796638c7d8c1f0544cd3ab0d9850a206a470b166cad3b2318ea323f4ed03eaf",
+	"engine/composite-variants.csv":     "9cb3149dc328096552a9b5aa640ffb2195e92f562e73266d5d89e92fd9e09828",
+	"engine/results.csv":                "fdef165cd21f47deb81d73870af4953c05d9c303180975e713e39e4a138845e9",
+	"engine/variant-capacities.csv":     "bded174c24f569874299866fb541e7f4ac4cc72294adbaf8e626f1e9ea06712f",
+	"mu-paths/results.csv":              "83fca27f185344e2784706b0b6ae2e3ea8fe0ae70ecabe332862f04f4f4e951c",
+	"mu-paths/variant-capacities.csv":   "dd5b3186f6fe513520ba6e0309d88520e668d60f84003326f57bd7dee0ca0275",
 }
 
 // The slow tests of this package run in parallel with each other (each

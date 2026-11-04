@@ -14,6 +14,8 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/internal/learnertest"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
 )
 
 // The closed-loop probe (analyzer-learner.md, 2.5; PR 4b, "Tests") for the
@@ -74,7 +76,7 @@ func probeRow(pod string, k, itlSec float64, readySince time.Time, served float6
 	return domain.ReplicaMetrics{
 		PodName: pod, VariantName: "v1", Ready: true, ReadySince: readySince,
 		KvCacheUsage: k, KvUsageInstant: k, TotalKvCapacityTokens: probeC,
-		AvgInputTokens: probeIL, AvgOutputTokens: probeOL, AvgITL: itlSec,
+		AvgInputTokens: probeIL, AvgOutputTokens: probeOL, AvgITL: itlSec, AvgITLKnown: itlSec > 0,
 		RequestRate: served, GenerationTokenRate: served * probeOL, QueueLength: queue,
 	}
 }
@@ -88,6 +90,10 @@ type probeCase struct {
 	// restartAt, when set, restarts the controller then: a new analyzer
 	// with nothing learned.
 	restartAt time.Duration
+	// engine runs the analyzer as the engine does, with a settle tracker
+	// observed before every cycle and new with each controller
+	// (WithSettleView); unset, the analyzer observes its own.
+	engine bool
 	// noise is the ITL gauge's relative noise.
 	noise float64
 }
@@ -96,6 +102,9 @@ type probeCase struct {
 type probeResult struct {
 	learnertest.Result
 	reasons map[string]int
+	// silentAfterRestart is how many cycles from the restart on the line
+	// was silent (itlReasonT2Failed).
+	silentAfterRestart int
 }
 
 // runProbe drives pc with the analyzer newA builds (again at a restart).
@@ -105,7 +114,16 @@ func runProbe(t *testing.T, pc probeCase, newA func() *ThroughputAnalyzer) probe
 	perReplica := probeTokens(itl.DefaultKSat, kvReq) // tokens/s at the pricing fill
 	mu := probeTokens(probeKMax, kvReq) / probeOL     // requests/s at the limit
 	clock := clocktesting.NewFakePassiveClock(learnertest.Start)
-	build := func() *ThroughputAnalyzer { return newA().WithClock(clock).WithSlopeHoldFor(time.Hour) }
+	var tracker *settle.Tracker
+	build := func() *ThroughputAnalyzer {
+		a := newA().WithClock(clock).WithSlopeHoldFor(time.Hour)
+		if pc.engine {
+			tracker = settle.NewTracker()
+			tracker.SetInterval(learnertest.Cycle)
+			a = a.WithSettleView(tracker).WithOptimizationInterval(learnertest.Cycle)
+		}
+		return a
+	}
 	a := build()
 	pods := make([]float64, pc.start)
 	for i := range pods {
@@ -139,6 +157,9 @@ func runProbe(t *testing.T, pc probeCase, newA func() *ThroughputAnalyzer) probe
 			}
 			rows = append(rows, probeRow(r.Name, k, lat, r.ReadyAt, r.Served, int(math.Round(r.Backlog))))
 		}
+		if tracker != nil {
+			tracker.Observe("ns/m", settlerow.Of(rows, nil), now)
+		}
 		out, err := a.Analyze(context.Background(), domain.AnalyzerInput{ModelID: "m", Namespace: "ns",
 			ReplicaMetrics: rows, ArrivalRate: lambda,
 			VariantStates: []domain.VariantReplicaState{{VariantName: "v1", CurrentReplicas: len(rows), GPUsPerReplica: 1}}})
@@ -151,14 +172,17 @@ func runProbe(t *testing.T, pc probeCase, newA func() *ThroughputAnalyzer) probe
 			return learnertest.Ceil(out.TotalDemand / vc.PerReplicaCapacity)
 		}
 		res.reasons[itlReasonT2Failed]++
+		if restarted {
+			res.silentAfterRestart++
+		}
 		return learnertest.Hold
 	})
 	return res
 }
 
 func (r probeResult) String() string {
-	return fmt.Sprintf("need %d, final %d, peak %d, under need for %s; reasons %v; verdict %q",
-		r.Need, r.Final, r.Peak, r.UnderFor, r.reasons, r.Verdict())
+	return fmt.Sprintf("need %d, final %d, peak %d, under need for %s; reasons %v; silent %d cycles after the restart; verdict %q",
+		r.Need, r.Final, r.Peak, r.UnderFor, r.reasons, r.silentAfterRestart, r.Verdict())
 }
 
 // stepAt is an arrival rate of from until at, then to.
@@ -314,4 +338,62 @@ func TestThroughputProbe_AReplicaAtItsCapWithSiblingsBelowTheBandPricesFromAbove
 	require.Equal(t, 9, on[itlReasonT2Failed], "silent until the capped replica's tenth reading")
 	require.Equal(t, 31, on[itlReasonT2AboveBand], "the above-band fallback prices the variant after it")
 	require.Positive(t, parent[itlReasonT2Default], "the parent prices from the below-band rows' tier-2 fit")
+}
+
+// A controller restart on the engine's settle tracker (learner PR 4b-2,
+// SwitchITLWaitsAfterRestart): the restarted engine's tracker sees every
+// replica first on its first cycle, and the line waits the settle from it,
+// so the band's line waits steadyFor and its ten readings after the
+// restart. The above-band fallback does not wait (itl's aboveBandSettling):
+// it is one-sided, and a warm-up reading can only raise its price. Run 2 min
+// and 15 s before a load step, with the wait and without it (the negative
+// control: the line 4b-1 built).
+//
+// Measured: a step 2 min after the restart, need 9, final 10, peak 10,
+// under need for 30s, silent 10 cycles (2.5 min) from the restart on,
+// against final 9, 0s and 2 cycles taken as settled: the step lands after
+// the wait, in the band, and the wait is the SLO side (4.4), inside
+// learnertest.UnderFor. A step 15 s after it pushes every replica above the
+// band inside the wait: final 10, peak 10, under need for 30s, silent 3
+// cycles (45 s), the same as taken as settled. With the restart wait
+// stamped on the above-band window too, as the PR first built it, that
+// case was under need for 1m45s and silent 8 cycles (2 min).
+func TestThroughputProbe_AControllerRestartOnTheEngineTrackerWaitsItsSettle(t *testing.T) {
+	run := func(stepAfter time.Duration) (on, off probeResult) {
+		pc := restartCase(stepAfter)
+		pc.engine = true
+		on = runProbe(t, pc, NewThroughputAnalyzer)
+		t.Logf("step %s after the restart, waits: %s", stepAfter, on)
+		off = runProbe(t, pc, withSwitchOff(SwitchITLWaitsAfterRestart))
+		t.Logf("step %s after the restart, taken as settled: %s", stepAfter, off)
+		require.Empty(t, on.Verdict(), "step %s after the restart", stepAfter)
+		require.LessOrEqual(t, on.UnderFor, learnertest.UnderFor)
+		return on, off
+	}
+
+	// The figures the reference pages quote (configuration.md, cycle-log.md,
+	// troubleshooting.md), pinned: 4 replicas, 15 s cycles, steadyFor 2 min.
+	on, off := run(2 * time.Minute)
+	require.GreaterOrEqual(t, on.reasons[itlReasonT2Failed], off.reasons[itlReasonT2Failed]+int(itl.DefaultSteadyFor/learnertest.Cycle),
+		"the band's line did not wait its settle")
+	require.Greater(t, on.UnderFor, off.UnderFor, "the wait cost nothing")
+	require.Equal(t, 30*time.Second, on.UnderFor, "in the band: under need")
+	require.Equal(t, 10, on.silentAfterRestart, "in the band: silent cycles after the restart")
+
+	on, off = run(15 * time.Second)
+	require.Greater(t, on.reasons[itlReasonT2Failed], off.reasons[itlReasonT2Failed], "the band's line did not wait its settle")
+	require.Positive(t, on.reasons[itlReasonT2AboveBand], "premise: the restarted line priced from above the band")
+	require.LessOrEqual(t, on.UnderFor, off.UnderFor, "the above-band fallback waited the restart")
+	require.LessOrEqual(t, on.silentAfterRestart, off.silentAfterRestart, "the above-band fallback waited the restart")
+	require.Equal(t, 30*time.Second, on.UnderFor, "above the band: under need")
+	require.Equal(t, 3, on.silentAfterRestart, "above the band: silent cycles after the restart")
+
+	// Negative control: the restart's wait stamped on the above-band
+	// readings too, as the PR first built it.
+	pc := restartCase(15 * time.Second)
+	pc.engine = true
+	stamped := runProbe(t, pc, func() *ThroughputAnalyzer { return NewThroughputAnalyzer().withAboveBandRestartWait() })
+	t.Logf("step 15s after the restart, the wait stamped above the band: %s", stamped)
+	require.Equal(t, 105*time.Second, stamped.UnderFor, "negative control: under need")
+	require.Equal(t, 8, stamped.silentAfterRestart, "negative control: silent cycles after the restart")
 }
