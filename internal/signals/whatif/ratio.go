@@ -41,7 +41,8 @@ const ratioPercentile = 0.90
 //
 // It refuses with TPOTQuantileUnbounded when a window's quantile falls in the
 // +Inf bucket, which has no edge to read, and with NoTPOTHistogram when no
-// window holds an observation. Answer.Value is R_q; CoarseTPOTBucket flags a
+// window holds an observation; bad data is MalformedHistogram, a refusal like
+// the others, and only a q outside (0, 1) is InvalidInput. Answer.Value is R_q; CoarseTPOTBucket flags a
 // q bucket wider than a quarter of its window's mean.
 func TPOTRatioFromWindows(windows []TPOTWindow, q float64) Result {
 	if !(q > 0 && q < 1) {
@@ -51,19 +52,22 @@ func TPOTRatioFromWindows(windows []TPOTWindow, q float64) Result {
 	coarse := false
 	for i, w := range windows {
 		if !Finite(w.Count) || w.Count < 0 || !Finite(w.Sum) {
-			return refuse(InvalidInput, fmt.Sprintf("window %d: count %g, sum %g", i, w.Count, w.Sum))
+			return refuse(MalformedHistogram, fmt.Sprintf("window %d: count %g, sum %g", i, w.Count, w.Sum))
 		}
 		if w.Count == 0 {
 			continue
 		}
 		if !(w.Sum > 0) {
-			return refuse(InvalidInput, fmt.Sprintf("window %d: %g observations summing to %g", i, w.Count, w.Sum))
+			return refuse(MalformedHistogram, fmt.Sprintf("window %d: %g observations summing to %g", i, w.Count, w.Sum))
 		}
 		mean := w.Sum / w.Count
-		lower, upper, u := quantileBucket(w.Buckets, q*w.Count)
+		lower, upper, empty, u := quantileBucket(w.Buckets, q, w.Count)
 		if u != nil {
 			u.Detail = fmt.Sprintf("window %d: %s", i, u.Detail)
 			return *u
+		}
+		if empty {
+			continue
 		}
 		ratios = append(ratios, upper/mean)
 		if (upper-lower)/mean > coarseBucketWidth {
@@ -82,26 +86,50 @@ func TPOTRatioFromWindows(windows []TPOTWindow, q float64) Result {
 	return Answer{Value: max(1, ratios[rank]), Flags: flags}
 }
 
-// quantileBucket finds the first bucket whose cumulative count reaches rank,
-// and returns its lower and upper edges.
-func quantileBucket(buckets []HistogramBucket, rank float64) (lower, upper float64, u *Unanswerable) {
-	prevEdge, prevCount := 0.0, 0.0
+// quantileBucket finds the bucket holding the q quantile and returns its lower
+// and upper edges, read the way histogram_quantile reads them:
+//
+//   - the cumulative counts are made monotone (a running maximum), since
+//     rate() over buckets scraped a moment apart leaves small dips that are
+//     not an error;
+//   - the rank is q times the +Inf bucket's count, the histogram's own total,
+//     rather than _count, which is scraped separately and may exceed it; a
+//     histogram with no +Inf bucket ranks against count.
+//
+// empty is true when the buckets hold no observation. Edges must rise from
+// above 0 (a TPOT is positive), and counts must be finite and non-negative;
+// anything else is MalformedHistogram.
+func quantileBucket(buckets []HistogramBucket, q, count float64) (lower, upper float64, empty bool, u *Unanswerable) {
+	cum := make([]float64, len(buckets))
+	prevEdge, running := 0.0, 0.0
 	for j, b := range buckets {
-		// Edges rise from above 0 (a TPOT is positive); NaN fails the
-		// comparison and is refused with them.
-		if !(b.UpperEdge > prevEdge) || !Finite(b.Count) || b.Count < prevCount {
-			r := refuse(InvalidInput, fmt.Sprintf("bucket %d (le %g, count %g) out of order", j, b.UpperEdge, b.Count))
-			return 0, 0, &r
+		// NaN fails the comparison and is refused with the rest.
+		if !(b.UpperEdge > prevEdge) || !Finite(b.Count) || b.Count < 0 {
+			r := refuse(MalformedHistogram, fmt.Sprintf("bucket %d (le %g, count %g) out of order", j, b.UpperEdge, b.Count))
+			return 0, 0, false, &r
 		}
-		if b.Count >= rank {
+		running = max(running, b.Count)
+		cum[j], prevEdge = running, b.UpperEdge
+	}
+	total := count
+	if n := len(buckets); n > 0 && math.IsInf(buckets[n-1].UpperEdge, 1) {
+		total = cum[n-1]
+	}
+	if !(total > 0) {
+		return 0, 0, true, nil
+	}
+	rank := q * total
+	prevEdge = 0
+	for j, b := range buckets {
+		if cum[j] >= rank {
 			if math.IsInf(b.UpperEdge, 1) {
 				r := refuse(TPOTQuantileUnbounded, fmt.Sprintf("the quantile is above the last finite edge %g", prevEdge))
-				return 0, 0, &r
+				return 0, 0, false, &r
 			}
-			return prevEdge, b.UpperEdge, nil
+			return prevEdge, b.UpperEdge, false, nil
 		}
-		prevEdge, prevCount = b.UpperEdge, b.Count
+		prevEdge = b.UpperEdge
 	}
 	r := refuse(TPOTQuantileUnbounded, fmt.Sprintf("the quantile is above the last edge %g", prevEdge))
-	return 0, 0, &r
+	return 0, 0, false, &r
 }

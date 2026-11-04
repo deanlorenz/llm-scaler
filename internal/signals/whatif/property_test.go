@@ -25,7 +25,7 @@ func randomDecode(r *rand.Rand) Decode {
 	return Decode{
 		Line:           itl.Model{A: 0.001 + 0.05*r.Float64(), B: 0.0005 + 0.01*r.Float64()},
 		Band:           FillBand{Lo: lo, Hi: hi},
-		CapacityTokens: (il + ol/2) * math.Exp(math.Log(2000)*r.Float64()) * 1.01,
+		CapacityTokens: (il + ol/2) / hi * math.Exp(math.Log(2000)*r.Float64()) * 1.01,
 		KVPerRequest:   il + ol/2,
 		OutputTokens:   ol,
 		ReplicaCap:     int64(1+r.IntN(1024)) * int64(1+r.IntN(8)),
@@ -64,7 +64,7 @@ func TestProperty_RoundTrip(t *testing.T) {
 	checked := 0
 	for range propertyDraws {
 		d := randomDecode(r)
-		full, _ := d.fullFill()
+		full := d.full().fill
 		if !(full > d.Band.Lo) {
 			continue
 		}
@@ -347,7 +347,13 @@ func TestProperty_EveryReasonHasACase(t *testing.T) {
 		}}, 0.9),
 		TargetBelowFloor: RateForTPOT(d, TPOTTarget{Seconds: 0.002}, 0.85),
 		Saturated:        FillAtRate(d, knee),
-		InvalidInput:     RateForTPOT(d, TPOTTarget{Seconds: 0.004}, 1.5),
+		NoDecodeReplicas: Knee(with(func(c *Decode) { c.Replicas = 0 })),
+		MalformedHistogram: TPOTRatioFromWindows([]TPOTWindow{{
+			Buckets: []HistogramBucket{{UpperEdge: 0.005, Count: 50}, {UpperEdge: 0.002, Count: 100}},
+			Sum:     1, Count: 100,
+		}}, 0.9),
+		TooManySlots: DecodeAdmission(with(func(c *Decode) { c.ReplicaCap, c.CapacityTokens = 1e10, 1e16 }), 1),
+		InvalidInput: RateForTPOT(d, TPOTTarget{Seconds: 0.004}, 1.5),
 	}
 	for _, reason := range Reasons() {
 		res, ok := cases[reason]
@@ -369,6 +375,14 @@ func TestProperty_EveryReasonHasACase(t *testing.T) {
 // discrete-event simulation of the same replica (state-dependent completion
 // rates, Poisson arrivals, first come first served), measuring the share of
 // arrivals that wait, the mean wait and the tail of the wait.
+//
+// What pins the chain's arithmetic is Erlang C (exact, 1e-9 relative) and the
+// worked example (the page's figures); this case checks the model, that the
+// chain describes the queue it claims to, and is loose by design. Near the
+// knee a busy period is long, so 2M arrivals leave the simulated means
+// several percent from the truth: across seeds, up to about 8% on the mean
+// wait. The 10% tolerance sits just above that noise, so it catches a wrong
+// model (a constant ITL is off by orders of magnitude) and not a few percent.
 func TestProperty_AdmissionMatchesSimulation(t *testing.T) {
 	cases := []struct {
 		name string
@@ -384,17 +398,19 @@ func TestProperty_AdmissionMatchesSimulation(t *testing.T) {
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			chainRes := DecodeAdmission(tc.d, 0) // the slots, before the rate is set
-			ch0, ok := chainRes.(Admission)
-			if !ok {
-				t.Fatalf("no chain: %#v", chainRes)
-			}
-			c := ch0.Slots
+			// The slots, worked out here rather than read off the chain: the
+			// replica cap, or the whole requests the band's top holds. A
+			// rounding up would admit a request the band cannot hold.
+			c := int(min(float64(tc.d.ReplicaCap), math.Floor(tc.d.Band.Hi*tc.d.CapacityTokens/tc.d.KVPerRequest)))
 			mu := func(m int) float64 {
-				return float64(m) / (tc.d.OutputTokens * tc.d.Line.ITLAt(float64(m)*tc.d.KVPerRequest/tc.d.CapacityTokens))
+				k := min(max(float64(m)*tc.d.KVPerRequest/tc.d.CapacityTokens, tc.d.Band.Lo), tc.d.Band.Hi)
+				return float64(m) / (tc.d.OutputTokens * tc.d.Line.ITLAt(k))
 			}
 			rate := tc.frac * mu(c) * float64(tc.d.Replicas)
 			ch := DecodeAdmission(tc.d, rate).(Admission)
+			if ch.Slots != c {
+				t.Fatalf("chain slots %d, want %d", ch.Slots, c)
+			}
 			sim := simulate(rand.New(rand.NewPCG(uint64(i)+7, 11)), rate/float64(tc.d.Replicas), mu, c, 2_000_000)
 			t.Logf("c=%d: wait probability chain %.4f sim %.4f; mean wait chain %.4g s sim %.4g s",
 				c, ch.WaitProbability, sim.waitShare, ch.MeanWait(), sim.meanWait)
@@ -486,6 +502,14 @@ func simulate(r *rand.Rand, lam float64, mu func(m int) float64, c, n int) simRe
 // request_tpot_seconds), then +Inf.
 var routerEdges = []float64{0.0005, 0.00205, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, math.Inf(1)}
 
+// layouts are the bucket layouts the R_q property is drawn on: the router's
+// defaults, and a non-uniform override of the kind the page recommends (fine
+// around the target, coarse away from it).
+var layouts = [][]float64{
+	routerEdges,
+	{0.001, 0.0015, 0.002, 0.0025, 0.00275, 0.003, 0.00325, 0.0035, 0.004, 0.005, 0.0075, 0.012, 0.03, math.Inf(1)},
+}
+
 func bucketed(samples []float64, edges []float64) TPOTWindow {
 	w := TPOTWindow{Buckets: make([]HistogramBucket, len(edges))}
 	for i, e := range edges {
@@ -521,14 +545,14 @@ func TestProperty_TPOTRatio(t *testing.T) {
 			for i := range samples {
 				samples[i] = mean * math.Exp(sigma*r.NormFloat64()-sigma*sigma/2)
 			}
-			w := bucketed(samples, routerEdges)
+			w := bucketed(samples, layouts[draw%len(layouts)])
 			windows = append(windows, w)
 			s := slices.Clone(samples)
 			slices.Sort(s)
 			truth = append(truth, s[int(math.Ceil(q*float64(len(s))))-1]/(w.Sum/w.Count))
 		}
 		slices.Sort(truth)
-		trueRatio := max(1, truth[int(math.Ceil(ratioPercentile*float64(len(truth))))-1])
+		trueRatio := max(1, truth[int(math.Ceil(0.90*float64(len(truth))))-1])
 		res := TPOTRatioFromWindows(windows, q)
 		if u, ok := res.(Unanswerable); ok {
 			if u.Reason != TPOTQuantileUnbounded {
@@ -569,6 +593,45 @@ func TestProperty_TPOTRatio(t *testing.T) {
 	fine := bucketed(slices.Repeat([]float64{0.00366}, 100), []float64{0.0035, 0.00375, 0.004, math.Inf(1)})
 	if got := mustAnswer(t, TPOTRatioFromWindows([]TPOTWindow{fine}, q)); got.HasFlag(CoarseTPOTBucket) {
 		t.Errorf("a 0.25 ms bucket at a 3.66 ms mean is flagged coarse")
+	}
+
+	// rate() over buckets scraped a moment apart leaves small dips in the
+	// cumulative counts; they are made monotone, as histogram_quantile does,
+	// not refused. Here +Inf reads 99.5 under the 5 ms bucket's 100: the
+	// running maximum makes the total 100, so the p99.9 rank is 99.9 and lands
+	// in (2.05, 5] ms. Ranked against the dipped 99.5 it would be 99.4, and
+	// read 2.05 ms, under-stating the tail.
+	dip := TPOTWindow{Buckets: []HistogramBucket{
+		{UpperEdge: 0.00205, Count: 99.6}, {UpperEdge: 0.005, Count: 100}, {UpperEdge: math.Inf(1), Count: 99.5},
+	}, Sum: 0.2, Count: 100}
+	near(t, "R_q over a dip", mustAnswer(t, TPOTRatioFromWindows([]TPOTWindow{dip}, 0.999)).Value, 0.005/0.002, 1e-12)
+
+	// The rank is against the +Inf bucket's count, the histogram's own total,
+	// not _count, scraped separately: here _count reads 101 against 100 in
+	// +Inf. At q = 0.99 the rank 99 falls in the 5 ms bucket (99 of 100);
+	// against _count it would be 99.99, past every finite bucket, and read
+	// as unbounded.
+	skewCount := TPOTWindow{Buckets: []HistogramBucket{
+		{UpperEdge: 0.00205, Count: 50}, {UpperEdge: 0.005, Count: 99}, {UpperEdge: math.Inf(1), Count: 100},
+	}, Sum: 0.202, Count: 101}
+	near(t, "R_q ranked against +Inf", mustAnswer(t, TPOTRatioFromWindows([]TPOTWindow{skewCount}, 0.99)).Value, 0.005/0.002, 1e-12)
+
+	// Data that cannot be read is a refusal with a data reason (exit 3), not
+	// a usage error; only a percentile outside (0, 1) is the caller's.
+	for name, w := range map[string]TPOTWindow{
+		"a NaN edge":        {Buckets: []HistogramBucket{{UpperEdge: math.NaN(), Count: 1}}, Sum: 1, Count: 1},
+		"a negative count":  {Buckets: []HistogramBucket{{UpperEdge: 0.005, Count: -1}, {UpperEdge: math.Inf(1), Count: 1}}, Sum: 1, Count: 1},
+		"a NaN count":       {Buckets: []HistogramBucket{{UpperEdge: 0.005, Count: math.NaN()}}, Sum: 1, Count: 1},
+		"falling edges":     {Buckets: []HistogramBucket{{UpperEdge: 0.005, Count: 1}, {UpperEdge: 0.002, Count: 1}}, Sum: 1, Count: 1},
+		"no sum":            {Buckets: []HistogramBucket{{UpperEdge: math.Inf(1), Count: 1}}, Sum: 0, Count: 1},
+		"an infinite count": {Buckets: []HistogramBucket{{UpperEdge: math.Inf(1), Count: 1}}, Sum: 1, Count: math.Inf(1)},
+	} {
+		if u, ok := TPOTRatioFromWindows([]TPOTWindow{w}, q).(Unanswerable); !ok || u.Reason != MalformedHistogram {
+			t.Errorf("%s: %#v, want MalformedHistogram", name, TPOTRatioFromWindows([]TPOTWindow{w}, q))
+		}
+	}
+	if u, ok := TPOTRatioFromWindows([]TPOTWindow{flat}, 1).(Unanswerable); !ok || u.Reason != InvalidInput {
+		t.Errorf("q = 1: want InvalidInput")
 	}
 
 	if res := TPOTRatioFromWindows(nil, q); res.(Unanswerable).Reason != NoTPOTHistogram {

@@ -70,6 +70,9 @@ func TestWorkedExample_SLOToRate(t *testing.T) {
 	a := mustAnswer(t, RateForTPOT(d, TPOTTarget{Seconds: 0.004}, 0.85))
 	near(t, "TPOT alone", a.Basis.Uncapped, 12.03, 0.005)
 	near(t, "capped rate", a.Value, 11.32, 0.005)
+	// The capped answer stands on the operating point's own fill, not the
+	// target's 0.551.
+	near(t, "fill at the cap", a.Basis.Fill, 0.474, 0.0005)
 	if len(a.Basis.BoundBy) != 1 || a.Basis.BoundBy[0] != BoundOperatingPoint {
 		t.Errorf("bound by %v, want the operating-point cap", a.Basis.BoundBy)
 	}
@@ -115,7 +118,17 @@ func TestBirthDeathAtConstantRateIsErlangC(t *testing.T) {
 				t.Fatalf("c=%d rho=%g: no chain", c, rho)
 			}
 			want := erlangC(c, lam/mu1)
-			if math.Abs(got.WaitProbability-want) > 1e-9*max(1, want) {
+			// Relative: at a low load the wait probability is far below 1
+			// (2e-7 at c = 64 and rho = 0.5), where an absolute 1e-9 would
+			// pass anything.
+			if want < 1e-280 {
+				// Underflowed in the reference: the chain must agree it is nil.
+				if got.WaitProbability > 1e-270 {
+					t.Errorf("c=%d rho=%g: wait probability %g, Erlang C underflows", c, rho, got.WaitProbability)
+				}
+				continue
+			}
+			if math.Abs(got.WaitProbability-want) > 1e-9*want {
 				t.Errorf("c=%d rho=%g: wait probability %.12g, Erlang C %.12g", c, rho, got.WaitProbability, want)
 			}
 			near(t, "decay", got.Decay, float64(c)*mu1-lam, 1e-9)

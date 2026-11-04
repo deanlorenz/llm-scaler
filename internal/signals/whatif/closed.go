@@ -2,6 +2,8 @@ package whatif
 
 import (
 	"fmt"
+	"math"
+	"slices"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 )
@@ -42,10 +44,12 @@ type Decode struct {
 func (d Decode) check() *Unanswerable {
 	var u Unanswerable
 	switch {
-	case d.Replicas < 1:
-		u = refuse(InvalidInput, fmt.Sprintf("decode replicas %d, want at least 1", d.Replicas))
+	// The band is the policy's, so an invalid one is a configuration error;
+	// everything below it is read from the cluster, so a bad value is data.
 	case !d.Band.valid():
 		u = refuse(InvalidInput, fmt.Sprintf("band [%g, %g], want 0 < lo < hi < 1", d.Band.Lo, d.Band.Hi))
+	case d.Replicas < 1:
+		u = refuse(NoDecodeReplicas, fmt.Sprintf("decode replicas %d", d.Replicas))
 	// B must be positive as well as A: with B <= 0 the request rate does not
 	// rise with fill, so no fill answers a rate and the line describes no
 	// engine (every step has a fixed cost).
@@ -57,41 +61,76 @@ func (d Decode) check() *Unanswerable {
 		u = refuse(NoBatchCap, fmt.Sprintf("replica cap %d", d.ReplicaCap))
 	case !Finite(d.OutputTokens) || !(d.OutputTokens > 0) || !Finite(d.KVPerRequest) || !(d.KVPerRequest > 0):
 		u = refuse(NoTraffic, fmt.Sprintf("output %g tokens, KV per request %g tokens", d.OutputTokens, d.KVPerRequest))
-	// A cache that cannot hold one request serves none; the closed form
-	// would price a fraction of a sequence.
-	case d.CapacityTokens < d.KVPerRequest:
-		u = refuse(NoCapacity, fmt.Sprintf("KV capacity %g tokens under one request's %g", d.CapacityTokens, d.KVPerRequest))
+	// The band's top must hold one whole request: a replica that cannot
+	// serves none, and the closed form would price a fraction of one.
+	case math.Floor(d.Band.Hi*d.CapacityTokens/d.KVPerRequest) < 1:
+		u = refuse(NoCapacity, fmt.Sprintf("KV capacity %g tokens holds no whole request of %g at the band top %g",
+			d.CapacityTokens, d.KVPerRequest, d.Band.Hi))
 	default:
 		return nil
 	}
 	return &u
 }
 
-// capFill is the fill at which the batch cap binds: ReplicaCap*KVreq/C. It
-// may exceed 1 when the KV cache binds first.
-func (d Decode) capFill() float64 {
-	return float64(d.ReplicaCap) * d.KVPerRequest / d.CapacityTokens
+// fullPoint is where a replica saturates: the sequences it runs there, the
+// fill those occupy, and the fill the line is read at.
+type fullPoint struct {
+	// slots is c, a whole number of sequences: the replica cap, or the
+	// sequences the band's top holds, floor(band.Hi*C/KVreq), when that is
+	// fewer. Kept as a float: a cap read as MaxInt64 is a number here, and
+	// only the admission chain needs it as a count (maxSlots bounds that).
+	slots float64
+	// slotFill is the fill the slots occupy, c*KVreq/C: never above band.Hi.
+	slotFill float64
+	// fill is k_full, the fill the line is read at: slotFill, raised to
+	// band.Lo when the slots fill less than the band's bottom, where the line
+	// was not fitted (the higher, safer ITL, as ReachableFill reads it).
+	fill float64
+	// by is what set the slots.
+	by Bound
+	// belowBand is slotFill < band.Lo: the knee is read at the band's bottom.
+	belowBand bool
 }
 
-// fullFill is k_full, the highest fill a replica is priced at: the lower of
-// the band's top (a policy knob, the highest fill the line is fitted on) and
-// the batch cap's fill (physical). The bound says which one set it.
-func (d Decode) fullFill() (float64, Bound) {
-	if c := d.capFill(); c < d.Band.Hi {
-		return c, BoundBatchCap
+// full is the replica's saturation point. The knee and the admission chain
+// both saturate at it, so the two never disagree about where a rate stops
+// being carried.
+func (d Decode) full() fullPoint {
+	p := fullPoint{slots: math.Floor(d.Band.Hi * d.CapacityTokens / d.KVPerRequest), by: BoundBandTop}
+	if cp := float64(d.ReplicaCap); cp <= p.slots {
+		p.slots, p.by = cp, BoundBatchCap
 	}
-	return d.Band.Hi, BoundBandTop
+	p.slotFill = p.slots * d.KVPerRequest / d.CapacityTokens
+	p.fill = p.slotFill
+	if p.slotFill < d.Band.Lo {
+		p.fill, p.belowBand = d.Band.Lo, true
+	}
+	return p
 }
 
-// replicaRate is lambda_rep(k), one replica's request rate at fill k.
+// flags is BelowFittedBand when the knee is read at the band's bottom.
+func (p fullPoint) flags() []Flag {
+	if p.belowBand {
+		return []Flag{BelowFittedBand}
+	}
+	return nil
+}
+
+// replicaRate is lambda_rep(k), one replica's request rate at fill k, with
+// the sequences capped at the slots.
 func (d Decode) replicaRate(k float64) float64 {
-	return ReplicaTokenRate(d.Line, k, d.CapacityTokens, d.KVPerRequest, d.ReplicaCap) / d.OutputTokens
+	seqs := min(itl.Sequences(k, d.CapacityTokens, d.KVPerRequest), d.full().slots)
+	itlSec := d.Line.ITLAt(k)
+	if !(seqs > 0) || !(itlSec > 0) {
+		return 0
+	}
+	return seqs / (itlSec * d.OutputTokens)
 }
 
-// knee is the fleet's decode knee, N_d * lambda_rep(k_full).
+// knee is the fleet's decode knee, N_d * c / (OL * ITL(k_full)).
 func (d Decode) knee() float64 {
-	k, _ := d.fullFill()
-	return float64(d.Replicas) * d.replicaRate(k)
+	p := d.full()
+	return float64(d.Replicas) * p.slots / (d.OutputTokens * d.Line.ITLAt(p.fill))
 }
 
 // fillAtReplicaRate is the closed-form fill one replica runs at while it
@@ -99,31 +138,33 @@ func (d Decode) knee() float64 {
 //
 //	k(lam) = lam*OL*B / (C/KVreq - lam*OL*A)
 //
-// It is valid while the denominator is positive and the fill is under
-// k_full; ok is false past that, where the replica is saturated.
+// It is valid while the denominator is positive and the sequences are under
+// the slots (the fill under slotFill); ok is false past that, where the
+// replica is saturated.
 func (d Decode) fillAtReplicaRate(lam float64) (k float64, ok bool) {
 	den := d.CapacityTokens/d.KVPerRequest - lam*d.OutputTokens*d.Line.A
 	if !(den > 0) {
 		return 0, false
 	}
 	k = lam * d.OutputTokens * d.Line.B / den
-	full, _ := d.fullFill()
-	if !Finite(k) || k > full {
+	if !Finite(k) || k > d.full().slotFill {
 		return 0, false
 	}
 	return k, true
 }
 
 // Knee is the rate, in requests per second over the fleet, at which the
-// decode replicas saturate: N_d * lambda_rep(k_full) (question 2, step 1).
-// Its Basis names whether the band's top or the batch cap set k_full.
+// decode replicas saturate: N_d * c / (OL * ITL(k_full)) (question 2, step 1).
+// Its Basis names whether the band's top or the batch cap set the slots, and
+// BelowFittedBand flags a knee read at the band's bottom because the slots
+// fill less than it.
 func Knee(d Decode) Result {
 	if u := d.check(); u != nil {
 		return *u
 	}
-	full, by := d.fullFill()
+	p := d.full()
 	knee := d.knee()
-	return Answer{Value: knee, Basis: Basis{Fill: full, Knee: knee, BoundBy: []Bound{by}}}
+	return Answer{Value: knee, Flags: p.flags(), Basis: Basis{Fill: p.fill, Knee: knee, BoundBy: []Bound{p.by}}}
 }
 
 // FillAtRate is the KV fill each decode replica runs at while the fleet
@@ -238,11 +279,12 @@ func RateForTPOT(d Decode, t TPOTTarget, headroom float64) Result {
 	if floor >= t.Seconds {
 		return refuse(TargetBelowFloor, fmt.Sprintf("target %g s at or below the floor %g s", t.Seconds, floor))
 	}
-	full, fullBy := d.fullFill()
+	p := d.full()
 	k := (t.Seconds/r - d.Line.B) / d.Line.A
 	by := []Bound{BoundTPOT}
-	if k > full {
-		k, by = full, []Bound{fullBy}
+	if k > p.fill {
+		k, by = p.fill, []Bound{p.by}
+		flags = append(flags, p.flags()...)
 	}
 	knee := d.knee()
 	uncapped := float64(d.Replicas) * d.replicaRate(k)
@@ -250,16 +292,22 @@ func RateForTPOT(d Decode, t TPOTTarget, headroom float64) Result {
 		return refuse(NoLine, fmt.Sprintf("the line prices no rate at fill %g", k))
 	}
 	rate := uncapped
-	op := headroom * knee
-	switch {
-	case rate > op:
-		rate, by = op, []Bound{BoundOperatingPoint}
-		// The cap's own fill, from the closed form. Below the knee it always
-		// exists; a headroom of 1 never gets here.
-		if kop, ok := d.fillAtReplicaRate(op / float64(d.Replicas)); ok {
-			k = kop
+	// A headroom of 1 is no cap: the knee bounds the rate, and the
+	// operating point is not named.
+	if op := headroom * knee; headroom < 1 && rate >= op {
+		if rate > op {
+			// The cap's own fill, from the closed form. Below the knee it
+			// exists; if it did not, the answer would have no fill to stand
+			// on, so it is refused rather than reported at the uncapped one.
+			kop, ok := d.fillAtReplicaRate(op / float64(d.Replicas))
+			if !ok {
+				return refuse(Saturated, fmt.Sprintf("no fill carries the operating point %g r/s", op))
+			}
+			rate, k, by, flags = op, kop, nil, slices.DeleteFunc(flags, func(f Flag) bool { return f == BelowFittedBand })
+			if kop < d.Band.Lo {
+				flags = append(flags, BelowFittedBand)
+			}
 		}
-	case rate == op:
 		by = append([]Bound{BoundOperatingPoint}, by...)
 	}
 	return Answer{Value: rate, Flags: flags, Basis: Basis{
@@ -271,7 +319,10 @@ func RateForTPOT(d Decode, t TPOTTarget, headroom float64) Result {
 // which TPOT percentile to report besides the mean.
 type ReplicasQuery struct {
 	// Headroom places the operating point at Headroom times the knee: the
-	// scaling policy's scaleUpThreshold, 0.85 by default. Used when Rate is 0.
+	// scaling policy's scaleUpThreshold, 0.85 by default. Used when Rate is 0,
+	// and then it must lie in (0, 1): unlike question 1, where 1 lifts the
+	// cap, question 2 refuses 1 (InvalidInput), because the knee itself is a
+	// point no fill carries.
 	Headroom float64
 	// Rate, when positive, is the operating rate in requests per second over
 	// the fleet, in place of Headroom times the knee (--rate).
@@ -310,9 +361,8 @@ func SLOAtReplicas(d Decode, q ReplicasQuery) DecodeSLO {
 		}
 		return out
 	}
-	full, by := d.fullFill()
+	out := DecodeSLO{Knee: Knee(d)}
 	knee := d.knee()
-	out := DecodeSLO{Knee: Answer{Value: knee, Basis: Basis{Fill: full, Knee: knee, BoundBy: []Bound{by}}}}
 
 	var rate float64
 	var rateBy []Bound
@@ -325,8 +375,12 @@ func SLOAtReplicas(d Decode, q ReplicasQuery) DecodeSLO {
 		}
 		rate = q.Rate
 	default:
-		if u := checkHeadroom(q.Headroom); u != nil {
-			refused = u
+		// Question 2 operates below the knee: at a headroom of 1 the
+		// operating point is the knee itself, where no fill carries the rate
+		// and the admission wait is unbounded. Ask for the knee with Knee.
+		if !(q.Headroom > 0 && q.Headroom < 1) {
+			u := refuse(InvalidInput, fmt.Sprintf("headroom %g, want 0 < headroom < 1 for question 2", q.Headroom))
+			refused = &u
 		}
 		rate, rateBy = q.Headroom*knee, []Bound{BoundOperatingPoint}
 	}

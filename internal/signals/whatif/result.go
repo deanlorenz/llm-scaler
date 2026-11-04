@@ -1,5 +1,7 @@
 package whatif
 
+import "slices"
+
 // Result is what every what-if question returns: an Answer, an Unanswerable,
 // or (from DecodeAdmission) an Admission. It is sealed, so a caller reaches a
 // number only through a type switch or assertion, and a refusal can never be
@@ -46,19 +48,36 @@ const (
 	// meets or exceeds it.
 	TargetBelowFloor Reason = "TargetBelowFloor"
 	// Saturated is a rate at or above the knee, where the decode replicas
-	// cannot drain their arrivals and no fill or wait exists.
+	// cannot drain their arrivals: question 2's operating rate (FillAtRate)
+	// and the admission chain (DecodeAdmission) both refuse it, at the same
+	// point.
 	Saturated Reason = "Saturated"
-	// InvalidInput is a question the caller asked wrongly: a NaN or infinite
-	// value, a percentile outside (0, 1), a ratio below 1, a headroom outside
-	// (0, 1], fewer than one replica, or a band that breaks FillBand's
-	// precondition. The CLI maps it to a usage error, not to a refusal.
+	// NoDecodeReplicas is a fleet read with no decode replica to price.
+	NoDecodeReplicas Reason = "NoDecodeReplicas"
+	// MalformedHistogram is a TPOT histogram whose data cannot be read: an
+	// edge that is NaN, not positive or not above the one before it, a
+	// negative or non-finite count, or observations with no positive sum.
+	// (Cumulative counts that dip, as rate() over a scrape leaves them, are
+	// not malformed: they are made monotone, as histogram_quantile does.)
+	MalformedHistogram Reason = "MalformedHistogram"
+	// TooManySlots is a replica whose slots exceed maxSlots: a batch cap and
+	// a KV capacity that large are a reading error, and the admission chain
+	// holds one state per slot.
+	TooManySlots Reason = "TooManySlots"
+	// InvalidInput is a question the caller asked wrongly, a usage or
+	// configuration error rather than data: a NaN or infinite target, rate or
+	// assumed ratio, a percentile outside (0, 1), an assumed ratio below 1, a
+	// headroom outside (0, 1] (outside (0, 1) for question 2), or a band that
+	// breaks FillBand's precondition. The CLI maps it to exit 2; every other
+	// reason is a refusal, exit 3.
 	InvalidInput Reason = "InvalidInput"
 )
 
 // Reasons lists every Reason this package can return, in a fixed order.
 func Reasons() []Reason {
 	return []Reason{NoLine, NoCapacity, NoBatchCap, NoTraffic, TokenGapPercentile,
-		NoTPOTHistogram, TPOTQuantileUnbounded, TargetBelowFloor, Saturated, InvalidInput}
+		NoTPOTHistogram, TPOTQuantileUnbounded, TargetBelowFloor, Saturated,
+		NoDecodeReplicas, MalformedHistogram, TooManySlots, InvalidInput}
 }
 
 // Unanswerable is a refused question: the Reason, and a Detail naming the
@@ -99,9 +118,9 @@ const (
 	// TPOT is read at the band's bottom, the higher, safer reading, so the
 	// answer's TPOT is a floor rather than the line's extrapolation.
 	BelowFittedBand Flag = "BelowFittedBand"
-	// KVBoundSlots is an admission chain whose slots are set by the KV cache
-	// (C/KVreq at a full cache) rather than the batch cap: an approximation,
-	// since KV-bound admission is not a fixed number of slots.
+	// KVBoundSlots is an admission chain whose slots are set by the KV the
+	// band's top holds, floor(band.Hi*C/KVreq), rather than the batch cap: an
+	// approximation, since KV-bound admission is not a fixed number of slots.
 	KVBoundSlots Flag = "KVBoundSlots"
 )
 
@@ -162,10 +181,5 @@ func (Answer) result() {}
 
 // HasFlag reports whether the answer carries f.
 func (a Answer) HasFlag(f Flag) bool {
-	for _, g := range a.Flags {
-		if g == f {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(a.Flags, f)
 }

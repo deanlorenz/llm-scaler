@@ -553,8 +553,11 @@ Every answer is an `Answer{Value, Band, Basis, Flags}` or an
 | `TPOTQuantileUnbounded` | The TPOT `q` quantile falls in the histogram's `+Inf` bucket |
 | `TargetBelowFloor` | The target is below what any number of replicas reaches |
 | `FlowControlUnknown` | Flow control on and the detector's thresholds unknown |
-| `Saturated` | A rate (`--rate`) at or above the knee, where no fill or admission wait exists |
-| `InvalidInput` | NaN or infinity, a percentile outside (0, 1), an `R_q` below 1, a headroom outside (0, 1], an invalid band; exit `2`, not `3` |
+| `Saturated` | Question 2's operating rate (`--rate`) or the decode admission chain at or above the knee, where no fill or admission wait exists; both saturate at the same rate |
+| `NoDecodeReplicas` | No decode replica read from the fleet |
+| `MalformedHistogram` | A TPOT histogram whose data cannot be read: a NaN, non-positive or falling edge, a negative or non-finite count, observations with no sum. Counts that dip, as `rate()` leaves them, are made monotone, not refused |
+| `TooManySlots` | More than 1,000,000 slots on one replica (a cap or capacity read wrongly); the chain holds one state per slot |
+| `InvalidInput` | A usage or configuration error, exit `2`, not `3`: a NaN or infinite target, rate or assumed ratio, a percentile outside (0, 1), an assumed `R_q` below 1, a headroom outside (0, 1] (outside (0, 1) for question 2), an invalid band |
 
 **Flags**, never refusals: extrapolation (with its distance), a borrowed, held
 or snapshot line, a lower-bound or assumed `V_P`, no readiness, an unstable
