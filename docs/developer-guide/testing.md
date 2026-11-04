@@ -1430,14 +1430,26 @@ tests do. The controller goes into `CONTROLLER_NAMESPACE`, which defaults to
   the full tier, the borrowing spec in a CI job of its own.
 - **Monitoring images.** Prometheus comes from kube-prometheus-stack
   (`KUBE_PROMETHEUS_STACK_CHART_VERSION`), with Grafana on, because
-  `operational_dashboard_test.go` tests the dashboard. Every image it pulls
-  is on quay.io, registry.k8s.io or ghcr.io except Grafana, which Grafana
-  publishes only on Docker Hub. The installer pulls Grafana from
-  `mirror.gcr.io` (`GRAFANA_IMAGE_REGISTRY`) with the chart's tag, since
-  anonymous Docker Hub pulls are rate limited on CI runners.
+  `operational_dashboard_test.go` tests the dashboard. No e2e image may come
+  from docker.io (AGENTS.md). Every image the chart pulls is on quay.io,
+  registry.k8s.io or ghcr.io except Grafana, which Grafana publishes only on
+  Docker Hub, so the installer pulls it from `mirror.gcr.io`
+  (`GRAFANA_IMAGE_REGISTRY`) with the chart's tag.
   `hack/check-kps-images.sh`, run by `make lint-deploy-scripts`, renders the
   installed release and fails on any docker.io or unqualified image. It
-  needs `helm` and access to the chart repository.
+  needs `helm` and access to the chart repository; the CI job installs a
+  pinned helm.
+- **Runner disk.** A full disk on the CI runner shows up as a Deployment
+  that never becomes ready, not as a disk error. Two PRs failed setup on
+  `kube-prometheus-stack-grafana not ready ... Progress deadline exceeded`
+  while the runner warned `Free space left: 43 MB`. Every kind e2e job
+  starts with `deploy/ci-pr-checks/free-disk.sh`, which removes toolchains
+  the e2e does not use and logs `df -h /` before and after. It also samples
+  free space for the rest of the job, and `disk-report.sh` prints the low
+  point at the end. With `KIND_PRUNE_HOST_IMAGES=true` (CI only), the
+  install removes the host Docker copy of the simulator and warm pool images
+  once the kind nodes hold their own. A grafana, prometheus or controller
+  timeout in setup: read those lines first.
 - **Helm repo updates.** `SKIP_HELM_REPO_UPDATE=true` skips `helm repo update`
   during the install. It is faster, but the repo indexes must already exist.
 

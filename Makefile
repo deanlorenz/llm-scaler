@@ -3017,6 +3017,8 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n hack/check-setup-prereqs-render.sh
 	@bash -n hack/check-e2e-images.sh
 	@bash -n hack/check-kps-images.sh
+	@bash -n deploy/ci-pr-checks/free-disk.sh
+	@bash -n deploy/ci-pr-checks/disk-report.sh
 	@bash -n hack/check-policy-apply-docs.sh
 	@bash -n hack/check-release-latest.sh
 	@bash -n hack/check-controller-ready.sh
