@@ -1649,7 +1649,8 @@ computed. Three horizons govern it, and the differences are load-bearing —
 getting any of them wrong silently changes replica counts.
 
 **Per-variant state** — the fitted ITL window and its baseline, the replica
-start estimate and its outlier counter — ages on `HistoryEvictionTimeout`
+start estimate, its outlier counter and the set of pods it refused
+(`startOutlierPods`) — ages on `HistoryEvictionTimeout`
 measured from when the variant was last *reported*, or last found to exist:
 the engine stamps every active and every parked variant just before the sweep
 (`notePresentVariants` → `NoteVariantsPresent`). It is a liveness stamp,

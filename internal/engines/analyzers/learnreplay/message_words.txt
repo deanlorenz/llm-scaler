@@ -796,6 +796,7 @@ discarded
 discarding
 discover
 discovery
+distinctPods
 do
 docs/developer-guide/testing.md
 docs/reference/operations.md
@@ -1429,6 +1430,7 @@ measured
 measuredRate
 measures
 medianErrPct
+medianSeconds
 medium
 mem_fraction_static
 memory-bound
@@ -1805,6 +1807,7 @@ previous
 previous-desired
 previousA
 previousB
+previousEstimateSeconds
 previousMode
 previousSource
 previousValue
@@ -1949,6 +1952,7 @@ replica-capacity-decision
 replica-capacity-skipped
 replica-capacity-store-fallback
 replica-capacity-summary
+replica-start-change-confirmed
 replica-start-measured
 replica-start-outlier-rejected
 replicaDemand
@@ -2257,8 +2261,11 @@ staleness
 stalled
 standard
 start
+start-above-bound
+start-confirms-by-distinct-pod
 startEstimateSeconds
 startEstimates
+startOutlierPods
 startOutliers
 startSeconds
 startSeenPods

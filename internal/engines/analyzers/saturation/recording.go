@@ -118,10 +118,11 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 // SwitchITLKeepsSettleThroughMissingRow, SwitchITLReadsFinitePodMean,
 // SwitchITLRestartUnderName, SwitchITLIdleOnEvidence,
 // SwitchKVPerRequestHitsResident, SwitchZeroReplicaDataParallel,
-// SwitchITLFitsAggregated, SwitchITLAggregatedShapeTerm and
-// SwitchITLAggregatedSizes, SwitchPrefillCapacityObserve and
-// SwitchPrefillBusyMinutes; a name it does not know is an error, and sets
-// nothing. Never called on a production path; a test holds that.
+// SwitchITLFitsAggregated, SwitchITLAggregatedShapeTerm,
+// SwitchITLAggregatedSizes, SwitchPrefillCapacityObserve,
+// SwitchStartConfirmsByDistinctPod and SwitchPrefillBusyMinutes; a name it
+// does not know is an error, and sets nothing. Never called on a production
+// path; a test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
 	rest := maps.Clone(switches)
 	fields := a.switchFields()
@@ -157,6 +158,10 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		SwitchBatchCapDecodeView:   &a.batchCapDecodeView,
 		SwitchBatchCapDerivedMu:    &a.batchCapDerivedMu,
 		SwitchITLPerToken:          &a.itlPerToken,
+
+		// Learner PR 5b: the start guard opens on distinct Pods
+		// (start_est.go).
+		SwitchStartConfirmsByDistinctPod: &a.startConfirmsByPod,
 
 		// #276: the spread of output lengths in the KV per request.
 		SwitchKVPerRequestOutputDispersion: &a.kvOutputDispersion,
