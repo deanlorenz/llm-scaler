@@ -111,6 +111,7 @@ type featureFlagsConfig struct {
 	stickyScaleDownEnabled      bool
 	limitedModeEnabled          bool
 	scaleFromZeroMaxConcurrency int
+	passive                     bool
 }
 
 // ScalingPolicySet represents saturation scaling configuration
@@ -408,6 +409,15 @@ func (c *Config) StickyScaleDownEnabled() bool {
 	return c.features.stickyScaleDownEnabled
 }
 
+// PassiveDefault reports the controller-wide passive switch (WVA_PASSIVE): the
+// value a model's passive mode takes when no scaling-policy entry sets
+// `passive` (ResolvePassive). Read at start. Thread-safe.
+func (c *Config) PassiveDefault() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.features.passive
+}
+
 // LimitedModeEnabled returns whether limited mode is enabled.
 // Thread-safe.
 func (c *Config) LimitedModeEnabled() bool {
@@ -688,6 +698,14 @@ func SetLearnedStateHorizonsForTest(c *Config, episodeGap, variantTimeout, bucke
 	c.infrastructure.learnedEpisodeGap = episodeGap
 	c.infrastructure.learnedVariantTimeout = variantTimeout
 	c.infrastructure.learnedBucketRetention = bucketRetention
+}
+
+// SetPassiveDefaultForTest sets the WVA_PASSIVE controller flag on a test
+// Config. Not for production use.
+func SetPassiveDefaultForTest(c *Config, on bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.features.passive = on
 }
 
 // SetLearnedStateSnapshotForTest turns the learned-state snapshot on or off on a

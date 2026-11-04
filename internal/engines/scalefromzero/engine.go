@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
@@ -44,6 +45,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/gpuusage"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/passive"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/prometheus"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
@@ -136,6 +138,10 @@ type Engine struct {
 	UsageRefresher *gpuusage.Refresher
 	// Variants is the set of workloads KEDA has called WVA about — discovery.
 	Variants *registry.Registry
+	// Passive resolves which models the controller only observes. A passive
+	// model is never woken: its wake is logged and nothing is published,
+	// admitted or drawn for it. Nil is every model active.
+	Passive *passive.Resolver
 	// VariantEnricher resolves each registered workload's scale target. Refreshed
 	// at the top of every cycle, which is a no-op for entries still inside their
 	// freshness window — this loop runs at 10Hz and must not read per tick.
@@ -588,6 +594,13 @@ func (e *Engine) processInactiveModel(
 			"metric", pending.Labels, "value", pending.Value)
 	}
 
+	// A passive model is observed, never woken. Checked before the verdict,
+	// which already holds node holes and draws borrowed capacity for the
+	// replicas it picks.
+	if e.passiveGate(logger, group) {
+		return nil
+	}
+
 	place, selected, outcome := e.wakeVerdict(ctx, group, candidates, covered)
 	constraints := place.constraints
 	if len(selected) == 0 {
@@ -649,6 +662,25 @@ func (e *Engine) processInactiveModel(
 		e.publishActivation(ctx, scaleTargets, va, pool, 1, outcome)
 	}
 	return nil
+}
+
+// passiveGate reports whether group's model is passive, so the engine takes
+// no action for it: no wake is published, no node hole held and no borrowed
+// capacity drawn. The first time, and again after any other outcome, it says
+// so in the log.
+func (e *Engine) passiveGate(logger logr.Logger, group modelGroup) bool {
+	if e.Passive == nil {
+		return false
+	}
+	p, source := e.Passive.Model(group.namespace, group.modelID)
+	if !p {
+		return false
+	}
+	if e.refusalChanged(group.key(), OutcomePassive) {
+		logger.Info("Scale-from-zero: passive model has pending requests; the scale-from-zero engine takes no action for it",
+			"namespace", group.namespace, "modelID", group.modelID, "source", source)
+	}
+	return true
 }
 
 // wakeVerdict is decideWake with the refusal named: a no-capacity refusal in a

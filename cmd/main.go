@@ -71,6 +71,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/passive"
 	prometheusutil "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/prometheus"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/scaler"
@@ -698,6 +699,11 @@ func main() {
 	// for tools and operators that would otherwise grep the log. Built before the
 	// bootstrap so the policy it loads is recorded; written only by the leader.
 	controllerStatus := controllerstatus.New(mgr.GetClient(), mgr.GetAPIReader(), config.SystemNamespace())
+	// What this process read, so the installer can tell a restart is due.
+	controllerStatus.SetPassiveDefault(cfg.PassiveDefault())
+	if cfg.PassiveDefault() {
+		setupLog.Info("Passive mode is on controller-wide (WVA_PASSIVE=true): no replica count is changed unless a scaling-policy entry sets passive: false")
+	}
 	if err := mgr.Add(controllerStatus); err != nil {
 		setupLog.Error(err, "unable to add the controller-status publisher to the manager")
 		os.Exit(1)
@@ -820,6 +826,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	// One answer to "is this model passive?" for the external scaler, both
+	// engines and the warm pool, so they cannot disagree about a model.
+	passiveResolver := &passive.Resolver{Config: cfg, Registry: registry.Default}
+
 	// Register optimization engine loops with the manager. Only start when leader.
 	err = mgr.Add(optimizeLoopRunnable(func(ctx context.Context) (optimizeLooper, error) {
 		sourceRegistry := source.NewSourceRegistry()
@@ -909,6 +919,7 @@ func main() {
 		// ScaledObject is served by a cluster-wide informer, which is the LIST+WATCH
 		// this design exists to remove.
 		engine.Variants = registry.Default
+		wirePassive(passiveResolver, passiveComponents{SteadyState: engine})
 		engine.Status = controllerStatus
 		// Kueue's preemptions of managed pods, recorded from the pod informer
 		// the engine already reads pods through: a preempted pod and its
@@ -969,6 +980,7 @@ func main() {
 		// which is where the freshness actually lives, so neither re-reads what the
 		// other has just read.
 		engine.Variants = registry.Default
+		wirePassive(passiveResolver, passiveComponents{ScaleFromZero: engine})
 		engine.VariantEnricher = registry.NewEnricher(mgr.GetAPIReader(), registry.Default, registry.DefaultTargetMaxAge)
 		engine.VariantEnricher.Recorder = mgr.GetEventRecorderFor("workload-variant-autoscaler-registry") //nolint:staticcheck // SA1019: core/v1 events; see the configmap reconciler
 		// Let the engine bring the usage picture up to date immediately before it
@@ -1035,6 +1047,7 @@ func main() {
 		// matches what they publish at.
 		DecisionInterval: cfg.OptimizationInterval,
 	}
+	wirePassive(passiveResolver, passiveComponents{Scaler: externalScaler})
 	// Without leader election this replica is the leader from the start; the
 	// manager's Elected channel says so too, but only after it has started
 	// the server, which would put it through a standby phase for nothing.
@@ -1132,7 +1145,7 @@ func main() {
 		for _, warmPoolNS := range readableWatched {
 			if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 				return runWarmPool(ctx, mgr, ds, warmPoolNS, warmPoolGPUUtil, warmPoolSleepMinSize,
-					warmPoolMaxHold, warmPoolMinHold, warmPoolPreloadTop, warmPoolMemoryBudget)
+					warmPoolMaxHold, warmPoolMinHold, warmPoolPreloadTop, warmPoolMemoryBudget, passiveResolver)
 			})); err != nil {
 				setupLog.Error(err, "unable to add the warm pool to manager", "namespace", warmPoolNS)
 				os.Exit(1)
@@ -1159,7 +1172,7 @@ func main() {
 				go func() {
 					defer close(done)
 					if err := runWarmPool(nsCtx, mgr, ds, ns, warmPoolGPUUtil, warmPoolSleepMinSize,
-						warmPoolMaxHold, warmPoolMinHold, warmPoolPreloadTop, warmPoolMemoryBudget); err != nil {
+						warmPoolMaxHold, warmPoolMinHold, warmPoolPreloadTop, warmPoolMemoryBudget, passiveResolver); err != nil {
 						setupLog.Error(err, "warm pool stopped", "namespace", ns)
 					}
 				}()
@@ -1506,6 +1519,7 @@ func runWarmPool(
 	warmPoolMinHold *time.Duration,
 	warmPoolPreloadTop *int,
 	warmPoolMemoryBudget *int64,
+	passiveResolver *passive.Resolver,
 ) error {
 	// Its own, because the original sat in main() as a local. Same name so the
 	// lines this function emits are indistinguishable from before the hoist.
@@ -1518,22 +1532,27 @@ func runWarmPool(
 	// workload registered later.
 	go trigger.WatchRegistry(ctx, registry.Default, 30*time.Second)
 
-	reconciler := warmpool.New(
-		warmpoolpool.NewAdapter(mgr.GetClient(), warmPoolNS, warmpoolpool.Ram),
-		&warmpool.Demand{
-			Namespace:            warmPoolNS,
-			GPUMemoryUtilization: *warmPoolGPUUtil,
-			Registry:             registry.Default,
-			Decisions:            decision.Default,
-			Client:               mgr.GetClient(),
-			Datastore:            ds,
-			// SERVING replicas rather than merely Ready ones, for the return
-			// rule -- see Demand.Serving. Unknown falls back to the Ready count,
-			// which is all a fleet whose collector has not run yet has.
-			Serving: func(namespace, variant string) (int, bool) {
-				return decision.Serving(namespace, variant, warmpool.ContentionMaxAge, time.Now())
-			},
+	// A passive model is observed, never scaled: the pool plans no copy and
+	// no borrow for it, and does not load or wake one (wirePassive).
+	guard := &warmpoolpool.PassiveGuard{Pool: warmpoolpool.NewAdapter(mgr.GetClient(), warmPoolNS, warmpoolpool.Ram)}
+	demand := &warmpool.Demand{
+		Namespace:            warmPoolNS,
+		GPUMemoryUtilization: *warmPoolGPUUtil,
+		Registry:             registry.Default,
+		Decisions:            decision.Default,
+		Client:               mgr.GetClient(),
+		Datastore:            ds,
+		// SERVING replicas rather than merely Ready ones, for the return
+		// rule -- see Demand.Serving. Unknown falls back to the Ready count,
+		// which is all a fleet whose collector has not run yet has.
+		Serving: func(namespace, variant string) (int, bool) {
+			return decision.Serving(namespace, variant, warmpool.ContentionMaxAge, time.Now())
 		},
+	}
+	wirePassive(passiveResolver, passiveComponents{Demand: demand, Guard: guard})
+	reconciler := warmpool.New(
+		guard,
+		demand,
 		warmpoolpolicy.Config{
 			SleepMinSize:       *warmPoolSleepMinSize,
 			MaxHold:            *warmPoolMaxHold,
@@ -1653,4 +1672,43 @@ func envBytes(name string, def int64) int64 {
 		return 1
 	}
 	return n
+}
+
+// passiveComponents are the components that must agree on which models are
+// passive (docs/reference/scaling-policy.md, "passive"). They are built at
+// different points of startup, so each call names the ones it has; a nil
+// field is one that call does not wire. Here rather than in a file of its
+// own because make build compiles cmd/main.go alone.
+type passiveComponents struct {
+	SteadyState   *steadystate.Engine
+	ScaleFromZero *scalefromzero.Engine
+	Scaler        *scaler.Server
+	Demand        *warmpool.Demand
+	Guard         *warmpoolpool.PassiveGuard
+}
+
+// wirePassive hands one resolver to every component in c, so the external
+// scaler, both engines and the warm pool answer "is this model passive?" the
+// same way. A component added to passiveComponents and not wired here fails
+// TestWirePassiveReachesEveryComponent.
+func wirePassive(r *passive.Resolver, c passiveComponents) {
+	variantPassive := func(namespace, variant string) bool {
+		m, _ := r.Variant(namespace, variant)
+		return m.Passive()
+	}
+	if c.SteadyState != nil {
+		c.SteadyState.Passive = r
+	}
+	if c.ScaleFromZero != nil {
+		c.ScaleFromZero.Passive = r
+	}
+	if c.Scaler != nil {
+		c.Scaler.Passive = r
+	}
+	if c.Demand != nil {
+		c.Demand.Passive = variantPassive
+	}
+	if c.Guard != nil {
+		c.Guard.Passive = variantPassive
+	}
 }

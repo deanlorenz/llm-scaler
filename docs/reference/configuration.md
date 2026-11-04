@@ -64,6 +64,7 @@ from the release notes. See
 | `WVA_FMA_LAUNCHER_METRICS` | Apply a PodMonitor that scrapes FMA launcher pods, which nothing else does — they declare no container ports, so a port-name endpoint generates no target for them. Applied to the **workload** namespace (`WVA_WATCH_NS`, else `WVA_NS`), and skipped if another PodMonitor already scrapes launchers there. See [FMA launcher pods](operations.md#fma-launcher-pods) | `false` |
 | `DEPLOY_LLMD_NS` | Create an empty llm-d namespace up front, for a demo that wants it before anything is deployed. `deploy/install-epp.sh` creates its own when it deploys EPP, and the scaling manager does not watch namespaces | `false` |
 | `ENABLE_SCALE_TO_ZERO` | Allow a model to be parked at zero replicas, and enable the EPP `flowControl` gate that makes waking it possible | `true` |
+| `WVA_PASSIVE` | Run the controller **passive**: it computes, logs and publishes everything and changes no replica count. Written to `WVA_PASSIVE` in `wva-manager-config`, read at start. Unset, a re-install keeps the live value, and keeps `passive` on the scaling-policy `default` entry too, both written into what it applies. A controller that read another value at start is restarted. A scaling-policy entry overrides it per namespace, tier or model ([passive](scaling-policy.md#passive)) | unset: keep the live value, else `false` |
 | `SKIP_CHECKS` | Turn the preflight's refusals (no model servers in the namespace, model servers or EPP not scraped, missing permissions) into warnings: findings are still reported. It does not skip the guard against a second install on the cluster, or the post-install verification | `false` |
 | `SCALER_BACKEND` | `keda` or `none` (use a pre-installed backend) | `keda` |
 | `KEDA_NAMESPACE` | Namespace KEDA is installed in. Set explicitly, it is also the namespace the external-scaler NetworkPolicy admits. Unset, that namespace is detected, never guessed; with no answer **no NetworkPolicy is applied**, and the installer warns that `:9090` is reachable from every Pod and prints the fix for the install's shape. How it is detected, and which existing policies are left as `state UNKNOWN`: [the external-scaler NetworkPolicy](upgrade-and-uninstall.md#the-external-scaler-networkpolicy). The policy is an admin-phase object (`make setup-prereqs`); `make check-prereqs` and `INSTALL_PHASE=wva` treat it as optional. `make verify-deployment` warns when the policy and KEDA's namespace differ, and prints `No NetworkPolicy: scaler port open` when there is none | `keda-system` for the KEDA install; detected for the NetworkPolicy |
@@ -1075,7 +1076,7 @@ decides whether a change needs a restart.
 **Static**: read once at startup, so a change needs a restart. The metrics and
 probe addresses, leader election, the Prometheus URL and its TLS material, the
 feature flags, **the optimization interval** (`GLOBAL_OPT_INTERVAL`), **the
-learned-state horizons** (`LEARNED_STATE_*`, read when the analyzer is built)
+learned-state horizons** (`LEARNED_STATE_*`, read when the analyzer is built), **the controller-wide passive switch** (`WVA_PASSIVE`; the `passive` key on a scaling-policy entry is live)
 and **the Prometheus cache settings**. The interval and cache settings look
 dynamic but are not: only test code changes them after load.
 

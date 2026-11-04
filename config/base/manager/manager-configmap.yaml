@@ -39,6 +39,11 @@ data:
     # Feature Flags
     # Enables scale-to-zero behavior across managed workloads.
     WVA_SCALE_TO_ZERO: "false"
+    # Passive mode: compute, log and publish everything, change no replica
+    # count. A scaling-policy entry's passive key overrides it per namespace,
+    # tier or model. Read at startup. make deploy-wva keeps the live value
+    # unless WVA_PASSIVE is passed.
+    WVA_PASSIVE: "false"
 
     # Prometheus Metrics Cache
     # Time-to-live for cached Prometheus metric responses.

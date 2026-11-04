@@ -79,6 +79,11 @@
 //	                       controller with no quota on its namespace ignores
 //	                       physicalGroups and says so here. The mode is not
 //	                       invalid; absent otherwise.
+//	passiveDefault         "true" or "false": the WVA_PASSIVE this process
+//	                       read at start. It is read only then, so a value
+//	                       that differs from wva-manager-config means the
+//	                       controller needs a restart; the installer compares
+//	                       the two. Absent until set.
 //	inFlightLedger         the in-flight node ledger, JSON
 //	                       (allocation.PersistedInFlight): the holes held for
 //	                       replicas whose pods hold no node yet, each with its
@@ -172,6 +177,9 @@ const (
 	// example a physicalGroups a namespace-scoped controller ignores. Absent
 	// when they do not.
 	KeyUtilizationShareNote = "utilizationShareNote"
+	// KeyPassiveDefault is the WVA_PASSIVE this process read at start,
+	// "true" or "false".
+	KeyPassiveDefault = "passiveDefault"
 )
 
 // PodListDeniedMessage is the KeyPodListDenied value.
@@ -656,6 +664,14 @@ func (p *Publisher) SetUtilizationShareNote(note string) {
 		return
 	}
 	p.update(func(d map[string]string) { setOrDelete(d, KeyUtilizationShareNote, note) })
+}
+
+// SetPassiveDefault records the WVA_PASSIVE this process read at start.
+func (p *Publisher) SetPassiveDefault(passive bool) {
+	if p == nil {
+		return
+	}
+	p.update(func(d map[string]string) { d[KeyPassiveDefault] = strconv.FormatBool(passive) })
 }
 
 // setOrDelete sets key to value, or removes it when value is empty.

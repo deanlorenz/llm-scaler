@@ -44,9 +44,10 @@ and read each `[SKIPPED]` reason.
 | Target | Ginkgo label filter | CI |
 | --- | --- | --- |
 | `make test-e2e-smoke` | `smoke` | every PR into `main` or `dev` that changes something besides `docs/**`, `README.md`, `CONTRIBUTING.md`, `LICENSE`, `OWNERS` or `PROJECT`, with `SCALE_TO_ZERO_ENABLED=false` |
-| `make test-e2e-full` | `full && !smoke && !flaky && !kueue-borrow` | PRs that touch code, config or tests, with `SCALE_TO_ZERO_ENABLED=true` and `DEPLOY_LWS=true` |
+| `make test-e2e-full` | `full && !smoke && !flaky && !kueue-borrow && !passive` | PRs that touch code, config or tests, with `SCALE_TO_ZERO_ENABLED=true` and `DEPLOY_LWS=true` |
 | `make test-e2e-multi-controller` | `multi-controller` specs | — |
 | `make test-e2e-kueue-borrow` / `test-e2e-kueue-borrow-with-setup` | `kueue-borrow` (the first needs `make install-kueue-e2e`) | job `e2e-tests-kueue-borrow`: PRs touching borrowing, label `ok-to-test-kueue`, nightly; `REQUIRE_KUEUE_E2E=true` |
+| `make test-e2e-passive` / `test-e2e-passive-with-setup` | `passive` | job `e2e-tests-passive`, beside `e2e-tests-full` on the same PRs; needs `USE_SIMULATOR=true` and `SCALE_TO_ZERO_ENABLED=true` |
 | `make test-e2e-smoke-with-setup` / `test-e2e-full-with-setup` | deploy the infra first, then run the tier | what CI runs |
 
 Smoke and full are **disjoint**: the full target excludes `smoke`, so run both

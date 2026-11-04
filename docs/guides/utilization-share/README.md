@@ -11,6 +11,11 @@ models](../../well-lit-paths/utilization-share/). **Experimental.**
 This guide turns it on in two steps, **shadow** (reports, moves nothing) then
 **active**, and back off. It is one block in the scaling policy, read live.
 
+> **A passive model puts its share group in shadow.** If one model of a group
+> is [passive](../../reference/scaling-policy.md#passive), the whole group
+> plans and moves nothing, and `wva_utilization_share_passive_shadow` is 1.
+> Make the model active, or keep it out of the group, to share again.
+
 ## Prerequisites
 
 - [ ] Two or more models scaled by the scaling manager, under a **limiter**: a
