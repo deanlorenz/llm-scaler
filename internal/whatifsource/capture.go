@@ -230,7 +230,7 @@ type windowScan struct {
 // window (windowAPI) and each step reads the samples evaluated at it. Every
 // query is a range query: a capture reads, and writes nothing.
 //
-// Every query is required: one that fails fails the capture, naming the
+// Every query is required: one that fails stops the capture, naming the
 // query, at once. A failed query leaves its field absent at every step of
 // the window, and a capture cannot tell that from a field the window did
 // not have, so a capture that went on would hand Generate inputs a

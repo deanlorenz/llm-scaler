@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,12 +25,12 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/whatifsource"
 )
 
-// runCLIWarn runs whatif with args and returns its output, its warnings and
-// its error.
-func runCLIWarn(ctx context.Context, args ...string) (string, string, error) {
-	var out, warn bytes.Buffer
-	err := run(ctx, args, &out, &warn)
-	return out.String(), warn.String(), err
+// runCLIWarn runs whatif with args under ctx and returns its warnings and
+// its error; its output is dropped.
+func runCLIWarn(ctx context.Context, args ...string) (string, error) {
+	var warn bytes.Buffer
+	err := run(ctx, args, io.Discard, &warn)
+	return warn.String(), err
 }
 
 // authSeen is an https server that records the Authorization header of each
@@ -123,7 +124,7 @@ func TestClient_InsecureSkipVerifyWarns(t *testing.T) {
 func TestClient_ARequestTimesOut(t *testing.T) {
 	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		select {
-		case <-time.After(5 * time.Second):
+		case <-time.After(2 * time.Second):
 		case <-r.Context().Done():
 		}
 	}))
@@ -143,11 +144,11 @@ func TestClient_ARequestTimesOut(t *testing.T) {
 // about.
 func TestCapture_BatchCapTwiceWarns(t *testing.T) {
 	srv := fleetServer(t)
-	_, warn, err := runCLIWarn(context.Background(), captureArgs(srv.URL, filepath.Join(t.TempDir(), "c.gz"),
+	warn, err := runCLIWarn(context.Background(), captureArgs(srv.URL, filepath.Join(t.TempDir(), "c.gz"),
 		"--batch-cap", "32", "--engine-args", "--max-num-seqs=64 --block-size=16")...)
 	require.NoError(t, err)
 	assert.Contains(t, warn, "--batch-cap 32 and --max-num-seqs in --engine-args")
-	_, warn, err = runCLIWarn(context.Background(), captureArgs(srv.URL, filepath.Join(t.TempDir(), "c.gz"),
+	warn, err = runCLIWarn(context.Background(), captureArgs(srv.URL, filepath.Join(t.TempDir(), "c.gz"),
 		"--batch-cap", "32", "--engine-args", "--block-size=16")...)
 	require.NoError(t, err)
 	assert.Empty(t, warn)
@@ -245,7 +246,7 @@ func TestGenerate_ExitCodes(t *testing.T) {
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _, err = runCLIWarn(ctx, "generate", "-in", capture, "-o", filepath.Join(dir, "out.jsonl"))
+	_, err = runCLIWarn(ctx, "generate", "-in", capture, "-o", filepath.Join(dir, "out.jsonl"))
 	require.Error(t, err)
 	assert.Equal(t, 1, exitCode(err), "%v", err)
 }
