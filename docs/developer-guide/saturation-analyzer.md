@@ -317,7 +317,7 @@ one (`atCapBatchCap`):
 |---|---|---|
 | ITL admission at the cap (`itl.Admission.MaxNumSeqs`, `fitLines`) | `atCapBatchCap`: flags, else declared (only while `SwitchBatchCapDeclared` is on too), else 0; `itl-window` logs `batchCap` and `batchCapSource` (`none` for 0) | `SwitchBatchCapITLAdmission` |
 | P/D decode view's at-cap exception (`decodeCapacityViews`, `atCapBatchCaps`) | `atCapBatchCap`, as above | `SwitchBatchCapDecodeView` |
-| derived mu's sequence cap (`deriveMuAtCap`) | `pricingBatchCap`: flags, declared, learned, default; `derived-mu` logs `batchCap` and `batchCapSource` | `SwitchBatchCapDerivedMu` |
+| derived mu's sequence cap (`whatif.DeriveMuAtCap`) | `pricingBatchCap`: flags, declared, learned, default; `derived-mu` logs `batchCap` and `batchCapSource` | `SwitchBatchCapDerivedMu` |
 | zero-replica estimate (`estimateStoredCapacity`, issue #427) | `zeroReplicaBatchCap`, per engine rank: flags, else declared (only while `SwitchBatchCapDeclared` is on too), else default; never learned. A prefill variant keeps flags, else default: P3 never prices prefill. The estimate is one rank's figure, also for a data-parallel variant (#438). `zero-replica-capacity-estimate` logs `batchCap` and `batchCapSource` on its `deployment-derived` line | `SwitchBatchCapZeroReplica` |
 | `slo` analyzer's admission (`slo.admission`) | `EngineParams.StatedBatchCap`: flags, else declared (not gated by `SwitchBatchCapDeclared`, a saturation switch); `slo-variant` logs `lineBatchCap` and `lineBatchCapSource` | `slo.SwitchBatchCapAdmission` |
 | `slo` analyzer's per-rank cap (`priceVariant`) | `StatedBatchCap`, else `BatchCap`; `slo-variant` logs `batchCap` and `batchCapSource` | `slo.SwitchBatchCapPerRank` |
@@ -334,7 +334,7 @@ replicas.
 The `slo` analyzer does not read the learned cap: it lives in the saturation
 analyzer's memory. A capped mu is still priced at `ITL(kPrice)`,
 although a replica held by its cap runs below `kPrice` and so faster: mu
-reads low, toward more replicas (the `slo` analyzer's `reachableFill`
+reads low, toward more replicas (the `slo` analyzer's `whatif.ReachableFill`
 accounts for this; saturation does not).
 
 With no `EngineParams` at all (the scale target was never read), a learned cap
@@ -1007,22 +1007,25 @@ kPrice = clamp(kvCacheThreshold x scaleUpThreshold,
                DefaultMinObservableK, DefaultMaxObservableK)
 ```
 
-`pricingK()`. With the shipped defaults that is `0.80 x 0.85 = 0.68`, **not**
-`0.85`. This composition is easy to get wrong: `k_sat` (0.85) is where the ITL
-line is validated, while 0.68 is the occupancy the autoscaler actually targets.
+`pricingK()` reads the policy and calls `whatif.PricingK` in
+`internal/signals/whatif`. With the shipped defaults that is
+`0.80 x 0.85 = 0.68`, **not** `0.85`. This composition is easy to get wrong:
+`k_sat` (0.85) is where the ITL line is validated, while 0.68 is the occupancy
+the autoscaler actually targets.
 
 ### The derived mu
 
-`deriveMu()` in `mu_from_itl.go`:
+`whatif.DeriveMuAtCap` in `internal/signals/whatif/mu.go`, the arithmetic the
+`slo` analyzer's pricing shares:
 
 ```
-C        = capacityTokensFor(params, rm.TotalKvCapacityTokens)
-seqs     = min(Sequences(kPrice, C, KVreq), MaxNumSeqs)
+C        = whatif.CapacityTokens(params, ranks, rm.TotalKvCapacityTokens)
+seqs     = whatif.CappedSequences(kPrice, C, KVreq, batchCap x ranks)
 tokenSec = seqs / ITL(kPrice)
 mu       = tokenSec / avgOutput
 ```
 
-It declines (`ok: false`, and the floor then emits nothing for that role) when
+It declines (`OK: false`, and the floor then emits nothing for that role) when
 the model is unfitted, `avgOutput <= 0`, `KVreq <= 0`, `seqs <= 0`,
 `ITL(kPrice) <= 0`, or `kPrice` is outside `(0, 1]`.
 

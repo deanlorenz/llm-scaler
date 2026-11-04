@@ -13,6 +13,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // gaugeIn returns the value of the first series of name whose labels include
@@ -100,7 +101,7 @@ var _ = Describe("What Analyze publishes", func() {
 		Expect(fill).To(BeNumerically("~", 0.6, 1e-9))
 		itlAt, ok := gaugeIn(registry, constants.WVASLOPredictedITLSeconds, agg1)
 		Expect(ok).To(BeTrue())
-		realised := realisedFill(defaultBand, line, 0.6, 0.85, 100000, 500, 0)
+		realised := whatif.RealisedFill(whatif.DefaultBand, line, 0.6, 0.85, 100000, 500, 0)
 		Expect(itlAt).To(BeNumerically("~", line.ITLAt(realised), 1e-9))
 		Expect(itlAt).To(BeNumerically("<", line.ITLAt(0.6)), "the headroom must lower the ITL actually run at")
 	})

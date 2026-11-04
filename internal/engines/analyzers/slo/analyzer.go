@@ -33,6 +33,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // backlogDrainSeconds is how quickly the analyzer asks the fleet to clear the
@@ -435,7 +436,7 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	// (settle.go).
 	a.settleAdmission(&adm, input.Namespace, input.ModelID)
 	// The fill is clamped to the band the line is fitted over.
-	band := fillBand{lo: adm.MinK, hi: adm.MaxK}
+	band := whatif.FillBand{Lo: adm.MinK, Hi: adm.MaxK}
 	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, adm, now)
 	d.line = r
 	if !(tpotTarget > 0) {
@@ -445,14 +446,14 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	if source == constants.SLOSourceNoLine || source == constants.SLOSourceDeclined {
 		return vc, reading, d
 	}
-	p := priceTPOT(band, line, tpotTarget)
-	d.targetFill = p.target
+	p := whatif.PriceTPOT(band, line, tpotTarget)
+	d.targetFill = p.Target
 	switch {
-	case !p.ok:
+	case !p.OK:
 		reading.Source = constants.SLOSourceInputInvalid
 		vc.Reason = domain.ReasonError
 		return vc, reading, d
-	case !p.feasible:
+	case !p.Feasible:
 		// Abstain, never cap: holding an infeasible variant at its count would
 		// freeze a single-variant fleet as load rises.
 		reading.Source = constants.SLOSourceInfeasible
@@ -479,8 +480,8 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	maxSeqs := d.batchCap * d.ranks
 	capTokens := fleet.capacityTokens(vs.VariantName, params)
 	d.capTokens = capTokens
-	fill := reachableFill(band, p.fill, capTokens, fleet.shape.KVreq, maxSeqs)
-	rate := replicaTokenRate(line, fill, capTokens, fleet.shape.KVreq, maxSeqs)
+	fill := whatif.ReachableFill(band, p.Fill, capTokens, fleet.shape.KVreq, maxSeqs)
+	rate := whatif.ReplicaTokenRate(line, fill, capTokens, fleet.shape.KVreq, maxSeqs)
 	if !(rate > 0) {
 		reading.Source = constants.SLOSourceInputInvalid
 		vc.Reason = domain.ReasonError
@@ -489,7 +490,7 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	vc.PerReplicaCapacity = rate
 	vc.Reason = "slo-" + source
 	reading.Fill = fill
-	if k := realisedFill(band, line, fill, scaleUp, capTokens, fleet.shape.KVreq, maxSeqs); finite(k) {
+	if k := whatif.RealisedFill(band, line, fill, scaleUp, capTokens, fleet.shape.KVreq, maxSeqs); finite(k) {
 		reading.PredictedITL = line.ITLAt(k)
 	}
 	return vc, reading, d
@@ -883,7 +884,8 @@ func (f fleetReading) demand(input domain.AnalyzerInput) float64 {
 
 // capacityTokens is the mean KV capacity of the variant's ready replicas, in
 // tokens: the live reading where there is one, the engine's configured
-// override otherwise, the same order the saturation analyzer reads them in.
+// override otherwise (whatif.CapacityTokens, which the saturation analyzer
+// reads them with too).
 func (f fleetReading) capacityTokens(variant string, params *capacity.EngineParams) float64 {
 	var sum float64
 	var n int
@@ -891,15 +893,7 @@ func (f fleetReading) capacityTokens(variant string, params *capacity.EnginePara
 		if rm.VariantName != variant || !rm.Ready || rm.FromWarmPool {
 			continue
 		}
-		c := 0.0
-		// math.MaxInt64 is the collector's overflow sentinel, not a capacity.
-		if rm.TotalKvCapacityTokens > 0 && rm.TotalKvCapacityTokens < math.MaxInt64 {
-			c = float64(rm.TotalKvCapacityTokens)
-		} else if params != nil && params.TotalKvTokensOverride > 0 {
-			// The flag sizes one engine; the row may run several.
-			c = float64(params.TotalKvTokensOverride) * float64(rm.Ranks())
-		}
-		if c > 0 {
+		if c := whatif.CapacityTokens(params, rm.Ranks(), rm.TotalKvCapacityTokens); c > 0 {
 			sum += c
 			n++
 		}
@@ -929,4 +923,9 @@ func (f fleetReading) engineRanks(variant string) int64 {
 		return 1
 	}
 	return max(int64(math.Round(float64(sum)/float64(n))), 1)
+}
+
+// finite reports whether x is neither NaN nor infinite.
+func finite(x float64) bool {
+	return !math.IsNaN(x) && !math.IsInf(x, 0)
 }

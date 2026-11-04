@@ -15,6 +15,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // The ITL line of an aggregated variant, by request shape (issue #275),
@@ -486,11 +487,11 @@ func (r *aggShapeRig) stepWithout(t *testing.T) *domain.AnalyzerResult {
 // however thin; a figure that may (decode's) and a borrowed reading are left
 // as they are.
 func TestAggregatedShape_ALiftedFigureNeverPricesAboveTheMeasuredRate(t *testing.T) {
-	derived := derivedMu{rate: 2.0, ok: true, capAtMeasured: true}
+	derived := whatif.DerivedMu{Rate: 2.0, OK: true, CapAtMeasured: true}
 	assert.Equal(t, 1.5, pricedDerivedRate(derived, throughputReading{rate: 1.5, samples: 1}))
 	assert.Equal(t, 2.0, pricedDerivedRate(derived, throughputReading{rate: 3.0, samples: 1}), "a higher measurement does not raise it")
 	assert.Equal(t, 2.0, pricedDerivedRate(derived, throughputReading{}), "no measurement")
 	assert.Equal(t, 2.0, pricedDerivedRate(derived, throughputReading{rate: 1.5, borrowed: true}), "a borrowed reading is not the variant's own")
-	derived.capAtMeasured = false
+	derived.CapAtMeasured = false
 	assert.Equal(t, 2.0, pricedDerivedRate(derived, throughputReading{rate: 1.5, samples: 1}), "decode's figure is unchanged")
 }

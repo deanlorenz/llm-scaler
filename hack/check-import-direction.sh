@@ -40,6 +40,13 @@ layer_of() {
         internal/scalingpolicy) echo 60 ;;
         internal/engines/allocation|internal/engines/allocation/*) echo 50 ;;
         internal/engines/analyzers/*|internal/engines/executor|internal/engines/variantmeta) echo 40 ;;
+        # whatif prices capacity from the lines the measuring packages fit
+        # (docs/proposals/slo-capacity-planner.md, "Packaging"): the analyzers
+        # call it, so it is below them, and it sits above floor so that an
+        # edge from floor, or from a package that only measures, back to it
+        # is an inversion. Like floor's, this arm MUST precede
+        # internal/signals/* below.
+        internal/signals/whatif|internal/signals/whatif/*) echo 32 ;;
         # floor reads the capacity window and prices the load from it, so it
         # is above the packages that only measure -- and above aggregation,
         # which it imports. Those keep the one rank they have always shared.

@@ -91,7 +91,7 @@ func itlLineReportOnly(role string) bool {
 	return domain.CanonicalRole(role) == domain.RoleBoth
 }
 
-// derivedWhyReportOnly is the derivedMu.why a replica is priced with when its
+// derivedWhyReportOnly is the whatif.DerivedMu.Why a replica is priced with when its
 // line's figure is reported only (itlLineReportOnly).
 const derivedWhyReportOnly = "report-only"
 

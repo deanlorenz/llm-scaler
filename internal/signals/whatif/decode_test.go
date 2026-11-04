@@ -1,4 +1,4 @@
-package slo
+package whatif
 
 import (
 	"math"
@@ -13,35 +13,35 @@ import (
 // 44 ms at k = 0.6, 52 ms at the top.
 var line = itl.Model{A: 0.040, B: 0.020}
 
-var _ = Describe("priceTPOT", func() {
+var _ = Describe("PriceTPOT", func() {
 	It("inverts the line at the target", func() {
-		p := priceTPOT(defaultBand, line, 0.044)
-		Expect(p.ok).To(BeTrue())
-		Expect(p.feasible).To(BeTrue())
-		Expect(p.fill).To(BeNumerically("~", 0.6, 1e-12))
+		p := PriceTPOT(DefaultBand, line, 0.044)
+		Expect(p.OK).To(BeTrue())
+		Expect(p.Feasible).To(BeTrue())
+		Expect(p.Fill).To(BeNumerically("~", 0.6, 1e-12))
 	})
 
 	It("clamps a loose target to the top of the fitted range", func() {
-		p := priceTPOT(defaultBand, line, 1.0)
-		Expect(p.feasible).To(BeTrue())
-		Expect(p.fill).To(Equal(defaultBand.hi))
+		p := PriceTPOT(DefaultBand, line, 1.0)
+		Expect(p.Feasible).To(BeTrue())
+		Expect(p.Fill).To(Equal(DefaultBand.Hi))
 	})
 
 	It("prices just inside the bottom of the range", func() {
-		p := priceTPOT(defaultBand, line, 0.027)
-		Expect(p.feasible).To(BeTrue())
-		Expect(p.fill).To(BeNumerically("~", 0.175, 1e-12))
+		p := PriceTPOT(DefaultBand, line, 0.027)
+		Expect(p.Feasible).To(BeTrue())
+		Expect(p.Fill).To(BeNumerically("~", 0.175, 1e-12))
 	})
 
 	It("is infeasible when the line exceeds the target at the bottom of its range", func() {
-		p := priceTPOT(defaultBand, line, line.ITLAt(defaultBand.lo))
-		Expect(p.ok).To(BeTrue())
-		Expect(p.feasible).To(BeFalse())
+		p := PriceTPOT(DefaultBand, line, line.ITLAt(DefaultBand.Lo))
+		Expect(p.OK).To(BeTrue())
+		Expect(p.Feasible).To(BeFalse())
 	})
 
 	DescribeTable("refuses an unusable input instead of pricing it",
 		func(m itl.Model, target float64) {
-			Expect(priceTPOT(defaultBand, m, target).ok).To(BeFalse())
+			Expect(PriceTPOT(DefaultBand, m, target).OK).To(BeFalse())
 		},
 		Entry("a flat line", itl.Model{A: 0, B: 0.02}, 0.05),
 		Entry("an inverted line", itl.Model{A: -0.01, B: 0.02}, 0.05),
@@ -58,65 +58,65 @@ var _ = Describe("priceTPOT", func() {
 	// and never below the saturation analyzer's default point.
 	It("prices a loose SLO at least as high as the saturation analyzer's default point", func() {
 		const saturationPricingK = 0.80 * 0.85
-		loose := priceTPOT(defaultBand, line, 1.0)
-		Expect(loose.fill).To(BeNumerically(">=", saturationPricingK))
-		Expect(replicaTokenRate(line, loose.fill, 1e6, 4000, 0)).
-			To(BeNumerically(">=", replicaTokenRate(line, saturationPricingK, 1e6, 4000, 0)))
+		loose := PriceTPOT(DefaultBand, line, 1.0)
+		Expect(loose.Fill).To(BeNumerically(">=", saturationPricingK))
+		Expect(ReplicaTokenRate(line, loose.Fill, 1e6, 4000, 0)).
+			To(BeNumerically(">=", ReplicaTokenRate(line, saturationPricingK, 1e6, 4000, 0)))
 	})
 })
 
-var _ = Describe("replicaTokenRate", func() {
+var _ = Describe("ReplicaTokenRate", func() {
 	It("is the resident sequences over the ITL at k", func() {
 		// 0.6 * 100000 / 500 = 120 sequences, one token each per 44 ms.
-		Expect(replicaTokenRate(line, 0.6, 100000, 500, 0)).To(BeNumerically("~", 120/0.044, 1e-9))
+		Expect(ReplicaTokenRate(line, 0.6, 100000, 500, 0)).To(BeNumerically("~", 120/0.044, 1e-9))
 	})
 
 	It("caps the sequences at the engine's max_num_seqs", func() {
-		Expect(replicaTokenRate(line, 0.6, 100000, 500, 64)).To(BeNumerically("~", 64/0.044, 1e-9))
+		Expect(ReplicaTokenRate(line, 0.6, 100000, 500, 64)).To(BeNumerically("~", 64/0.044, 1e-9))
 	})
 
 	It("is zero when an input is unusable", func() {
-		Expect(replicaTokenRate(line, 0.6, 0, 500, 0)).To(BeZero())
-		Expect(replicaTokenRate(line, 0.6, 100000, 0, 0)).To(BeZero())
-		Expect(replicaTokenRate(itl.Model{A: math.NaN()}, 0.6, 100000, 500, 0)).To(BeZero())
+		Expect(ReplicaTokenRate(line, 0.6, 0, 500, 0)).To(BeZero())
+		Expect(ReplicaTokenRate(line, 0.6, 100000, 0, 0)).To(BeZero())
+		Expect(ReplicaTokenRate(itl.Model{A: math.NaN()}, 0.6, 100000, 500, 0)).To(BeZero())
 	})
 })
 
-var _ = Describe("realisedFill", func() {
+var _ = Describe("RealisedFill", func() {
 	It("finds the fill that carries scaleUp times the priced rate, below the priced fill", func() {
-		k := realisedFill(defaultBand, line, 0.6, 0.85, 100000, 500, 0)
+		k := RealisedFill(DefaultBand, line, 0.6, 0.85, 100000, 500, 0)
 		Expect(k).To(BeNumerically("<", 0.6))
-		Expect(replicaTokenRate(line, k, 100000, 500, 0)).
-			To(BeNumerically("~", 0.85*replicaTokenRate(line, 0.6, 100000, 500, 0), 1e-6))
+		Expect(ReplicaTokenRate(line, k, 100000, 500, 0)).
+			To(BeNumerically("~", 0.85*ReplicaTokenRate(line, 0.6, 100000, 500, 0), 1e-6))
 	})
 
 	It("is the priced fill when there is no headroom", func() {
-		Expect(realisedFill(defaultBand, line, 0.6, 1, 100000, 500, 0)).To(Equal(0.6))
+		Expect(RealisedFill(DefaultBand, line, 0.6, 1, 100000, 500, 0)).To(Equal(0.6))
 	})
 
 	It("is NaN when the priced rate is unusable", func() {
-		Expect(math.IsNaN(realisedFill(defaultBand, line, 0.6, 0.85, 0, 500, 0))).To(BeTrue())
+		Expect(math.IsNaN(RealisedFill(DefaultBand, line, 0.6, 0.85, 0, 500, 0))).To(BeTrue())
 	})
 })
 
-var _ = Describe("reachableFill", func() {
+var _ = Describe("ReachableFill", func() {
 	It("is k when the engine admits every sequence k implies", func() {
-		Expect(reachableFill(defaultBand, 0.6, 100000, 500, 256)).To(Equal(0.6))
-		Expect(reachableFill(defaultBand, 0.6, 100000, 500, 0)).To(Equal(0.6))
+		Expect(ReachableFill(DefaultBand, 0.6, 100000, 500, 256)).To(Equal(0.6))
+		Expect(ReachableFill(DefaultBand, 0.6, 100000, 500, 0)).To(Equal(0.6))
 	})
 
 	It("is the fill max_num_seqs stops at when it binds", func() {
-		Expect(reachableFill(defaultBand, 0.6, 100000, 500, 64)).To(BeNumerically("~", 0.32, 1e-12))
+		Expect(ReachableFill(DefaultBand, 0.6, 100000, 500, 64)).To(BeNumerically("~", 0.32, 1e-12))
 	})
 
 	It("never goes below the fitted range", func() {
-		Expect(reachableFill(defaultBand, 0.6, 100000, 500, 8)).To(Equal(defaultBand.lo))
+		Expect(ReachableFill(DefaultBand, 0.6, 100000, 500, 8)).To(Equal(DefaultBand.Lo))
 	})
 })
 
-var _ = Describe("realisedFill below the fitted range", func() {
+var _ = Describe("RealisedFill below the fitted range", func() {
 	It("reports the bottom of the range rather than extrapolating under it", func() {
 		// A very low headroom drives the realised fill under 0.15.
-		Expect(realisedFill(defaultBand, line, 0.2, 0.3, 100000, 500, 0)).To(Equal(defaultBand.lo))
+		Expect(RealisedFill(DefaultBand, line, 0.2, 0.3, 100000, 500, 0)).To(Equal(DefaultBand.Lo))
 	})
 })

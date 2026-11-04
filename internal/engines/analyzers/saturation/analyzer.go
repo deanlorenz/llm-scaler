@@ -156,7 +156,7 @@ type SaturationAnalyzer struct {
 	// itlTracker holds one rolling window of (k, ITL) readings PER VARIANT,
 	// from which ITL(k) = A*k + B is fitted so mu can be derived for the shape
 	// the fleet is serving NOW rather than waiting for it to saturate under it
-	// (mu_from_itl.go), and the B of each key's last full fit. Keyed like the
+	// (whatif.DeriveMuAtCap), and the B of each key's last full fit. Keyed like the
 	// throughput windows and swept with them. The slo analyzer fits its lines
 	// with the same itl.Tracker, so the two never apply different rules.
 	//

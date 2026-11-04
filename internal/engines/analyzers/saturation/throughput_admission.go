@@ -7,6 +7,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // Which saturated readings may become a measured service rate (mu), and how
@@ -266,7 +267,7 @@ func (t tuning) tokensOutrunCompletions(rm domain.ReplicaMetrics, role string, f
 // served is the variant's highest served rate this cycle (servedBounds), and
 // filling whether the replica's tokens outran its completions
 // (tokensOutrunCompletions).
-func (t tuning) throughputRefusal(requestRate, mu float64, derived derivedMu, served float64, filling bool) string {
+func (t tuning) throughputRefusal(requestRate, mu float64, derived whatif.DerivedMu, served float64, filling bool) string {
 	if !(requestRate > 0) {
 		return refusedNoCompletion
 	}
@@ -276,7 +277,7 @@ func (t tuning) throughputRefusal(requestRate, mu float64, derived derivedMu, se
 	if served > t.MuChoice.MaxRatio*mu {
 		return refusedUnderServed
 	}
-	if derived.ok && mu < t.MuChoice.MinMeasuredOfDerived*derived.rate {
+	if derived.OK && mu < t.MuChoice.MinMeasuredOfDerived*derived.Rate {
 		return refusedUnderDerived
 	}
 	return ""
@@ -562,7 +563,7 @@ func (a *SaturationAnalyzer) noteSaturatedReading(key, pod string, mu float64, r
 //     figure, or, once it has given way, still MeasuredDerivedReturnRatio
 //     above it; and when it sits as far under it, but only once it has been
 //     stale for MeasuredLowHoldFor -- until then the lower of the two prices.
-func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading throughputReading, derived derivedMu, served float64, t tuning, now time.Time) bool {
+func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading throughputReading, derived whatif.DerivedMu, served float64, t tuning, now time.Time) bool {
 	return a.measuredYield(key, reading, derived, served, t, now) != muYieldNone
 }
 
@@ -579,16 +580,16 @@ const (
 )
 
 // measuredYield is measuredYieldsToDerived, saying which way it gave way.
-func (a *SaturationAnalyzer) measuredYield(key string, reading throughputReading, derived derivedMu, served float64, t tuning, now time.Time) muYield {
+func (a *SaturationAnalyzer) measuredYield(key string, reading throughputReading, derived whatif.DerivedMu, served float64, t tuning, now time.Time) muYield {
 	maxR, retR := t.MuChoice.MaxRatio, t.MuChoice.ReturnRatio
-	if !derived.ok || !(derived.rate > 0) || !(reading.rate > 0) {
+	if !derived.OK || !(derived.Rate > 0) || !(reading.rate > 0) {
 		return muYieldNone
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	c := a.throughputMuChoice[key]
 	latched := c != nil && c.yielded
-	ratio := reading.rate / derived.rate
+	ratio := reading.rate / derived.Rate
 	// Unknown: a memo with no evidence behind it, or none at all for a
 	// window on record (restored, or brought back).
 	_, onRecord := a.saturatedThroughput[key]

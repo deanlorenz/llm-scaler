@@ -12,6 +12,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // Issue #150. --max-num-seqs and --max-num-batched-tokens bound ONE engine. A
@@ -25,17 +26,17 @@ func TestDeriveMuCapsSequencesPerRank(t *testing.T) {
 	short := shape.New(100, 100, 0) // a shape whose cache implies far more than 256 sequences
 
 	one := deriveMu(tracedModel, tracedParams, 1, tracedKv, short, tracedK, 100)
-	require.True(t, one.ok)
-	require.Equal(t, 256.0, one.seqs, "precondition: one rank sits on its cap")
+	require.True(t, one.OK)
+	require.Equal(t, 256.0, one.Seqs, "precondition: one rank sits on its cap")
 
 	eight := deriveMu(tracedModel, tracedParams, 8, 8*tracedKv, short, tracedK, 100)
-	require.True(t, eight.ok)
-	assert.Equal(t, 8*256.0, eight.seqs, "eight ranks admit eight times max_num_seqs")
-	assert.InDelta(t, 8*one.rate, eight.rate, 1e-9*one.rate,
+	require.True(t, eight.OK)
+	assert.Equal(t, 8*256.0, eight.Seqs, "eight ranks admit eight times max_num_seqs")
+	assert.InDelta(t, 8*one.Rate, eight.Rate, 1e-9*one.Rate,
 		"eight ranks of one engine's cache serve eight times its rate")
 
 	capped := deriveMu(tracedModel, tracedParams, 1, 8*tracedKv, short, tracedK, 100)
-	assert.Equal(t, 256.0, capped.seqs,
+	assert.Equal(t, 256.0, capped.Seqs,
 		"the defect: eight ranks' cache capped at one rank's 256 sequences")
 
 	unknown := deriveMu(tracedModel, tracedParams, 0, tracedKv, short, tracedK, 100)
@@ -45,11 +46,11 @@ func TestDeriveMuCapsSequencesPerRank(t *testing.T) {
 // The KV flag sizes one engine; the live reading is already the replica's.
 func TestCapacityTokensForScalesOnlyTheFlag(t *testing.T) {
 	flagged := &capacity.EngineParams{TotalKvTokensOverride: tracedKv}
-	assert.Equal(t, float64(8*tracedKv), capacityTokensFor(flagged, 8, 0),
+	assert.Equal(t, float64(8*tracedKv), whatif.CapacityTokens(flagged, 8, 0),
 		"with no live reading, eight ranks hold eight times the flag")
-	assert.Equal(t, float64(tracedKv), capacityTokensFor(flagged, 8, tracedKv),
+	assert.Equal(t, float64(tracedKv), whatif.CapacityTokens(flagged, 8, tracedKv),
 		"a live reading is the whole replica's and is never multiplied")
-	assert.Equal(t, capacityTokensFor(flagged, 1, 0), capacityTokensFor(flagged, 0, 0))
+	assert.Equal(t, whatif.CapacityTokens(flagged, 1, 0), whatif.CapacityTokens(flagged, 0, 0))
 }
 
 // The derived k2 (P3) prices one engine and is scaled to the replica.
@@ -95,7 +96,7 @@ func TestReplicaCapacityPricesEveryRank(t *testing.T) {
 		rm.EngineRanks = ranks
 		cfg := &config.ScalingPolicy{KvCacheThreshold: 0.8, ScaleUpThreshold: 0.85, QueueLengthThreshold: 10}
 		return a.computeReplicaCapacity(rm, cfg, tuningOf(cfg), "m", "ns", 8, domain.RoleDecode, "H200",
-			outputKeys{k2: 1000, mu: 1000}, 1000, 1000, 0, derivedMu{}, servedRates{}, false, false, replicaRouting{}, false, logr.Discard())
+			outputKeys{k2: 1000, mu: 1000}, 1000, 1000, 0, whatif.DerivedMu{}, servedRates{}, false, false, replicaRouting{}, false, logr.Discard())
 	}
 
 	eight := price(8)

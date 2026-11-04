@@ -11,6 +11,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // The cases #389 listed as gaps on the classes it had: liveness for 8-GPU
@@ -245,7 +246,7 @@ func checkMuFirstSampleTimeBase(seed uint64) error {
 	}
 	first := sampleTimeBase(path).rate1m[0]
 	t := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
-	if t.throughputRefusal(first, first, derivedMu{rate: truth, ok: true}, 0, false) != "" {
+	if t.throughputRefusal(first, first, whatif.DerivedMu{Rate: truth, OK: true}, 0, false) != "" {
 		return nil
 	}
 	return holds(relErr((first+truth)/2, first) <= propBand, kindAdoptedRaw,

@@ -14,6 +14,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/balance"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // defaultTuning is the tuning of a policy that sets none of it.
@@ -203,7 +204,7 @@ func TestTuningAdmissionAndMuChoice(t *testing.T) {
 	assert.True(t, defaultTuning.tokensOutrunCompletions(rm, domain.RoleDecode, 500), "1.25x is over the default 1.15")
 	assert.False(t, lenient.tokensOutrunCompletions(rm, domain.RoleDecode, 500), "and under 1.30")
 
-	derived := derivedMu{rate: 4.0, ok: true}
+	derived := whatif.DerivedMu{Rate: 4.0, OK: true}
 	strict := tuningOf(policyWith(func(p *config.ScalingPolicy) { p.AnalyzerTuning.MuChoice.MinMeasuredOfDerived = 0.8 }))
 	assert.Empty(t, defaultTuning.throughputRefusal(1, 2.4, derived, 0, false), "0.6 of derived passes the default half")
 	assert.Equal(t, refusedUnderDerived, strict.throughputRefusal(1, 2.4, derived, 0, false), "and not 0.8")

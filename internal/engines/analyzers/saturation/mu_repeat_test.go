@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // An exact repeat of mu's last reading past the sample spacing is use, not a
@@ -99,14 +100,14 @@ func TestMuRepeat_OverDerivedDoesNotKeepTheMeasurementFresh(t *testing.T) {
 // under-orders. Repeated for longer than the hold, it keeps pricing.
 func TestMuRepeat_UnderDerivedStillKeepsTheMeasurementFresh(t *testing.T) {
 	tn := tuningOf(nil)
-	derived := derivedMu{ok: true, rate: 3.0}
+	derived := whatif.DerivedMu{OK: true, Rate: 3.0}
 	for _, on := range []bool{true, false} {
 		a, clock := muRepeatRig(t, on)
 		t0 := *clock
-		a.noteSaturatedReading(muRepeatKey, "pod-a", 1.2, false, derived.rate, tn, *clock)
+		a.noteSaturatedReading(muRepeatKey, "pod-a", 1.2, false, derived.Rate, tn, *clock)
 		a.recordSaturatedThroughputFrom(muRepeatKey, "pod-a", 1.2)
 		for *clock = t0.Add(ThroughputSampleSpacing); clock.Sub(t0) <= MeasuredLowHoldFor+5*time.Minute; *clock = clock.Add(time.Minute) {
-			a.noteSaturatedReading(muRepeatKey, "pod-a", 1.2, false, derived.rate, tn, *clock)
+			a.noteSaturatedReading(muRepeatKey, "pod-a", 1.2, false, derived.Rate, tn, *clock)
 			a.recordSaturatedThroughputFrom(muRepeatKey, "pod-a", 1.2)
 		}
 		assert.Equal(t, clock.Add(-time.Minute), a.throughputMuChoice[muRepeatKey].saturatedAt, "switch %v", on)
