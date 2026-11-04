@@ -13,6 +13,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/floor"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // What one replica can hold: the memory bound k1, the compute bound k2, and
@@ -64,8 +65,8 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	fleetHitRate float64,
 	// derived is mu priced from this variant's fitted ITL model, which needs
 	// no saturated cycle and no bucket. It is preferred over the measured
-	// window when present (mu_from_itl.go).
-	derived derivedMu,
+	// window when present (whatif.DeriveMuAtCap).
+	derived whatif.DerivedMu,
 	// served is what the variant's Ready replicas served this cycle
 	// (servedBounds), in the same requests/s mu is measured in: the highest
 	// rate, a lower bound on what one replica sustains, and the median of
@@ -223,8 +224,8 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		k2Ref = held
 	}
 	a.mu.Unlock()
-	if ref <= 0 && derived.ok {
-		ref = derived.rate
+	if ref <= 0 && derived.OK {
+		ref = derived.Rate
 	}
 	// Whether a saturated reading is the replica at its limit or a load step
 	// it has just been handed (k2_settle.go). Judged on the busiest rank, as
@@ -341,13 +342,13 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 			// a sibling's served rate contradicts it (refusedUnderServed),
 			// which no repetition confirms.
 			derivedRate := 0.0
-			if derived.ok {
-				derivedRate = derived.rate
+			if derived.OK {
+				derivedRate = derived.Rate
 			}
 			if a.noteSaturatedReading(throughputKey, rm.PodName, mu, why == refusedUnderDerived, derivedRate, tune, a.now()) {
 				logger.V(logging.DEFAULT).Info("saturated-throughput-low-confirmed",
 					"modelID", modelID, "namespace", namespace, "variant", rm.VariantName,
-					"pod", rm.PodName, "role", role, "rate", mu, "derivedRate", derived.rate,
+					"pod", rm.PodName, "role", role, "rate", mu, "derivedRate", derived.Rate,
 					"confirmedFor", MeasuredLowConfirmFor.String(),
 					"reason", "under half the derived mu on every saturated cycle for MeasuredLowConfirmFor: the line is the wrong figure, and the reading is recorded")
 				why = ""
@@ -358,7 +359,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 				logger.V(logging.DEFAULT).Info("saturated-throughput-refused",
 					"modelID", modelID, "namespace", namespace, "variant", rm.VariantName,
 					"pod", rm.PodName, "role", role, "rate", mu, "requestRate", rm.RequestRate,
-					"derivedOK", derived.ok, "derivedRate", derived.rate, "servedBound", served.max, "reason", why)
+					"derivedOK", derived.OK, "derivedRate", derived.Rate, "servedBound", served.max, "reason", why)
 			} else if write, ok := a.marginClamp(throughputKey, mu, clamped); !ok {
 				// Past the margin toward shorter outputs with no window to
 				// clamp to: nothing is written (marginClamp).
@@ -426,7 +427,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// choice does not flip with derived's noise (measuredYieldsToDerived).
 	throughputSamples := reading.samples
 	yield := muYieldNone
-	if !useDerived(derived.ok, reading) {
+	if !useDerived(derived.OK, reading) {
 		yield = a.measuredYield(throughputKey, reading, derived, served.max, tune, a.now())
 		switch yield {
 		case muYieldServed:
@@ -435,7 +436,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 			a.noteMuCount(namespace, modelID, rm.VariantName, muReasonYieldStale)
 		}
 	}
-	if useDerived(derived.ok, reading) || yield != muYieldNone {
+	if useDerived(derived.OK, reading) || yield != muYieldNone {
 		saturatedThroughput = pricedDerivedRate(derived, reading)
 		throughputBucket = derivedBucket
 		// Not the stale measured count, which describes a different figure
@@ -682,17 +683,17 @@ func useDerived(derivedOK bool, reading throughputReading) bool {
 
 // pricedDerivedRate is the rate a derived figure prices a replica at: the
 // figure, and for one that may not price above a measured rate of the
-// variant's own (derivedMu.capAtMeasured, an aggregated variant's lifted
+// variant's own (whatif.DerivedMu.CapAtMeasured, an aggregated variant's lifted
 // figure, issue #275) the lower of the two where the variant has one,
 // however thin. The figure rests on a shape term and a prefill correction
 // that are estimates, so the lower prices it, as a stale pair that
 // disagrees does (measuredYieldsToDerived). A reading borrowed from another
 // bucket is not the variant's own.
-func pricedDerivedRate(derived derivedMu, reading throughputReading) float64 {
-	if derived.capAtMeasured && !reading.borrowed && reading.rate > 0 {
-		return min(derived.rate, reading.rate)
+func pricedDerivedRate(derived whatif.DerivedMu, reading throughputReading) float64 {
+	if derived.CapAtMeasured && !reading.borrowed && reading.rate > 0 {
+		return min(derived.Rate, reading.rate)
 	}
-	return derived.rate
+	return derived.Rate
 }
 
 // derivedBucket is the sentinel the bucket label carries when mu was derived

@@ -40,7 +40,7 @@ func policy(tpot, ttft time.Duration) *config.ScalingPolicy {
 func row(variant, pod string, k float64) domain.ReplicaMetrics {
 	return domain.ReplicaMetrics{
 		PodName: pod, VariantName: variant, Ready: true,
-		KvUsageInstant: k, AvgITL: line.ITLAt(k), AvgITLKnown: true,
+		KvUsageInstant: k, AvgITL: testLine.ITLAt(k), AvgITLKnown: true,
 		TotalKvCapacityTokens: 100000, AvgOutputTokens: 1000, RequestRate: 1,
 	}
 }

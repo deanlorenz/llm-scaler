@@ -45,20 +45,20 @@ func TestThroughputFloor_AgreesWithOccupancyAtTheTarget(t *testing.T) {
 	line := itl.Model{A: 0.082, B: 0.0105}
 	kPrice := pricingK(cfg)
 	d := deriveMu(line, params, 1, kvTokens, shape.New(1000, 500, 0), kPrice, 500)
-	require.True(t, d.ok)
+	require.True(t, d.OK)
 	require.InDelta(t, 0.68, kPrice, 1e-9)
 	k1 := float64(memoryBound(kvTokens, cfg.KvCacheThreshold))
 
 	for _, n := range []int{1, 2, 4} {
-		lambda := float64(n) * d.rate // every replica exactly at kPrice
+		lambda := float64(n) * d.Rate // every replica exactly at kPrice
 		occupancy := float64(n) * kPrice * kvTokens
-		fl := floorAtTarget(n, lambda, d.rate, k1, cfg.ScaleUpThreshold)
+		fl := floorAtTarget(n, lambda, d.Rate, k1, cfg.ScaleUpThreshold)
 		assert.InDelta(t, 0, targetRC(occupancy, cfg.ScaleUpThreshold, n, k1), 1e-6, "N=%d: occupancy holds at the target", n)
 		assert.InDelta(t, 0, targetRC(fl, cfg.ScaleUpThreshold, n, k1), 1e-6,
 			"N=%d: the floor holds at the target too (floor util %.3f)", n, fl/(float64(n)*k1))
 		// And it still orders past it: 5 % more arrivals than the fleet serves
 		// at the target is 5 % more fleet.
-		over := floorAtTarget(n, 1.05*lambda, d.rate, k1, cfg.ScaleUpThreshold)
+		over := floorAtTarget(n, 1.05*lambda, d.Rate, k1, cfg.ScaleUpThreshold)
 		assert.InDelta(t, 0.05*float64(n), targetRC(over, cfg.ScaleUpThreshold, n, k1), 1e-6, "N=%d: orders past the target", n)
 	}
 
