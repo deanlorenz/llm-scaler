@@ -297,8 +297,8 @@ The staircase is the TTFT pass mark (decode is validated against the goldens).
 | --- | --- |
 | Fleet | Fixed `N_p` = 2, `N_d` = 2; ScaledObjects paused (`autoscaling.keda.sh/paused`) |
 | Load | guidellm, constant rate, streamed, from `test/benchmark` behind a make target |
-| Buckets | A: prompts 1000, answers 1000 (decode-bound). B: prompts 8000, answers 200 (prefill-bound) |
-| Flow control | Each bucket twice: off, then on (utilization detector, one band, static ceiling) |
+| Buckets | A: prompts 1000, answers 1000 (decode-bound). B: prompts 8000, answers 200 (prefill-bound). C (bursty): B's shape with arrivals at an interarrival `Ca²` of 4, the squared coefficient of variation P3's `ArrivalCV2` takes. The arrivals are a renewal process: i.i.d. gaps from a balanced two-phase hyperexponential with mean `1/λ` and SCV 4, which is on/off traffic with exponential phase lengths. The fallback is batches at Poisson epochs: a batch of `k` simultaneous requests gives gaps of SCV `2k − 1`, so `k` = 2 (3) and `k` = 3 (5) bracket 4. The harness measures `Ca²` per step from the request send times and records it; a step outside 3 to 5 is rerun. guidellm's built-in rate profiles are constant or Poisson, so bucket C needs a driver of its own in `test/benchmark` (not yet written) |
+| Flow control | Each bucket twice: off, then on (utilization detector, one band, static ceiling). Bucket C is predicted with the measured `Ca²`, not Poisson |
 | Start | 40% of the predicted knee |
 | Steps | +10% to 70% of the knee, then +3% to 110% |
 | Hold | 10 minutes per step; the first 3 discarded |
@@ -316,6 +316,17 @@ separately to the mean TPOT and to the per-request TPOT percentile. **Noise floo
 prefill at 30k tok/s; a step whose window holds fewer than 4 such times is
 flagged and lengthened. Until the run passes, every TTFT figure prints
 UNVALIDATED.
+
+**Which bucket lifts which flag.** The SLO analyzer's S2 does not size on a
+figure carrying a flag below until the bucket named passes the mark above,
+in all its repeats ([S1 decisions](slo-tiers.md#s1-decisions)):
+
+| Flag | Lifted by |
+| --- | --- |
+| `UnvalidatedTTFT` | Buckets A and B, flow control off and on |
+| `AssumedPoissonArrivals` | Bucket C, flow control off and on, predicted at the measured `Ca²` |
+| `AboveFlowControlOnset` (on a rate answer) | Buckets B and C with flow control on, with steps above the prefill onset |
+| `FlowControlInferredOff` | Never by the staircase: it is a missing series, fixed by scraping it |
 
 ## Open questions
 

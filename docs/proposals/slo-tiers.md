@@ -191,6 +191,7 @@ data:
     slo:
       tpot: {target: 100ms}                  # a mean
       ttft: {target: 3s, percentile: 90}     # a percentile; observed only (TTFT enforce is step 2c)
+      flowControl: disabled                  # S1: the EPP's flow-control gate, declared (not parsed yet)
       mode: enforce                          # phase 1: not parsed yet, ignored today
 ```
 
@@ -540,12 +541,689 @@ Two PRs, under [the learner rules](analyzer-learner.md):
 
 | PR | What | Goldens | Depends on |
 | --- | --- | --- | --- |
-| S1 (2b) | Price each prefill and aggregated variant against the TTFT target in shadow: the rate per replica at which the bounded TTFT meets it. Published as `wva_slo_*` series and in the cycle log; no replica count changes. Switch `slo-ttft-price` | `slo-published.csv` moves with the switch on | the what-if P3; a golden with router TTFT and the [recorder fields](analyzer-learner.md#29-recorder-fields-for-ttft-and-capture), which the prefill-stress recording provides |
-| S2 (2c) | Enforce, once S1's shadow predictions pass their gate | moves | S1; the what-if staircase run itself, not the per-bucket PR that precedes it in that plan |
+| S1 (2b) | Price each prefill variant of a P/D model against the TTFT target in shadow: the TTFT predicted at the current rate, and the rate per replica at which the bounded TTFT meets it. Aggregated variants wait for the what-if M1. Published as `wva_slo_*` series and in the cycle log; no replica count changes. Switch `slo-ttft-price`. Inputs and outputs: [S1 decisions](#s1-decisions) | `slo-published.csv` moves with the switch on | the what-if P3 (PR #471); a golden with router TTFT and the [recorder fields](analyzer-learner.md#29-recorder-fields-for-ttft-and-capture), which the prefill-stress recording provides |
+| S2 (2c) | Enforce, once S1's shadow predictions pass their gate | moves | S1; Q1 (the measured `V_P` and prompt spread); M2, the what-if staircase run itself with its bursty bucket, not the per-bucket PR that precedes it in that plan |
 
 `ols-sweep-slo` gives S1 router TTFT, `AvgTTFT`, `AvgServiceTime` and the
 arrival rate: enough to fit `a` and check a low-load mean, not to fit `V_P` (no
 queue), the router queue (flow control off) or a tail (no histograms).
+
+#### S1 decisions
+
+Settled 2026-11-04, revised 2026-11-05 after two review rounds, before S1 is
+built. The model is P3's ([end-to-end TTFT](slo-capacity-planner-ttft.md), and
+its "As built (P3)" section on PR #471); this section says only what S1 feeds
+it and what S1 does with the answer. One rule runs through it: **only err
+toward more replicas.** Where an input is unknown, S1 assumes the value that
+asks for more replicas and flags it; where a flag means the answer may
+over-promise, S2 does not act on it.
+
+**Scope: prefill variants only.** P3 prices a P/D fleet; aggregated TTFT is
+the what-if M1, and P1 refuses `a` on an aggregated pod. S1 prices each
+prefill variant of a P/D model and publishes nothing for an aggregated one,
+as TPOT publishes nothing for a prefill one. Aggregated TTFT follows M1.
+
+**No TTFT objective, no entry.** A model whose policy sets no `slo.ttft`
+target gets no TTFT entry, no TTFT series and no `slo-ttft-variant` line,
+whatever its roles. The `engine` golden's P/D model is TPOT-only, so it does
+not move.
+
+##### Where P1's figures come from
+
+P1's observer lives in the saturation analyzer, which feeds it two inputs no
+other analyzer has: decode back-pressure (the `computeK2` test) and the
+back-pressure bound. S1 does not run a second observer: it would lack both
+inputs and keep a second copy of six hours of samples.
+
+- **The stash.** `observePrefill` stores each variant's latest
+  `prefill.Estimate` in a new map on the saturation analyzer,
+  `prefillEstimates map[string]stashedEstimate`, keyed
+  `namespace|model|variant` (the shape of `prefillBoundStashKey`), with
+  `stashedEstimate{est prefill.Estimate; at time.Time}`. It is written under
+  the saturation analyzer's `mu`, which `observePrefill` takes for the write
+  only (it does not hold it today; `takePrefillBounds` takes it the same
+  way).
+- **Stamped with the cycle.** `at` is the saturation analyzer's `now()` at
+  the write. S1 refuses an entry whose `at` is not its own `now()` this
+  cycle, with reason `no-estimate`. Both analyzers read one clock: the
+  engine's per-cycle clock in production (`cycleclock`, passed to both in
+  `steadystate/engine.go`) and the replay's clock in `learnreplay/replay.go`,
+  so the times are equal within a cycle, not merely close. An entry left
+  from a cycle in which the observation did not run is therefore never read.
+- **Forgotten with the variant.** The entry is deleted in the saturation
+  analyzer's `forgetVariant` (an operator's
+  `llm-d.ai/forget-learned-state`) and swept in
+  `evictPrefillObservationLocked` when older than
+  `prefillBoundsStaleAfter`, like the bounds.
+- **The handle.** S1 never rebuilds the observer's key
+  (`prefillObserveKey`), which reads the accelerator memo under the
+  saturation analyzer's lock. It reads the stash through an interface in
+  package `slo`:
+
+      type PrefillEstimates interface {
+          PrefillEstimate(namespace, modelID, variant string) (prefill.Estimate, time.Time, bool)
+      }
+
+  `*saturation.SaturationAnalyzer` implements it. It is wired with
+  `(*slo.Analyzer).WithPrefillEstimates(PrefillEstimates)` in both places
+  that build the SLO analyzer: `steadystate/engine.go` (passed `satV2`) and
+  `learnreplay/replay.go` (passed `r.sat`). `whatifsource/capture.go`
+  builds one too and passes none, so it prices no TTFT.
+- **Lock order:** the SLO analyzer's `mu`, then the saturation analyzer's
+  `mu`, then the observer's lock. Nothing takes them in another order, so a
+  read from S1 cannot deadlock a saturation cycle.
+- **The same cycle's estimate.** The engine runs saturation first, always
+  (`runSaturation`, before `analyzerRunEntries` in `runAnalyzers`), so S1
+  reads the estimate saturation made from the same cycle's rows. **Replay
+  fidelity depends on this order:** a replay that ran `slo` before
+  saturation would find no entry stamped with the cycle and read
+  `no-estimate`, moving the golden. The order holds in sizer mode too:
+  saturation still runs there, and `eligibleEntries` only drops its result
+  from the composite.
+- S1 therefore needs `prefill-capacity-observe` on; with it off, no entry is
+  written and every prefill variant reads `no-estimate`.
+
+##### 1. The imbalance `f`
+
+P3 refuses `NoImbalance` with more than one prefill pod and no `f`, and P1
+learns `f` only after 5 minutes at 100 requests a pod.
+
+**At the current count `N_p`,** S1 takes, in order:
+
+1. P1's learned `f` **at `N_p` pods**, from minutes taken at that count only.
+   P1's `F` today is a median over every count the variant has had (its
+   `fSample` carries no pod count; `FPodsLast` is only the last minute's), so
+   a learned `f` from three pods would be read at five. **P1 gains a
+   per-count `f` in the S1 PR:** `fSample` records the minute's pod count,
+   and `prefill.Estimate` gains `FByPods map[int]float64` with
+   `FSamplesByPods map[int]int`, each count's median held to the same
+   `MinImbalanceMinutes`. `F` keeps its meaning for the log.
+2. With one prefill pod, none: P3 prices one pod as `f` = 1, exactly.
+3. Otherwise an assumed `f`, flagged `AssumedImbalance`:
+   `f = min(N_p, max(1.5, f_raw))`.
+
+**`f_raw`** is the busiest pod's share of the variant's computed-token rate
+over the mean share, `max_i r_i ÷ mean_i r_i`, with `r_i` the row field
+`PrefillComputedTokenRate` of each Ready, settled prefill row of the cycle.
+It is the largest over the last 5 cycles at the current Ready count, and
+**not de-biased**. The state lives in the SLO analyzer:
+`imbalance map[string]*imbalanceWindow`, keyed `namespace|model|variant`,
+with `imbalanceWindow{pods int; shares []float64}`, under the SLO analyzer's
+`mu`. The window is reset when the Ready count changes, forgotten in the SLO
+analyzer's `forgetVariant`, and evicted by its `evictStale` after the state
+timeout, like its lines. With no computed-token rate on any row, `f` is 1.5.
+
+Why:
+
+- **Publishing nothing** leaves most multi-pod fleets with no figure, so
+  shadow would collect no predictions on the fleets S2 most needs to size.
+- **`f` = 1 over-promises**, which is why P3 refuses to assume it silently.
+- **The raw share errs high.** At few requests, chance alone puts the busiest
+  pod above its share; P1's de-bias exists to remove that excess. A high `f`
+  lowers the rate per replica, so it asks for more replicas, the permitted
+  side. The raw share also catches a real sticky-routing imbalance (one pod
+  winning a whole refresh window: the 439 waiting with 3 of 4 pods idle),
+  which a stated constant alone would miss.
+- **The floor 1.5** covers minutes in which the shares happen to look even.
+  It is P3's own synthetic multi-pod case, and near P1's 2:1:1:1 example
+  (1.6). It is a constant, not a policy field, until a recording argues for
+  another value ([open question 5](#s1-open-questions)).
+- **Capped at `N_p`**, the most one pod can carry.
+- **Deriving `f` from the router's configuration** (scorer weights) was
+  rejected: no formula maps weights to a share.
+
+**At another count `N'`** (S2's search), `f` is `min(N', max(1.5, f))`, with
+`f` the figure above. A learned `f` is never carried unchanged to a new
+count, and one pod's exact `f` = 1 never reaches two or more pods. At
+`N'` = 1 the clamp gives 1, which is exact.
+
+**Routing-bound.** When `f ÷ N_p` ≥ 0.8, one pod takes at least 80% of the
+work, and more pods would mostly sit idle behind the router. The variant is
+`routing-bound`: `predicted_ttft` is still published, the per-replica rate is
+not, and it makes no TTFT contribution. The fix is the router's scoring, not
+replicas.
+
+##### 2. `V_P` in production
+
+Busy minutes fire only while a learner recording is on, because the
+queue-minimum query is record-only (#470). **Decision:** S1 takes P1's
+estimate as it is: busy minutes when it has them, else the peak under a
+queue, else the back-pressure bound, else `no-prefill-capacity`. S1 makes no
+collector change. The collector change is its own PR, **Q1** in the
+[what-if PR plan](slo-capacity-planner.md#pr-plan), after #470 merges and
+before S2.
+
+Why:
+
+- **Every source reads at or below `V_P`** on the prompts it was learned on.
+  Busy minutes read at it when the pod ran flat out and under it otherwise
+  (#470: data-parallel pods and stalls under-read); the other two are lower
+  bounds, flagged `VPLowerBound`. A low `V_P` asks for more replicas, so S1
+  need not refuse the lower bounds. The one exception is the noise of the
+  peak under a queue, a max of one-minute rates, which P1 states as a limit.
+- **Refusing without busy minutes** was rejected: shadow would then mean
+  "only while recording", and production would never accumulate predictions.
+- **The lower bounds cost replicas, not safety.** A peak under a queue taken
+  at moderate load reads well below `V_P` and over-provisions. That is why Q1
+  comes before S2, which spends replicas, and not before S1, which spends
+  none.
+- **Q1 is its own PR** because it is a collector cost, reviewable alone. It
+  issues three per-instance queries every cycle, not only while recording,
+  for namespaces holding a model whose policy sets a TTFT target: the queue
+  minimum (busy minutes), the per-request computed-prefill-token histogram
+  (`vllm:request_prefill_kv_computed_tokens_bucket`, the
+  [measured spread](#the-prompt-spread)), and the KV transfer time
+  (`nixl_xfer_time_seconds`, the [transfer term](#3-what-s1-passes-to-ttftat-and-rateforttft)).
+  The queue minimum and transfer time are R1 fields recordings already
+  carry; the computed-token histogram is new. **Q1 is a hard gate for S2**:
+  without it S2 sees only assumed spreads and omitted transfers, on neither
+  of which it acts.
+- **`V_P` depends on the prompts it was learned on.** Prefill throughput per
+  token falls as prompts lengthen (attention grows with the prompt): run 2
+  read 135k tok/s at 30k-token prompts and 118k at 37k
+  ([the recordings](#the-p2-recordings)), 13% lower for 1.23 times the
+  prompt. So a `V_P` learned on short prompts over-reads on long ones and
+  over-promises. P1 records the mean effective prompt behind `V_P` in a new
+  field, `prefill.Estimate.VPPromptTokens`: the mean of P1's
+  `effectivePrompt` (`PrefillComputedTokenRate ÷ RequestRate`) over the
+  minutes `V_P` rests on:
+  - busy minutes: the busy minutes inside `BusyWindow` whose median is `VP`;
+  - peak under a queue: the `PeakRun` minutes of the run whose least minute
+    is the peak;
+  - back-pressure bound: the bound's readings, through a new
+    `prefill.Bound.PromptTokens` the saturation analyzer fills from the same
+    rows. Until it does, the field is 0.
+
+  When the current mean differs from `VPPromptTokens` by more than **1.2x**
+  either way, or `VPPromptTokens` is 0, S1 flags `VPShapeMoved`. Published;
+  S2 does not act on it. **Why 1.2x:** taking the per-token prefill time as
+  linear in the prompt through run 2's two points (7.39 µs a token at 30k,
+  8.50 µs at 37k: 135k and 118k tok/s, from the run's `levels.txt`, 4.51
+  and 3.18 req/s with a queue on every sample), a prompt 1.5x longer than
+  `V_P` was learned on reads `V_P` about 32% high inside the threshold
+  (round 2 said a quarter, from the two points' ratio alone), and 1.2x
+  longer about 13% high. The threshold is the largest over-read let through
+  unflagged, so 1.2x accepts about 13% where 1.5x accepted about 32%. Two
+  points fit no curve, and the linear extrapolation is an assumption; run 1
+  adds points.
+  A shorter prompt than `V_P` was learned on under-reads `V_P`, the safe
+  side; it is flagged too, so a shape change is visible either way.
+- **P1's estimate is not persisted** (the plan's "Later" row). After a
+  controller restart every prefill variant reads `no-prefill-capacity` until
+  a pod queues again, and makes no TTFT contribution.
+
+##### 3. What S1 passes to `TTFTAt` and `RateForTTFT`
+
+One `whatif.TTFTFleet` per prefill variant, from one pure function, so that
+S2 calls it at other counts and the S1 tests call it directly:
+
+    // internal/engines/analyzers/slo/ttft_fleet.go
+    func ttftFleet(in ttftInputs, pods int) (whatif.TTFTFleet, []whatif.Flag)
+
+`ttftInputs` holds the cycle's figures (the estimate, `f`'s state, the shape,
+the decode variant, flow control); the returned flags are S1's own, added to
+P3's on the answer.
+
+| Input | From |
+| --- | --- |
+| `V_P`, `a` and their flags | P1's stashed estimate, through `whatif.PrefillFromEstimate` |
+| `f` | [Decision 1](#1-the-imbalance-f), at `pods` |
+| `N_p` | `pods`: the variant's Ready replicas for S1, each `N'` for S2 |
+| `PromptTokens` | The effective prompt, `E[I_eff]` (prefix hits are not prefill work), as P1 reads it |
+| `PromptCV` | Measured from the computed-prefill-token histogram where a row carries it (Q1); otherwise 2, flagged `AssumedPromptSpread` ([below](#the-prompt-spread)) |
+| `ArrivalCV2` | 0, Poisson (P3's open question 5), flagged `AssumedPoissonArrivals`: an S1 flag, since P3 has none for it. Poisson over-promises on bursty traffic. Lifted by the staircase's bursty bucket ([which bucket lifts which flag](slo-capacity-planner-ttft.md#ground-truth-and-the-staircase)) |
+| `TransferSecondsPerToken` | Measured: the mean of the R1 field `AvgKVTransferTime` over Ready decode rows with `AvgKVTransferTimeKnown`, divided by `E[I_eff]`. Run 2 recorded it on 374 of 386 decode rows. `TransferOmitted` (0 passed) only where no decode row carries it, which in production is until Q1 issues the query |
+| `Decode` | The model's decode variant, from the inputs S1 already prices TPOT with: its line, band, capacity tokens, `KVreq`, `O`, batch cap times ranks, and Ready replicas `N_d`. Only when the model has exactly one decode variant and its line prices (`own` or `pinned`; not `pinned-default`, `no-line` or `declined`) |
+| `FlowControl` | The tier's `slo.flowControl` when it is set ([below](#the-flow-control-state)): `enabled` passes `FlowControlOn`, `disabled` passes `FlowControlOff`. Unset, it is inferred from the series: on when the router's flow-control queue series exists for the model, `FlowControlNoSeries` (flagged `FlowControlInferredOff`) otherwise. On always carries the upstream detector thresholds 5 and 0.8, which this repository's install leaves unchanged, so P3's `FlowControlUnknown` cannot arise |
+| The rate | The model's arrival rate times the variant's share of the Ready prefill replicas |
+| The target | `slo.ttft.target`, and `slo.ttft.percentile` ÷ 100 |
+
+**The decode side.** With flow control on and no decode side, S1 does not
+price, and the reason is `no-decode-side`: without decode, P3 cannot place
+the decode onset, above which TTFT is not priced at all (P3's review). P3
+answers such a fleet flagged `DecodeOnsetUnchecked`, and its "What S1 calls"
+note says S1 must pass the decode role there; S1 never publishes such an
+answer. With flow control off, S1 prices prefill alone, flagged
+`DecodeSideOmitted`: published, with no TTFT contribution, because it leaves
+out `W_decode` and decode's first step and so over-promises.
+
+###### The flow-control state
+
+P3 prices flow control on and off differently, and with the gate off its
+series do not exist, so S1 cannot tell "off" from "not scraped". **Decision:**
+a new tier field, `slo.flowControl`, `enabled` or `disabled`, is the positive
+source when it is set:
+
+```yaml
+slo:
+  ttft: {target: 3s, percentile: 90}
+  flowControl: disabled        # the EPP's flowControl feature gate, as deployed
+```
+
+- **Set:** S1 passes what it declares, and no inference flag is raised.
+- **Unset:** S1 infers the state from the series. An inferred "off" is
+  flagged `FlowControlInferredOff`, which stays on S2's no-act list. **So on
+  a default install S2 does not act until the operator declares the state.
+  This is intended:** a scrape gap reads as "off", and pricing an on gate as
+  off misses the decode onset, above which TTFT is not priced at all. The
+  safe side is to wait for the operator.
+- **Checked against the router.** Declared `disabled` while the router's
+  flow-control queue series exist for the model is a contradiction: S1 logs
+  a warning, prices as declared, and flags `FlowControlMismatch`, which is
+  no-act. Declared `enabled` with no series for the model is treated as the
+  same mismatch: it is the conservative reading, but it assumes an on gate
+  publishes its queue series while empty, which is unverified; the S1 PR
+  checks it against an EPP with the gate on and no traffic.
+- **Validation** is the `slo` block's: a value other than the two drops the
+  tier entry, as a bad duration does. The field is in `config.SLOPolicy`,
+  `FlowControl SLOFlowControl \`yaml:"flowControl,omitempty"\``, with
+  `SLOFlowControlEnabled` and `SLOFlowControlDisabled`; empty is unset. It is
+  replaced whole with the `slo` block by an overlay. The detector's
+  thresholds stay at the upstream defaults; an override is open question 4.
+
+**The transfer term** is taken as per request. If `nixl_xfer_time_seconds`
+is per chunk (the TTFT page's open question 3), a request's transfer is
+several of them and the mean under-reads, which over-promises; the staircase
+settles it ([open question 8](#s1-open-questions)).
+
+###### The prompt spread
+
+**The spread P3 needs is the effective prompt's**, `I_eff`, the tokens a pod
+computes after prefix hits, not the raw prompt's. The raw histogram is
+`vllm:request_prompt_tokens`, per instance (the R1 field
+`PromptTokensBuckets`).
+
+**Decision:** Q1 measures `cv_eff` directly from vLLM's per-request
+computed-prefill-token histogram, `vllm:request_prefill_kv_computed_tokens`,
+per instance, the series P1 already reads `V_P` from (as `_sum`): it is
+`I_eff` per request. An earlier revision derived `cv_eff = cv_raw ÷ (1 − h)`
+from the raw histogram and the prefix hit rate `h`. That was dropped, because
+hits that vary by request break it in the unsafe direction: 2000-token
+prompts of which half hit 1800 tokens give `I_eff` of 2000 or 200, a `cv` of
+0.82, while the raw `cv` is 0 and the formula gives 0.
+
+**From coarse buckets:**
+
+- The mean is exact, `_sum ÷ _count`.
+- The second moment uses each bucket's **upper bound**, `Σ n_b·u_b² ÷ Σ n_b`,
+  so `cv² = E_u[I²] ÷ mean² − 1` reads high, never low. vLLM's token buckets
+  are coarse (1-2-5 steps), so it can read well high: constant 3000-token
+  prompts read about `cv` 1.3 in the 2000-5000 bucket. That costs replicas,
+  not safety.
+- Mass in the `+Inf` bucket has no upper bound: `cv` is set to 3 and flagged
+  `PromptSpreadClamped`. So is any measured `cv` above 3, where the p90
+  stops being monotone (below).
+- **Pods are pooled:** each bucket's rate is summed over the variant's Ready
+  pods, and `cv` is computed once from the pooled counts. The worst pod's
+  spread is not what P3's per-pod queue takes, but with routing that mixes
+  prompts across pods the pooled figure is that spread, and `f` carries the
+  imbalance.
+
+**The assumption.** Without the histogram, S1 assumes `cv` = 2, not 1, flagged
+`AssumedPromptSpread`. A gamma prompt at `cv` 1 is exponential; heavy-tailed
+prompts (a few long documents among short chat turns) sit above it, and a
+`cv` too low under-states both the queue (`Cs²` = `cv²`) and the request's
+own prefill tail, so it over-promises TTFT and asks for too few replicas.
+
+**Checked before relying on it:** does a larger `cv` always price a longer
+TTFT at p90 and above? No test on #471 asserts it (its property cases vary
+the rate and the replicas, not `cv`), so it was scanned on #471's round-1 tip
+(`f12de0dcf`, `engineWait`): `TTFTAt` on the prefill side, mean prompt 1000
+and 8000 tokens, `a` 5 and 30 ms, 1 and 4 pods, at 0.05, 0.3, 0.6 and 0.85 of
+the knee, p90, p95 and p99, `cv` 0, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 7 and 10:
+96 cells, 1056 priced points.
+
+- **Up to `cv` 3 it holds** in all 96 cells: TTFT rises with `cv` at every
+  percentile and load, on that grid.
+- **Above 3 it does not, at p90 and low load** (8 of the 96 cells, all of
+  them p90 at 0.05 of the knee). There the p90 peaks near `cv` 3 and then
+  falls (8000 tokens, `a` 5 ms: 1.131 s at `cv` 3, 1.118 at 4, 0.072 at 10).
+  The request's own prefill dominates there, and a gamma of shape `1/cv²`
+  puts ever more mass near zero, so its p90 shrinks. At 0.3 of the knee and
+  above, and at p95 and p99 everywhere, it still rises.
+
+So the claim is true only over a range, and the value is chosen as the one
+that maximises the priced TTFT over the plausible range. Over [0, 3] that is
+the range's top, because TTFT is monotone there. **The plausible top is taken
+as 2**, not 3: it is the top of the spread P3's property cases draw, a gamma
+at `cv` 2 already puts the p99 prompt near 10 times the mean, and `cv` 3 would
+roughly double the predicted TTFT at 0.6 of the knee (0.47 s to 0.93 s at
+1000 tokens, p90), spending replicas on a spread no measurement supports. The
+2 is not measured: run 1's histograms are the first evidence, and Q1
+replaces the assumption in production. No `cv`, assumed or measured, is
+passed above 3.
+
+**The scan's limits.** It called `TTFTAt` only, on the prefill side only (no
+decode role, flow control off, Poisson arrivals, `f` = 1), at the grid points
+listed. It did not call `RateForTTFT`, so the claim that a larger `cv` never
+raises the rate at the target is inferred from TTFT rising at every rate,
+not checked. It was a throwaway test, not committed; the S1 PR adds the
+property case ([tests](#the-s1-prs-tests)).
+
+**Two calls per variant, two roles:**
+
+- `RateForTTFT(fleet, target)`, at the current count, **sets the reason**
+  and the per-replica rate: the fleet's rate at the target ÷ `N_p`, with `f`
+  held. Its refusals, its bound and its flags are what S2 reads.
+- `TTFTAt(fleet, rate, q)`, at the current rate, is **the shadow
+  prediction** scored against the router, and says whether the target is met
+  now. A refusal here (`Saturated` at or over the prefill knee,
+  `AboveDecodeOnset`) only blanks `predicted_ttft`: the current rate is past
+  what the fleet serves at any TTFT, so the target is **unmet**, which is a
+  reason to grow, not to hold. `AboveFlowControlOnset` on this call is also
+  unmet, not a hold. S2 then grows from `RateForTTFT`'s answer, whose own
+  flags decide whether it may.
+
+**Decode-bound only when decode materially sets the rate.** P3 flags
+`HeldByDecodeAdmission` whenever the prefill side alone allows a higher rate
+than the full fleet, which any `W_decode` > 0 makes true. Read as a hold,
+that would stop S2 growing prefill on almost every P/D fleet. So the variant
+is `decode-bound` only when the rate answer is bound by the decode onset, or
+the prefill side's own rate (`Basis.TTFT.PrefillOnlyRate`) exceeds the full
+rate by more than 10%. Otherwise S1 publishes the per-replica rate as
+TTFT-bound, at the full rate (the lower of the two), so decode's share of the
+tail is still counted. When `decode-bound`, the per-replica figure is absent
+and `predicted_ttft` stays: more prefill pods cannot raise a rate decode
+sets, and dividing that fixed rate by more pods would ask for more pods every
+cycle. This is the superseded design's blame rule (a miss with decode at its
+ceiling is decode's), kept. The 10% is a stated threshold, not a measured
+one.
+
+With a decode side, the rate is not proportional to `N_p` (`W_decode` depends
+on the whole rate), so the per-replica figure holds at the current count only.
+
+##### 4. What S1 publishes
+
+Behind the replay switch `slo.SwitchTTFTPrice = "slo-ttft-price"`, in
+`internal/engines/analyzers/slo/ttft.go`, on by default like the other
+observe switches.
+
+**What keeps it out of a replica count.** The guard is the engine, not the
+analyzer's result: `eligibleEntries` (`steadystate/engine_v2.go`) drops the
+`slo` analyzer's result from the composite unconditionally, so nothing `slo`
+returns decides a count today. S1 still leaves its result unchanged (a
+prefill variant's `VariantCapacity` stays no-data, `RoleDemand` gains no
+`prefill`), because that result is published as `wva_analyzer_*`
+(`wva_analyzer_demand`, `wva_analyzer_target{analyzer_name="slo"}`) and
+dashboards read it; a shadow figure there would read as a decision. **S2 needs
+an enforce-path change:** `eligibleEntries` keeps `slo` under
+`slo.mode: enforce`, and only then does the result carry prefill demand.
+
+New series, all per prefill variant, labelled `namespace`, `model_name`,
+`variant_name` and `statistic`. **One convention:** `statistic` (`p90`), as
+the per-model series use it. No `objective` label: every series here is TTFT
+by name.
+
+| Metric | Labels beyond those | Meaning |
+| --- | --- | --- |
+| `wva_slo_predicted_ttft_seconds` | — | `TTFTAt` at the variant's current rate, at the objective's percentile. Present when priced and when `decode-bound` or `routing-bound`; absent when `TTFTAt` refuses (the target is then unmet, `wva_slo_ttft_unmet`) |
+| `wva_slo_ttft_unmet` | — | `1` when the current rate misses the target: the prediction is above it, or `TTFTAt` refused at or over the prefill knee or the decode onset, or the current rate is above the prefill flow-control onset; `0` when met; absent when not priced |
+| `wva_slo_ttft_replica_requests_per_second` | — | `RateForTTFT` ÷ `N_p` at the current count. Absent unless the reason is `priced` |
+| `wva_slo_ttft_vp_source` | `vp_source` | `1` for where `V_P` came from (`busy-minutes`, `peak-under-queue`, `back-pressure-bound`, `none`), `0` for the others. Present whenever the variant is evaluated |
+| `wva_slo_ttft_reason` | `reason` | `1` for the reason from `RateForTTFT` at the current count, `0` for the others. `priced`; S1's own: `no-estimate`, `no-decode-side`, `decode-bound`, `routing-bound`; and P3's refusals in kebab case: `no-prefill-capacity`, `no-fixed-latency`, `no-imbalance`, `no-prefill-replicas`, `no-decode-replicas`, `no-capacity`, `no-batch-cap`, `above-decode-onset`, `saturated`, `target-below-floor`, `no-traffic`, `too-many-slots`, `input-invalid`. `flow-control-unknown` is not among them: S1 always passes thresholds, so P3 cannot return it |
+| `wva_slo_ttft_flag` | `flag` | `1` for each flag on the rate answer, `0` for the others |
+
+The flag series zero-fills a fixed list, `constants.SLOTTFTFlags`, in this
+order: P3's TTFT flags (`UnvalidatedTTFT`, `AssumedVP`, `VPLowerBound`,
+`VPAboveSlopeBound`, `AssumedImbalance`, `AssumedPromptSpread`,
+`TransferOmitted`, `DecodeSideOmitted`, `FlowControlInferredOff`,
+`AboveFlowControlOnset`, `HeldByDecodeAdmission`, `DecodeOnsetUnchecked`),
+the decode flags a TTFT answer can carry (`BelowFittedBand`,
+`KVBoundSlots`), and S1's (`AssumedPoissonArrivals`, `VPShapeMoved`,
+`PromptSpreadClamped`, `FlowControlMismatch`). `AssumedVP` and `DecodeOnsetUnchecked` always read 0
+under S1, which assumes no `V_P` and publishes no unchecked answer; they are
+listed so the series set does not change when that does. `UnvalidatedTTFT`
+reads 1 until the staircase passes. `wva_slo_source` keeps its labels and
+stays TPOT's.
+
+**The operator join.** The prediction is per variant and the router's figure
+per model. With one prefill variant per model, compare them on the model and
+statistic:
+
+    max by (exported_namespace, model_name, statistic) (wva_slo_predicted_ttft_seconds)
+      / on (exported_namespace, model_name, statistic)
+    max by (exported_namespace, model_name, statistic) (wva_slo_observed_seconds{objective="ttft"})
+
+With several prefill variants, `max` takes the worst variant's prediction
+against the model's mixed figure ([open question 6](#s1-open-questions)).
+
+**The cycle log** gains one line per prefill variant, `slo-ttft-variant`, at
+the verbose level: the variant, reason, target and statistic, the rate,
+`N_p` and `unmet`; P3's figures (the bound, the independent and pooled
+figures, the floor, `β`, `ρ_w`, `θ`, the fleet's rate, the per-replica rate,
+the prefill side's own rate, what bound it, the knee, the onsets) and flags;
+the inputs (`vp`, `vpSource`, `vpPromptTokens`, `estimateAt`, `a`, `f`,
+`fSource` as `learned`, `one-pod` or `assumed`, `fRaw`, the prompt and its
+`cv` with its source, the transfer per token, the decode variant or none, the
+flow-control state); and both calls' refusals.
+
+**The golden.** The snapshot gains one field:
+
+    // internal/metrics/slo_metrics.go
+    type SLOModelSnapshot struct {
+        ...
+        TTFT []SLOTTFTReading `learnrec:"omitzero"`
+    }
+
+    type SLOTTFTReading struct {
+        Variant, Statistic   string
+        Predicted, PerReplica float64 // NaN when absent
+        Unmet                bool
+        VPSource, Reason     string
+        Flags                []string
+    }
+
+The recording codec (`internal/signals/learnrec`) reads its own tag, not
+`json`: a field tagged `learnrec:"omitzero"` is left out while it holds its
+zero value, and a nil slice is zero. S1 leaves `TTFT` nil with the switch
+off, so `slo-published.csv` is byte identical off. With the switch on, it
+moves only in goldens with a TTFT target and a prefill variant:
+`ols-sweep-slo` and `ols-sweep-slo-restart`. The `engine` golden's P/D model
+is TPOT-only and does not move. In the two that move:
+
+- P1 refuses `V_P` (one prefill pod that never queued), so the prefill
+  variant reads `reason="no-prefill-capacity"` and `vp_source="none"`.
+- The back-pressure bound does not fire: both recordings run with
+  `EnablePrefillThroughputBound: false` (166 and 286 recorded policies, all
+  false).
+
+P2's goldens are the first priced ones.
+
+**The switch table** (`learnreplay`'s switch runs) declares:
+
+| Switch | Moves | Note |
+| --- | --- | --- |
+| `slo-ttft-price` | `slo-published.csv` in `ols-sweep-slo` and `ols-sweep-slo-restart` | Off: byte identical |
+| `prefill-capacity-observe`, with `slo-ttft-price` on | `slo-published.csv` in the same two | Off: no estimate is stashed, so every prefill variant reads `no-estimate` in place of `no-prefill-capacity` |
+
+The second row is **documentation only** until the switch-run harness can run
+"X off with Y on": today it turns one switch off with the others at their
+defaults. The S1 PR adds that pairwise run, so the row is checked rather than
+asserted.
+
+##### 5. S2, as a sketch
+
+- **The search.** S2 evaluates every `N'` from 1 upward to `N_p + cap`,
+  with `cap = MaxReplicas − N_p` when the variant sets `MaxReplicas`
+  (`domain.VariantMetadata`), else `4·N_p`. At `N'` = `N_p` it reuses S1's
+  answer; at each other `N'` it calls `ttftFleet(in, N')`, which sets `f` to
+  `min(N', max(1.5, f))`. It takes **the least `N'` whose `RateForTTFT` meets
+  the variant's rate**, without assuming the rate rises with `N'`. It
+  starts at 1, not `N_p`: a search from `N_p` would pin the TTFT floor at the
+  current count while the target is met, and prefill could never scale in.
+  The search stops at the first `N'` whose answer is `decode-bound`: that
+  `N'` is taken if no smaller one met the rate, since more prefill pods
+  cannot help. If no `N'` meets the rate, the answer is `N_p + cap`,
+  flagged. **The cost:** at most `N_p + cap` `RateForTTFT` calls per variant
+  per cycle, each a bisection over P3's model; S2's PR
+  measures the time on its largest fleet.
+- **With the demand floor.** The TTFT count is one more floor: the prefill
+  role takes the larger of the floor's count and the TTFT count, never less.
+  In guard mode the composite's larger-of rule does this, once
+  `eligibleEntries` keeps `slo` under enforce
+  ([decision 4](#4-what-s1-publishes)); the need reaches it as demand at
+  saturation's per-replica capacity (composite item 5).
+- **Where S2 does not act.** "Does not act" means **no TTFT contribution**
+  that cycle: the TTFT count is absent, not held at the current count, so
+  the demand floor and the other analyzers still size prefill, and it can
+  still scale in. S2 does not act on a rate answer with:
+  - a reason other than `priced`: `decode-bound`, `routing-bound`,
+    `no-decode-side`, `no-estimate`, and every refusal;
+  - `DecodeSideOmitted`;
+  - `AssumedPromptSpread` or `PromptSpreadClamped`, so Q1 is a hard gate;
+  - `VPShapeMoved` or `VPAboveSlopeBound`;
+  - `TransferOmitted`, raised only when no transfer time was measured;
+  - `AssumedPoissonArrivals`, until the staircase's bursty bucket passes;
+  - `AboveFlowControlOnset` on the rate answer, where the per-pod model is
+    not proven conservative;
+  - `FlowControlInferredOff`, so S2 waits for a declared
+    [`slo.flowControl`](#the-flow-control-state), and `FlowControlMismatch`.
+
+  Which staircase bucket lifts which flag is one table, on the
+  [TTFT page](slo-capacity-planner-ttft.md#ground-truth-and-the-staircase).
+  `UnvalidatedTTFT` is not on the list only because S2 does not ship until
+  the staircase removes it. A refused or flagged figure at the **current
+  rate** is not on the list: it means the target is unmet, and S2 grows.
+- **Bound 6** applies to the per-replica rate: it may fall at once, and
+  rises only after holding for the scale-down stabilization window.
+
+What S1 keeps stable for this: `ttftFleet` as a function of the pod count,
+the series, reason and flag names, and the no-act list above.
+
+##### 6. The P2 recordings, and what they must show
+
+###### The P2 recordings
+
+P2's goldens are three prefill-stress runs, all with a learner recording on a
+build with the R1 fields:
+
+| Run | Fleet | What it is for |
+| --- | --- | --- |
+| 1 | 3 prefill + 3 decode | R1 coverage: every TTFT recorder field, on several prefill pods; the source for `f` and for the first measured prompt spread |
+| 2 | 1 prefill + 2 decode | Prefill-bound, so busy minutes fire. `V_P` read 135k tok/s at 30k-token prompts and 118k at 37k. `AvgKVTransferTime` on 374 of 386 decode rows |
+| 3 | open loop, for `a` (running now) | Low-load minutes with spread prompts, which a prefill-bound run lacks, so P1 fits `a` |
+
+Before S1 leaves shadow, replayed with `slo-ttft-price` on, they must show:
+
+1. **The inputs learned.** `a` is fitted on run 3, which needs low-load
+   minutes with prompts spanning 1.5x (P1's rule); a prefill-bound run reads
+   `no-fixed-latency` throughout. On run 2, `V_P` comes from busy minutes,
+   below P1's `slopeBound`, with `VPPromptTokens` tracking the prompt.
+2. **The prefill side is what binds** on run 2: no `decode-bound` (the 10%
+   rule of decision 3) at its rates, or it tests decode.
+3. **The wait tail.** The per-pod `request_queue_time_seconds` histogram at
+   or below P3's `ρ_w·e^(−t/θ)` at the target's tail (P3's check 2).
+4. **The prediction against the router, in the TTFT domain.** The runs
+   score `TTFTAt` at the observed rate, so the mark is on TTFT, not rate. In
+   judged windows below the knee, at p90 and p95,
+   `wva_slo_predicted_ttft_seconds` against `wva_slo_observed_seconds`: a
+   prediction **more than 10% below** the observed TTFT fails (it
+   over-promises); **more than 25% above** fails (it over-provisions). The
+   staircase keeps its rate-domain mark (a predicted rate at the target more
+   than 10% above the measured one fails, more than 25% below fails); the
+   two have the same direction, since an under-predicted TTFT is an
+   over-predicted rate.
+5. **The mean residual.** The sum of the parts' means against the router's
+   mean TTFT leaves a residual of at most **10 ms**. Source: none measured.
+   The router's clock starts at the EPP's request headers, so the residual is
+   the EPP's scheduling and the hop to the pod, not the proxy before the EPP.
+   The only related figure in this repository is the engine-side overhead
+   inside `a`, at least 2.5 ms on `ols-sweep`
+   ([what is derivable](slo-capacity-planner-ttft.md#what-is-derivable-today)),
+   which is already in the parts. 10 ms is a stated budget, four times that.
+   Run 3 measures the real figure at low load (router mean TTFT less the
+   engine's `AvgTTFT`), and the budget is replaced by it.
+6. **`f` on run 1**: the per-count `f` at 3 pods, against the busiest pod's
+   measured share, and whether the floor 1.5 holds.
+7. **The goldens.** The three runs are committed as P2's goldens; run 2's
+   `slo-published.csv` prices the prefill variant from `busy-minutes`.
+
+**What they cannot show:** the flow-control onsets, bursty arrivals, and a
+fleet resized under load. S2 stays gated on the staircase (`N_p` = 2, with
+its bursty bucket), as the table says; P2 is necessary, not sufficient.
+
+##### The S1 PR's tests
+
+Each is a unit or property case that fails on `main` (where none of this
+exists) and passes on the PR; each switch is also held by the golden runs.
+
+1. The stash: an entry is written per prefill variant by `observePrefill`,
+   stamped with the cycle; S1 refuses an entry from another cycle
+   (`no-estimate`); `forgetVariant` and `evictPrefillObservationLocked`
+   delete it.
+2. Replay order: a replay with `slo` run before saturation reads
+   `no-estimate` (a guard against reordering).
+3. Lock order: a concurrent test runs saturation cycles and S1 reads under
+   `-race` without deadlock.
+4. `f` per count: `FByPods` keeps counts apart; a learned `f` at 3 pods is
+   not read at 4; at a count with too few minutes, the assumed `f` is used.
+5. `f_raw`: the raw share, the 5-cycle max, the reset on a count change, the
+   floor 1.5, the clamp to `N_p`, and one pod giving no `f`.
+6. `f` at `N'`: `min(N', max(1.5, f))`, never 1 at `N'` ≥ 2.
+7. `routing-bound` at `f ÷ N_p` ≥ 0.8, with `predicted_ttft` present and no
+   per-replica rate.
+8. `VPPromptTokens` per source, and `VPShapeMoved` above 1.2x either way,
+   not at or below it, and at 0.
+9. The measured `cv`: upper-bound second moment reads at or above the true
+   `cv` on a bucketed sample; pooled over pods; `+Inf` mass and `cv` > 3
+   give 3 and `PromptSpreadClamped`; the 2000/1800 counterexample reads 0.82
+   or more.
+10. The assumed `cv` 2 with `AssumedPromptSpread`.
+11. Monotonicity in `cv` over [0, 3] for both `TTFTAt` (rising) and
+    `RateForTTFT` (falling), as a property case on seeded fleets.
+12. The transfer term from `AvgKVTransferTime`, and `TransferOmitted` only
+    with none measured.
+13. `slo.flowControl`: parsed and validated (a third value drops the
+    entry); declared wins over the series; unset and no series flags
+    `FlowControlInferredOff`; declared `disabled` with series, and
+    `enabled` without, warn and flag `FlowControlMismatch`.
+14. The decode side: `no-decode-side` with flow control on and no decode;
+    `DecodeSideOmitted` with it off; one decode variant only.
+15. `decode-bound` at more than 10% and not at 10% or less; at the decode
+    onset.
+16. Current-rate refusals (`Saturated`, `AboveDecodeOnset`) and
+    `AboveFlowControlOnset` set `unmet` and blank only `predicted_ttft`; the
+    reason comes from `RateForTTFT`.
+17. The reason set: every listed reason reachable, `flow-control-unknown`
+    not.
+18. The flag series zero-fills `constants.SLOTTFTFlags` exactly.
+19. No TTFT objective, no entry and no series.
+20. The snapshot: `TTFT` nil with the switch off; the `learnrec` encoding of
+    a snapshot is byte identical to `main`'s with it off.
+21. S2's search (in S2's PR, listed so S1's `ttftFleet` serves it): from 1,
+    the least `N'` meeting the rate below `N_p` when the target is met with
+    slack, so the floor can fall.
+22. The pairwise switch run: `prefill-capacity-observe` off with
+    `slo-ttft-price` on, and the switch table rows held.
+
+##### S1 open questions
+
+1. **Several decode variants** behind one prefill variant: which decode side?
+   *Recommend:* none, priced prefill alone with flow control off and
+   `no-decode-side` with it on, until a fleet needs it.
+2. **Burstiness.** Poisson over-promises on bursty traffic (P3's open
+   question 5). Flagged `AssumedPoissonArrivals`; lifted by the staircase's
+   bursty bucket. *Open:* estimate `Ca²` from arrivals instead, so the flag
+   is not needed.
+3. **Sizer mode: closed.** Saturation runs in sizer mode too
+   (`runSaturation` is unconditional; `eligibleEntries` drops only its
+   result), so P1's observer runs and the stash is written there.
+4. **Flow control off is never known: closed.** The tier declares it,
+   [`slo.flowControl`](#the-flow-control-state); unset, an inferred off is
+   no-act, so S2 waits for the operator, by design. Still open: the
+   detector's thresholds when an install overrides them, a further policy
+   field or the EPP's configuration.
+5. **The `f` floor 1.5** is not measured. *Recommend:* set it from run 1.
+6. **Several prefill variants per model.** The router's TTFT is per model,
+   so a per-variant prediction cannot be scored one to one. *Recommend:*
+   score the request-weighted mixture of the variants' predicted tails.
+7. **The `VPShapeMoved` threshold: closed, 1.2x** ([decision 2](#2-v_p-in-production)).
+   Scaling `V_P` by a fitted per-token slope, in place of flagging, waits
+   for more than run 2's two points.
+8. **Transfer per request or per chunk** (the TTFT page's open question 3):
+   per chunk, the measured mean under-reads.
+9. **Scale-in: closed.** S2 searches from 1 ([decision 5](#5-s2-as-a-sketch)),
+   at most `N_p + cap` `RateForTTFT` calls per variant per cycle.
 
 ### Phase 3: the attainment trim
 

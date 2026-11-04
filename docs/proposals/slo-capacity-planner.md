@@ -468,11 +468,12 @@ is made.**
 | D3 | Accessors, the replay function, bands, basis, `cmd/whatif` from a recording or snapshot, footer, exit codes | none | D2 |
 | D4 | Standalone answers from `--prometheus`; no switch (adapter only) | none | D3, R2 |
 | P1 | `internal/signals/prefill`, observing: `V_P`, `a`, `f`; logs only; switch `prefill-capacity-observe`. On `ols-sweep` it fits `a` and refuses `V_P` and `f` | none | — |
-| P2 | The prefill-stress recording as a golden | adds one | P1, R1, the run |
+| P2 | The prefill-stress recordings as goldens: runs 1, 2 and 3 ([the recordings](slo-tiers.md#the-p2-recordings)) | adds three | P1, R1, the runs |
 | P3 | The TTFT model in `whatif`; UNVALIDATED; no switch | none | P2, D2 |
-| S1, S2 | The SLO analyzer prices TTFT, shadow then enforce, on the same `prefill` and `whatif` library: [SLO tiers, phase 2](slo-tiers.md#phase-2-ttft) | with its switch | P3 |
+| S1, S2 | The SLO analyzer prices TTFT, shadow then enforce, on the same `prefill` and `whatif` library: [SLO tiers, phase 2](slo-tiers.md#phase-2-ttft) | with its switch | S1: P3. S2: S1, Q1, M2 |
 | M1 | Per-bucket and mix answers; aggregated TTFT | none | P3, R1, #276 |
 | M2 | The staircase run; an operator page in `docs/reference/`; drops UNVALIDATED if it passes | — | D4, P3 |
+| Q1 | Issue the queue-minimum query every cycle, not only while a recording is on, and add the per-request computed-prefill-token histogram (`vllm:request_prefill_kv_computed_tokens_bucket`, per instance), for namespaces holding a model whose policy sets a TTFT target: busy minutes fire in production, and the measured effective-prompt spread replaces S1's assumed `cv` 2. Before S2, not S1: [S1 decisions](slo-tiers.md#s1-decisions) | none for the queue minimum (recordings carry it); the histogram is new, so recordings made after Q1 carry it | P1's busy minutes (PR #470) |
 | Only if asked | The controller endpoint and two gauges | none | P3 |
 | Later | Prefill line and learned batch cap in the snapshot; the floor's prefill mu from `V_P`; a shared prefill/decode budget; #275, #277 | — | — |
 
