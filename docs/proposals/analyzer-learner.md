@@ -2014,6 +2014,27 @@ band (`T2-above-band`) inside that wait. Before the review it priced 4.
 - **N2:** `WithOptimizationInterval` sets the interval of the analyzer's own
   tracker too, so its absence tolerance follows the controller's interval.
 
+**Round-2 review.** The own-tracker path after a long gap now treats a
+model the tracker does not hold (never seen, or evicted inside another
+model's `observe`) the same as a stale one, and forgets the traces of
+every line key of the model by prefix, absent variants included, all under
+`a.mu` and all behind `throughput-itl-reads-the-settle-tracker`. The order
+and absent-variant tests are guards: the round-1 code also passed them,
+because `observe` evicts a variant state at the same timeout and the line's
+keys with it; the new path does not rest on the two timeouts staying equal.
+Mutants killed: the stale path with the switch off
+(`TestITLSettle_AfterALongGapWithTheMoveOffTheOwnTraceIsKept`, an idle run
+before the gap that 4b-1's own trace keeps), the eviction keeping the
+model on the tracker or keeping its stamp
+(`TestITLSettle_TheEvictionForgetsAModelOnTheOwnTracker`), and no
+`ForgetTraces` (four tests). The probe figures the reference pages quote
+are pinned exactly, the control included (`itl.Admission.AboveBandWaitsAfterRestart`,
+set only by negative controls): in the band, 30 s under need and 10 silent
+cycles; above it, 30 s and 3; the stamp put back, 1m45s and 8. On the
+settle rig, three steady replicas price first on cycle 8 after a restart
+and one replica on cycle 10, not 8 + 10: readings taken during the settle
+count towards the ten, and only three must be settled.
+
 ## 8. Risks and limits
 
 - **One shared bug.** A defect in the settle tracker reaches every learner at

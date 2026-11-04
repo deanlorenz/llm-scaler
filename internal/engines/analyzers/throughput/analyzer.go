@@ -75,6 +75,11 @@ type ThroughputAnalyzer struct {
 	// (itl.Admission.AboveBandFallback), for the tests' negative controls
 	// only: set by withoutAboveBandFallback, which only tests define.
 	noAboveBandFallback bool
+	// aboveBandWaitsAfterRestart stamps the above-band readings with the
+	// restart's wait (itl.Admission.AboveBandWaitsAfterRestart), for the
+	// tests' negative controls only: set by withAboveBandRestartWait, which
+	// only tests define.
+	aboveBandWaitsAfterRestart bool
 	// paths counts the line's fits by path, for the replay (path_counts.go).
 	paths pathCounters
 }
@@ -697,7 +702,12 @@ func (a *ThroughputAnalyzer) VariantState(modelID, namespace, variantName string
 // because neither Kubernetes resource names nor operator-provided model IDs can
 // contain a null byte.
 func variantKey(namespace, modelID, variantName string) string {
-	return namespace + "\x00" + modelID + "\x00" + variantName
+	return modelKeyPrefix(namespace, modelID) + variantName
+}
+
+// modelKeyPrefix is what every variantKey of the model begins with.
+func modelKeyPrefix(namespace, modelID string) string {
+	return namespace + "\x00" + modelID + "\x00"
 }
 
 // getOrCreateVariantState returns the variantState for the given key, creating

@@ -239,6 +239,13 @@ func (a *ThroughputAnalyzer) withoutAboveBandFallback() *ThroughputAnalyzer {
 	return a
 }
 
+// withAboveBandRestartWait stamps the above-band readings with the
+// restart's wait, as learner PR 4b-2 first built it, for a negative control.
+func (a *ThroughputAnalyzer) withAboveBandRestartWait() *ThroughputAnalyzer {
+	a.aboveBandWaitsAfterRestart = true
+	return a
+}
+
 // A flat above-band line (A = 0: every reading the same ITL, B pinned at
 // it) is a price end to end: the line prices one ITL at every k, the
 // variant keeps a finite, positive per-replica capacity on every cycle, the

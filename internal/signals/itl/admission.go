@@ -93,6 +93,11 @@ type Admission struct {
 	// DefaultKSat (fitAboveBand), and never sets the held slope or the
 	// intercept. Without it, as before, such a reading is only counted.
 	AboveBandFallback bool
+	// AboveBandWaitsAfterRestart stamps the above-band window's readings
+	// with the restart's wait too (WaitsAfterRestart), as learner PR 4b-2
+	// first built it, before its review exempted them (aboveBandSettling).
+	// Only negative controls set it.
+	AboveBandWaitsAfterRestart bool
 }
 
 // MaxNumSeqsSourceNone is Admission.MaxNumSeqsSource when no cap is stated:

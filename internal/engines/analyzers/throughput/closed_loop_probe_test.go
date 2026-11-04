@@ -371,14 +371,29 @@ func TestThroughputProbe_AControllerRestartOnTheEngineTrackerWaitsItsSettle(t *t
 		return on, off
 	}
 
+	// The figures the reference pages quote (configuration.md, cycle-log.md,
+	// troubleshooting.md), pinned: 4 replicas, 15 s cycles, steadyFor 2 min.
 	on, off := run(2 * time.Minute)
 	require.GreaterOrEqual(t, on.reasons[itlReasonT2Failed], off.reasons[itlReasonT2Failed]+int(itl.DefaultSteadyFor/learnertest.Cycle),
 		"the band's line did not wait its settle")
 	require.Greater(t, on.UnderFor, off.UnderFor, "the wait cost nothing")
+	require.Equal(t, 30*time.Second, on.UnderFor, "in the band: under need")
+	require.Equal(t, 10, on.silentAfterRestart, "in the band: silent cycles after the restart")
 
 	on, off = run(15 * time.Second)
 	require.Greater(t, on.reasons[itlReasonT2Failed], off.reasons[itlReasonT2Failed], "the band's line did not wait its settle")
 	require.Positive(t, on.reasons[itlReasonT2AboveBand], "premise: the restarted line priced from above the band")
 	require.LessOrEqual(t, on.UnderFor, off.UnderFor, "the above-band fallback waited the restart")
 	require.LessOrEqual(t, on.silentAfterRestart, off.silentAfterRestart, "the above-band fallback waited the restart")
+	require.Equal(t, 30*time.Second, on.UnderFor, "above the band: under need")
+	require.Equal(t, 3, on.silentAfterRestart, "above the band: silent cycles after the restart")
+
+	// Negative control: the restart's wait stamped on the above-band
+	// readings too, as the PR first built it.
+	pc := restartCase(15 * time.Second)
+	pc.engine = true
+	stamped := runProbe(t, pc, func() *ThroughputAnalyzer { return NewThroughputAnalyzer().withAboveBandRestartWait() })
+	t.Logf("step 15s after the restart, the wait stamped above the band: %s", stamped)
+	require.Equal(t, 105*time.Second, stamped.UnderFor, "negative control: under need")
+	require.Equal(t, 8, stamped.silentAfterRestart, "negative control: silent cycles after the restart")
 }

@@ -38,9 +38,10 @@ import (
 // itl.Admission.AboveBandFallback), until the band fits. A shape change
 // empties the window and drops the held slope: the old shape's A is not
 // held into the new shape. Since PR 4b-2 the settle is read from the
-// engine's settle tracker, under switches of its own (settle.go). Off, as before: a
-// window of every healthy reading in the band, OLS when it is ready, else A
-// by least squares through B over the cycle's healthy rows, at any k.
+// engine's settle tracker, under switches of its own (settle.go). Off, as
+// before: a window of every healthy reading in the band, OLS when it is
+// ready, else A by least squares through B over the cycle's healthy rows,
+// at any k.
 const SwitchITLSteadyGate = "throughput-itl-steady-gate"
 
 // SwitchITLKeepsWindowOnGPSMismatch is the replay switch for the
@@ -109,6 +110,7 @@ func (a *ThroughputAnalyzer) lineAdmission(adm itl.Admission, namespace, modelID
 	}
 	a.settleAdmission(&adm, namespace, modelID)
 	adm.AboveBandFallback = !a.noAboveBandFallback
+	adm.AboveBandWaitsAfterRestart = a.aboveBandWaitsAfterRestart
 	if a.store == nil {
 		return adm
 	}

@@ -260,7 +260,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 				trace.countIdle(hasITL, traceable(k), now, s)
 				settling, restartOnly = trace.settlingOnTracker(adm, rm, traces.since, now, s)
 			}
-			aboveSettling = aboveBandSettling(settling, restartOnly, rm, now, s)
+			aboveSettling = aboveBandSettling(settling, restartOnly && !adm.AboveBandWaitsAfterRestart, rm, now, s)
 			if traceable(k) {
 				still := trace.still(k, now, s)
 				steady, aboveSteady = !settling && still, !aboveSettling && still
@@ -694,14 +694,24 @@ func (t *Tracker) ClearWindow(key string) bool {
 	return had
 }
 
-// ForgetTraces drops the key's replicas' settle traces, and keeps its
-// windows, intercept and held slope: the next Observe reads every replica as
-// on the key's first, so a settle that began before it is a settle only with
+// ForgetTraces drops the replicas' settle traces of every key match reports
+// true for, and keeps their windows, intercepts and held slopes: the next
+// Observe of such a key reads every replica as on the key's first, so a
+// settle that began before it is a settle only with
 // Admission.WaitsAfterRestart, and the drift test starts with no history.
-func (t *Tracker) ForgetTraces(key string) {
+// It returns how many keys' traces it dropped. match runs under the
+// tracker's lock, as Sweep's stale does.
+func (t *Tracker) ForgetTraces(match func(key string) bool) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	delete(t.traces, key)
+	n := 0
+	for key := range t.traces {
+		if match(key) {
+			delete(t.traces, key)
+			n++
+		}
+	}
+	return n
 }
 
 // ForgetSlope drops the key's last A, so no slope is held for it until a

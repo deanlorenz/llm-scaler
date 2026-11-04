@@ -117,7 +117,8 @@ type replicaTrace struct {
 	// restartWait is set when joined is only the controller restart's
 	// (Admission.WaitsAfterRestart): the replica was serving on the key's
 	// first Observe. The above-band window does not take that stamp
-	// (Tracker.Observe).
+	// (Tracker.Observe). Read on the key's own trace only: on the settle
+	// tracker, settlingOnTracker reports the restart's wait itself.
 	restartWait bool
 	samples     []kSample
 	// idle counts the replica's latest rows in a row that carried neither an

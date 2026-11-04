@@ -1000,7 +1000,9 @@ func assertResultsPriced(t *testing.T, recording []byte) {
 	t.Helper()
 	events, err := readEvents(recording)
 	require.NoError(t, err)
-	priced := map[string]int{}
+	// priced counts the variants each analyzer priced; throughputPriced the
+	// throughput analyzer's, by variant and reason.
+	priced, throughputPriced := map[string]int{}, map[string]int{}
 	for _, ev := range events {
 		var res *domain.AnalyzerResult
 		var errText string
@@ -1025,6 +1027,9 @@ func assertResultsPriced(t *testing.T, recording []byte) {
 		for _, vc := range res.VariantCapacities {
 			if vc.PerReplicaCapacity > 0 {
 				priced[ev.Kind]++
+				if ev.Kind == throughput.KindAnalyze {
+					throughputPriced[vc.VariantName+" "+vc.Reason]++
+				}
 			}
 		}
 	}
@@ -1043,6 +1048,8 @@ func assertResultsPriced(t *testing.T, recording []byte) {
 	// (T2-above-band), which the wait kept silent before 4b-2's review.
 	assert.Equal(t, map[string]int{saturation.KindAnalyze: 64, slo.KindAnalyze: 6, throughput.KindAnalyze: 8}, priced,
 		"variants priced per analyzer")
+	assert.Equal(t, map[string]int{"agg-a T1-ols": 1, "agg-a T2-held": 2, "pd-d T2-above-band": 4, "pd-d T2-default": 1},
+		throughputPriced, "the throughput analyzer's priced variants, by reason")
 }
 
 // readEvents is learnrec.Read's events.

@@ -125,19 +125,30 @@ func TestITLSettle_AControllerRestartWaitsTheSettle(t *testing.T) {
 // neither orders nor vetoes a scale-down. Off, it prices once the window
 // holds ten readings.
 func TestITLSettle_AfterAControllerRestartTheLineIsSilentForTheSettle(t *testing.T) {
-	first := func(switches map[string]bool) int {
+	firstOf := func(switches map[string]bool, replicas int) int {
 		r := newSettleRig(t, switches)
 		for i := range 4 * settleCycles {
-			if r.cycle(settleFleet()).Tier != "" {
+			if r.cycle(settleFleet()[:replicas]).Tier != "" {
 				return i
 			}
 		}
 		return -1
 	}
+	first := func(switches map[string]bool) int { return firstOf(switches, 3) }
 	on, off := first(nil), first(map[string]bool{SwitchITLWaitsAfterRestart: false})
-	t.Logf("first line after a controller restart: cycle %d on, cycle %d off", on, off)
-	assert.GreaterOrEqual(t, on, settleCycles, "the line priced inside the restart's settle")
-	assert.Less(t, off, settleCycles, "switch off: the line prices inside what would be the settle")
+	one := firstOf(nil, 1)
+	t.Logf("first line after a controller restart: cycle %d on, cycle %d off; one replica, cycle %d on", on, off, one)
+	// One replica gives one reading a cycle: the window holds ten on cycle
+	// 9, and the line needs three of them past the settle.
+	assert.Equal(t, settleCycles+2, one, "one replica: the first line after the restart")
+	// Pinned: three replicas, 15 s cycles, steadyFor 2 min. On, the first
+	// line is the first cycle past the settle (cycle 8, 2 min silent: the
+	// window already holds ten readings by then); off, the fourth cycle,
+	// once the window holds ten. The closed-loop probe's four replicas under
+	// a growing load take 10 cycles (TestThroughputProbe_AControllerRestart
+	// OnTheEngineTrackerWaitsItsSettle).
+	assert.Equal(t, settleCycles, on, "the line priced inside the restart's settle, or later than its end")
+	assert.Equal(t, 3, off, "switch off: the line priced other than once the window held ten readings")
 }
 
 // The analyzer alone, with no engine tracker, has watched the fleet:
@@ -164,40 +175,169 @@ func TestITLSettle_TheAnalyzerAloneDoesNotWait(t *testing.T) {
 // line's window and held slope) is the eviction's, as before 4b-2, and is
 // not compared.
 func TestITLSettle_AfterALongGapTheAnalyzerAloneSettlesEveryModelAlike(t *testing.T) {
-	c := clocktesting.NewFakePassiveClock(lineStart)
-	a := NewThroughputAnalyzer().WithClock(c).WithOptimizationInterval(settleCycle)
-	now := lineStart
-	cycle := func(model string) itl.Reading {
-		t.Helper()
-		c.SetTime(now)
-		rows := settleFleet()
-		_, err := a.Analyze(context.Background(), domain.AnalyzerInput{ModelID: model, Namespace: "ns",
-			ReplicaMetrics: rows, ArrivalRate: 4,
-			VariantStates: []domain.VariantReplicaState{{VariantName: "v1", CurrentReplicas: len(rows), GPUsPerReplica: 1}}})
-		require.NoError(t, err)
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		st := a.variantStates[variantKey("ns", model, "v1")]
-		require.NotNil(t, st)
-		return st.reading
-	}
-	settling, tiers := map[string][]int{}, map[string][]string{}
-	for i := range 2*settleCycles + 4 {
-		if i == settleCycles {
-			now = now.Add(2 * time.Hour)
-		}
-		for _, model := range []string{"m1", "m2"} {
-			r := cycle(model)
-			if r.Settling > 0 {
-				settling[model] = append(settling[model], i)
-			}
-			tiers[model] = append(tiers[model], r.Tier)
-		}
-		now = now.Add(settleCycle)
-	}
+	r := newOwnRig(t, nil)
+	settling, tiers := r.run(2*settleCycles+4, settleCycles, func(int) []string { return []string{"m1", "m2"} }, ownFleet)
 	t.Logf("settling cycles: %v; tiers: %v", settling, tiers)
-	require.NotEmpty(t, tiers["m1"][len(tiers["m1"])-1], "premise: the line priced after the gap")
-	assert.Equal(t, settling["m2"], settling["m1"], "the model analyzed first after the gap settled differently")
+	require.NotEmpty(t, tiers["m1/v1"][len(tiers["m1/v1"])-1], "premise: the line priced after the gap")
+	assert.Empty(t, settling["m1/v1"], "the model analyzed first after the gap settled: it was not first-seen")
+	assert.Equal(t, settling["m2/v1"], settling["m1/v1"], "the model analyzed first after the gap settled differently")
+}
+
+// ownRig is the throughput analyzer alone, with no engine view: the line
+// reads the tracker it observes itself. Cycles are settleCycle apart from
+// lineStart.
+type ownRig struct {
+	t     *testing.T
+	a     *ThroughputAnalyzer
+	clock *clocktesting.FakePassiveClock
+	now   time.Time
+}
+
+func newOwnRig(t *testing.T, switches map[string]bool) *ownRig {
+	t.Helper()
+	c := clocktesting.NewFakePassiveClock(lineStart)
+	r := &ownRig{t: t, a: NewThroughputAnalyzer().WithClock(c).WithOptimizationInterval(settleCycle), clock: c, now: lineStart}
+	require.NoError(t, r.a.SetSwitchesForReplay(switches))
+	return r
+}
+
+// analyze is one Analyze of model at the rig's instant, with rows; it
+// returns each variant's reading that cycle.
+func (r *ownRig) analyze(model string, rows []domain.ReplicaMetrics) map[string]itl.Reading {
+	r.t.Helper()
+	r.clock.SetTime(r.now)
+	var states []domain.VariantReplicaState
+	seen := map[string]bool{}
+	for _, rm := range rows {
+		if !seen[rm.VariantName] {
+			seen[rm.VariantName] = true
+			states = append(states, domain.VariantReplicaState{VariantName: rm.VariantName, CurrentReplicas: 3, GPUsPerReplica: 1})
+		}
+	}
+	_, err := r.a.Analyze(context.Background(), domain.AnalyzerInput{ModelID: model, Namespace: "ns",
+		ReplicaMetrics: rows, ArrivalRate: 4, VariantStates: states})
+	require.NoError(r.t, err)
+	r.a.mu.Lock()
+	defer r.a.mu.Unlock()
+	out := map[string]itl.Reading{}
+	for v := range seen {
+		st := r.a.variantStates[variantKey("ns", model, v)]
+		require.NotNil(r.t, st)
+		out[v] = st.reading
+	}
+	return out
+}
+
+// run drives n cycles, the clock jumping 2 h before cycle gapAt; each
+// cycle analyzes the models order gives, in that order, with rows(model, i).
+// It returns, by "model/variant", the cycles on which a reading was kept out
+// as its replica's settle, and each cycle's tier.
+func (r *ownRig) run(n, gapAt int, order func(i int) []string,
+	rows func(model string, i int) []domain.ReplicaMetrics) (map[string][]int, map[string][]string) {
+	settling, tiers := map[string][]int{}, map[string][]string{}
+	for i := range n {
+		if i == gapAt {
+			r.now = r.now.Add(2 * time.Hour)
+		}
+		for _, model := range order(i) {
+			for v, rd := range r.analyze(model, rows(model, i)) {
+				key := model + "/" + v
+				if rd.Settling > 0 {
+					settling[key] = append(settling[key], i)
+				}
+				tiers[key] = append(tiers[key], rd.Tier)
+			}
+		}
+		r.now = r.now.Add(settleCycle)
+	}
+	return settling, tiers
+}
+
+func ownFleet(string, int) []domain.ReplicaMetrics { return settleFleet() }
+
+// Three identical models across a gap past ownSettleTimeout, analyzed in
+// two orders: every model reads alike in both, and none settles. A guard:
+// before the review's round 2 only the first model analyzed after the gap
+// took the stale path, and the others, evicted inside its observe, were
+// first-seen without forgetting their line keys' traces. That read alike
+// too, since the same observe drops their variant states at the same
+// timeout and the line's keys with them (Sweep); the stale path now covers
+// both, so it does not rest on the two timeouts staying equal.
+func TestITLSettle_AfterALongGapTheOrderOfTheModelsDoesNotMatter(t *testing.T) {
+	models := []string{"m1", "m2", "m3"}
+	forward := func(int) []string { return models }
+	backward := func(int) []string { return []string{"m3", "m2", "m1"} }
+	n := 2*settleCycles + 4
+	fwd, _ := newOwnRig(t, nil).run(n, settleCycles, forward, ownFleet)
+	bwd, _ := newOwnRig(t, nil).run(n, settleCycles, backward, ownFleet)
+	t.Logf("settling cycles, forward: %v; backward: %v", fwd, bwd)
+	assert.Empty(t, fwd, "forward order: a model settled after the gap")
+	assert.Empty(t, bwd, "backward order: a model settled after the gap")
+}
+
+// A variant with no row on the stale model's first cycle after the gap
+// forgets its line key's traces too: when it comes back a cycle later it
+// is first-seen, as a variant the model shows for the first time, and does
+// not settle. A guard, as the order case above: forgetting only the
+// variants with rows also passes today, because the stale cycle's observe
+// sweeps the absent variant's key at the same timeout.
+func TestITLSettle_AfterALongGapAnAbsentVariantForgetsItsTracesToo(t *testing.T) {
+	rows := func(_ string, i int) []domain.ReplicaMetrics {
+		f := settleFleet()
+		if i == settleCycles {
+			return f
+		}
+		for _, rm := range settleFleet() {
+			rm.PodName, rm.VariantName = rm.PodName+"-2", "v2"
+			f = append(f, rm)
+		}
+		return f
+	}
+	settling, tiers := newOwnRig(t, nil).run(2*settleCycles+4, settleCycles, func(int) []string { return []string{"m"} }, rows)
+	t.Logf("settling cycles: %v; tiers: %v", settling, tiers)
+	require.NotEmpty(t, tiers["m/v2"], "premise: v2 was analyzed")
+	assert.Empty(t, settling["m/v2"], "the variant absent on the stale cycle settled when it came back")
+	assert.Empty(t, settling["m/v1"])
+}
+
+// With SwitchITLReadsSettle off the line is 4b-1's own trace, and a long gap
+// forgets nothing: a replica idle on its last two cycles before the gap
+// whose load comes back after it waits steadyFor, as 4b-1's idle rule says.
+// On, the model is first-seen after the gap and nothing settles. Kills the
+// stale path run with the switch off (its traces forgotten, the idle run
+// with them).
+func TestITLSettle_AfterALongGapWithTheMoveOffTheOwnTraceIsKept(t *testing.T) {
+	rows := func(_ string, i int) []domain.ReplicaMetrics {
+		f := settleFleet()
+		if i == settleCycles-2 || i == settleCycles-1 {
+			settleIdle(&f[2])
+		}
+		return f
+	}
+	one := func(int) []string { return []string{"m"} }
+	n := 2*settleCycles + 4
+	off, _ := newOwnRig(t, map[string]bool{SwitchITLReadsSettle: false}).run(n, settleCycles, one, rows)
+	on, _ := newOwnRig(t, nil).run(n, settleCycles, one, rows)
+	assert.Equal(t, cycleSpan(settleCycles, settleCycles), off["m/v1"], "switch off: the idle run did not survive the gap")
+	assert.Empty(t, on["m/v1"], "switch on: the model was not first-seen after the gap")
+}
+
+// The eviction forgets the model on the analyzer's own tracker and drops
+// its stamp: a model not analyzed for ownSettleTimeout leaves nothing
+// behind, though no Analyze of it comes again.
+func TestITLSettle_TheEvictionForgetsAModelOnTheOwnTracker(t *testing.T) {
+	r := newOwnRig(t, nil)
+	r.analyze("m1", settleFleet())
+	r.now = r.now.Add(2 * time.Hour)
+	r.analyze("m2", settleFleet())
+	r.a.mu.Lock()
+	_, stamped := r.a.ownSettled["ns/m1"]
+	r.a.mu.Unlock()
+	assert.False(t, stamped, "the evicted model kept its stamp")
+	_, held := r.a.ownSettle.Replica("ns/m1", settle.Key{Pod: "pod-a", Variant: "v1"})
+	assert.False(t, held, "the evicted model's replicas stayed on the own tracker")
+	_, held = r.a.ownSettle.Replica("ns/m2", settle.Key{Pod: "pod-a", Variant: "v1"})
+	require.True(t, held, "premise: the tracker keys replicas so")
 }
 
 // One missing row keeps the replica's settle (the 1 min absence rule). Off,
