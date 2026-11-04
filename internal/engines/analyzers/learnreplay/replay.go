@@ -66,6 +66,9 @@ type Options struct {
 	// RegisterEngine set, and with none the engine events are skipped
 	// (Report.Ignored).
 	Engine EngineReplayer
+	// stop, when set, is asked after each applied event; true ends the
+	// replay there (StateAt).
+	stop func(r *replayer, ev learnrec.RawEvent) bool
 }
 
 // build makes the analyzers and the store a recording's start describes.
