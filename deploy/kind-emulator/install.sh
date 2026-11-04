@@ -223,7 +223,13 @@ _load_into_kind() {
         return 1
     fi
 
-    log_warning "'kind load docker-image' failed (containerd image store issue) — falling back to pulling directly into KIND nodes"
+    # Reproduced with kind v0.25.0 and Docker 29 (containerd image store): an
+    # image pulled with --platform is saved as its whole multi-platform index,
+    # and the node's `ctr import --all-platforms` stops on a platform that was
+    # never pulled ("content digest ...: not found"). It is not our image name
+    # or tag. The fallback costs no extra disk: kind load also puts one copy on
+    # every node, which is all a per-node pull stores.
+    log_warning "'kind load docker-image' failed (containerd image store issue: $(printf '%s\n' "$load_stderr" | grep -v '^[[:space:]]*$' | tail -1)) — falling back to pulling directly into KIND nodes"
     local nodes
     nodes="$(kind get nodes --name "$CLUSTER_NAME")" || return 1
     for node in $nodes; do
@@ -254,7 +260,27 @@ load_sim_image() {
         return
     fi
 
-    _load_into_kind "$SIM_IMAGE" || log_warning "Failed to load simulator image into KIND cluster — tests may be slow on first run"
+    if _load_into_kind "$SIM_IMAGE"; then
+        _drop_host_copy "$SIM_IMAGE"
+    else
+        log_warning "Failed to load simulator image into KIND cluster — tests may be slow on first run"
+    fi
+}
+
+# _drop_host_copy IMAGE
+# With KIND_PRUNE_HOST_IMAGES=true (CI sets it), removes the host Docker copy of
+# a registry image once the KIND nodes hold their own. The nodes never read the
+# host copy again, and on a CI runner it is disk the run needs: the warm pool's
+# ubi9/python-311 alone is 1.55 GB unpacked. Off by default, so a local re-run
+# does not pull it again. Never used for the WVA image, which may exist only on
+# the host.
+_drop_host_copy() {
+    [ "${KIND_PRUNE_HOST_IMAGES:-false}" = "true" ] || return 0
+    if docker image rm "$1" >/dev/null 2>&1; then
+        log_info "Removed the host copy of '$1' (KIND_PRUNE_HOST_IMAGES=true); the KIND nodes keep theirs"
+    else
+        log_warning "Could not remove the host copy of '$1'; continuing"
+    fi
 }
 
 # Pre-loads the warm pool's images, for the same reason as the simulator's: a
@@ -298,7 +324,11 @@ load_warmpool_images() {
             log_warning "Failed to pull warm pool image '$image' — warm pool tests may be slow on first run"
             continue
         fi
-        _load_into_kind "$image" || log_warning "Failed to load warm pool image '$image' into KIND cluster — warm pool tests may be slow on first run"
+        if _load_into_kind "$image"; then
+            _drop_host_copy "$image"
+        else
+            log_warning "Failed to load warm pool image '$image' into KIND cluster — warm pool tests may be slow on first run"
+        fi
     done
 }
 
