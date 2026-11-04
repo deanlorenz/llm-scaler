@@ -605,6 +605,352 @@ Exit codes: `0` every role answered; `3` a role refused (output still printed);
 `2` usage or input error; `1` internal error. `whatif.ExitCode` applies them:
 `2` if any result is `InvalidInput`, else `3` if any is refused, else `0`.
 
+### Recording mode, as built (D3)
+
+`whatif replicas-to-slo` and `whatif slo-to-rate` answer for decode from a
+recording, `--recording FILE --cycle N|last`. TTFT, prefill and the fleet row
+are not supported in this build: `--ttft`, `--ttft-percentile`,
+`--assume-vp` and `--prefill` are a usage error.
+
+- **Shape.** Each length is measured or assumed, and the output says which.
+  Measured is the request-rate-weighted mean of the variant's last 20 cycles
+  with traffic (5 minutes at a 15 s cycle), so a recording that ends idle is
+  priced at the traffic it last served. `--assume-input-tokens` and
+  `--assume-output-tokens` state a length instead, flagged `AssumedShape`;
+  the worked example states IL = OL = 1000.
+- **Bands.** Each resample is refitted by the tracker's own choice of fit
+  (`itl.Refit`): the full fit only on steady readings that are ready, else
+  pinned-B on the readings the pinned fit reads, else the held slope. An
+  above-band line is refitted on the above-band readings. The bootstrap is
+  stratified: cycles holding steady readings are drawn among themselves
+  until the resample holds exactly the steady window's count, and the other
+  cycles among themselves. Whether the tracker takes the full fit turns on
+  that count as much as on the spread; drawn freely, a 15-reading window
+  gave resamples of 8 to 20, windows the tracker never had. `--seed` sets
+  the bootstrap's seed; the JSON names it.
+- **Tier flags.** When more than 10% of the resamples land at another tier
+  (either way, a hold or no fit included), the answer is flagged:
+  `TierUnstable` when those resamples' median figure lies more than 5% from
+  the answer, the tier moving the figure; `LineNearGate`, informational,
+  when it does not. Neither changes the exit code. The text gives the count:
+  `TierUnstable (n/200 resamples changed tier)`, `LineNearGate (n/200)`.
+- **The worked example is flagged `LineNearGate (22/200)`.** Its line rests on
+  15 steady readings spanning 0.322 of fill, against the tracker's 0.30
+  gate, so a resample that narrows below the gate refits pinned-B; the
+  figures those resamples price stay within 5% of the answer, and the mean
+  TPOT's whole band, [3.65 .. 3.70] ms, is under 2% wide. Nothing to do: the flag
+  says the line sits near the gate, not that the answer is in doubt.
+- **Exit codes.** A recording file that is missing or unreadable, or is not
+  a learner recording, is an input error: exit `2`, like a model or cycle
+  the recording does not hold. A recording that fails inside the analyzers,
+  or a cancelled run, is exit `1`.
+
+### JSON output
+
+`-o json` (or `--output json`) writes one object. Abridged from the worked
+example (`cmd/whatif/testdata/replicas-to-slo-worked-json.golden`; of its
+four results only `meanTPOT` is kept here):
+
+```json
+{
+  "schemaVersion": 1,
+  "question": "replicas-to-slo",
+  "source": {
+    "recording": "../../internal/engines/analyzers/learnreplay/testdata/goldens/ols-sweep/recording.jsonl.gz",
+    "namespace": "ns-01",
+    "model": "model-02",
+    "firstCycle": 1,
+    "lastCycle": 226,
+    "totalCycles": 226,
+    "firstAt": "2026-11-01T21:54:30.377845609Z",
+    "lastAt": "2026-11-01T22:50:53.616794067Z"
+  },
+  "bands": {
+    "method": "block bootstrap",
+    "blockCycles": 4,
+    "resamples": 200,
+    "seed": 1,
+    "loPercent": 10,
+    "hiPercent": 90
+  },
+  "roles": [
+    {
+      "role": "decode",
+      "variant": "variant-01",
+      "inputs": {
+        "line": {
+          "a": 0.004437632383842851,
+          "b": 0.0015568837184686396,
+          "tier": "ols",
+          "readings": 15,
+          "observedFill": {
+            "lo": 0.17953730856956665,
+            "hi": 0.501466275659824
+          },
+          "fromCycle": 197,
+          "toCycle": 220,
+          "resamples": 200,
+          "tierChanges": 22
+        },
+        "fillBand": {
+          "lo": 0.15,
+          "hi": 0.8
+        },
+        "capacityTokens": 131072,
+        "kvPerRequest": 1500,
+        "shape": {
+          "inputTokens": 1000,
+          "inputSource": "assumed",
+          "outputTokens": 1000,
+          "outputSource": "assumed",
+          "prefixHitRate": 0,
+          "fromCycle": 204,
+          "toCycle": 223,
+          "cycles": 20
+        },
+        "batchCap": 64,
+        "batchCapSource": "flags",
+        "ranks": 1,
+        "replicas": 1,
+        "replicasFrom": "recording",
+        "headroom": 0.85,
+        "tpot": {
+          "percentile": 0.9,
+          "ratio": 1.3,
+          "ratioSource": "assumed",
+          "windows": 0
+        }
+      },
+      "results": {
+        "meanTPOT": {
+          "answer": {
+            "value": 0.0036607509947803553,
+            "unit": "s",
+            "band": {
+              "lo": 0.003646523903932082,
+              "hi": 0.0036965490906630907
+            },
+            "basis": {
+              "fill": 0.4740967917873882,
+              "kneeRate": 13.313632625239457,
+              "floor": 0.002222528576045067,
+              "uncapped": 0,
+              "boundBy": [],
+              "tier": "ols"
+            },
+            "flags": [
+              "LineNearGate",
+              "AssumedShape"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "exitCode": 0,
+  "note": "estimate from 15 readings (cycles 197-220) of a 226-cycle recording, not a guarantee; see basis (-o json)"
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `schemaVersion` | The schema below; a change to any key is a new version. |
+| `question` | `replicas-to-slo` or `slo-to-rate`. |
+| `source` | The recording, the model, `firstCycle` (1), `lastCycle` (the cycle answered at) and `totalCycles` (the recording's), with their clocks. Absent on an error object. |
+| `bands` | How the bands were drawn: block bootstrap, `blockCycles`, `resamples`, `seed`, the percentiles. Absent on an error object. |
+| `roles[]` | One per decode variant priced: `inputs` (what it was priced from) and `results`. |
+| `inputs.line` | The ITL line (`a` in seconds per unit of fill, `b` in seconds), its `tier`, the `readings` it was fitted from, their `observedFill` range and `fromCycle`-`toCycle`, and of the bootstrap's `resamples` how many (`tierChanges`) landed at another tier. |
+| `inputs.shape` | Lengths in tokens, each with its source, `measured` (over `fromCycle`-`toCycle`) or `assumed`. |
+| `results` | `knee`, `operatingRate`, `meanTPOT`, `percentileTPOT` for question 2; `rate` for question 1. A question not asked has no key. |
+| a result | Exactly one of `answer` and `refused`. |
+| `answer` | `value` in `unit`: `r/s` (requests per second over the fleet) for a rate, `s` for a TPOT. `band`, when present, is in the same unit. `basis` is what it rests on (`fill`, `kneeRate` in r/s, `floor` in s, `uncapped` in r/s, `boundBy`, `tier`; a field that does not apply is 0). `flags` is always an array. |
+| `refused` | `reason`, one of the reasons table above, and `detail`. |
+| `inputs.tpot` | `targetSeconds` (question 1, seconds), `percentile` (0 to 1), `ratio` (R_q) and where it came from. |
+| `exitCode` | The process's exit code, as above. |
+| `error` | Present only when no answer was reached (exit `2` or `1`): `message`; the object then holds `schemaVersion`, `question`, `roles` (empty) and `exitCode` alone. |
+
+To read a figure, for example the mean TPOT in milliseconds:
+
+```
+whatif replicas-to-slo --recording run.jsonl.gz -o json | jq '.roles[0].results.meanTPOT.answer.value * 1000'
+```
+
+Every key path, with its JSON type, for `schemaVersion` 1 (the `cmd/whatif`
+tests hold the wire types to this list):
+
+<!-- whatif-json-schema-v1: begin -->
+```
+bands object
+bands.blockCycles number
+bands.hiPercent number
+bands.loPercent number
+bands.method string
+bands.resamples number
+bands.seed number
+error object
+error.message string
+exitCode number
+note string
+question string
+roles array
+roles[] object
+roles[].inputs object
+roles[].inputs.batchCap number
+roles[].inputs.batchCapSource string
+roles[].inputs.capacityTokens number
+roles[].inputs.fillBand object
+roles[].inputs.fillBand.hi number
+roles[].inputs.fillBand.lo number
+roles[].inputs.headroom number
+roles[].inputs.kvPerRequest number
+roles[].inputs.line object
+roles[].inputs.line.a number
+roles[].inputs.line.b number
+roles[].inputs.line.borrowedFrom string
+roles[].inputs.line.fromCycle number
+roles[].inputs.line.observedFill object
+roles[].inputs.line.observedFill.hi number
+roles[].inputs.line.observedFill.lo number
+roles[].inputs.line.readings number
+roles[].inputs.line.resamples number
+roles[].inputs.line.tier string
+roles[].inputs.line.tierChanges number
+roles[].inputs.line.toCycle number
+roles[].inputs.ranks number
+roles[].inputs.rate number
+roles[].inputs.replicas number
+roles[].inputs.replicasFrom string
+roles[].inputs.shape object
+roles[].inputs.shape.cycles number
+roles[].inputs.shape.fromCycle number
+roles[].inputs.shape.inputSource string
+roles[].inputs.shape.inputTokens number
+roles[].inputs.shape.outputSource string
+roles[].inputs.shape.outputTokens number
+roles[].inputs.shape.prefixHitRate number
+roles[].inputs.shape.toCycle number
+roles[].inputs.tpot object
+roles[].inputs.tpot.percentile number
+roles[].inputs.tpot.ratio number
+roles[].inputs.tpot.ratioSource string
+roles[].inputs.tpot.targetSeconds number
+roles[].inputs.tpot.windows number
+roles[].results object
+roles[].results.knee object
+roles[].results.knee.answer object
+roles[].results.knee.answer.band object
+roles[].results.knee.answer.band.hi number
+roles[].results.knee.answer.band.lo number
+roles[].results.knee.answer.basis object
+roles[].results.knee.answer.basis.boundBy array
+roles[].results.knee.answer.basis.boundBy[] string
+roles[].results.knee.answer.basis.fill number
+roles[].results.knee.answer.basis.floor number
+roles[].results.knee.answer.basis.kneeRate number
+roles[].results.knee.answer.basis.tier string
+roles[].results.knee.answer.basis.uncapped number
+roles[].results.knee.answer.flags array
+roles[].results.knee.answer.flags[] string
+roles[].results.knee.answer.unit string
+roles[].results.knee.answer.value number
+roles[].results.knee.refused object
+roles[].results.knee.refused.detail string
+roles[].results.knee.refused.reason string
+roles[].results.meanTPOT object
+roles[].results.meanTPOT.answer object
+roles[].results.meanTPOT.answer.band object
+roles[].results.meanTPOT.answer.band.hi number
+roles[].results.meanTPOT.answer.band.lo number
+roles[].results.meanTPOT.answer.basis object
+roles[].results.meanTPOT.answer.basis.boundBy array
+roles[].results.meanTPOT.answer.basis.boundBy[] string
+roles[].results.meanTPOT.answer.basis.fill number
+roles[].results.meanTPOT.answer.basis.floor number
+roles[].results.meanTPOT.answer.basis.kneeRate number
+roles[].results.meanTPOT.answer.basis.tier string
+roles[].results.meanTPOT.answer.basis.uncapped number
+roles[].results.meanTPOT.answer.flags array
+roles[].results.meanTPOT.answer.flags[] string
+roles[].results.meanTPOT.answer.unit string
+roles[].results.meanTPOT.answer.value number
+roles[].results.meanTPOT.refused object
+roles[].results.meanTPOT.refused.detail string
+roles[].results.meanTPOT.refused.reason string
+roles[].results.operatingRate object
+roles[].results.operatingRate.answer object
+roles[].results.operatingRate.answer.band object
+roles[].results.operatingRate.answer.band.hi number
+roles[].results.operatingRate.answer.band.lo number
+roles[].results.operatingRate.answer.basis object
+roles[].results.operatingRate.answer.basis.boundBy array
+roles[].results.operatingRate.answer.basis.boundBy[] string
+roles[].results.operatingRate.answer.basis.fill number
+roles[].results.operatingRate.answer.basis.floor number
+roles[].results.operatingRate.answer.basis.kneeRate number
+roles[].results.operatingRate.answer.basis.tier string
+roles[].results.operatingRate.answer.basis.uncapped number
+roles[].results.operatingRate.answer.flags array
+roles[].results.operatingRate.answer.flags[] string
+roles[].results.operatingRate.answer.unit string
+roles[].results.operatingRate.answer.value number
+roles[].results.operatingRate.refused object
+roles[].results.operatingRate.refused.detail string
+roles[].results.operatingRate.refused.reason string
+roles[].results.percentileTPOT object
+roles[].results.percentileTPOT.answer object
+roles[].results.percentileTPOT.answer.band object
+roles[].results.percentileTPOT.answer.band.hi number
+roles[].results.percentileTPOT.answer.band.lo number
+roles[].results.percentileTPOT.answer.basis object
+roles[].results.percentileTPOT.answer.basis.boundBy array
+roles[].results.percentileTPOT.answer.basis.boundBy[] string
+roles[].results.percentileTPOT.answer.basis.fill number
+roles[].results.percentileTPOT.answer.basis.floor number
+roles[].results.percentileTPOT.answer.basis.kneeRate number
+roles[].results.percentileTPOT.answer.basis.tier string
+roles[].results.percentileTPOT.answer.basis.uncapped number
+roles[].results.percentileTPOT.answer.flags array
+roles[].results.percentileTPOT.answer.flags[] string
+roles[].results.percentileTPOT.answer.unit string
+roles[].results.percentileTPOT.answer.value number
+roles[].results.percentileTPOT.refused object
+roles[].results.percentileTPOT.refused.detail string
+roles[].results.percentileTPOT.refused.reason string
+roles[].results.rate object
+roles[].results.rate.answer object
+roles[].results.rate.answer.band object
+roles[].results.rate.answer.band.hi number
+roles[].results.rate.answer.band.lo number
+roles[].results.rate.answer.basis object
+roles[].results.rate.answer.basis.boundBy array
+roles[].results.rate.answer.basis.boundBy[] string
+roles[].results.rate.answer.basis.fill number
+roles[].results.rate.answer.basis.floor number
+roles[].results.rate.answer.basis.kneeRate number
+roles[].results.rate.answer.basis.tier string
+roles[].results.rate.answer.basis.uncapped number
+roles[].results.rate.answer.flags array
+roles[].results.rate.answer.flags[] string
+roles[].results.rate.answer.unit string
+roles[].results.rate.answer.value number
+roles[].results.rate.refused object
+roles[].results.rate.refused.detail string
+roles[].results.rate.refused.reason string
+roles[].role string
+roles[].variant string
+schemaVersion number
+source object
+source.firstAt string
+source.firstCycle number
+source.lastAt string
+source.lastCycle number
+source.model string
+source.namespace string
+source.recording string
+source.totalCycles number
+```
+<!-- whatif-json-schema-v1: end -->
+
 ## See also
 
 - [End-to-end TTFT](slo-capacity-planner-ttft.md): the TTFT model, flow control,

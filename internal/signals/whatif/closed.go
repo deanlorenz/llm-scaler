@@ -36,6 +36,11 @@ type Decode struct {
 	ReplicaCap int64
 	// Replicas is N_d, the decode replicas sharing the arrivals.
 	Replicas int
+	// Tier is where Line came from (TierOLS, TierPinnedB, TierHeld,
+	// TierBorrowed), carried into every Basis; "" when the caller does not
+	// know it. A pinned-B or held line on the default intercept is refused
+	// (PinnedDefaultB).
+	Tier string
 }
 
 // check refuses a Decode the planner cannot price, naming the first input
@@ -55,6 +60,8 @@ func (d Decode) check() *Unanswerable {
 	// engine (every step has a fixed cost).
 	case !itl.ValidModel(d.Line.A, d.Line.B) || !Finite(d.Line.B) || !(d.Line.B > 0):
 		u = refuse(NoLine, fmt.Sprintf("line A=%g B=%g", d.Line.A, d.Line.B))
+	case d.onDefaultB():
+		u = refuse(PinnedDefaultB, fmt.Sprintf("a %s line on the default intercept %g s", d.Tier, itl.DefaultBaselineSec))
 	case !Finite(d.CapacityTokens) || !(d.CapacityTokens > 0):
 		u = refuse(NoCapacity, fmt.Sprintf("KV capacity %g tokens", d.CapacityTokens))
 	case d.ReplicaCap <= 0:
@@ -70,6 +77,25 @@ func (d Decode) check() *Unanswerable {
 		return nil
 	}
 	return &u
+}
+
+// defaultBTolerance is how near itl.DefaultBaselineSec, relative to it, an
+// intercept reads as that default rather than a measurement: a pinned fit
+// holds B exactly, but a line that travelled through a snapshot or a borrow
+// may not hold every bit of it.
+const defaultBTolerance = 1e-9
+
+// onDefaultB reports a line whose slope was fitted against the default
+// intercept rather than a measured one: a pinned-B, held or above-band fit
+// pins B, and a borrowed line is its donor's, so one of those on the
+// default B rests on no measured floor (PinnedDefaultB). An ols line fits B
+// itself and is never refused for where it lands.
+func (d Decode) onDefaultB() bool {
+	switch d.Tier {
+	case TierPinnedB, TierHeld, TierBorrowed:
+		return math.Abs(d.Line.B-itl.DefaultBaselineSec) <= defaultBTolerance*itl.DefaultBaselineSec
+	}
+	return false
 }
 
 // fullPoint is where a replica saturates: the sequences it runs there, the
@@ -179,7 +205,7 @@ func KneeRate(d Decode) Result {
 func (d Decode) kneeAnswer() Answer {
 	p := d.full()
 	knee := d.kneeRate()
-	return Answer{Value: knee, Flags: p.flags(), Basis: Basis{Fill: p.fill, KneeRate: knee, BoundBy: []Bound{p.by}}}
+	return Answer{Value: knee, Flags: p.flags(), Basis: Basis{Fill: p.fill, KneeRate: knee, BoundBy: []Bound{p.by}, Tier: d.Tier}}
 }
 
 // checkRate refuses a rate that is not a finite, non-negative number of
@@ -214,7 +240,7 @@ func (d Decode) fillAtRate(rate float64) Result {
 	if !ok {
 		return refuse(Saturated, fmt.Sprintf("no fill carries %g r/s", rate))
 	}
-	return Answer{Value: k, Basis: Basis{Fill: k, KneeRate: knee}}
+	return Answer{Value: k, Basis: Basis{Fill: k, KneeRate: knee, Tier: d.Tier}}
 }
 
 // TPOTTarget is a TPOT service level: the mean, or a percentile over requests
@@ -308,7 +334,7 @@ func RateForTPOT(d Decode, q RateQuery) Result {
 	}
 	floor := d.Line.ITLAt(d.Band.Lo) * r
 	if floor >= t.Seconds {
-		return refuse(TargetBelowFloor, fmt.Sprintf("target %g s at or below the floor %g s", t.Seconds, floor))
+		return refuse(TargetBelowFloor, fmt.Sprintf("target %.4g ms at or below the floor %.4g ms", 1000*t.Seconds, 1000*floor))
 	}
 	p := d.full()
 	k := (t.Seconds/r - d.Line.B) / d.Line.A
@@ -342,7 +368,7 @@ func RateForTPOT(d Decode, q RateQuery) Result {
 		by = append([]Bound{BoundOperatingPoint}, by...)
 	}
 	return Answer{Value: rate, Flags: flags, Basis: Basis{
-		Fill: k, KneeRate: knee, Floor: floor, Uncapped: uncapped, BoundBy: by,
+		Fill: k, KneeRate: knee, Floor: floor, Uncapped: uncapped, BoundBy: by, Tier: d.Tier,
 	}}
 }
 
@@ -423,7 +449,7 @@ func SLOAtReplicas(d Decode, q ReplicasQuery) DecodeSLO {
 		return every(out, u)
 	}
 	k := res.(Answer).Value
-	out.Rate = Answer{Value: rate, Basis: Basis{Fill: k, KneeRate: knee, BoundBy: rateBy}}
+	out.Rate = Answer{Value: rate, Basis: Basis{Fill: k, KneeRate: knee, BoundBy: rateBy, Tier: d.Tier}}
 	out.MeanTPOT = d.tpotAt(k, knee, 1, nil)
 	if p := q.PercentileTarget; p != nil {
 		if p.Percentile == 0 && !p.OverTokenGaps {
@@ -450,5 +476,5 @@ func (d Decode) tpotAt(k, knee, r float64, flags []Flag) Answer {
 		at = d.Band.Lo
 		flags = append(flags, BelowFittedBand)
 	}
-	return Answer{Value: d.Line.ITLAt(at) * r, Flags: flags, Basis: Basis{Fill: k, KneeRate: knee, Floor: floor}}
+	return Answer{Value: d.Line.ITLAt(at) * r, Flags: flags, Basis: Basis{Fill: k, KneeRate: knee, Floor: floor, Tier: d.Tier}}
 }

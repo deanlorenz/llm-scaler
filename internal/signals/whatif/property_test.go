@@ -368,6 +368,7 @@ func TestProperty_EveryReasonHasACase(t *testing.T) {
 	knee := mustAnswer(t, KneeRate(d)).Value
 	cases := map[Reason]Result{
 		NoLine:             KneeRate(with(func(c *Decode) { c.Line = itl.Model{} })),
+		PinnedDefaultB:     KneeRate(with(func(c *Decode) { c.Tier, c.Line = TierPinnedB, itl.Model{A: 0.004, B: itl.DefaultBaselineSec} })),
 		NoCapacity:         KneeRate(with(func(c *Decode) { c.CapacityTokens = 0 })),
 		NoBatchCap:         KneeRate(with(func(c *Decode) { c.ReplicaCap = 0 })),
 		NoTraffic:          KneeRate(with(func(c *Decode) { c.OutputTokens = 0 })),
