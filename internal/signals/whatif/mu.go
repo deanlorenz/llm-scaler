@@ -123,7 +123,15 @@ func CapacityTokens(params *capacity.EngineParams, ranks int, liveTokens int64) 
 // A configuration whose product falls outside that range is clamped to it: the
 // model says nothing useful outside the range it was fitted on, and a clamped
 // price is a worse answer than an extrapolated one only in theory.
+//
+// A band that breaks FillBand's precondition (inverted, NaN at either end, or
+// an end outside (0, 1)) is replaced by DefaultBand. Clamped to an inverted
+// band, the answer would be whichever edge the last clamp applied; the policy
+// never passes one, since its validation resets such a band to the default.
 func PricingK(kvCacheThreshold, scaleUpThreshold float64, band FillBand) float64 {
+	if !band.valid() {
+		band = DefaultBand()
+	}
 	k := itl.DefaultKSat
 	if kvCacheThreshold*scaleUpThreshold > 0 {
 		k = kvCacheThreshold * scaleUpThreshold

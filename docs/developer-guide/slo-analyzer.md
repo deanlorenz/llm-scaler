@@ -17,7 +17,8 @@ hands the optimizer `namedResults[0]`, saturation's.
 | --- | --- |
 | `internal/config` (`slo.go`) | `SLOPolicy`, `SLOObjective`, `SLODuration`, `SLOPercentile`; `Validate`, `SLOSummary`, `SLOMisconfiguration` |
 | `internal/collector` (`router_latency.go`), `registration/slo.go` | `CollectRouterLatency`: the router's TTFT histogram and TPOT `_sum`/`_count`, per model, over 5 minutes |
-| `internal/engines/analyzers/slo` | the analyzer: `analyzer.go` (cycle, fleet, line, judging, state), `price.go` (TPOT pricing), `histogram.go` (quantile, attainment, sample minimum), `transient.go` (exclusion) |
+| `internal/engines/analyzers/slo` | the analyzer: `analyzer.go` (cycle, fleet, line, judging, state), `histogram.go` (quantile, attainment, sample minimum), `transient.go` (exclusion) |
+| `internal/signals/whatif` (`decode.go`) | the TPOT pricing: `PriceTPOT`, `ReachableFill`, `ReplicaTokenRate`, `RealisedFill`, `FillBand`; shared with the saturation analyzer's derived mu (`mu.go`) |
 | `internal/signals/itl` (`tracker.go`) | `Tracker`: the ITL windows and intercepts, shared with the saturation analyzer |
 | `internal/metrics` (`slo_metrics.go`) | `PublishSLO`, `SweepSLO`, `DeleteSLOModel` |
 | `internal/engines/steadystate` | the engine's calls into it (below) |

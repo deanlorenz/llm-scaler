@@ -16,12 +16,21 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
 
-// The vectors in testdata were captured from the slo and saturation analyzers
-// on main, before this package's functions were moved out of them (the commit
-// that adds testdata/*.jsonl.gz holds the capture). Each holds one call's
-// inputs and outputs, floats as the hex of their IEEE-754 bits. Replaying the
-// inputs here must give back every output bit for bit: the move changed no
-// number the controller acts on.
+// TestMovedPricingIsBitIdentical is the proof of one change only: PR D1
+// (docs/proposals/slo-capacity-planner.md, "PR plan") moved this package's
+// functions out of the slo and saturation analyzers, and a pure move must not
+// change a number the controller acts on.
+//
+// The vectors in testdata were captured from those analyzers on main before
+// the move, by commit bf493785a ("test(whatif): freeze the decode pricing's
+// outputs on main"); checking that commit out and running its capture tests
+// with WHATIF_WRITE_VECTORS=1 regenerates them, byte for byte. Each holds one
+// call's inputs and outputs, floats as the hex of their IEEE-754 bits.
+// Replaying the inputs here must give back every output bit for bit.
+//
+// They pin the code as it was, not as it should be. A PR that changes any of
+// these functions on purpose -- starting with D2 -- deletes the vectors and
+// this test in the same PR, rather than regenerating them to match.
 
 // vector is one captured call: float inputs F, integer inputs I, and float
 // (OF), bool (OB) and string (OS) outputs.

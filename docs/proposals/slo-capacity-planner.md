@@ -95,13 +95,13 @@ Refusals, flags, the standalone mode and exit codes are in the
 
 ## Decode: TPOT from the ITL line
 
-**TPOT is a mean by default** (`slo/price.go`: "TPOT is a MEAN ... no tail
+**TPOT is a mean by default** (`whatif.PriceTPOT` in `internal/signals/whatif/decode.go`: "TPOT is a MEAN ... no tail
 model"); a per-request percentile is supported [below](#tpot-as-a-percentile-over-requests).
 
 A decode replica at fill `k` holds `n(k) = min(k·C/KVreq, batchCap·ranks)`
 sequences, each emitting a token every `ITL(k)`. So TPOT is `ITL(k)` and the
-replica's request rate is `λ_rep(k) = n(k)/(ITL(k)·OL)`: `replicaTokenRate/OL`
-in the SLO analyzer, `deriveMuAtCap` in saturation. For a given rate the fill is
+replica's request rate is `λ_rep(k) = n(k)/(ITL(k)·OL)`: `whatif.ReplicaTokenRate/OL`
+in the SLO analyzer, `whatif.DeriveMuAtCap` in saturation. For a given rate the fill is
 closed form (Little's law, residence `OL·ITL(k)`):
 
     k(λ_rep) = λ_rep·OL·B / ( C/KVreq − λ_rep·OL·A )
@@ -112,7 +112,7 @@ Corrections: TPOT per accepted token under speculative decoding (`ITLPerToken`,
 #274, PR #430); `KVreq = ILeff + D·OL/2` with the output spread
 `D = E[O²]/E[O]²` (#276, unmerged); `KVreq` assumes prompt and output length are
 uncorrelated (the exact footprint is `E[IL·OL]/E[OL] + E[OL²]/(2·E[OL])`), so a
-positive correlation makes the rate read high; and `reachableFill` clamps `k`
+positive correlation makes the rate read high; and `whatif.ReachableFill` clamps `k`
 to the batch-cap fill `batchCap·KVreq/C`.
 
 ### TPOT as a percentile over requests
@@ -216,9 +216,9 @@ optimised split, across the prefill and decode sides. The full model is
 
 ### Question 1: from an SLO to a rate
 
-**Decode, TPOT `t`.** For the mean, `k* = (t − B)/A` (`priceTPOT`); for a
+**Decode, TPOT `t`.** For the mean, `k* = (t − B)/A` (`whatif.PriceTPOT`); for a
 per-request percentile, `k* = (t/R_q − B)/A`. `TargetBelowFloor` if
-`ITL(band.lo)·R_q ≥ t` (`R_q` = 1 for the mean). Clamp to the band and the batch cap (`reachableFill`).
+`ITL(band.lo)·R_q ≥ t` (`R_q` = 1 for the mean). Clamp to the band and the batch cap (`whatif.ReachableFill`).
 Rate `N_d·λ_rep(k*)`, **capped at the operating point**, because past it the
 admission wait is no longer small. `--headroom 1` lifts the cap.
 
@@ -239,7 +239,7 @@ transfer and `ITL(band.lo)` alone exceed `T`, `TargetBelowFloor`.
    and the batch-cap fill (physical). Prefill: `N_p·V_P/(f·E[I_eff])`. The
    binding role has the lower knee.
 2. **Operating point.** `scaleUpThreshold` (0.85) times the knee, in rate,
-   applied once (as `realisedFill`), or `--rate`.
+   applied once (as `whatif.RealisedFill`), or `--rate`.
 3. **Answer.** TPOT from the closed-form fill, as the mean and, when a TPOT
    percentile is asked, as `ITL(k)·R_q`; TTFT at percentile `q`
    (`--ttft-percentile`, else the policy's, else 90). Floors are printed: TPOT
@@ -247,7 +247,7 @@ transfer and `ITL(band.lo)` alone exceed `T`, `TargetBelowFloor`.
    `a + I_q/V_P + ITL(band.lo)`.
 
 **Two headroom conventions.** The tool applies 0.85 in rate; saturation applies
-it in fill (`pricingK` = `KvCacheThreshold × ScaleUpThreshold`, 0.68). The rate is
+it in fill (`whatif.PricingK` = `KvCacheThreshold × ScaleUpThreshold`, 0.68). The rate is
 concave in fill, so a saturation-driven fleet runs hotter: `λ_rep(0.68)` is
 12.99 r/s in the worked example, against 11.32. `--headroom-space fill` gives
 the saturation convention.
@@ -359,7 +359,7 @@ resamples, a fixed printed seed; "tier unstable" when more than 10% of resamples
 change tier. `V_P` from a peak and `f` are extreme statistics, so they get a
 ±15% sensitivity sweep instead. **Extrapolation**: a fill or prompt length
 outside the window's range is flagged with the distance; outside the band the
-tool clamps, as `pricingK` and `priceTPOT` do. **The line check** runs on every
+tool clamps, as `whatif.PricingK` and `whatif.PriceTPOT` do. **The line check** runs on every
 answer and a mismatch above 15% away from a ramp is printed.
 
 ## Where decode is most wrong
@@ -457,7 +457,7 @@ is made.**
 | Recordings | Prefill-stress (30k prompts, 3 prefill pods, decode below its ceiling, fixed replicas); the staircase warm-ups, flow control off and on | — | R1 |
 | Capture | The `ols-sweep-slo` window, from its Prometheus snapshot | — | R2 |
 | D1 | Move the decode pricing into `whatif` at layer 32. Proof: vectors captured from `main` before the move, frozen, asserted bit-identical; the fails-on-main rule is waived for a pure move | none move | — |
-| D2 | Closed form, TPOT inversions, the admission chain, `Answer`/`Unanswerable`, property cases | none | D1 |
+| D2 | Closed form, TPOT inversions, the admission chain, `Answer`/`Unanswerable`, property cases. Deletes D1's frozen vectors and `TestMovedPricingIsBitIdentical` if it changes a moved function (regenerable from bf493785a) | none | D1 |
 | D3 | Accessors, the replay function, bands, basis, `cmd/whatif` from a recording or snapshot, footer, exit codes | none | D2 |
 | D4 | Standalone answers from `--prometheus`; no switch (adapter only) | none | D3, R2 |
 | P1 | `internal/signals/prefill`, observing: `V_P`, `a`, `f`; logs only; switch `prefill-capacity-observe`. On `ols-sweep` it fits `a` and refuses `V_P` and `f` | none | — |

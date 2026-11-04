@@ -29,10 +29,23 @@ import (
 // fill sits below the priced one, each window's observed maximum pulls the
 // bound down, and the fill converges near 0.05*s/(1-s) -- 0.28 at a scale-up
 // threshold of 0.85. See docs/proposals/slo-tiers.md, "Bounds".
+//
+// Precondition: 0 < Lo < Hi < 1, the rule the policy's validation applies
+// (config.ScalingPolicy.ITLBand returns only such a band). The functions here
+// do not check it, except PricingK, which falls back to DefaultBand rather
+// than let the result depend on the order its two clamps are applied in.
 type FillBand struct{ Lo, Hi float64 }
 
 // DefaultBand is the band of a policy that sets neither edge.
-var DefaultBand = FillBand{Lo: itl.DefaultMinObservableK, Hi: itl.DefaultMaxObservableK}
+func DefaultBand() FillBand {
+	return FillBand{Lo: itl.DefaultMinObservableK, Hi: itl.DefaultMaxObservableK}
+}
+
+// valid reports whether b meets FillBand's precondition. NaN at either end
+// fails it, since NaN fails every comparison.
+func (b FillBand) valid() bool {
+	return b.Lo > 0 && b.Lo < b.Hi && b.Hi < 1
+}
 
 // Pricing is the outcome of inverting a line at a mean-TPOT target.
 type Pricing struct {

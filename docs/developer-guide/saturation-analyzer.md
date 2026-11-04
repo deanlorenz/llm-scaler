@@ -1004,9 +1004,12 @@ throughput floor's line names the key and source it priced from (`muKey`,
 
 ```
 kPrice = clamp(kvCacheThreshold x scaleUpThreshold,
-               DefaultMinObservableK, DefaultMaxObservableK)
+               itlBand.minObservableK, itlBand.maxObservableK)
 ```
 
+The band is the policy's `analyzerTuning.itlBand` (0.15 and 0.80 unless the
+policy sets it), the one the line is fitted over; with both thresholds unset
+the product is `itl.DefaultKSat` before the clamp.
 `pricingK()` reads the policy and calls `whatif.PricingK` in
 `internal/signals/whatif`. With the shipped defaults that is
 `0.80 x 0.85 = 0.68`, **not** `0.85`. This composition is easy to get wrong:
