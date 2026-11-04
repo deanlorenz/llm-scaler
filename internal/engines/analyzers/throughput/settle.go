@@ -51,11 +51,15 @@ const SwitchITLReadsSettle = "throughput-itl-reads-the-settle-tracker"
 // new with the controller, so it first sees every replica on the first
 // cycle (settle.Joined). On, a replica already serving on the line's first
 // cycle waits its settle too, from the tracker's first sight of it: no line
-// for steadyGate.steadyFor after a restart, then until the window holds
-// itl.DefaultMinSamples readings, and the analyzer is silent meanwhile.
-// Off, as in 4b-1, such a replica is taken as settled. An analyzer with no
-// engine view never waits: it stands for a controller that has watched the
-// fleet.
+// from the band for steadyGate.steadyFor after a restart, then until the
+// window holds itl.DefaultMinSamples readings, and the analyzer is silent
+// meanwhile unless the above-band fallback prices it. The fallback's window
+// does not wait (it is one-sided: a warm-up reading can only raise its
+// price), only a replica that became Ready within steadyFor is kept out of
+// it. Off, as in 4b-1, such a replica is taken as settled. The wait is read
+// only on the tracker (SwitchITLReadsSettle on) with an engine view: an
+// analyzer with no view stands for a controller that has watched the
+// fleet, and the line's own trace does not wait.
 const SwitchITLWaitsAfterRestart = "throughput-itl-waits-after-controller-restart"
 
 // SwitchITLKeepsSettleThroughMissingRow is the replay switch for the
@@ -110,6 +114,18 @@ func (a *ThroughputAnalyzer) settleView() settle.View {
 // observeOwnSettle observes input's rows into the analyzer's own tracker at
 // now, when the engine gave it none. Every row, lent ones included: the
 // tracker keys a lend apart, as the engine's does.
+//
+// A model last observed more than ownSettleTimeout ago is first-seen, as
+// one evicted is: its observations are forgotten and observed again
+// backdated, and its line's keys forget their replicas' settle traces
+// (itl.Tracker.ForgetTraces), so the keys read every replica as on their
+// first cycle and nothing settles. The eviction (evictOwnSettleLocked) runs
+// inside observe, after the model analyzed first has observed: before this,
+// after a long gap that model read the gap as an absence (settle.Rejoined)
+// and settled, while every model after it, evicted meanwhile, was
+// first-seen and did not, so the result depended on the order. Part of
+// SwitchITLReadsSettle: off, the line reads no tracker and keeps its own
+// trace.
 func (a *ThroughputAnalyzer) observeOwnSettle(input domain.AnalyzerInput, now time.Time) {
 	if a.settle != nil {
 		return
@@ -120,10 +136,19 @@ func (a *ThroughputAnalyzer) observeOwnSettle(input domain.AnalyzerInput, now ti
 	}
 	model := utils.GetNamespacedKey(input.Namespace, input.ModelID)
 	a.mu.Lock()
-	_, seen := a.ownSettled[model]
+	last, seen := a.ownSettled[model]
+	stale := seen && now.Sub(last) > ownSettleTimeout && a.itlReadsSettle
 	a.ownSettled[model] = now
+	if stale {
+		for _, rm := range input.ReplicaMetrics {
+			a.lines.ForgetTraces(variantKey(input.Namespace, input.ModelID, rm.VariantName))
+		}
+	}
 	a.mu.Unlock()
-	settlerow.ObserveOwn(a.ownSettle, model, settlerow.Of(input.ReplicaMetrics, roles), !seen, ownSettleBackdate, now)
+	if stale {
+		a.ownSettle.Forget(model)
+	}
+	settlerow.ObserveOwn(a.ownSettle, model, settlerow.Of(input.ReplicaMetrics, roles), !seen || stale, ownSettleBackdate, now)
 }
 
 // evictOwnSettleLocked forgets what the analyzer's own tracker holds of a
@@ -144,7 +169,9 @@ func (a *ThroughputAnalyzer) settleAdmission(adm *itl.Admission, namespace, mode
 	if a.itlReadsSettle {
 		adm.Settle = &itl.Settle{View: a.settleView(), Model: utils.GetNamespacedKey(namespace, modelID)}
 	}
-	adm.WaitsAfterRestart = a.itlWaitsAfterRestart && a.settle != nil
+	// The wait reads the engine's tracker: on the line's own trace it would
+	// wait for every key the analyzer makes anew, not a controller restart.
+	adm.WaitsAfterRestart = a.itlWaitsAfterRestart && a.itlReadsSettle && a.settle != nil
 	adm.KeepsThroughMissingRow = a.itlKeepsSettle
 	adm.FiniteOnly = a.itlFiniteOnly
 	adm.RestartUnderName, adm.IdleOnEvidence = a.itlRestartUnderName, a.itlIdleOnEvidence

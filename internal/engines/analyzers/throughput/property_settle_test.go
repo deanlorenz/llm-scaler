@@ -132,6 +132,24 @@ func checkEngineMissedRow(newA propAnalyzer) func(uint64) error {
 	}
 }
 
+// Known truth, the above-band fallback after a controller restart: the
+// fleet of checkAboveBandFallback, every replica serving above the band
+// since before the restart, on the engine's rig from a restart at cycle 0.
+// The band's line waits steadyFor after the restart
+// (SwitchITLWaitsAfterRestart); the fallback's window does not (itl's
+// aboveBandSettling), so the fallback prices inside that wait, and still
+// never under the true line. The first two cycles read 30 % over the line,
+// a transient the restart caught: above the line, they can only raise the
+// price. Negative control (a mutant run): with the restart wait stamped on
+// the fallback's readings too, the fallback first prices on cycle 8, after
+// the wait, and the case fails on all 100 seeds.
+func checkAboveBandAfterRestart(newA propAnalyzer) func(uint64) error {
+	return aboveBandFallbackCheck(newA, engineCycles, 2, settleCycles-1,
+		func(a *ThroughputAnalyzer, rows func(int) []domain.ReplicaMetrics) (map[int]itl.Model, error) {
+			return engineLineOf(a, 0, rows)
+		})
+}
+
 // settleCases is the engine-rig cases, on the analyzer newA builds.
 func settleCases(newA propAnalyzer) []learnertest.Case {
 	c := func(class learnertest.Class, name string, check func(uint64) error) learnertest.Case {
@@ -142,6 +160,7 @@ func settleCases(newA propAnalyzer) []learnertest.Case {
 		c(learnertest.ClassTransient, "controller-restart-with-a-joiner", checkRestartWithAJoiner(newA)),
 		c(learnertest.ClassTransient, "joiner-warm-up-on-the-engine-tracker", checkEngineJoiner(newA)),
 		c(learnertest.ClassMissing, "missed-row-on-the-engine-tracker", checkEngineMissedRow(newA)),
+		c(learnertest.ClassKnownTruth, "above-band-fallback-after-a-restart", checkAboveBandAfterRestart(newA)),
 	}
 }
 

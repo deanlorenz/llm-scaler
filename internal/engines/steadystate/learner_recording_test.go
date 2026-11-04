@@ -1038,8 +1038,10 @@ func assertResultsPriced(t *testing.T, recording []byte) {
 	// it reads the engine's settle tracker and waits like the slo line,
 	// after the controller start and after each day the clock jumps
 	// (throughput.SwitchITLWaitsAfterRestart and the tracker's absence
-	// tolerance): it prices 4.
-	assert.Equal(t, map[string]int{saturation.KindAnalyze: 64, slo.KindAnalyze: 6, throughput.KindAnalyze: 4}, priced,
+	// tolerance). Its above-band fallback does not wait after the restart
+	// (it is one-sided): it prices 8, 4 of them pd-d from above the band
+	// (T2-above-band), which the wait kept silent before 4b-2's review.
+	assert.Equal(t, map[string]int{saturation.KindAnalyze: 64, slo.KindAnalyze: 6, throughput.KindAnalyze: 8}, priced,
 		"variants priced per analyzer")
 }
 

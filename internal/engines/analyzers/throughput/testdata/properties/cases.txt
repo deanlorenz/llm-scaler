@@ -8,6 +8,7 @@ edges/throughput-itl/steady-for-default
 edges/throughput-itl/ten-readings
 first-sample/throughput-itl/one-reading
 known-truth/throughput-itl/above-band-fallback
+known-truth/throughput-itl/above-band-fallback-after-a-restart
 known-truth/throughput-itl/line-at-kprice
 known-truth/throughput-itl/line-at-kprice-timebase
 missing-duplicated/throughput-itl/infinite-itl

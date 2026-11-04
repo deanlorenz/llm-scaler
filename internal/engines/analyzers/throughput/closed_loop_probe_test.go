@@ -102,6 +102,9 @@ type probeCase struct {
 type probeResult struct {
 	learnertest.Result
 	reasons map[string]int
+	// silentAfterRestart is how many cycles from the restart on the line
+	// was silent (itlReasonT2Failed).
+	silentAfterRestart int
 }
 
 // runProbe drives pc with the analyzer newA builds (again at a restart).
@@ -169,14 +172,17 @@ func runProbe(t *testing.T, pc probeCase, newA func() *ThroughputAnalyzer) probe
 			return learnertest.Ceil(out.TotalDemand / vc.PerReplicaCapacity)
 		}
 		res.reasons[itlReasonT2Failed]++
+		if restarted {
+			res.silentAfterRestart++
+		}
 		return learnertest.Hold
 	})
 	return res
 }
 
 func (r probeResult) String() string {
-	return fmt.Sprintf("need %d, final %d, peak %d, under need for %s; reasons %v; verdict %q",
-		r.Need, r.Final, r.Peak, r.UnderFor, r.reasons, r.Verdict())
+	return fmt.Sprintf("need %d, final %d, peak %d, under need for %s; reasons %v; silent %d cycles after the restart; verdict %q",
+		r.Need, r.Final, r.Peak, r.UnderFor, r.reasons, r.silentAfterRestart, r.Verdict())
 }
 
 // stepAt is an arrival rate of from until at, then to.
@@ -337,27 +343,42 @@ func TestThroughputProbe_AReplicaAtItsCapWithSiblingsBelowTheBandPricesFromAbove
 // A controller restart on the engine's settle tracker (learner PR 4b-2,
 // SwitchITLWaitsAfterRestart): the restarted engine's tracker sees every
 // replica first on its first cycle, and the line waits the settle from it,
-// so the analyzer is silent (it holds the fleet) for steadyFor and its ten
-// readings after the restart. Run 2 min and 15 s before a load step, with
-// the wait and without it (the negative control: the line 4b-1 built).
+// so the band's line waits steadyFor and its ten readings after the
+// restart. The above-band fallback does not wait (itl's aboveBandSettling):
+// it is one-sided, and a warm-up reading can only raise its price. Run 2 min
+// and 15 s before a load step, with the wait and without it (the negative
+// control: the line 4b-1 built).
 //
 // Measured: a step 2 min after the restart, need 9, final 10, peak 10,
-// under need for 30s, 18 cycles silent (T2-failed), against final 9 and
-// 0s, 4 silent, taken as settled. A step 15 s after it, final 10, peak 10,
-// under need for 1m45s, 16 silent, against 30s and 5. The wait is the
-// SLO side (4.4): under need for longer, inside learnertest.UnderFor.
+// under need for 30s, silent 10 cycles (2.5 min) from the restart on,
+// against final 9, 0s and 2 cycles taken as settled: the step lands after
+// the wait, in the band, and the wait is the SLO side (4.4), inside
+// learnertest.UnderFor. A step 15 s after it pushes every replica above the
+// band inside the wait: final 10, peak 10, under need for 30s, silent 3
+// cycles (45 s), the same as taken as settled. With the restart wait
+// stamped on the above-band window too, as the PR first built it, that
+// case was under need for 1m45s and silent 8 cycles (2 min).
 func TestThroughputProbe_AControllerRestartOnTheEngineTrackerWaitsItsSettle(t *testing.T) {
-	for _, stepAfter := range []time.Duration{2 * time.Minute, 15 * time.Second} {
+	run := func(stepAfter time.Duration) (on, off probeResult) {
 		pc := restartCase(stepAfter)
 		pc.engine = true
-		on := runProbe(t, pc, NewThroughputAnalyzer)
+		on = runProbe(t, pc, NewThroughputAnalyzer)
 		t.Logf("step %s after the restart, waits: %s", stepAfter, on)
-		off := runProbe(t, pc, withSwitchOff(SwitchITLWaitsAfterRestart))
+		off = runProbe(t, pc, withSwitchOff(SwitchITLWaitsAfterRestart))
 		t.Logf("step %s after the restart, taken as settled: %s", stepAfter, off)
 		require.Empty(t, on.Verdict(), "step %s after the restart", stepAfter)
 		require.LessOrEqual(t, on.UnderFor, learnertest.UnderFor)
-		require.GreaterOrEqual(t, on.reasons[itlReasonT2Failed], off.reasons[itlReasonT2Failed]+int(itl.DefaultSteadyFor/learnertest.Cycle),
-			"step %s after the restart: the line did not wait its settle", stepAfter)
-		require.Greater(t, on.UnderFor, off.UnderFor, "step %s after the restart: the wait cost nothing", stepAfter)
+		return on, off
 	}
+
+	on, off := run(2 * time.Minute)
+	require.GreaterOrEqual(t, on.reasons[itlReasonT2Failed], off.reasons[itlReasonT2Failed]+int(itl.DefaultSteadyFor/learnertest.Cycle),
+		"the band's line did not wait its settle")
+	require.Greater(t, on.UnderFor, off.UnderFor, "the wait cost nothing")
+
+	on, off = run(15 * time.Second)
+	require.Greater(t, on.reasons[itlReasonT2Failed], off.reasons[itlReasonT2Failed], "the band's line did not wait its settle")
+	require.Positive(t, on.reasons[itlReasonT2AboveBand], "premise: the restarted line priced from above the band")
+	require.LessOrEqual(t, on.UnderFor, off.UnderFor, "the above-band fallback waited the restart")
+	require.LessOrEqual(t, on.silentAfterRestart, off.silentAfterRestart, "the above-band fallback waited the restart")
 }

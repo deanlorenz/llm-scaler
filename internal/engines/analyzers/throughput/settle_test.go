@@ -154,6 +154,52 @@ func TestITLSettle_TheAnalyzerAloneDoesNotWait(t *testing.T) {
 	}
 }
 
+// The analyzer alone, after a gap longer than it keeps a model it has not
+// analyzed (ownSettleTimeout): two identical models settle alike, whichever
+// is analyzed first. Its own tracker is evicted inside observe, after the
+// first model's rows were observed, so before the fix the first model read
+// the gap as an absence (settle.Rejoined) and settled again on cycles 8 to
+// 15, while the second, evicted meanwhile, was first-seen and backdated, and
+// never settled. What else each keeps across the gap (the variant state, the
+// line's window and held slope) is the eviction's, as before 4b-2, and is
+// not compared.
+func TestITLSettle_AfterALongGapTheAnalyzerAloneSettlesEveryModelAlike(t *testing.T) {
+	c := clocktesting.NewFakePassiveClock(lineStart)
+	a := NewThroughputAnalyzer().WithClock(c).WithOptimizationInterval(settleCycle)
+	now := lineStart
+	cycle := func(model string) itl.Reading {
+		t.Helper()
+		c.SetTime(now)
+		rows := settleFleet()
+		_, err := a.Analyze(context.Background(), domain.AnalyzerInput{ModelID: model, Namespace: "ns",
+			ReplicaMetrics: rows, ArrivalRate: 4,
+			VariantStates: []domain.VariantReplicaState{{VariantName: "v1", CurrentReplicas: len(rows), GPUsPerReplica: 1}}})
+		require.NoError(t, err)
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		st := a.variantStates[variantKey("ns", model, "v1")]
+		require.NotNil(t, st)
+		return st.reading
+	}
+	settling, tiers := map[string][]int{}, map[string][]string{}
+	for i := range 2*settleCycles + 4 {
+		if i == settleCycles {
+			now = now.Add(2 * time.Hour)
+		}
+		for _, model := range []string{"m1", "m2"} {
+			r := cycle(model)
+			if r.Settling > 0 {
+				settling[model] = append(settling[model], i)
+			}
+			tiers[model] = append(tiers[model], r.Tier)
+		}
+		now = now.Add(settleCycle)
+	}
+	t.Logf("settling cycles: %v; tiers: %v", settling, tiers)
+	require.NotEmpty(t, tiers["m1"][len(tiers["m1"])-1], "premise: the line priced after the gap")
+	assert.Equal(t, settling["m2"], settling["m1"], "the model analyzed first after the gap settled differently")
+}
+
 // One missing row keeps the replica's settle (the 1 min absence rule). Off,
 // as 4b-1, the replica starts over when it comes back, and its readings are
 // kept out of the pinned fit for steadyFor.
@@ -190,7 +236,9 @@ func TestITLSettle_AnAbsencePastTheToleranceStartsTheSettleAgain(t *testing.T) {
 	n := back + settleCycles + 3
 	assert.Equal(t, want, settlingCycles(newSettleRig(t, nil), n, rows))
 	assert.Equal(t, want, settlingCycles(newSettleRig(t, map[string]bool{SwitchITLKeepsSettleThroughMissingRow: false}), n, rows))
-	assert.Equal(t, want, settlingCycles(newSettleRig(t, map[string]bool{SwitchITLReadsSettle: false}), n, rows),
+	// The key's own trace does not wait after the restart
+	// (SwitchITLWaitsAfterRestart reads the tracker only).
+	assert.Equal(t, cycleSpan(back, settleCycles), settlingCycles(newSettleRig(t, map[string]bool{SwitchITLReadsSettle: false}), n, rows),
 		"on the key's own trace too")
 }
 
@@ -231,7 +279,9 @@ func TestITLSettle_ANewRevisionUnderTheSameNameStartsTheSettle(t *testing.T) {
 	n := rollAt + settleCycles + 3
 	assert.Equal(t, append(cycleSpan(0, settleCycles), cycleSpan(rollAt, settleCycles)...),
 		settlingCycles(newSettleRig(t, nil), n, rows))
-	assert.Equal(t, cycleSpan(0, settleCycles), settlingCycles(newSettleRig(t, map[string]bool{SwitchITLReadsSettle: false}), n, rows),
+	// Off, nor does the key's own trace wait after the restart
+	// (SwitchITLWaitsAfterRestart reads the tracker only).
+	assert.Empty(t, settlingCycles(newSettleRig(t, map[string]bool{SwitchITLReadsSettle: false}), n, rows),
 		"switch off: the rollout is missed")
 }
 
@@ -256,7 +306,9 @@ func TestITLSettle_AGapBetweenCyclesPastTheToleranceSettlesAgain(t *testing.T) {
 		return out
 	}
 	assert.Equal(t, append(cycleSpan(0, settleCycles), cycleSpan(gapAt, settleCycles)...), run(nil))
-	assert.Equal(t, cycleSpan(0, settleCycles), run(map[string]bool{SwitchITLReadsSettle: false}),
+	// Off, nor does the key's own trace wait after the restart
+	// (SwitchITLWaitsAfterRestart reads the tracker only).
+	assert.Empty(t, run(map[string]bool{SwitchITLReadsSettle: false}),
 		"switch off: a gap between cycles is no absence")
 }
 
@@ -292,7 +344,19 @@ func TestITLSettle_AJoinerSettlesOnEitherPath(t *testing.T) {
 	want := append(cycleSpan(0, settleCycles), cycleSpan(joinAt, settleCycles)...)
 	n := joinAt + settleCycles + 3
 	assert.Equal(t, want, settlingCycles(newSettleRig(t, nil), n, rows))
-	assert.Equal(t, want, settlingCycles(newSettleRig(t, map[string]bool{SwitchITLReadsSettle: false}), n, rows))
+	// The key's own trace does not wait after the restart
+	// (SwitchITLWaitsAfterRestart reads the tracker only).
+	assert.Equal(t, cycleSpan(joinAt, settleCycles), settlingCycles(newSettleRig(t, map[string]bool{SwitchITLReadsSettle: false}), n, rows))
+}
+
+// SwitchITLWaitsAfterRestart reads the engine's tracker only: with the line
+// on its own trace (SwitchITLReadsSettle off) and an engine view, a
+// controller restart does not wait, as a key the analyzer made anew must
+// not. Before, the own trace waited steadyFor on every key's first cycle.
+func TestITLSettle_TheOwnTraceDoesNotWaitAfterARestart(t *testing.T) {
+	assert.Empty(t, settlingCycles(newSettleRig(t, map[string]bool{SwitchITLReadsSettle: false}), 2*settleCycles, steadySettleFleet))
+	assert.Equal(t, cycleSpan(0, settleCycles), settlingCycles(newSettleRig(t, nil), 2*settleCycles, steadySettleFleet),
+		"premise: on the tracker the restart waits")
 }
 
 // settleIdle makes rm idle on evidence: a known KV of 0 and a known empty

@@ -91,23 +91,23 @@ import (
 // builds it with none, and its line reads the tracker the analyzer observes
 // itself. Measured, each alone against all off:
 //
-//   - SwitchITLReadsSettle moves acceptance/variant-capacities.csv (3 of
-//     149 rows) and engine/variant-capacities.csv (1 of 139): on the cycles
-//     after the clock jumps a day, the tracker reads the gap as an absence
-//     (settle.Rejoined) and model-01's variant-01 holds its slope (T2-held)
-//     where the key's own trace refitted (T1-ols). Its results.csv and the
-//     engine's composite-release.csv rows differ in the last digit only,
-//     inside the comparison's tolerance: not a move, though the all-on
-//     goldens were rewritten with them.
+//   - SwitchITLReadsSettle moves nothing. The PR first measured it moving
+//     acceptance/variant-capacities.csv and engine/variant-capacities.csv
+//     (3 and 2 rows changed bytes):
+//     after a clock jump past an hour, the analyzer's own tracker read the
+//     gap as an absence (settle.Rejoined) for model-01, the first model
+//     analyzed, and its line settled, while every later model, evicted
+//     meanwhile, was first-seen and did not. Its review made a model the
+//     own tracker has not seen for ownSettleTimeout first-seen whatever the
+//     order (throughput/settle.go, observeOwnSettle), and the goldens came
+//     back byte for byte to main's. Its unit tests hold it.
 //   - SwitchITLWaitsAfterRestart moves nothing: an analyzer with no engine
 //     view never waits. It moves the throughput-sweep-restart recording when
 //     that lands (recorded on 4b-0, with the view). Its unit tests hold it.
 //   - The other four move nothing, as their 4a twins moved nothing; their
 //     unit tests hold them.
 var replaySwitches = map[string][]string{
-	throughput.SwitchITLReadsSettle: {
-		"acceptance/variant-capacities.csv", "engine/variant-capacities.csv",
-	},
+	throughput.SwitchITLReadsSettle:                  nil,
 	throughput.SwitchITLWaitsAfterRestart:            nil,
 	throughput.SwitchITLKeepsSettleThroughMissingRow: nil,
 	throughput.SwitchITLRestartUnderName:             nil,
@@ -333,7 +333,7 @@ var heldBy = map[string][]heldTest{
 	},
 	// Learner PR 4b-2's throughput line on the engine's settle tracker: each
 	// test runs the switch on and off through Analyze on the engine's rig.
-	// The move names outputs too; its tests hold its two own rules directly
+	// The move names no output; its tests hold its two own rules directly
 	// (a rollout under the same name, a gap between cycles).
 	throughput.SwitchITLReadsSettle: {
 		{"../throughput", "TestITLSettle_ANewRevisionUnderTheSameNameStartsTheSettle"},

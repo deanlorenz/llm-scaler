@@ -227,6 +227,9 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 		// reading -- k below the band, no ITL yet -- still says where the
 		// replica's load is.
 		steady, settling := false, false
+		// The same for the above-band window, which does not wait after a
+		// controller restart (aboveBandSettling).
+		aboveSteady, aboveSettling := false, false
 		hasITL := adm.hasITL(rm)
 		var trace *replicaTrace
 		if rm.Ready && !rm.FromWarmPool {
@@ -242,19 +245,25 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 				trace = nil
 			}
 			if trace == nil {
-				trace = &replicaTrace{since: now, joined: now.After(traces.since) || adm.WaitsAfterRestart}
+				first := !now.After(traces.since)
+				trace = &replicaTrace{since: now, joined: !first || adm.WaitsAfterRestart,
+					restartWait: first && adm.WaitsAfterRestart}
 				traces.replicas[rm.PodName] = trace
 			}
 			trace.lastSeen, trace.missed = now, false
+			restartOnly := false
 			if adm.Settle == nil {
 				trace.serving(hasITL, traceable(k), now, s)
 				settling = trace.settling(now, s)
+				restartOnly = settling && trace.restartWait
 			} else {
 				trace.countIdle(hasITL, traceable(k), now, s)
-				settling = trace.settlingOnTracker(adm, rm, traces.since, now, s)
+				settling, restartOnly = trace.settlingOnTracker(adm, rm, traces.since, now, s)
 			}
+			aboveSettling = aboveBandSettling(settling, restartOnly, rm, now, s)
 			if traceable(k) {
-				steady = !settling && trace.still(k, now, s)
+				still := trace.still(k, now, s)
+				steady, aboveSteady = !settling && still, !aboveSettling && still
 			} else {
 				// Present, so its trace is kept; no k, so nothing is noted.
 				trace = nil
@@ -282,8 +291,8 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 			if aw == nil || k < DefaultKSat {
 				break
 			}
-			dropped := aw.add(Observation{K: k, ITLSec: rm.AvgITL, Timestamp: now, settling: settling})
-			if !dropped && steady {
+			dropped := aw.add(Observation{K: k, ITLSec: rm.AvgITL, Timestamp: now, settling: aboveSettling})
+			if !dropped && aboveSteady {
 				asw.Add(k, rm.AvgITL, now)
 			}
 		default:
@@ -683,6 +692,16 @@ func (t *Tracker) ClearWindow(key string) bool {
 		}
 	}
 	return had
+}
+
+// ForgetTraces drops the key's replicas' settle traces, and keeps its
+// windows, intercept and held slope: the next Observe reads every replica as
+// on the key's first, so a settle that began before it is a settle only with
+// Admission.WaitsAfterRestart, and the drift test starts with no history.
+func (t *Tracker) ForgetTraces(key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.traces, key)
 }
 
 // ForgetSlope drops the key's last A, so no slope is held for it until a

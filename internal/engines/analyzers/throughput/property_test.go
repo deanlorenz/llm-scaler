@@ -508,15 +508,30 @@ func checkKnownTruth(newA propAnalyzer, timeBase bool) func(uint64) error {
 // 85, over 2 % on 11), and the 4 ms case too: there the B term is small
 // and the gauge's noise outweighs it.
 func checkAboveBandFallback(newA propAnalyzer) func(uint64) error {
+	return aboveBandFallbackCheck(newA, 24, 0, 0, func(a *ThroughputAnalyzer, rows func(int) []domain.ReplicaMetrics) (map[int]itl.Model, error) {
+		_, _, lines, err := lineOf(a, 24, rows)
+		return lines, err
+	})
+}
+
+// aboveBandFallbackCheck is checkAboveBandFallback's judgement over the
+// given number of cycles of the analyzer newA builds, run by run. The first
+// warm cycles read 30 % over the true line: a transient the run starts in,
+// which sits above the line and can only raise the price. With firstBy
+// above zero the fallback must have priced by that cycle.
+func aboveBandFallbackCheck(newA propAnalyzer, cycles, warm, firstBy int,
+	run func(*ThroughputAnalyzer, func(int) []domain.ReplicaMetrics) (map[int]itl.Model, error)) func(uint64) error {
 	return func(seed uint64) error {
-		const cycles = 24
 		f := newPropFleet(learnertest.Rand(seed), cycles, 0.86, 0.90, 0.94)
 		for _, b := range []float64{0.004, propTrueB} {
 			a := newA()
-			_, _, lines, err := lineOf(a, cycles, func(c int) []domain.ReplicaMetrics {
+			lines, err := run(a, func(c int) []domain.ReplicaMetrics {
 				out := f.rows(c)
 				for i := range out {
 					out[i].AvgITL = (propTrueA*f.ks[i] + b) * (1 + f.noise[i][c])
+					if c < warm {
+						out[i].AvgITL *= 1.3
+					}
 				}
 				return out
 			})
@@ -528,6 +543,15 @@ func checkAboveBandFallback(newA propAnalyzer) func(uint64) error {
 			}
 			if n := a.PathCounts()[PathITLAboveBand]; n == 0 {
 				return learnertest.Violate(learnertest.KindNotLearned, "true B %.3f s: a line above the band, but not the fallback's", b)
+			}
+			if firstBy > 0 {
+				first := cycles
+				for c := range lines {
+					first = min(first, c)
+				}
+				if first > firstBy {
+					return learnertest.Violate(learnertest.KindNotLearned, "true B %.3f s: the fallback first priced on cycle %d, after cycle %d", b, first, firstBy)
+				}
 			}
 			truth := propTrueA*itl.DefaultKSat + b
 			for c := range cycles {
