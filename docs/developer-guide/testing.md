@@ -1428,6 +1428,16 @@ tests do. The controller goes into `CONTROLLER_NAMESPACE`, which defaults to
   create the `e2e-default` InferenceObjective themselves.
 - **Kueue.** Two specs, see [Kueue specs](#kueue-specs): the quota spec in
   the full tier, the borrowing spec in a CI job of its own.
+- **Monitoring images.** Prometheus comes from kube-prometheus-stack
+  (`KUBE_PROMETHEUS_STACK_CHART_VERSION`), with Grafana on, because
+  `operational_dashboard_test.go` tests the dashboard. Every image it pulls
+  is on quay.io, registry.k8s.io or ghcr.io except Grafana, which Grafana
+  publishes only on Docker Hub. The installer pulls Grafana from
+  `mirror.gcr.io` (`GRAFANA_IMAGE_REGISTRY`) with the chart's tag, since
+  anonymous Docker Hub pulls are rate limited on CI runners.
+  `hack/check-kps-images.sh`, run by `make lint-deploy-scripts`, renders the
+  installed release and fails on any docker.io or unqualified image. It
+  needs `helm` and access to the chart repository.
 - **Helm repo updates.** `SKIP_HELM_REPO_UPDATE=true` skips `helm repo update`
   during the install. It is faster, but the repo indexes must already exist.
 

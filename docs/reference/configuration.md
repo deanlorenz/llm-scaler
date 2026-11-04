@@ -80,6 +80,7 @@ from the release notes. See
 | `KEDA_CHART_VERSION` | KEDA Helm chart version. [Supported versions](keda.md#supported-versions) | `2.21.0` |
 | `KEDA_CMA_NAMESPACE` | OpenShift: where the installer reads the Custom Metrics Autoscaler's version, for its [version line](keda.md#what-the-installer-prints) | `openshift-keda` |
 | `KUBE_PROMETHEUS_STACK_CHART_VERSION` | kube-prometheus-stack Helm chart version, when the install deploys Prometheus. Unset, a newer release already installed is kept rather than downgraded, with a warning | `92.7.0` |
+| `GRAFANA_IMAGE_REGISTRY` | Registry the kube-prometheus-stack Grafana image is pulled from, when the install deploys Prometheus with `DEPLOY_OPERATIONAL_DASHBOARD=true`. The repository path and tag stay the chart's. The default is Google's public Docker Hub mirror, because anonymous Docker Hub pulls are rate limited; set your own mirror on a cluster that cannot reach it | `mirror.gcr.io` |
 | `UNDEPLOY` | Remove instead of install (`install.sh` doubles as the uninstaller) | `false` |
 | `DELETE_NAMESPACES` | With `UNDEPLOY=true`, also delete the scaling manager and monitoring namespaces | `false` |
 | `DELETE_LLMD_NS` | With `DELETE_NAMESPACES=true`, also delete `LLMD_NS`. Separate because that namespace holds the model servers: deleting it takes the workloads with it | `false` |

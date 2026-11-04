@@ -3016,6 +3016,7 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n hack/check-llmd-monitors.sh
 	@bash -n hack/check-setup-prereqs-render.sh
 	@bash -n hack/check-e2e-images.sh
+	@bash -n hack/check-kps-images.sh
 	@bash -n hack/check-policy-apply-docs.sh
 	@bash -n hack/check-release-latest.sh
 	@bash -n hack/check-controller-ready.sh
@@ -3239,6 +3240,11 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@echo "Checking every image the e2e Go code names has a registry host..."
 	@# AGENTS.md: never docker.io in e2e. An image with no host resolves there.
 	@bash hack/check-e2e-images.sh
+	@echo "Checking every image the installed kube-prometheus-stack pulls names a registry other than docker.io..."
+	@# The e2e monitoring stack is chart defaults, not Go code, so the check
+	@# above never saw it: Grafana came from Docker Hub. Renders the release
+	@# deploy_prometheus_kube_stack installs; needs helm and the chart repo.
+	@bash hack/check-kps-images.sh
 	@echo "Checking no doc applies the sample scaling policy over an install..."
 	@# The sample has no limiters: applying it removes the GPU limit.
 	@bash hack/check-policy-apply-docs.sh
