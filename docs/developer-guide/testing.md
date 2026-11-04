@@ -329,6 +329,19 @@ the slo analyzer listed, streamed load, router TTFT recorded.
    kubectl -n "$PROM_NS" cp -c prometheus "$PROM_POD:/prometheus/snapshots/$NAME" ./ols-sweep-slo-snapshot
    ```
 
+   `kubectl cp` runs `tar` inside the container, so it needs `tar` in the
+   Prometheus image. A distroless image has none, and the copy fails with
+   `executable file not found`. Then copy from a helper Pod that mounts the
+   same volume and has `tar`: a Pod with an image that has `tar` (from a
+   registry you trust), the Prometheus data volume's claim mounted
+   read-only at `/prometheus`, then
+   `kubectl -n "$PROM_NS" cp "$HELPER_POD:/prometheus/snapshots/$NAME" ./ols-sweep-slo-snapshot`.
+   A ReadWriteOnce claim mounts only on Prometheus' own node, so schedule
+   the helper there. An ephemeral container works as well where the
+   cluster allows them:
+   `kubectl debug -n "$PROM_NS" "$PROM_POD" --target=prometheus --image=IMAGE-WITH-TAR -c snap -- sleep 3600`,
+   then `kubectl cp -c snap "$PROM_POD:/proc/1/root/prometheus/snapshots/$NAME" ./ols-sweep-slo-snapshot`.
+
    Without the admin API, `promtool tsdb dump` writes the series out as text,
    and `promtool tsdb create-blocks-from openmetrics` makes blocks of them
    again.
@@ -364,9 +377,13 @@ the slo analyzer listed, streamed load, router TTFT recorded.
    Every query is required. One that fails (often `query.max-samples` on a
    histogram over many steps) stops the capture with exit 1 and names the
    query: shorten the window or lengthen `--step`. Each HTTP request may
-   take `--timeout` (2m30s by default). A window over
-   `whatifsource.MaxStepQueries` steps times queries (about a day at 15 s)
-   needs `--force`, since every sample is held in memory.
+   take `--timeout` (2m30s by default). Two bounds need `--force` to pass:
+   `whatifsource.MaxStepQueries`, 1,000,000 steps times the 80 queries a
+   capture with kube-state-metrics registers (12,500 steps, a little over
+   two days at 15 s), which bounds the load; and `whatifsource.MaxSamples`,
+   20 million samples held in memory, which grows with the Pods as well.
+   [What-if capture](whatif-capture.md#load-on-prometheus) gives the load
+   a window puts on Prometheus.
 
 4. Generate the recording, and add it as a golden like any recording
    (below):

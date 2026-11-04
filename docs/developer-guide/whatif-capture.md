@@ -9,43 +9,107 @@ How to run it on a real window is in
 [Testing: Capture a past window](testing.md#capture-a-past-window).
 
 ```
-whatif capture  --prometheus URL --namespace NS (--kube-state-metrics | --role-of ROLE=SELECTOR ...) \
-                --from T0 --to T1 [--step 15s] [--policy FILE] [--timeout 2m30s] [--force] -o run.capture.jsonl.gz
+whatif capture  --prometheus URL --namespace NS (--kube-state-metrics | --role-of ROLE=SELECTOR ...)
+                --from T0 --to T1 -o run.capture.jsonl.gz
+                [--step 15s] [--policy FILE]
+                [--engine vllm|sglang] [--engine-args "ARGS"] [--batch-cap N]
+                [--gpus-per-replica 1] [--accelerator NAME]
+                [--bearer-token-file FILE] [--ca-file FILE] [--insecure-skip-verify]
+                [--timeout 2m30s] [--force]
 whatif generate -in run.capture.jsonl.gz -o run.jsonl
 ```
+
+| Flag | What it does |
+| --- | --- |
+| `--prometheus` | The Prometheus base URL, http or https. Required. |
+| `--namespace` | The namespace whose models to capture. Required. |
+| `--kube-state-metrics` | Read Pods, owners, readiness, GPUs and nodes from kube-state-metrics in the same Prometheus. |
+| `--role-of ROLE=SELECTOR` | The Pods a label selector picks serve ROLE (`prefill`, `decode`, `both`), as one variant. Repeat per variant. |
+| `--from`, `--to` | The window, RFC 3339 or Unix seconds, truncated to the millisecond. Required. |
+| `--step` | The interval between cycles, taken as the run's optimize interval. Whole milliseconds. Default 15s. |
+| `--policy` | A scaling-policy entry (YAML), applied as the default entry. Default: the defaults. |
+| `--engine` | The inference engine the variants run, `vllm` or `sglang`. Default `vllm`. |
+| `--engine-args` | The engine's arguments, space-separated, parsed for its parameters (kube-state-metrics has none). |
+| `--batch-cap` | The engine's batch cap (`--max-num-seqs`, or `--max-running-requests`). Warned about when `--engine-args` sets it too. |
+| `--gpus-per-replica`, `--accelerator` | Stand-ins where kube-state-metrics gives no GPU request or node label. |
+| `--bearer-token-file` | A file holding a bearer token. Sent over https only, to Prometheus' own host only (compared without case), never on a redirect elsewhere. Refused with an http URL, or when the file is empty. |
+| `--ca-file` | A PEM file of the CAs that sign an https Prometheus' certificate, trusted in place of the system's: for a Prometheus behind a private CA (an OpenShift service CA, say). Refused with an http URL. |
+| `--insecure-skip-verify` | Do not verify the certificate. Warned about on stderr. Refused with an http URL. |
+| `--timeout` | How long one HTTP request may take. Default 2m30s, a little over Prometheus' own 2-minute query timeout. |
+| `--force` | Capture past the load and memory bounds below. |
+| `-o` | Where to write the capture. Written beside it and renamed over it when whole, so a failed run leaves the file that was there. |
+
+`whatif generate` takes `-in` (the capture, gzipped or not) and `-o` (the
+recording; a name ending in `.gz` is gzipped). Both commands write their
+file with mode 0600, through a temporary file renamed over it.
 
 `make whatif` builds `bin/whatif`, with the commit in the build. The command
 is not in the manager image.
 
-Exit codes: 0 done; 2 a usage or input error (a bad flag, overlapping
-`--role-of` selectors, a window too large without `--force`, a capture
-`generate` cannot read); 1 anything else (a failed Prometheus query, a
-`generate` that fails inside the analyzers).
+Exit codes: 0 done; 2 the caller's input (a bad flag, invalid options,
+overlapping `--role-of` selectors, no Pod the role map attributes with a
+KV-cache series, a window too large without `--force`, a capture `generate`
+cannot read; `whatifsource.IsInputError`); 1 anything else (a failed
+Prometheus query, `whatifsource.ErrQueryFailed`, or a `generate` that fails
+inside the analyzers).
+
+## Load on Prometheus
+
+A capture turns every query the controller asks into one range query over
+the whole window, at the step. A window of more than 10,000 steps is asked
+in parts of at most 10,000 steps, one part after another. The collector
+asks a cycle's queries together, so different queries run at the same time,
+as many as a controller's cycle asks at once; each is asked once for the
+whole capture, and every later step reads its answer from memory.
+
+A capture registers about 80 queries with kube-state-metrics (67 without);
+one namespace with a single vLLM model asks about 56 of them. For a fleet
+of 10 engine Pods, each per-Pod query returns 10 series, and each histogram
+about 10 to 20 per Pod (one per bucket), roughly 1,000 series in all. Rough
+figures, to be read as orders of magnitude:
+
+| Window at 15 s | Steps | Range requests | Samples returned and held |
+| --- | --- | --- | --- |
+| 1 hour | 241 | about 56 | about 240,000 |
+| 1 day | 5,761 | about 56 | about 5.8 million |
+| 3 days | 17,281 | about 112 (two parts each) | about 17 million; past `MaxStepQueries`, so it needs `--force` |
+
+Prometheus reads far more raw samples than it returns: each `rate(...[1m])`
+reads every scrape in its minute at every step.
+
+- **Capture off-peak**, or better, **from a snapshot** served by a local
+  Prometheus ([Testing](testing.md#capture-a-past-window)), never by loading
+  a production server with a long window.
+- **The usual failure is `query.max-samples`**: a histogram over many steps
+  loads more samples than the server allows in one query. It stops the
+  capture with exit 1 and names the query; shorten the window or lengthen
+  the step.
+- **Bounds.** `whatifsource.MaxStepQueries` (1,000,000) steps times
+  registered queries is checked before any query: about 12,500 steps with
+  the 80 queries, a little over two days at 15 s. `whatifsource.MaxSamples`
+  (20 million, a little over a gigabyte at about 60 bytes each) bounds the
+  samples held, counted as the answers arrive. Past either, the capture
+  stops with exit 2 unless `--force`.
 
 ## Talking to Prometheus
 
-- Every HTTP request has a timeout, `--timeout` (2m30s by default, a little
-  over Prometheus' own 2-minute query timeout).
-- `--bearer-token-file` is sent to an https Prometheus only, and only to its
-  own host: a redirect to another host does not carry it. With an http
-  `--prometheus` it is refused, since it would never be sent.
-- `--insecure-skip-verify` warns on stderr.
-- `--from` and `--to` are truncated to the millisecond, and `--step` must be
-  a whole number of milliseconds: that is what Prometheus keeps.
+- Every HTTP request has a timeout, `--timeout`.
+- **Port-forwarding to an authenticated Prometheus:** `kubectl port-forward`
+  gives a plain-http local URL, and the token is never sent over http, so
+  the capture is refused. Forward to Prometheus' https port and capture
+  from `https://localhost:PORT` with `--ca-file` (the certificate must name
+  `localhost`, or use `--insecure-skip-verify` knowing what it gives up), or
+  capture from a local snapshot, which needs no token.
 - Every sample must be on the step grid, `--from` plus a whole number of
   steps. A query frontend that aligns start to step (Thanos, Mimir) answers
   off it, and the capture fails, naming the cause.
-- Every range query's samples stay in memory for the whole capture. A
-  window of more than `whatifsource.MaxStepQueries` (1,000,000) steps times
-  queries, about a day at a 15 s step, is refused unless `--force`.
 
 **Every query is required.** One that fails stops the capture at once and
 names the query; the collector's retries do not sleep through their
 backoff on an answer that cannot change. A failed query would leave its
 field absent at every step, which a capture cannot tell from a field the
 window did not have, so the generated run would read inputs no controller
-read. The usual failure is a limit such as `query.max-samples` on a
-histogram over many steps: shorten the window or lengthen the step.
+read.
 
 ## The pieces
 
@@ -160,13 +224,16 @@ Each of these is either flagged in the capture or fixed by what it writes:
   parking), chunked range queries, and deterministic bytes; a failed query
   failing the capture at once, overlapping `--role-of`, replicas counted
   from engine Pods only, the rollout and multi-Pod flags, the step grid,
-  and the window-size cap.
+  the window-size and sample bounds, and whose fault each error is
+  (`IsInputError`).
 - `cmd/whatif`: the flags, usage errors (exit 2), a Prometheus error
-  (exit 1, no file left), the step and the window, and `generate`; the
-  bearer token kept off a redirect's host and refused for http, the
-  `--insecure-skip-verify` and `--batch-cap` warnings, the request timeout,
-  `generate`'s exit codes, and the flags surviving capture, generate, a
-  Fidelity replay and the export.
+  (exit 1, and the capture that was at `-o` kept), the step and the
+  window, and `generate`; the bearer token kept off a redirect's host and
+  off http on the same host, refused for http or when empty, TLS flags
+  refused for http, the `--insecure-skip-verify` and `--batch-cap`
+  warnings, the request timeout, `generate`'s exit codes and single error
+  prefix, `startOf` reading the caveats, and the flags surviving capture,
+  generate, a Fidelity replay and the export.
 - `learnreplay` (`TestGenerate_*`): the call order on a hand-built capture,
   refusals, a Fidelity replay of the generated recording, the settle
   tracker forgetting a model parked whole, and the caveats.
@@ -176,5 +243,8 @@ Each of these is either flagged in the capture or fixed by what it writes:
   byte: each Analyze's input, result and store records, and the order of
   calls in every cycle. The engine is given variant states with only the
   fields a capture fills. That is the bound the comparison holds to. The
-  round trip runs again with the window split into range queries of five
-  steps.
+  fleet has a model parked whole partway through the window (the settle
+  tracker's verdicts must match the engine's too) and a router Pod in
+  kube-state-metrics. The round trip runs again with the window split
+  into range queries of five steps, and with a role map by Pod name that
+  also picks the router.
