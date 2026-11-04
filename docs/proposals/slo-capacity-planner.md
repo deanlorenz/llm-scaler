@@ -419,7 +419,8 @@ pass mark (goldens scale out):
 A check with no data is **SKIPPED with a reason**, never passed. TTFT's pass mark
 is [the staircase](slo-capacity-planner-ttft.md#ground-truth-and-the-staircase).
 
-**Property cases**, in `internal/signals/whatif/whatiftest`, each
+**Property cases**, in `internal/signals/whatif` (`property_test.go`, in the
+package so the chain's Erlang C case reaches its solver), each
 mutation-checked:
 
 - The rate never falls when a target loosens, never rises when prompts or
@@ -552,6 +553,8 @@ Every answer is an `Answer{Value, Band, Basis, Flags}` or an
 | `TPOTQuantileUnbounded` | The TPOT `q` quantile falls in the histogram's `+Inf` bucket |
 | `TargetBelowFloor` | The target is below what any number of replicas reaches |
 | `FlowControlUnknown` | Flow control on and the detector's thresholds unknown |
+| `Saturated` | A rate (`--rate`) at or above the knee, where no fill or admission wait exists |
+| `InvalidInput` | NaN or infinity, a percentile outside (0, 1), an `R_q` below 1, a headroom outside (0, 1], an invalid band; exit `2`, not `3` |
 
 **Flags**, never refusals: extrapolation (with its distance), a borrowed, held
 or snapshot line, a lower-bound or assumed `V_P`, no readiness, an unstable
