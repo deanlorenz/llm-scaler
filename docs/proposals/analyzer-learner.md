@@ -1657,7 +1657,7 @@ not hold the decode pod at its cap without preempting.
 | 4b-0 | the admission's inputs, wired and not yet used: settle view, slope hold and interval in the admission; the capacity store wired but not read until 4b-1 (`EngineParams` only, then), wired in main (`Engine.NewThroughputAnalyzer`) and in replay; the policy read through interfaces (`itlPolicyOf`); `start.ThroughputConfig`, so a recording states the analyzer's settings and a replay builds it as the run did. The window still reads only the band | none move: every golden replays byte for byte |
 | 4b-1 | the two recordings with base goldens (own commit, taken after 4b-0 merged); the shared generator and simulator; the verbosity test; `throughput-itl-steady-gate`, `throughput-itl-keeps-the-window-on-gps-mismatch`, `learner-write` | as named above |
 | 4b-2 | `throughput-itl-reads-the-settle-tracker`, `throughput-itl-waits-after-controller-restart` | the restart wait's |
-| 4b-3 | `throughput-itl-admits-at-sequence-cap` | none expected |
+| 4b-3 | `throughput-itl-admits-at-sequence-cap` ([as built](#4b-3-as-built)) | none expected; none measured |
 
 4b-1 can land on the synthetic goldens alone if the recording is late; the
 recordings then land in 4b-2 with their base goldens. Forget for this line
@@ -2034,6 +2034,148 @@ cycles; above it, 30 s and 3; the stamp put back, 1m45s and 8. On the
 settle rig, three steady replicas price first on cycle 8 after a restart
 and one replica on cycle 10, not 8 + 10: readings taken during the settle
 count towards the ten, and only three must be settled.
+
+#### 4b-3 as built
+
+Status: built on `feat/learner-4b3`, on main after 4b-2 merged (#458,
+891c071c4). One switch, `throughput-itl-admits-at-sequence-cap`
+(`T/admission.go`), on by the constructor.
+
+**What it does.** Row 1's cap admission, with row 1's semantics, on the
+throughput line. A reading above the band is the band's when its replica's
+batch is exactly at the cap its engine states, on every rank, with requests
+waiting and a preemption rate read and at most
+`itlBand.capMaxPreemptionRate`. The cap is `EngineParams.StatedBatchCap`:
+the flags' `max_num_seqs`, lowered by `--max-num-active-seqs`, else the
+`llm-d.ai/max-num-seqs` annotation; never the parser's default and never a
+learned cap. The test itself is the shared one (`itl.Admission.atSequenceCap`,
+which `itl.Admission.MaxNumSeqs` turns on), so 4b-3 changes no code in I.
+
+- **The store is read outside `a.mu`.** `engineOf` reads each variant's
+  record once per cycle, before `observe` takes the analyzer's lock, and
+  takes both the cap and `ArgsTag` from that one read. Since 4b-1 the
+  arguments were read inside `lineAdmission`, under `a.mu`; they now come
+  from the same read, so a held slope stays bounded by the same arguments.
+- **Only on the tracker.** With `throughput-itl-steady-gate` off the
+  parent's window reads the band alone, switch on or off
+  (`TestITLCap_TheParentsWindowReadsNoCap`).
+- **The summary line says so.** `throughput analyzer: ITL line` gains
+  `atCap` (this cycle's readings admitted at the cap), `batchCap` and
+  `batchCapSource` (`flags`, `declared` or `none`).
+
+**Decision: a reading at the cap goes to the band's window, not the
+above-band fallback's.** The order a variant's line is taken in is:
+
+1. the band's window, readings at the cap included: the full fit, else the
+   pinned fit;
+2. the held slope;
+3. the above-band fallback, from readings above the band that are **not**
+   at the cap, at k of at least 0.85.
+
+A reading at the cap enters one window only. The tracker already sorted rows
+this way (`case k > hi && !adm.atSequenceCap(rm)` sends only uncapped rows
+to the fallback); 4b-3 is what gives it a cap to read. Why the band's
+window:
+
+- A reading at the cap is a point on the line (#287): the batch cannot grow,
+  and the fill above the band is its sequences' contexts, not memory
+  pressure. Rows 1 and 13 fit it into their lines; the throughput line now
+  reads the same rows the same way.
+- The fallback is a stand-in, one-sided by construction: B pinned at the
+  least ITL, so it prices over the truth (4b-1 as built). It never sets the
+  held slope and never stores B. A variant at its cap priced from it would
+  order more replicas than its line needs, and its line could not hold
+  through a dip below the band. On the probe below the fallback priced
+  0.0560 s at k 0.85 against a true 0.0525 s (6.7 % over); the band's
+  line prices 0.0522 s (0.6 % under, with B pinned at the 6 ms default
+  against a true 10 ms; known truth's ε is 5 %).
+- So the fallback stays for what it was built for: a key with no fit from
+  the band (readings at the cap included) and no slope it may hold.
+
+Tests: `TestITLCap_AVariantAtItsCapPricesFromTheBandNotTheFallback` holds a
+capped replica at k 0.92, an uncapped one at 0.90 (its batch one short) and
+one below the band. On, the band's line prices it from the capped replica's
+tenth reading (T2-failed 9, T2-default 11, of 20 cycles) while the
+fallback's window holds 20 readings it is never asked for. Off, the
+fallback prices it (T2-failed 4, T2-above-band 16). With the capped
+replica preempting at 0.5/s, nothing is the band's and the fallback prices
+it, as it must. Mutant: a reading at the cap sent to the fallback's window
+(`case k > hi:`) fails 4 tests and all 5 cap property cases (below).
+
+**Which way the fleet moves.** Where a variant's only replica in reach sat
+at its cap, the line is now its own: against 4b-2, **down** where the
+above-band fallback priced it (it priced over the truth, so ordered more),
+and **live again** where 4b-2 was silent: a capped replica at k between
+0.80 and 0.85, which the fallback may not use (`cause`
+`all-above-band-below-ksat`), or the cycles before the fallback had ten
+readings. Live, the analyzer orders a scale-up and joins the scale-down
+vote again. Readings at the cap also teach B and the held slope, as in the
+band.
+
+**Probe** (`TestThroughputProbe_AReplicaAtItsCapWithSiblingsBelowTheBandPricesFromTheBand`;
+40 cycles, one replica at its declared cap of 64 at k 0.92 and two below
+the band; truth at k 0.85 is 0.0525 s):
+
+| run | reasons | band's window | priced at k 0.85 |
+| --- | --- | --- | --- |
+| main (891c071c4), the case as 4b-1 left it | T2-failed 9, T2-above-band 31 | 0 | 0.0560 s |
+| on | T2-failed 9, T2-default 31 | up to 20 | 0.0522 s |
+| switch off (negative control) | T2-failed 9, T2-above-band 31 | 0 | 0.0560 s |
+| the parent's line (gate off) | T2-default 40 | n/a | 0.0528 s |
+
+**Ledger.** `edges/throughput-itl/sequence-cap`, owned by 4b-3, fails on
+main on 1/1 seeds ("a replica at its sequence cap above the band was
+refused: the window holds 0 readings") and passes on 1/1 here; the row is
+removed and the ledger is empty.
+
+**Property cases** (2.6; `T/property_cap_test.go`, each through
+`Analyze`):
+
+| case | here | main |
+| --- | --- | --- |
+| `edges/throughput-itl/sequence-cap` | passes 1/1 | fails 1/1: refused |
+| `edges/throughput-itl/sequence-cap-edges`: at the cap admitted; one under, one over, no queue, preemption unread, preemption NaN, only the parser's default cap (256), two ranks at one rank's cap refused; two ranks both at the cap admitted | passes 1/1 | fails 1/1: at the cap refused |
+| `edges/throughput-itl/cap-preemption-default`: 0/s admitted, 0.001/s refused | passes 1/1 | fails 1/1 |
+| `edges/throughput-itl/cap-preemption-non-default`: `capMaxPreemptionRate: 0.5`, 0.5/s admitted, 0.501/s refused | passes 1/1 | fails 1/1 |
+| `known-truth/throughput-itl/at-cap-with-siblings-below-the-band`: priced from the band's line on every cycle from the tenth reading, never the fallback, never under the truth by more than ε | passes 100/100 | fails 100/100: priced from the fallback |
+
+The mutant is the switch off (`TestThroughputCapPropertyMutants`): each case
+fails there with the failure main shows. The main column was run on
+891c071c4 with the case file copied in (its own `sequence-cap` case renamed
+apart).
+
+**Mutants** (source edits, each alone, the throughput package run; all
+killed):
+
+| mutant | what fails |
+| --- | --- |
+| cap not read (`engineOf` reads no cap) | 4 tests (the stated-cap test, the fallback-order test, the wired-line test, the probe) and all 5 cap property cases |
+| preemption check dropped in T (`CapMaxPreemptionRate` +Inf) | the fallback-order test and both `cap-preemption` edges |
+| preemption check dropped in I (`atSequenceCap` without its rate clause) | the same |
+| admitted when not at the cap: the parser's default cap read (`BatchCap`) | 3 tests (the annotation's stated-cap case, the fallback-order test, the probe) and all 5 cap property cases |
+| admitted when not at the cap: every reading above the band once a cap is known | the fallback-order and wired-line tests, `sequence-cap-edges` and both `cap-preemption` edges |
+| the switch ignored | 5 tests: the stated-cap test, the fallback-order test, the probe, `TestThroughputCapPropertyMutants` and `TestTheWiredAnalyzerReadsTheFleetAsABareOneDoes` |
+| a reading at the cap sent to the fallback's window | 4 tests and all 5 cap property cases |
+
+**A vacuous test removed.** 4b-0's `TestTheWindowStillReadsOnlyTheBand`
+fed a row with `Ready` unset; since 4b-1 the tracker refuses such a row as
+not Ready, so the test passed whatever the cap admission did. It is replaced
+by `TestITLCap_AReplicaAtItsStatedCapIsAReading`, whose rows are Ready and
+which asserts the reading's `Offered` and `Capped` counts on and off, for
+each way a cap is stated. `TestTheWiredAnalyzerReadsTheFleetAsABareOneDoes`
+turns the cap switch off with the settle switches: its capped replica is
+the one row the wired analyzer now reads differently
+(`TestITLCap_TheWiredLineAdmitsTheCappedReplica`).
+
+**Goldens.** None move, as the order table expected. Measured
+(`TestGoldens_TheSwitchRuns`): the switch alone against all off moves 0
+outputs, and all on reproduces main's goldens byte for byte. By
+construction: the in-process fixtures predate `start.ThroughputConfig`, so
+the replay builds the analyzer with no capacity store, and with no store it
+knows no cap. 4b-2's six switches move to `earlierSeams`
+(`learner4b2Seams`), each still moving nothing off alone; the cap switch is
+held by its unit tests (`heldBy`). `switchBase` is unchanged: main's
+goldens are 4b-1's bytes.
 
 ## 8. Risks and limits
 

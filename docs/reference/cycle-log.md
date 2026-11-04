@@ -345,7 +345,7 @@ The throughput analyzer uses:
 | `T2-pinned` | capacity from Tier-2 constrained OLS with a prior fitted B |
 | `T2-default` | capacity from Tier-2 constrained OLS with the default baseline B (cold start) |
 | `T2-held` | the last fitted slope, held because the window is too short to fit a new one: the fleet sits below the band or above it, or its replicas are still settling. B is the variant's measured intercept, or the default. The hold ends when the slope is older than `LEARNED_STATE_BUCKET_RETENTION` (7 days by default), or when the variant's engine arguments change. A shape change drops it |
-| `T2-above-band` | no line from the band and no slope to hold, so the line is fitted from settled readings above the band at k of at least 0.85 (10 readings, 3 settled, as in the band), with B at the least ITL among them. This is a variant that never fitted, under load that keeps every replica above the band: a controller restart into saturation, or a variant that starts there. It errs one way only: it prices a higher ITL than the true line, so a lower per-replica capacity and more replicas. On readings of the true line it never under-provisions. Its slope is never held and its B never stored; the first fit in the band replaces it. It does not wait out a controller restart or leader change, since readings taken during warm-up can only raise its price: measured with 4 replicas all above the band, 15 s cycles and `steadyFor` 2 min, it came back about 45 seconds after a simulated restart. A pod that became Ready less than `steadyFor` before the restart still waits |
+| `T2-above-band` | no line from the band and no slope to hold, so the line is fitted from settled readings above the band at k of at least 0.85 (10 readings, 3 settled, as in the band), with B at the least ITL among them. A replica at its sequence cap is not among them: its readings are the band's (see `atCap` below). This is a variant that never fitted, under load that keeps every replica above the band: a controller restart into saturation, or a variant that starts there. It errs one way only: it prices a higher ITL than the true line, so a lower per-replica capacity and more replicas. On readings of the true line it never under-provisions. Its slope is never held and its B never stored; the first fit in the band replaces it. It does not wait out a controller restart or leader change, since readings taken during warm-up can only raise its price: measured with 4 replicas all above the band, 15 s cycles and `steadyFor` 2 min, it came back about 45 seconds after a simulated restart. A pod that became Ready less than `steadyFor` before the restart still waits |
 | `T2-failed` | no line this cycle; the variant is skipped. The causes: fewer than 10 readings in the window, or fewer than 3 settled; every reading above the band at k under 0.85 (nothing the fallback may use); a shape change, which empties the window and drops the held slope; a controller restart or leader change, which starts with no line and waits the settle (see `restart` below); or no healthy row this cycle (stale metrics, no ITL, no KV capacity, no request shape). The `throughput analyzer: ITL line` line below names which |
 
 When a variant's line goes silent (`T2-failed`) or comes back, the throughput
@@ -355,7 +355,8 @@ every cycle:
 ```text
 INFO  throughput analyzer: ITL line  {"namespace": "default", "modelID": "my-model", "variant": "decode",
   "silent": true, "cause": "too-few-readings", "source": "T2-failed", "inBand": 3, "aboveBand": 0,
-  "belowBand": 0, "settling": 0, "held": 6, "aboveBandHeld": 0}
+  "belowBand": 0, "settling": 0, "held": 6, "aboveBandHeld": 0, "atCap": 0, "batchCap": 0,
+  "batchCapSource": "none"}
 ```
 
 | Field | Meaning |
@@ -364,11 +365,34 @@ INFO  throughput analyzer: ITL line  {"namespace": "default", "modelID": "my-mod
 | `cause` | why the line is silent; empty when it came back. See the next table |
 | `source` | the `reason` of this cycle's line: `T2-failed` when silent, else the tier it came back on |
 | `inBand` | this cycle's readings inside the band |
-| `aboveBand` | this cycle's rows above the band (not counted in the band) |
+| `aboveBand` | this cycle's rows above the band and not at their sequence cap (not counted in the band) |
 | `belowBand` | this cycle's rows below the band: replicas too lightly loaded to teach the line |
 | `settling` | this cycle's readings from replicas still settling (just joined, or load just came back) |
 | `held` | readings the band's window holds. The line needs 10, with 3 settled |
 | `aboveBandHeld` | readings the above-band window holds, at k of at least 0.85. The fallback needs 10, with 3 settled |
+| `atCap` | this cycle's readings above the band taken into the band's window because the replica is at its sequence cap (below) |
+| `batchCap`, `batchCapSource` | the sequence cap per engine rank the line reads for the variant, and where it comes from: `flags` (`--max-num-seqs`, lowered by `--max-num-active-seqs`), `declared` (the `llm-d.ai/max-num-seqs` annotation), or `none` (`batchCap` 0: no replica above the band teaches the line) |
+
+**A replica at its sequence cap teaches the line from above the band.** Its
+batch is exactly the stated cap on every engine rank, requests are waiting,
+and its preemption rate was read and is at most
+`analyzerTuning.itlBand.capMaxPreemptionRate` (0 by default). Such a replica
+cannot take another sequence however much cache is free, so its fill above
+the band is its sequences' contexts, not memory pressure, and its reading is
+a point on the line. The throughput line takes it into the band's window, as
+the saturation and slo lines do, and counts it in `atCap`. It needs the cap
+stated (`--max-num-seqs` on the engine, or the `llm-d.ai/max-num-seqs`
+annotation); a cap the engine picks by default is not read. A variant whose
+only loaded replica is at its cap is then priced from its own line
+(`T1-ols`, `T2-pinned` or `T2-default`) once the window holds 10 readings,
+not from the above-band fallback (`T2-above-band`). Which way the fleet
+moves: where the fallback priced such a variant, it priced a higher ITL than
+the line, so the fleet orders **fewer** replicas now; where the line was
+silent (a capped replica between k 0.80 and 0.85, or the cycles before the
+fallback had its 10 readings), the analyzer is **live again**: it orders a
+scale-up when it needs one, and votes on scale-down. A capped replica that
+preempts more than `capMaxPreemptionRate` is not read at its cap: it stays in
+`aboveBand`, and only the fallback may use it.
 
 | `cause` | Meaning |
 |---|---|
