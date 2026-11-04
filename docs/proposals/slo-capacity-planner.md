@@ -473,6 +473,7 @@ is made.**
 | S1, S2 | The SLO analyzer prices TTFT, shadow then enforce, on the same `prefill` and `whatif` library: [SLO tiers, phase 2](slo-tiers.md#phase-2-ttft) | with its switch | P3 |
 | M1 | Per-bucket and mix answers; aggregated TTFT | none | P3, R1, #276 |
 | M2 | The staircase run; an operator page in `docs/reference/`; drops UNVALIDATED if it passes | — | D4, P3 |
+| Q1 | Issue the queue-minimum query every cycle, not only while a recording is on, for namespaces holding a model whose policy sets a TTFT target, so busy minutes fire in production. Before S2, not S1: [S1 decisions](slo-tiers.md#s1-decisions) | none (recordings already carry it) | P1's busy minutes (PR #470) |
 | Only if asked | The controller endpoint and two gauges | none | P3 |
 | Later | Prefill line and learned batch cap in the snapshot; the floor's prefill mu from `V_P`; a shared prefill/decode budget; #275, #277 | — | — |
 
