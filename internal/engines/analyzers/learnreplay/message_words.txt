@@ -60,14 +60,19 @@
 :demand
 A
 AMD
+AboveDecodeOnset
+AboveFlowControlOnset
 AcceleratorNotResolved
 AggregatedServiceTimeIncludesDecode
 Analyze
 Applied
 Applying
 ArgsFingerprint
+AssumedImbalance
+AssumedPromptSpread
 AssumedShape
 AssumedTPOTRatio
+AssumedVP
 AvgInputTokens/AvgOutputTokens/PrefixCacheHitRate
 B
 BaseURL
@@ -78,6 +83,7 @@ C0-agree
 C1-single
 C4-no-signal
 CONFIG_MAP_NAME
+Ca
 Cannot
 Check
 Closing
@@ -98,6 +104,7 @@ CreateContainerConfigError
 CreateContainerError
 D
 Datastore
+DecodeSideOmitted
 Deleted
 Discarding
 E1-const
@@ -112,6 +119,8 @@ ExtrapolatedFill
 FMA
 Failed
 Fix
+FlowControlInferredOff
+FlowControlUnknown
 Found
 GLOBAL_OPT_INTERVAL
 GPS
@@ -129,6 +138,7 @@ HEALTH_PROBE_BIND_ADDRESS
 HPA
 HPA/KEDA
 Health
+HeldByDecodeAdmission
 HeldLine
 Hybrid
 ID
@@ -191,8 +201,11 @@ NoBatchCap
 NoCapacity
 NoComputedTokens
 NoDecodeReplicas
+NoFixedLatency
+NoImbalance
 NoLine
 NoPrefillCapacity
+NoPrefillReplicas
 NoPromptSpread
 NoPromptVariance
 NoTPOTHistogram
@@ -207,6 +220,7 @@ Optimization
 Optimizer
 P/D
 P0-store
+P1
 P1-obs
 P1-obs-downstream
 P1-obs-invalid
@@ -244,6 +258,7 @@ PinnedDefaultB
 Please
 Pod
 PodMonitor
+Poisson
 Pre-populated
 Preemptions
 Preserving
@@ -304,6 +319,7 @@ T2-held
 T2-pinned
 TPOT
 TPOTQuantileUnbounded
+TTFT
 Target
 TargetBelowFloor
 The
@@ -313,6 +329,7 @@ TokenGapPercentile
 TooFewImbalanceMinutes
 TooFewLowLoadMinutes
 TooManySlots
+TransferOmitted
 TriggeredScaleUp
 UP
 Unable
@@ -320,6 +337,7 @@ Unexpected
 Unmarshal
 Until
 Unusable
+UnvalidatedTTFT
 Updated
 Upgrade
 Using
@@ -330,6 +348,9 @@ VA
 VAs
 VLLM_ALL2ALL_BACKEND
 VLLM_USE_V1
+VPAboveSlopeBound
+VPLowerBound
+V_P
 Variant
 VariantAutoscaling
 VariantAutoscalings
@@ -714,6 +735,7 @@ current
 current-replicas
 currentNeedGPUs
 currentReplicas
+cv
 cycle
 cycles
 cyclesSinceAnalyzed
@@ -1638,6 +1660,7 @@ one
 one-minute
 ones
 only
+onset
 onto
 open
 operating
@@ -1826,6 +1849,7 @@ prometheus
 promised
 promisedOnNodes
 promisedUnplaced
+prompt
 property
 provided
 provider
@@ -2178,6 +2202,7 @@ silent
 since
 single
 single-accelerator
+single-exponential
 single-sample
 sit
 size
@@ -2303,6 +2328,7 @@ success
 successfully
 such
 sum
+summed
 summing
 supply
 supported
@@ -2397,6 +2423,7 @@ together
 token
 tokenSec
 tokens
+tokens/s
 tokensInUse
 tolerance
 too
@@ -2571,6 +2598,7 @@ well-known-namespace
 went
 were
 what
+whatif
 when
 where
 whether
