@@ -356,7 +356,7 @@ func TestAFlushLeavesTheWorkingMemories(t *testing.T) {
 	if n := len(a.itlTracker.Baselines()); n != 0 {
 		t.Errorf("%d ITL baselines survived a flush", n)
 	}
-	for _, name := range []string{"decodeSaturatedAt", "fleetShape", "startSeenPods", "startOutliers"} {
+	for _, name := range []string{"decodeSaturatedAt", "fleetShape", "startSeenPods", "startOutliers", "startOutlierPods"} {
 		if v.FieldByName(name).Len() != 1 {
 			t.Errorf("a flush cleared %s", name)
 		}

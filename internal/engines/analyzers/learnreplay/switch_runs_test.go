@@ -120,6 +120,15 @@ var replaySwitches = map[string][]string{
 	throughput.SwitchITLRestartUnderName:             nil,
 	throughput.SwitchITLIdleOnEvidence:               nil,
 	throughput.SwitchITLReadsFinitePodMean:           nil,
+
+	// Learner PR 5b, on main after 5a (0fec87b18): the start guard opens on
+	// distinct Pods. 4b-2's six above stay this table's rows, as main has
+	// them after #460 (P1's row is above too); #465 (4b-3) moves them to
+	// learner4b2Seams, and this row stays here. Measured alone against all off, it moves
+	// nothing: it changes only when a start over three times the estimate
+	// is admitted, and no output any recording replays differs on it. Its
+	// unit tests hold it (heldBy).
+	saturation.SwitchStartConfirmsByDistinctPod: nil,
 }
 
 // learner4b1Seams is learner PR 4b-1's switches, earlier seams now (merged
@@ -495,6 +504,22 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestMuLatch_AWindowRestoredAfterARefusedReadingComesBackLatched"},
 		{"../saturation", "TestMuLatch_AWindowBroughtBackFromTheStashComesBackLatched"},
 		{"../saturation", "TestMuLatch_AWindowRestoredAsAPriorAfterARefusedReadingComesBackLatched"},
+	},
+	// Learner PR 5b's start guard on distinct Pods across a run: each runs
+	// the switch on and fails with it off; (a) to (d) and the lines' also
+	// run it off and assert the parent's figure.
+	saturation.SwitchStartConfirmsByDistinctPod: {
+		{"../saturation", "TestStartConfirm_OnePodRepeatingNeverOpensTheGuard"},
+		{"../saturation", "TestStartConfirm_AOneReplicaVariantLearnsASlowerImage"},
+		{"../saturation", "TestStartConfirm_ARestoredEstimateIsCorrectedByRollouts"},
+		{"../saturation", "TestStartConfirm_TwoSteadyPodsAndALaterThirdOpenIt"},
+		{"../saturation", "TestStartConfirm_ALargeStepReachesTheNewLevel"},
+		{"../saturation", "TestStartConfirm_TheMedianIgnoresABlipInTheRun"},
+		{"../saturation", "TestStartConfirm_ARunPodBackInRangeLeavesTheRunOpen"},
+		{"../saturation", "TestStartConfirm_TheLinesCountDistinctPods"},
+		{"../saturation", "TestStartConfirm_TheMedianOfTheRun"},
+		{"../saturation", "TestStartConfirm_ARestartDropsTheRun"},
+		{"../saturation", "TestStartConfirm_ThroughAnalyze"},
 	},
 }
 
