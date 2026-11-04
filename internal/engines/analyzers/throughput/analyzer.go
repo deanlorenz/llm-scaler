@@ -66,6 +66,14 @@ type ThroughputAnalyzer struct {
 	// changes. On by the constructor.
 	itlReadsSettle, itlWaitsAfterRestart, itlKeepsSettle  bool
 	itlRestartUnderName, itlIdleOnEvidence, itlFiniteOnly bool
+	// itlAdmitsAtCap is the replay switch of learner PR 4b-3 (admission.go):
+	// SwitchITLAdmitsAtSequenceCap. On by the constructor.
+	itlAdmitsAtCap bool
+	// capPinsDefaultB prices readings at the cap through the default B
+	// alone, as 4b-3 first built it (itl.Admission.OneSidedAboveKSat off),
+	// for the tests' negative controls only: set by withCapPinnedAtDefaultB,
+	// which only tests define.
+	capPinsDefaultB bool
 	// ownSettle is the settle tracker the analyzer observes itself when the
 	// engine gave it none (settle.go), and ownSettled when it last observed
 	// each model into it.
@@ -127,6 +135,18 @@ type variantState struct {
 	// last cycle it was read, so its summary line logs only when that
 	// changes (SwitchITLSteadyGate).
 	lineSilent bool
+	// batchCap and batchCapSource are the sequence cap the line's
+	// admission read this cycle and where it came from
+	// (itl.Admission.MaxNumSeqs), for the line's summary only.
+	batchCap       int64
+	batchCapSource string
+	// summaryLogged is whether the line's summary has logged for the
+	// variant, and loggedAtCap and loggedCapSource what it last logged of
+	// the cap: whether readings were taken at it, and its source
+	// (noteLineSilence).
+	summaryLogged   bool
+	loggedAtCap     bool
+	loggedCapSource string
 }
 
 // NewThroughputAnalyzer creates a ThroughputAnalyzer with default configuration.
@@ -144,6 +164,7 @@ func NewThroughputAnalyzer() *ThroughputAnalyzer {
 		itlRestartUnderName:   true,
 		itlIdleOnEvidence:     true,
 		itlFiniteOnly:         true,
+		itlAdmitsAtCap:        true,
 		ownSettle:             settle.NewTracker(),
 		ownSettled:            make(map[string]time.Time),
 	}
@@ -186,9 +207,10 @@ func (a *ThroughputAnalyzer) observeDefaultBand(
 // observe is Observe with each variant's admission (admissionFor): the KV
 // band [MinK, MaxK] a reading must fall in is the policy band
 // (analyzerTuning.itlBand), which Analyze passes, as the saturation and slo
-// analyzers read them. Only the band is read here: the window takes no capped
-// replica above it, and the rest of the admission waits for the line to move
-// onto itl.Tracker (analyzer-learner.md, PR 4b).
+// analyzers read them. The parent's window (SwitchITLSteadyGate off) reads
+// only the band, and takes no capped replica above it; the line on
+// itl.Tracker reads the whole admission, the sequence cap included
+// (SwitchITLAdmitsAtSequenceCap).
 func (a *ThroughputAnalyzer) observe(
 	ctx context.Context,
 	now time.Time,
@@ -271,6 +293,7 @@ func (a *ThroughputAnalyzer) observe(
 		}
 
 		adm := admissionFor(variantName)
+		state.batchCap, state.batchCapSource = adm.MaxNumSeqs, adm.MaxNumSeqsSource
 		// On the shared tracker (SwitchITLSteadyGate, itl_line.go) the
 		// tracker judges each row; the window below is left as it was.
 		if a.itlSteadyGate {
@@ -410,11 +433,13 @@ func (a *ThroughputAnalyzer) analyze(
 	a.observeOwnSettle(input, now)
 
 	// observe updates internal state (acquires/releases a.mu internally).
-	// One admission for the model's variants until the line reads each
-	// variant's engine parameters (admission).
+	// The model's admission (admission), completed per variant from its
+	// engine parameters (lineAdmission), which are read from the capacity
+	// store here, before observe takes a.mu (engineOf).
 	adm := a.admission(itlPolicyOf(input.Config), input.Namespace, input.ModelID)
+	engines := a.engineOf(input.Namespace, input.ModelID, ownMetrics)
 	a.observe(ctx, now, input.ModelID, input.Namespace, ownMetrics, func(variant string) itl.Admission {
-		return a.lineAdmission(adm, input.Namespace, input.ModelID, variant)
+		return a.lineAdmission(adm, input.Namespace, input.ModelID, engines[variant])
 	})
 
 	byVariant := groupByVariant(ownMetrics)

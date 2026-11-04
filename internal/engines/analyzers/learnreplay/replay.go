@@ -11,7 +11,10 @@
 // The replay records itself with a recorder of its own. At the recording's
 // own commit (Fidelity) that recording must equal the original byte for
 // byte: every result, every store record read before an Analyze, every check
-// event. Test support only; nothing in the controller imports it.
+// event. Nothing in the controller imports it: the tests, cmd/learnergolden,
+// cmd/whatif (Generate, generate.go; StateAt, state.go, for the answer
+// commands) and internal/whatifsource, which writes the capture Generate
+// reads (CaptureWindow, CaptureCycle), do.
 package learnreplay
 
 import (
@@ -45,6 +48,11 @@ const (
 	// (capacity.EngineSuppliedDiff). Outputs may move; they are the goldens'
 	// business, not the replay's.
 	Normal
+	// Generate makes a recording from a capture (generate.go): the cycle
+	// inputs whatif capture built from Prometheus, played through the
+	// analyzers in the engine's order. There is no recording to hold it to,
+	// so it reports no mismatch; Report.Recording is the generated run.
+	Generate
 )
 
 // The packages a replay sets switches in (Options.Switches).

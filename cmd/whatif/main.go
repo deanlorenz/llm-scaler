@@ -1,15 +1,29 @@
 // Command whatif is the what-if capacity planner's command line
-// (docs/proposals/slo-capacity-planner.md, "CLI reference"). It answers the
-// planner's two questions for decode from a learner recording, replayed
+// (docs/proposals/slo-capacity-planner.md, "CLI reference"). It captures a
+// past window from Prometheus, turns a capture into a learner recording, and
+// answers the planner's two questions for decode from a recording, replayed
 // through the analyzers to the cycle asked for:
 //
+//	whatif capture         --prometheus URL --namespace NS (--kube-state-metrics | --role-of ROLE=SELECTOR ...)
+//	                       --from T0 --to T1 [--step 15s] [--policy FILE] -o run.capture.jsonl.gz
+//	whatif generate        -in run.capture.jsonl.gz -o run.jsonl
 //	whatif replicas-to-slo --recording FILE [--cycle N|last] [--model M] [--decode N]
 //	                       [--headroom H | --rate R] [--tpot-percentile P [--assume-tpot-ratio R]] [-o json]
 //	whatif slo-to-rate     --recording FILE [--cycle N|last] [--model M] [--decode N]
 //	                       --tpot 4ms[@p90] [--assume-tpot-ratio R] [--headroom H] [-o json]
 //
-// Exit codes: 0 every role answered; 3 a role refused (the output is still
-// printed); 2 a usage or input error; 1 anything else.
+// capture writes the window's cycle inputs (internal/whatifsource);
+// generate plays them through the analyzers in the engine's order
+// (learnreplay, Generate mode) and writes the recording, which
+// learnergolden export pseudonymises and learnergolden add accepts at the
+// commit that generated it. replicas-to-slo and slo-to-rate read a
+// recording (learnreplay.StateAt).
+//
+// Exit codes: 0 done, and every role answered; 3 a role refused (the
+// output is still printed); 2 a usage or input error (a bad flag, an
+// unreadable or malformed capture or recording, overlapping --role-of
+// selectors, a window too large without --force); 1 anything else (a failed
+// Prometheus query, a Generate or a replay that fails inside the analyzers).
 package main
 
 import (
@@ -25,7 +39,7 @@ import (
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	err := run(ctx, os.Args[1:], os.Stdout)
+	err := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
 	stop()
 	if err != nil {
 		var s exitStatus
@@ -65,20 +79,30 @@ func exitCode(err error) int {
 	return 1
 }
 
-const usage = "usage: whatif replicas-to-slo|slo-to-rate [flags]; -h after a command lists its flags"
+const usage = "usage: whatif capture|generate|replicas-to-slo|slo-to-rate [flags]; -h after a command lists its flags"
 
 // command is one subcommand: it parses its own flags from args and writes
-// what it reports to out.
-type command func(ctx context.Context, args []string, out io.Writer) error
+// what it reports to out, and its warnings to warn (stderr).
+type command func(ctx context.Context, args []string, out, warn io.Writer) error
 
 // commands is every subcommand, by name.
 var commands = map[string]command{
-	"replicas-to-slo": runReplicasToSLO,
-	"slo-to-rate":     runSLOToRate,
+	"capture":         runCapture,
+	"generate":        runGenerate,
+	"replicas-to-slo": noWarnings(runReplicasToSLO),
+	"slo-to-rate":     noWarnings(runSLOToRate),
+}
+
+// noWarnings is a command that writes no warnings: everything it reports,
+// a JSON error included, goes to out.
+func noWarnings(cmd func(ctx context.Context, args []string, out io.Writer) error) command {
+	return func(ctx context.Context, args []string, out, _ io.Writer) error {
+		return cmd(ctx, args, out)
+	}
 }
 
 // run runs one command. Asking for help is not an error.
-func run(ctx context.Context, args []string, out io.Writer) error {
+func run(ctx context.Context, args []string, out, warn io.Writer) error {
 	if len(args) == 0 {
 		return usageError{errors.New(usage)}
 	}
@@ -86,7 +110,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	if !ok {
 		return usagef("unknown command %q; %s", args[0], usage)
 	}
-	return cmd(ctx, args[1:], out)
+	return cmd(ctx, args[1:], out, warn)
 }
 
 // newFlags is a flag set for one command that reports its errors as usage

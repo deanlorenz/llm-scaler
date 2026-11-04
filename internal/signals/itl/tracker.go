@@ -108,6 +108,11 @@ type Reading struct {
 	// (Admission.AboveBandFallback): the band gave no line, the key held no
 	// slope it may hold, and A was fitted from the readings above the band.
 	AboveBandFit bool
+	// PinnedAtLeastITL is set when Model is the pinned fit's line through
+	// the least ITL of the window's readings at a k of at least DefaultKSat,
+	// not through the default baseline (Admission.OneSidedAboveKSat): it
+	// priced the higher ITL at DefaultKSat.
+	PinnedAtLeastITL bool
 	// AboveBandHeld is the above-band window's size after pruning; zero
 	// without the fallback.
 	AboveBandHeld int
@@ -282,13 +287,13 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 			r.BelowBand++
 		case k > hi && !adm.atSequenceCap(rm):
 			r.AboveBand++
-			if k < DefaultKSat {
+			if !atOrPastKSat(k) {
 				r.AboveBandUnderKSat++
 			}
 			// Kept for the fallback only, stamped as a reading in the band
 			// is, and only at a k of at least the one the line is priced at
 			// (fitAboveBand: what makes the fallback one-sided).
-			if aw == nil || k < DefaultKSat {
+			if aw == nil || !atOrPastKSat(k) {
 				break
 			}
 			dropped := aw.add(Observation{K: k, ITLSec: rm.AvgITL, Timestamp: now, settling: aboveSettling})
@@ -417,12 +422,68 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 		r.Declined = true
 		return r
 	}
+	m, heldA := c.model, c.model.A
+	if adm.OneSidedAboveKSat && !r.BaselineLearned {
+		if lo, ok := atLeastITLLine(c.read); ok && lo.ITLAt(DefaultKSat) > m.ITLAt(DefaultKSat) {
+			// The hold pairs its A with the baseline (above), so the A held
+			// is the one that prices the chosen line's ITL at DefaultKSat
+			// through it: a held line prices what this one did.
+			m, r.PinnedAtLeastITL = lo, true
+			heldA = (m.ITLAt(DefaultKSat) - baseline) / DefaultKSat
+		}
+	}
 	t.mu.Lock()
-	t.slopes[key] = heldSlope{a: c.model.A, fittedAt: now, args: adm.Args}
+	t.slopes[key] = heldSlope{a: heldA, fittedAt: now, args: adm.Args}
 	t.mu.Unlock()
-	r.Model, r.Tier = c.model, TierPinnedB
+	r.Model, r.Tier = m, TierPinnedB
 	return r
 }
+
+// atLeastITLLine is the line pinned at the least ITL among obs's readings at
+// a k of at least DefaultKSat, fitted over those readings alone
+// (fitAboveBand): the above-band fallback's line, over the readings of the
+// band's own window that lie at or past where the line is priced. ok is
+// false when there is none.
+//
+// Why the pinned fit needs it (Admission.OneSidedAboveKSat). A key with no
+// learned B pins DefaultBaselineSec, and a fit through B0 over readings at
+// k above DefaultKSat prices at kSat, on readings of the true line ITL = A'k
+// + B', A'kSat + B' + (B0 - B')(1 - kSat/kbar): under the truth whenever B'
+// is above B0. Readings at a replica's sequence cap sit there. Pinned at the
+// least ITL of those readings instead, which is at least B' (every ITL is B'
+// + A'k plus a noise small against A'k), the same term is >= 0
+// (fitAboveBand), so the higher of the two lines at kSat never prices a
+// higher mu than the truth, on readings without noise. With the gauge's
+// noise the margin, (b - B')(1 - kSat/kbar), can be smaller than the noise
+// on the readings' mean: under 1 ms on a shallow line at a cap near kSat,
+// where it measured at most 0.5 % under the truth at 2 % noise, within
+// known truth's 5 %.
+//
+// One reading at or past kSat is enough. Through a single reading the line
+// is flat at its ITL (A 0), and that ITL is B' + A'k with k >= kSat, so at
+// kSat it is at least the truth: one reading errs the same way, only by
+// more. The window's floors (DefaultMinSamples, MinSettledSamples) have
+// already been met by the pinned fit it is set against, and the higher of
+// the two is taken, so a lone reading can only raise the price.
+func atLeastITLLine(obs []Observation) (Model, bool) {
+	var past []Observation
+	for _, o := range obs {
+		if atOrPastKSat(o.K) {
+			past = append(past, o)
+		}
+	}
+	if len(past) == 0 {
+		return Model{}, false
+	}
+	return fitAboveBand(past, aboveBandB(past))
+}
+
+// atOrPastKSat reports whether a reading at fill k lies at or past
+// DefaultKSat, where the line is priced: the floor both one-sided lines
+// read from (the above-band window, and atLeastITLLine over the band's
+// window), since a reading under it turns their margin against the truth
+// (fitAboveBand).
+func atOrPastKSat(k float64) bool { return k >= DefaultKSat }
 
 // fitChoice is chooseFit's outcome: a line at a tier, or hold (too few
 // settled readings: Observe holds the key's last slope, or tries the

@@ -107,27 +107,35 @@ import (
 //   - The other four move nothing, as their 4a twins moved nothing; their
 //     unit tests hold them.
 //
+// Since learner PR 4b-3 those six are earlier seams (learner4b2Seams), and
+// this PR's one switch is the throughput line's cap admission
+// (throughput.SwitchITLAdmitsAtSequenceCap): a reading above the band from a
+// replica at the sequence cap its engine states, with requests waiting and
+// preemption at most itlBand.capMaxPreemptionRate, is the band's. Its base
+// is main after 4b-2 merged (891c071c4, #458), whose goldens are 4b-1's
+// all-on run byte for byte. Measured alone against all off, it moves
+// nothing, by construction: the three in-process fixtures that run the
+// throughput analyzer predate start.ThroughputConfig, so the replay builds
+// it with no capacity store, and with no store it knows no cap; no cluster
+// recording runs the analyzer. The throughput-sweep recordings, when they
+// land, state the store, but their sweep does not hold the decode pod at
+// its cap without preempting (analyzer-learner.md, PR 4b). Its unit tests
+// hold it (heldBy).
+//
 // The what-if PR P1 (docs/proposals/slo-capacity-planner.md, the PR plan)
 // adds one: the saturation analyzer's prefill observation
-// (saturation.SwitchPrefillCapacityObserve), on the same base. It moves no
+// (saturation.SwitchPrefillCapacityObserve), on 4b-1's base. It moves no
 // golden: it only logs (prefill-capacity-observed), and writes no state an
 // output reads. Its unit tests hold it (heldBy).
 var replaySwitches = map[string][]string{
-	saturation.SwitchPrefillCapacityObserve:          nil,
-	throughput.SwitchITLReadsSettle:                  nil,
-	throughput.SwitchITLWaitsAfterRestart:            nil,
-	throughput.SwitchITLKeepsSettleThroughMissingRow: nil,
-	throughput.SwitchITLRestartUnderName:             nil,
-	throughput.SwitchITLIdleOnEvidence:               nil,
-	throughput.SwitchITLReadsFinitePodMean:           nil,
+	saturation.SwitchPrefillCapacityObserve: nil,
+	throughput.SwitchITLAdmitsAtSequenceCap: nil,
 
 	// Learner PR 5b, on main after 5a (0fec87b18): the start guard opens on
-	// distinct Pods. 4b-2's six above stay this table's rows, as main has
-	// them after #460 (P1's row is above too); #465 (4b-3) moves them to
-	// learner4b2Seams, and this row stays here. Measured alone against all off, it moves
-	// nothing: it changes only when a start over three times the estimate
-	// is admitted, and no output any recording replays differs on it. Its
-	// unit tests hold it (heldBy).
+	// distinct Pods. Measured alone against all off, it moves nothing: it
+	// changes only when a start over three times the estimate is admitted,
+	// and no output any recording replays differs on it. Its unit tests hold
+	// it (heldBy).
 	saturation.SwitchStartConfirmsByDistinctPod: nil,
 
 	// P1's busy minutes (saturation.SwitchPrefillBusyMinutes), on P1's
@@ -136,6 +144,20 @@ var replaySwitches = map[string][]string{
 	// moves no golden: no committed recording carries a queue minimum, and
 	// the observation only logs. Its unit tests hold it (heldBy).
 	saturation.SwitchPrefillBusyMinutes: nil,
+}
+
+// learner4b2Seams is learner PR 4b-2's switches, earlier seams now (merged
+// into earlierSeams): the throughput line on the engine's settle tracker,
+// six switches. Measured each alone against all off from 1c9a34fe8 (4b-1
+// merged), none moves a golden: the in-process fixtures give the analyzer
+// no engine view. Each is held by its unit tests (heldBy).
+var learner4b2Seams = map[string][]string{
+	throughput.SwitchITLReadsSettle:                  nil,
+	throughput.SwitchITLWaitsAfterRestart:            nil,
+	throughput.SwitchITLKeepsSettleThroughMissingRow: nil,
+	throughput.SwitchITLRestartUnderName:             nil,
+	throughput.SwitchITLIdleOnEvidence:               nil,
+	throughput.SwitchITLReadsFinitePodMean:           nil,
 }
 
 // learner4b1Seams is learner PR 4b-1's switches, earlier seams now (merged
@@ -224,8 +246,9 @@ func switchPackage(name string) string {
 // stays on, at its constructor default, in this PR's runs; off alone, from
 // all on, it may move only what it named. A seam's row goes with the seam,
 // in the PR, or cleanup PR, that deletes it with zero golden diff. Learner
-// PR 4a's rows are learner4aSeams, and 4b-1's learner4b1Seams, merged in.
-var earlierSeams = withSeams(learner4b1Seams, withSeams(learner4aSeams, map[string][]string{
+// PR 4a's rows are learner4aSeams, 4b-1's learner4b1Seams and 4b-2's
+// learner4b2Seams, merged in.
+var earlierSeams = withSeams(learner4b2Seams, withSeams(learner4b1Seams, withSeams(learner4aSeams, map[string][]string{
 	// #275 (two switches) and #438, this file's own rows before learner PR
 	// 4b-1 (see replaySwitches).
 	saturation.SwitchZeroReplicaDataParallel: nil,
@@ -308,7 +331,7 @@ var earlierSeams = withSeams(learner4b1Seams, withSeams(learner4aSeams, map[stri
 		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
 		"engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
 	},
-}))
+})))
 
 // withSeams is rows with more's rows added; a name in both is a row given
 // twice, and panics.
@@ -395,6 +418,16 @@ var heldBy = map[string][]heldTest{
 	},
 	throughput.SwitchITLReadsFinitePodMean: {
 		{"../throughput", "TestITLSettle_APodWithAnAbsentRankIsNoReading"},
+	},
+	// Learner PR 4b-3's cap admission on the throughput line: each runs the
+	// switch on and off through Analyze (the property cases' mutant is the
+	// switch off).
+	throughput.SwitchITLAdmitsAtSequenceCap: {
+		{"../throughput", "TestITLCap_AReplicaAtItsStatedCapIsAReading"},
+		{"../throughput", "TestITLCap_AVariantAtItsCapPricesFromTheBandNotTheFallback"},
+		{"../throughput", "TestITLCap_WhatIsNotAtTheCapIsNotAReading"},
+		{"../throughput", "TestThroughputCapPropertyMutants"},
+		{"../throughput", "TestThroughputProbe_AReplicaAtItsCapWithSiblingsBelowTheBandPricesFromTheBand"},
 	},
 	saturation.SwitchITLKeepsSettleThroughMissingRow: {
 		{"../saturation", "TestITLSettle_OneMissingRowKeepsTheSettle"},
@@ -584,16 +617,30 @@ func TestGoldens_ASwitchNoGoldenMovesIsHeldByItsTests(t *testing.T) {
 	}
 }
 
-// mergedRows is replaySwitches and earlierSeams together.
+// mergedRows is replaySwitches and earlierSeams together (mergeRows).
 func mergedRows() map[string][]string {
-	out := maps.Clone(replaySwitches)
-	maps.Copy(out, earlierSeams)
-	return out
+	return mergeRows(replaySwitches, earlierSeams)
+}
+
+// mergeRows is mine and earlier together, on a copy; a name in both is a
+// switch with two rows, this PR's and an earlier one's, and panics, as
+// withSeams does: the row it kept would decide which outputs the switch may
+// move.
+func mergeRows(mine, earlier map[string][]string) map[string][]string {
+	return withSeams(maps.Clone(mine), maps.Clone(earlier))
+}
+
+// A switch in both replaySwitches and earlierSeams panics, and the tables
+// as they stand do not.
+func TestGoldens_ASwitchWithTwoRowsPanics(t *testing.T) {
+	require.Panics(t, func() { mergeRows(map[string][]string{"x": nil}, map[string][]string{"x": nil}) })
+	require.NotPanics(t, func() { mergedRows() })
 }
 
 // switchBase is the sha256 of each output a switch of this PR names, as the
-// base commit's goldens hold it (main at 1c9a34fe8, learner PR 4b-1 merged). It also
-// holds the base digests of the outputs a 4b-2 switch could move that the
+// base commit's goldens hold it (main at 891c071c4, learner PR 4b-2 merged;
+// the same bytes as at 1c9a34fe8, since 4b-2 moved none). It also holds the
+// base digests of the outputs a throughput switch could move that the
 // expectation does not name, so the measured rows need no new lookup.
 var switchBase = map[string]string{
 	"acceptance/results.csv":            "7aef7e7391f761fe984f89720d61b0583048b330989c449098dce8ec2d285981",

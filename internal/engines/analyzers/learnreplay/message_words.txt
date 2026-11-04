@@ -1,7 +1,16 @@
 -
 --
 --data-parallel-size
+--force
+--from
+--kube-state-metrics
+--max-num-seqs
+--max-running-requests
+--metric-labels-allowlist
+--model-path
 --pipeline-parallel-size
+--role-of
+--step
 --tensor-parallel-size
 -1
 -1000
@@ -11,6 +20,7 @@
 -dp
 -f
 -inf
+-m
 -pp
 -t
 -tp
@@ -100,6 +110,7 @@ D
 DataParallelRanks
 Datastore
 Deleted
+Deployment
 Discarding
 E1-const
 EPP
@@ -149,6 +160,7 @@ It
 JSON
 KEDA
 KV
+KV-cache
 KVBoundSlots
 Kubernetes
 Kueue
@@ -177,6 +189,7 @@ METRICS_SECURE
 MalformedHistogram
 MeasuredLowConfirmFor
 Metrics
+Mimir
 Minimum
 Mode
 Model
@@ -244,7 +257,9 @@ Physical
 PinnedDefaultB
 Please
 Pod
+Pod-name
 PodMonitor
+Pods
 Pre-populated
 Preemptions
 Preserving
@@ -253,6 +268,7 @@ Processing
 Prometheus
 Published
 REST_CLIENT_TIMEOUT
+ROLE
 R_q
 Ready
 RecordedValue
@@ -271,11 +287,13 @@ Restored
 Retention
 Retrying
 RollingOut
+Running
 S
 SATURATION_CONFIG_MAP_NAME
 SCALE_FROM_ZERO_ENGINE_MAX_CONCURRENCY
 SCALING
 SCALING_POLICY_CONFIG_MAP_NAME
+SELECTOR
 SGLang
 SGLangNoComputedTokens
 STOP
@@ -296,6 +314,7 @@ SetRecordedValue
 SetUsed
 Skipping
 StartOptimizeLoop
+StatefulSet
 Successfully
 T1-ols
 T2-above-band
@@ -307,6 +326,7 @@ TPOT
 TPOTQuantileUnbounded
 Target
 TargetBelowFloor
+Thanos
 The
 This
 TierUnstable
@@ -357,6 +377,7 @@ Workloads
 _
 __name__
 a
+a-zA-Z0-9_
 aIntercept
 aOverhead
 aOverheadKnown
@@ -413,6 +434,8 @@ agree
 agreeCycles
 agreed
 aim
+alignment
+aligns
 all
 all-above-band-below-ksat
 all2all_backend
@@ -440,9 +463,11 @@ and
 annotation
 another
 answer
+answered
 answers
 any
 anything
+app
 app.kubernetes.io/component
 app.kubernetes.io/part-of
 appears
@@ -461,12 +486,15 @@ arrivingPromptTokens
 arrivingRead
 as
 asked
+asks
 assumed
 assumes
 at
+atCap
 attainment
 attempted
 attributed
+attributes
 auto
 autoscalers
 autoscaling.keda.sh/paused
@@ -511,6 +539,7 @@ become
 becomes
 been
 before
+begins
 behavior
 behind
 being
@@ -596,6 +625,7 @@ capacityTokens
 capitals
 capped
 caps
+capture
 carries
 carry
 case
@@ -889,6 +919,7 @@ errors
 estimate
 estimateSeconds
 estimatedTokens
+evaluate
 evaluation
 even
 event
@@ -899,6 +930,7 @@ evict
 evicted
 eviction
 exactly
+example
 exceed
 exceeds
 exclude
@@ -911,6 +943,7 @@ expects
 expert_parallel
 expert_parallel_size
 exported
+exports
 external
 externalClusterQuotas
 externalNamespaceQuotas
@@ -937,6 +970,7 @@ fields
 figure
 figures
 file
+filed
 fill
 filled
 filling
@@ -996,6 +1030,7 @@ from
 fromBucket
 fromG
 fromLastConstraintsAge
+frontend
 frozen
 full
 future
@@ -1035,6 +1070,7 @@ gpusPerReplica
 grace
 grants
 greedy-by-score
+grid
 group
 group/
 groupKey
@@ -1124,6 +1160,8 @@ inf
 inference
 inference_extension_flow_control_queue_size
 inferencepool
+inferred
+infers
 info
 infrastructure
 inline
@@ -1132,6 +1170,7 @@ inputTokensWas
 inputs
 inside
 instance
+instant
 instead
 int
 integer
@@ -1255,6 +1294,20 @@ know
 known
 known-failures
 known-truth
+kube-state-metrics
+kube_deployment_spec_replicas
+kube_node_labels
+kube_pod_container_resource_requests
+kube_pod_created
+kube_pod_deletion_timestamp
+kube_pod_info
+kube_pod_labels
+kube_pod_owner
+kube_pod_start_time
+kube_pod_status_phase
+kube_pod_status_ready
+kube_pod_status_ready_time
+kube_replicaset_owner
 kueue
 kueue-gate
 kueue-lender-release
@@ -1290,10 +1343,12 @@ kv_transfer_config
 kv_transfer_config.kv_connector
 kv_utilization_out_of_range
 label
+label_
 labels
 lagFraction
 landed
 lands
+large
 larger
 last
 lastAccelerator
@@ -1330,6 +1385,7 @@ lender-waiting
 lenderClusterQueue
 lenderDebounce
 length
+lengthen
 lent
 let
 liftReason
@@ -1357,11 +1413,13 @@ lineTier
 lines
 list
 listed
+lists
 live
 liveness
 llm-d.ai/role
 llm-d.ai/utilization-share-transfer
 llm_d_epp_flow_control_queue_size
+lmsysorg/sglang
 lo
 load
 loadImbalance
@@ -1384,6 +1442,7 @@ lowerBound
 lowerBounds
 lowered
 lowering
+m-prefill
 made
 main.go
 make
@@ -1401,6 +1460,7 @@ marked
 marks
 match
 matches
+matrix
 max
 maxBytes
 maxHeadroomReplicas
@@ -1433,6 +1493,7 @@ medianErrPct
 medianSeconds
 medium
 mem_fraction_static
+memory
 memory-bound
 memory_layout
 metric
@@ -1446,6 +1507,7 @@ metrics-secure
 metricsCount
 mid-rollout
 mid-run
+milliseconds
 minKSpread
 minReplicas
 minSamples
@@ -1513,6 +1575,8 @@ muLogged
 muShortWindow
 muSource
 muWindows
+multi-Pod
+multiple
 must
 mutually
 n-dependence
@@ -1534,6 +1598,7 @@ namespaceQuotas
 namespaceScoped
 namespaces
 nan
+narrow
 near-k_sat
 nearly
 need
@@ -1543,6 +1608,7 @@ needs
 negative
 neighbour
 neither
+nest
 net
 never
 new
@@ -1614,6 +1680,9 @@ num_gpu_blocks_override
 num_redundant_experts
 num_speculative_tokens
 number
+nvidia.com/gpu
+nvidia.com/gpu.product
+nvidia_com_gpu
 object
 objective
 observation
@@ -1652,6 +1721,7 @@ operator
 optimization
 optimizer
 optimizer.type
+options
 or
 order
 ordered
@@ -1678,6 +1748,7 @@ over-state
 over-stated
 overMax
 overQuotaGPUs
+overlap
 override
 own
 own-k1
@@ -1688,6 +1759,8 @@ ownReplicas
 ownSettled
 owner
 ownerReferences
+owner_kind
+owner_name
 owning
 p
 page_size
@@ -1737,12 +1810,15 @@ percentiles
 period
 persist
 persisted
+phase
 physical
 physicalGroups
 physicsKey
+picked
 picture
 pinned-B
 pinned-B-held
+pinnedAtLeastITL
 pins
 pipeline_parallel_size
 place
@@ -1758,8 +1834,10 @@ planningFrom
 plans
 plateauCycles
 pod
+pod-template-hash
 pod/
 podGPUs
+pod_name
 pods
 podsOmitted
 point
@@ -1798,8 +1876,10 @@ prefillKnown
 prefillObservations
 prefillRefused
 prefillStepsPerToken
+prefix
 prefix-cache-scorer
 prefix_caching_disabled
+prefixes
 preparation
 present
 pressure-needs-scale-up
@@ -1839,10 +1919,12 @@ provider
 providersSkipped
 published
 publishes
+python3
 q
 quantile
 quantization
 quarter
+queries
 query
 question
 queue
@@ -1885,6 +1967,7 @@ reached
 read
 read-error
 readable
+readiness
 reading
 readings
 reads
@@ -1961,6 +2044,7 @@ replicas
 replicasByVariant
 replicasImplied
 replicasToMove
+replicaset
 report-only
 reportOnly
 reported
@@ -2027,12 +2111,15 @@ revision
 revisions
 rises
 role
+role-of
 roleRC
 roleSC
 roles
 rolesKnownNow
 rolled-out
+rolling
 rollout
+rollouts
 room
 rose
 round
@@ -2050,6 +2137,7 @@ runs
 s
 safety
 same
+sample
 sampleAge
 sampleSeconds
 sampled
@@ -2124,16 +2212,21 @@ seed
 seeds
 seen
 seen|
+select
 selected
 selector
+selectors
+selects
 seq
 seqs
 sequence
 sequences
+series
 serve
 served
 served-siblings
 servedBound
+server
 service
 serviceable
 serving
@@ -2173,6 +2266,7 @@ shared
 sharing
 sharing_unresolved
 short
+shorten
 shorter
 shortfall
 should
@@ -2364,6 +2458,7 @@ throughput
 throughput-demand-floor
 throughput-demand-floor-total
 throughput-itl-above-band
+throughput-itl-admits-at-sequence-cap
 throughput-itl-held
 throughput-itl-idle-needs-evidence
 throughput-itl-keeps-the-settle-through-a-missing-row
@@ -2449,6 +2544,7 @@ ttft
 ttft.percentile
 ttft.target
 ttftExcluded
+turn
 twice
 two
 type
@@ -2544,6 +2640,7 @@ via
 victim
 vllm
 vllm.entrypoints
+vllm/vllm-openai
 vllm:cache_config_info
 vllm:num_requests_running
 vllm:request_generation_tokens_count
@@ -2584,6 +2681,7 @@ well-known-namespace
 went
 were
 what
+whatifsource
 when
 where
 whether
@@ -2614,6 +2712,7 @@ workload
 workload-variant-autoscaler
 workload-variant-autoscaler-system
 workload/
+workloads
 works
 worstErrPct
 worstPod

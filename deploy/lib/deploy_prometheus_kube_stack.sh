@@ -122,6 +122,16 @@ deploy_prometheus_kube_stack() {
     if [ -z "${KUBE_PROMETHEUS_STACK_CHART_VERSION:-}" ]; then
         log_error "KUBE_PROMETHEUS_STACK_CHART_VERSION is empty: refusing an unpinned kube-prometheus-stack, which upgrades the release every WVA on this cluster shares to whatever the repository serves today."
     fi
+    # Grafana is the one image this chart pulls from Docker Hub
+    # (docker.io/grafana/grafana; Grafana publishes nowhere else). Docker Hub
+    # rate-limits anonymous pulls, and a CI runner or a busy node that hits the
+    # limit leaves Grafana Pending until --wait gives up. mirror.gcr.io is
+    # Google's public Docker Hub mirror: same repository path, same tag, same
+    # digest. The tag is left to the chart, so it moves with the chart pin.
+    # The chart's Grafana test pod (docker.io/bats/bats) runs only on
+    # `helm test`, which nothing here runs, so it is not rendered at all.
+    # hack/check-kps-images.sh fails when a rendered image resolves to docker.io.
+    local grafana_registry="${GRAFANA_IMAGE_REGISTRY:-mirror.gcr.io}"
     local kps_version
     kps_version="$(kps_chart_version_to_install)" \
         || log_error "Could not list the Helm releases in $MONITORING_NAMESPACE (see the error above), so this install cannot tell whether a newer kube-prometheus-stack is already there, and installing $KUBE_PROMETHEUS_STACK_CHART_VERSION could downgrade a release every WVA on the cluster shares. Fix the error and re-run, or set KUBE_PROMETHEUS_STACK_CHART_VERSION=<version> to choose the version yourself."
@@ -137,6 +147,8 @@ deploy_prometheus_kube_stack() {
         --set prometheus.prometheusSpec.web.tlsConfig.keySecret.name="$PROMETHEUS_SECRET_NAME" \
         --set prometheus.prometheusSpec.web.tlsConfig.keySecret.key=tls.key \
         --set grafana.enabled="$DEPLOY_OPERATIONAL_DASHBOARD" \
+        --set grafana.image.registry="$grafana_registry" \
+        --set grafana.testFramework.enabled=false \
         --set grafana.sidecar.dashboards.enabled=true \
         --set grafana.sidecar.dashboards.label=grafana_dashboard \
         --set 'grafana.datasources.datasources\.yaml.apiVersion=1' \
