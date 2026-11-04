@@ -1,12 +1,10 @@
 package throughput
 
 import (
-	"context"
 	"testing"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
@@ -54,8 +52,8 @@ func TestITLPolicyReadsTheBandTheGateAndTheCapRate(t *testing.T) {
 
 // The admission takes the policy's keys, the slope hold, and the engine's
 // settle tracker with its absence tolerance at the optimize interval. It
-// does not read the capacity store yet: a variant whose flags state a cap
-// still gets none, and no arguments, until the line reads them (4b-1, 4b-3).
+// reads no capacity store: a variant's cap and arguments are read per
+// variant (engineOf) and set per variant (lineAdmission; itl_cap_test.go).
 func TestAdmissionReadsThePolicyTheSettleViewAndTheHold(t *testing.T) {
 	store := capacity.NewStore()
 	store.FileScaleTarget("ns", "m", "v1", "H100", 1,
@@ -80,7 +78,7 @@ func TestAdmissionReadsThePolicyTheSettleViewAndTheHold(t *testing.T) {
 		t.Errorf("absence tolerance %v, want %v", adm.AbsenceTolerance, want)
 	}
 	if adm.MaxNumSeqs != 0 || adm.MaxNumSeqsSource != batchCapNone || adm.Args != "" {
-		t.Errorf("the store was read before anything reads it: cap %d from %q, args %q",
+		t.Errorf("the model's admission read the store: cap %d from %q, args %q",
 			adm.MaxNumSeqs, adm.MaxNumSeqsSource, adm.Args)
 	}
 
@@ -104,30 +102,5 @@ func TestStartConfigStatesTheBuilders(t *testing.T) {
 		SettleView: true, CapacityStore: true}
 	if got != want {
 		t.Errorf("StartConfig %+v, want %+v", got, want)
-	}
-}
-
-// The admission is wired, and changes nothing yet: a replica at its stated
-// cap, above the band, with requests waiting and no preemption, is a reading
-// the saturation analyzer's line admits (itl.Admission), and the window here
-// still refuses it. Cap admission is a named change of its own (PR 4b-3).
-func TestTheWindowStillReadsOnlyTheBand(t *testing.T) {
-	store := capacity.NewStore()
-	params := capacity.EngineParams{Engine: inferenceengine.EngineVLLM, MaxNumSeqs: 64, MaxNumSeqsSet: true, Image: "img:1"}
-	store.FileScaleTarget("ns", "m", "v1", "H100", 1, params, false, admissionAt)
-	m := makeMetrics("v1", 1, 0.88, 0)[0]
-	m.RunningRequests, m.QueueLength = 64, 10
-	m.PreemptionRate, m.PreemptionRateKnown = 0, true
-	if !m.AtBatchCap(params.ExplicitMaxNumSeqs()) {
-		t.Fatal("the row is not at its cap; the case tests nothing")
-	}
-	a := NewThroughputAnalyzer().WithCapacityStore(store).WithSettleView(settle.NewTracker())
-	if _, err := a.Analyze(context.Background(), domain.AnalyzerInput{ModelID: "m", Namespace: "ns",
-		ReplicaMetrics: []domain.ReplicaMetrics{m}}); err != nil {
-		t.Fatalf("Analyze: %v", err)
-	}
-	st, _ := a.VariantState("m", "ns", "v1")
-	if st.SampleCount != 0 {
-		t.Errorf("the window kept %d readings above the band at the cap, want 0 until cap admission", st.SampleCount)
 	}
 }

@@ -123,6 +123,12 @@ type Start struct {
 	// commit that recorded it, since its replay must reproduce it byte for
 	// byte.
 	Commit string
+	// Caveats is what the run could not see, one line each: a recording
+	// learnreplay's Generate mode made from a capture carries the capture's
+	// flags (rollouts not seen, roles inferred from Pod names, engine
+	// parameters from flags, ...), so a golden made from it says so. Empty
+	// for a controller's recording.
+	Caveats []string `learnrec:"omitzero"`
 }
 
 // BuildCommit is the commit this binary was built from, set at link time:

@@ -80,6 +80,7 @@ from the release notes. See
 | `KEDA_CHART_VERSION` | KEDA Helm chart version. [Supported versions](keda.md#supported-versions) | `2.21.0` |
 | `KEDA_CMA_NAMESPACE` | OpenShift: where the installer reads the Custom Metrics Autoscaler's version, for its [version line](keda.md#what-the-installer-prints) | `openshift-keda` |
 | `KUBE_PROMETHEUS_STACK_CHART_VERSION` | kube-prometheus-stack Helm chart version, when the install deploys Prometheus. Unset, a newer release already installed is kept rather than downgraded, with a warning | `92.7.0` |
+| `GRAFANA_IMAGE_REGISTRY` | Registry the kube-prometheus-stack Grafana image is pulled from, when the install deploys Prometheus with `DEPLOY_OPERATIONAL_DASHBOARD=true`. The repository path and tag stay the chart's. The default is Google's public Docker Hub mirror, because anonymous Docker Hub pulls are rate limited; set your own mirror on a cluster that cannot reach it | `mirror.gcr.io` |
 | `UNDEPLOY` | Remove instead of install (`install.sh` doubles as the uninstaller) | `false` |
 | `DELETE_NAMESPACES` | With `UNDEPLOY=true`, also delete the scaling manager and monitoring namespaces | `false` |
 | `DELETE_LLMD_NS` | With `DELETE_NAMESPACES=true`, also delete `LLMD_NS`. Separate because that namespace holds the model servers: deleting it takes the workloads with it | `false` |
@@ -1113,9 +1114,14 @@ and [troubleshooting](troubleshooting.md#symptom-index).
   during the silence.
 - **A variant that starts above the band is priced from above it.** With no
   line from the band and no slope to hold, the line is fitted from readings
-  at k of at least 0.85 (`T2-above-band`). It errs one way only: it prices a
-  higher ITL than the true line, so it orders more replicas, never fewer.
-  The band's first fit replaces it. A fleet that sits above the band but
+  at k of at least 0.85 (`T2-above-band`), with B at the least ITL among
+  them. Without noise it errs one way only: it prices a higher ITL than the
+  true line, so it orders more replicas, never fewer. With 2 % gauge noise
+  it was at most 0.5 % under in simulation, within the 5 % known-truth
+  bound. The band's first fit replaces it, and a replica at its sequence
+  cap teaches the band's line instead, priced the same one-sided way until
+  the variant learns its intercept B (see
+  [the cycle log](cycle-log.md#reason-values-reason-field)). A fleet that sits above the band but
   under k 0.85 gets no line at all (`cause` `all-above-band-below-ksat`).
 
 ## Optional: scaling band after `make deploy-e2e-infra`
