@@ -22,7 +22,7 @@ package saturation
 //   - the derived k2 (P3, estimateCapacityAtCapSpread) rises: the sequences
 //     the batch cap admits hold more KV each, so a replica holds more before
 //     its batch binds, and fewer replicas are ordered;
-//   - the derived mu (deriveMuAtCap) falls where the KV binds rather than the
+//   - the derived mu (whatif.DeriveMuAtCap) falls where the KV binds rather than the
 //     batch cap: fewer sequences fit at the pricing point, so a replica
 //     serves fewer requests a second, and more replicas are ordered.
 //

@@ -9,6 +9,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // Property cases for measured mu (inventory row 5): its write path and fold
@@ -178,7 +179,7 @@ func checkMuFirstSample(tn config.AnalyzerTuning) func(uint64) error {
 		truth := 0.2 * (1 + 0.1*r.Float64())
 		first := truth * (0.40 + 0.05*r.Float64()) // E1: 0.0995 against about 0.2
 		t := tuning{AnalyzerTuning: tn.WithDefaults()}
-		if t.throughputRefusal(first, first, derivedMu{rate: truth, ok: true}, 0, false) != "" {
+		if t.throughputRefusal(first, first, whatif.DerivedMu{Rate: truth, OK: true}, 0, false) != "" {
 			return nil
 		}
 		moved := relErr((first+truth)/2, first)
@@ -207,7 +208,7 @@ func realMuChooser(measured, derived float64, sampledAt, now time.Time) float64 
 	a := NewSaturationAnalyzer(capacity.NewStore())
 	t := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
 	if a.measuredYieldsToDerived(propMuKey, throughputReading{rate: measured, sampledAt: sampledAt},
-		derivedMu{rate: derived, ok: true}, 0, t, now) {
+		whatif.DerivedMu{Rate: derived, OK: true}, 0, t, now) {
 		return derived
 	}
 	return measured
@@ -258,7 +259,7 @@ func checkMuHalfServed(seed uint64) error {
 	var sum float64
 	var n int
 	for _, v := range []float64{1, 1, 1, slow} {
-		if t.throughputRefusal(v, v, derivedMu{}, 1, false) == "" {
+		if t.throughputRefusal(v, v, whatif.DerivedMu{}, 1, false) == "" {
 			sum += v
 			n++
 		}
@@ -285,7 +286,7 @@ func checkMuLatch(tn config.AnalyzerTuning) func(uint64) error {
 			v := make([]bool, len(noise))
 			for i, e := range noise {
 				now := propStart.Add(time.Duration(i) * propCycle)
-				v[i] = a.measuredYieldsToDerived(propMuKey, throughputReading{rate: side * (1 + e)}, derivedMu{rate: 1, ok: true}, 0, t, now)
+				v[i] = a.measuredYieldsToDerived(propMuKey, throughputReading{rate: side * (1 + e)}, whatif.DerivedMu{Rate: 1, OK: true}, 0, t, now)
 			}
 			if n := reversals(v); n > 1 {
 				return violation(kindFlipped, "measured/derived on %.1f with 4%% noise: the choice reversed %d times in %d cycles", side, n, len(v))

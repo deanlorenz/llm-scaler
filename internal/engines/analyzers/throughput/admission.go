@@ -53,20 +53,19 @@ func itlPolicyOf(cfg domain.AnalyzerConfig) itlPolicy {
 
 // admission is the model's ITL admission under policy p: the policy's keys,
 // the engine's settle tracker with its absence tolerance at the optimize
-// interval, and the slope hold. What only the capacity store gives -- the
-// variant's stated sequence cap and the arguments a held slope was fitted
-// under -- is not read yet: nothing reads it until the line moves onto
-// itl.Tracker (PR 4b-1, the arguments; 4b-3, the cap), so the store, though
-// wired, costs no lookup a cycle. From then the cap is the one the engine's
-// flags state (ExplicitMaxNumSeqs), else the one the llm-d.ai/max-num-seqs
-// annotation declares (StatedBatchCap), never a learned or default cap, as
-// the slo analyzer reads it; the arguments are ArgsTag, as the saturation
-// analyzer tags its windows.
+// interval, and the slope hold. What only the capacity store gives is read
+// per variant (lineAdmission): the arguments a held slope was fitted under
+// (ArgsTag, as the saturation analyzer tags its windows), since 4b-1. The
+// variant's stated sequence cap is not read yet (4b-3): then it is the one
+// the engine's flags state (ExplicitMaxNumSeqs), else the one the
+// llm-d.ai/max-num-seqs annotation declares (StatedBatchCap), never a
+// learned or default cap, as the slo analyzer reads it.
 //
-// Built whole although the window reads only its band today: it is the one
-// value 4b-1 hands itl.Tracker unchanged, and building it on every cycle is
-// what lets TestTheWiredAnalyzerReadsTheFleetAsABareOneDoes hold that
-// nothing it carries changes what the window admits. It costs no lookup.
+// Built whole although the line reads no sequence cap today: it is the one
+// value every variant's admission starts from, and building it on every
+// cycle is what lets TestTheWiredAnalyzerReadsTheFleetAsABareOneDoes hold
+// that nothing it carries changes what the window admits. It costs no
+// lookup.
 func (a *ThroughputAnalyzer) admission(p itlPolicy, namespace, modelID string) itl.Admission {
 	adm := itl.Admission{
 		MinK: p.lo, MaxK: p.hi,
@@ -87,8 +86,9 @@ func (a *ThroughputAnalyzer) admission(p itlPolicy, namespace, modelID string) i
 // WithSettleView sets the settle tracker the ITL line reads each replica's
 // settle from: the engine's, which it observes at the top of every cycle.
 // Call it before the analyzer is used. Unset, the admission carries no
-// settle tracker, and the line, once on itl.Tracker, judges each replica's
-// settle from its own trace.
+// settle tracker, and the line reads a tracker the analyzer observes itself
+// (settle.go), as one that has watched the fleet: nothing waits after a
+// restart.
 func (a *ThroughputAnalyzer) WithSettleView(v settle.View) *ThroughputAnalyzer {
 	a.settle = v
 	return a
@@ -96,10 +96,12 @@ func (a *ThroughputAnalyzer) WithSettleView(v settle.View) *ThroughputAnalyzer {
 
 // WithOptimizationInterval sets the controller's optimize interval, which
 // sets how long a replica may go without a row and keep its settle
-// (settle.Tolerance). Call it before the analyzer is used. Unset, the
-// tolerance is the least, settle.Period.
+// (settle.Tolerance), on the key's own trace and on the tracker the analyzer
+// observes itself when the engine gave it none. Call it before the analyzer
+// is used. Unset, the tolerance is the least, settle.Period.
 func (a *ThroughputAnalyzer) WithOptimizationInterval(d time.Duration) *ThroughputAnalyzer {
 	a.settleInterval = d
+	a.ownSettle.SetInterval(d)
 	return a
 }
 

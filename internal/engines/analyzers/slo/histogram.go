@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // histogram is a cumulative latency histogram in ascending bucket order,
@@ -25,7 +26,7 @@ type histogram struct {
 func newHistogram(in []domain.LatencyBucket) (histogram, bool) {
 	bs := make([]domain.LatencyBucket, 0, len(in))
 	for _, b := range in {
-		if math.IsNaN(b.UpperBound) || !finite(b.Rate) || b.Rate < 0 {
+		if math.IsNaN(b.UpperBound) || !whatif.Finite(b.Rate) || b.Rate < 0 {
 			continue
 		}
 		bs = append(bs, b)

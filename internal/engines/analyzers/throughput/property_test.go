@@ -170,7 +170,9 @@ func throughputCases(newA propAnalyzer) []learnertest.Case {
 	}
 	direct, timeBase := learnertest.FamilyDirect, learnertest.FamilyTimeBase
 	cheap := learnertest.CheapSeeds
-	return []learnertest.Case{
+	// The engine-rig cases of learner PR 4b-2 (property_settle_test.go)
+	// first, then the line's own.
+	return append(settleCases(newA), []learnertest.Case{
 		c(learnertest.ClassTransient, "joiner-warm-up", direct, cheap, checkJoinerWarmUp(newA)),
 		c(learnertest.ClassTransient, "load-step", direct, cheap, checkLoadStep(newA)),
 		c(learnertest.ClassTransient, "controller-restart", direct, cheap, checkRestart(newA)),
@@ -193,7 +195,7 @@ func throughputCases(newA propAnalyzer) []learnertest.Case {
 		c(learnertest.ClassEdges, "steady-for-default", direct, 1, checkSteadyFor(newA, nil, itl.DefaultSteadyFor)),
 		c(learnertest.ClassEdges, "steady-for-10m", direct, 1, checkSteadyFor(newA, nonDefaultSteady, 10*time.Minute)),
 		c(learnertest.ClassEdges, "sequence-cap", direct, 1, checkSequenceCap(newA)),
-	}
+	}...)
 }
 
 // The non-default policies 2.6 asks the edges to run at.
@@ -226,14 +228,14 @@ func checkJoinerWarmUp(newA propAnalyzer) func(uint64) error {
 		if err != nil {
 			return err
 		}
-		return movedFrom(base, with, before, before+during, propTransientTol, "with a joiner's warm-up")
+		return movedFrom(base, with, before, before+during, "with a joiner's warm-up")
 	}
 }
 
 // movedFrom is a violation of kind KindTransient when, on a cycle from first
 // to the run's end, base priced a line and got priced none, or one more than
-// tol off it.
-func movedFrom(base, got map[int]itl.Model, first, cycles int, tol float64, what string) error {
+// propTransientTol off it.
+func movedFrom(base, got map[int]itl.Model, first, cycles int, what string) error {
 	if len(base) == 0 {
 		return learnertest.Violate(learnertest.KindNotLearned, "the run without the transient priced no line")
 	}
@@ -246,7 +248,7 @@ func movedFrom(base, got map[int]itl.Model, first, cycles int, tol float64, what
 		if !okG {
 			return learnertest.Violate(learnertest.KindTransient, "cycle %d: no line %s, against %.4f s without", c, what, propPriced(b))
 		}
-		if e := learnertest.RelErr(propPriced(g), propPriced(b)); e > tol {
+		if e := learnertest.RelErr(propPriced(g), propPriced(b)); e > propTransientTol {
 			return learnertest.Violate(learnertest.KindTransient, "cycle %d: priced %.4f s %s, against %.4f s without (%.1f %%)",
 				c, propPriced(g), what, propPriced(b), 100*e)
 		}
@@ -287,7 +289,7 @@ func checkLoadStep(newA propAnalyzer) func(uint64) error {
 		if err != nil {
 			return err
 		}
-		return movedFrom(base, with, steady, steady+after, propTransientTol, "through the step's overshoot")
+		return movedFrom(base, with, steady, steady+after, "through the step's overshoot")
 	}
 }
 
@@ -401,7 +403,7 @@ func checkMissing(newA propAnalyzer, edit func(*domain.ReplicaMetrics)) func(uin
 		if err != nil {
 			return err
 		}
-		return movedFrom(base, with, before, before+after, propTransientTol, "with the defect")
+		return movedFrom(base, with, before, before+after, "with the defect")
 	}
 }
 
@@ -506,15 +508,30 @@ func checkKnownTruth(newA propAnalyzer, timeBase bool) func(uint64) error {
 // 85, over 2 % on 11), and the 4 ms case too: there the B term is small
 // and the gauge's noise outweighs it.
 func checkAboveBandFallback(newA propAnalyzer) func(uint64) error {
+	return aboveBandFallbackCheck(newA, 24, 0, 0, func(a *ThroughputAnalyzer, rows func(int) []domain.ReplicaMetrics) (map[int]itl.Model, error) {
+		_, _, lines, err := lineOf(a, 24, rows)
+		return lines, err
+	})
+}
+
+// aboveBandFallbackCheck is checkAboveBandFallback's judgement over the
+// given number of cycles of the analyzer newA builds, run by run. The first
+// warm cycles read 30 % over the true line: a transient the run starts in,
+// which sits above the line and can only raise the price. With firstBy
+// above zero the fallback must have priced by that cycle.
+func aboveBandFallbackCheck(newA propAnalyzer, cycles, warm, firstBy int,
+	run func(*ThroughputAnalyzer, func(int) []domain.ReplicaMetrics) (map[int]itl.Model, error)) func(uint64) error {
 	return func(seed uint64) error {
-		const cycles = 24
 		f := newPropFleet(learnertest.Rand(seed), cycles, 0.86, 0.90, 0.94)
 		for _, b := range []float64{0.004, propTrueB} {
 			a := newA()
-			_, _, lines, err := lineOf(a, cycles, func(c int) []domain.ReplicaMetrics {
+			lines, err := run(a, func(c int) []domain.ReplicaMetrics {
 				out := f.rows(c)
 				for i := range out {
 					out[i].AvgITL = (propTrueA*f.ks[i] + b) * (1 + f.noise[i][c])
+					if c < warm {
+						out[i].AvgITL *= 1.3
+					}
 				}
 				return out
 			})
@@ -526,6 +543,15 @@ func checkAboveBandFallback(newA propAnalyzer) func(uint64) error {
 			}
 			if n := a.PathCounts()[PathITLAboveBand]; n == 0 {
 				return learnertest.Violate(learnertest.KindNotLearned, "true B %.3f s: a line above the band, but not the fallback's", b)
+			}
+			if firstBy > 0 {
+				first := cycles
+				for c := range lines {
+					first = min(first, c)
+				}
+				if first > firstBy {
+					return learnertest.Violate(learnertest.KindNotLearned, "true B %.3f s: the fallback first priced on cycle %d, after cycle %d", b, first, firstBy)
+				}
 			}
 			truth := propTrueA*itl.DefaultKSat + b
 			for c := range cycles {

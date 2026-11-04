@@ -113,8 +113,14 @@ type replicaTrace struct {
 	since time.Time
 	// joined is set when the replica appeared after the key's first Observe:
 	// it is new, not merely new to this process.
-	joined  bool
-	samples []kSample
+	joined bool
+	// restartWait is set when joined is only the controller restart's
+	// (Admission.WaitsAfterRestart): the replica was serving on the key's
+	// first Observe. The above-band window does not take that stamp
+	// (Tracker.Observe). Read on the key's own trace only: on the settle
+	// tracker, settlingOnTracker reports the restart's wait itself.
+	restartWait bool
+	samples     []kSample
 	// idle counts the replica's latest rows in a row that carried neither an
 	// ITL nor a k: no tokens in the rate window and nothing in the cache, so
 	// nothing was served.
@@ -169,7 +175,7 @@ func (rt *replicaTrace) serving(hasITL, hasK bool, now time.Time, s Steadiness) 
 		return
 	}
 	if rt.idle >= s.IdleRows {
-		rt.since, rt.joined, rt.samples = now, true, rt.samples[:0]
+		rt.since, rt.joined, rt.restartWait, rt.samples = now, true, false, rt.samples[:0]
 	}
 	rt.idle = 0
 }

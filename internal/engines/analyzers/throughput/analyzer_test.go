@@ -32,6 +32,7 @@ func makeMetrics(variant string, count int, baseK float64, kStep float64) []doma
 			AvgOutputTokens:       256,
 			PrefixCacheHitRate:    0.0,
 			AvgITL:                0.030 + k*0.05,
+			AvgITLKnown:           true,
 		}
 	}
 	return metrics

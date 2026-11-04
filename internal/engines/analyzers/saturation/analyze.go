@@ -18,6 +18,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // One cycle, end to end. What each stage computes is in the file named after
@@ -411,7 +412,7 @@ func (c *cycle) observeFleetShape() {
 // window the backlog projection exists for. A measurement always wins, so a
 // warm fleet is unaffected.
 //
-// BOTH HALVES OR NEITHER. deriveMuAtCap reads the output length twice: as the
+// BOTH HALVES OR NEITHER. whatif.DeriveMuAtCap reads the output length twice: as the
 // divisor, and inside the shape, where KVreq = ILeff + OL/2 sets how many
 // sequences fit. Moving only the divisor leaves the two halves of one division
 // on different timescales, and a swap that raises the generation while dropping
@@ -448,7 +449,7 @@ func (c *cycle) resolvePricing() {
 // fitLines fits one ITL(k) line per variant per cycle, from readings its
 // replicas report at whatever load they are at. This is what lets mu be
 // priced for the shape arriving now instead of the one the fleet last
-// saturated under (mu_from_itl.go).
+// saturated under (internal/signals/whatif, mu.go).
 func (c *cycle) fitLines() {
 	c.itlModels = make(map[string]itl.Model, len(c.gpusByVariant))
 	c.itlBorrowedFrom = make(map[string]string, len(c.gpusByVariant))
@@ -483,7 +484,7 @@ func (c *cycle) fitLines() {
 	for _, variant := range variants {
 		// Decode, and an aggregated variant (itlLineRole, issue #432); never
 		// prefill. ITL is the latency between GENERATED tokens, and
-		// deriveMuAtCap divides a token rate by an output length; prefill emits
+		// whatif.DeriveMuAtCap divides a token rate by an output length; prefill emits
 		// about one token per request -- its work is the prompt -- so the
 		// same arithmetic would read three orders of magnitude low, which is
 		// why saturatedCompletionRate special-cases it on the measured path
@@ -741,11 +742,11 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				// own (capAtMeasured).
 				price = c.priceAggregated(ac, rm, itlModel, engineParams, batchCap.perRank, fleetShape, muShape, kPrice)
 			} else {
-				price.derived = deriveMuAtCap(itlModel, engineParams, batchCap.perRank, rm.Ranks(), rm.TotalKvCapacityTokens,
+				price.derived = whatif.DeriveMuAtCap(itlModel, engineParams, batchCap.perRank, rm.Ranks(), rm.TotalKvCapacityTokens,
 					muShape, kPrice, c.muDivisor)
 			}
-			if !price.derived.ok {
-				muMissing[rm.PodName] = price.derived.why
+			if !price.derived.OK {
+				muMissing[rm.PodName] = price.derived.Why
 			}
 			c.logDerivedMu(derivedMuLog{rm: rm, price: price, kPrice: kPrice, line: itlModel, agg: ac,
 				fleetShape: fleetShape, muShape: muShape, residentBound: residentBound,
@@ -759,11 +760,11 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		// is priced as if it had none, and the figure goes to the
 		// service-rate signal only.
 		priced := derived
-		if derived.ok && price.reportOnly {
+		if derived.OK && price.reportOnly {
 			if !rm.FromWarmPool {
-				c.reportedMu[rm.VariantName] = append(c.reportedMu[rm.VariantName], derived.rate)
+				c.reportedMu[rm.VariantName] = append(c.reportedMu[rm.VariantName], derived.Rate)
 			}
-			priced = derivedMu{why: derivedWhyReportOnly}
+			priced = whatif.DerivedMu{Why: derivedWhyReportOnly}
 		}
 		rc := c.a.computeReplicaCapacity(rm, c.cfg, c.tune, c.input.ModelID, c.input.Namespace, gpuCount,
 			role, c.accelByVariant[rm.VariantName], c.keys, c.fleetOutput, c.stableInput,
@@ -887,11 +888,11 @@ func (c *cycle) logDerivedMu(l derivedMuLog) {
 	}
 	c.logger.V(perReplicaLogLevel).Info("derived-mu",
 		"namespace", c.input.Namespace, "variant", rm.VariantName, "pod", rm.PodName,
-		"ok", derived.ok,
+		"ok", derived.OK,
 		// An aggregated line's figure is reported, not priced (#432), until
 		// it is lifted (#275).
 		"reportOnly", l.price.reportOnly,
-		"rate", derived.rate, "seqs", derived.seqs, "tokenSec", derived.tokenSec,
+		"rate", derived.Rate, "seqs", derived.Seqs, "tokenSec", derived.TokenSec,
 		"kPrice", kPrice, "itlAtKPrice", priceModel.ITLAt(kPrice),
 		"itlA", itlModel.A, "itlB", itlModel.B, "itlZero", itlModel.IsZero(),
 		// Whose line it is. Without this the record reports a rate

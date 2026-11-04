@@ -35,7 +35,7 @@ func neutralRows(start time.Time, i int) []domain.ReplicaMetrics {
 			AvgInputTokens: 1024, AvgOutputTokens: 256,
 			// No generation rate: the GPS check, which clears the window
 			// after three mismatches, would keep it from filling.
-			AvgITL: 0.006 + 0.05*k, RequestRate: 2,
+			AvgITL: 0.006 + 0.05*k, AvgITLKnown: true, RequestRate: 2,
 		}
 	}
 	early := start.Add(-time.Hour)
@@ -73,10 +73,11 @@ func neutralRows(start time.Time, i int) []domain.ReplicaMetrics {
 // The wiring is neutral: an analyzer given the engine's settle tracker,
 // a capacity store stating the capped replica's cap, the optimize interval
 // and a slope hold reads the scripted fleet exactly as a bare one does --
-// the same window and line every cycle, and the same result. Until the line
-// moves onto itl.Tracker (PR 4b-1) nothing it was handed may change what it
-// admits. The run must reach a full fit, so the equality is not one of two
-// empty windows.
+// the same window and line every cycle, and the same result, with the
+// settle switches of PR 4b-2 off: until the line reads the cap (PR 4b-3),
+// the store, the interval and the hold may change nothing it admits. The
+// run must reach a full fit, so the equality is not one of two empty
+// windows.
 func TestTheWiredAnalyzerReadsTheFleetAsABareOneDoes(t *testing.T) {
 	start := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 	bareClock, wiredClock := clocktesting.NewFakePassiveClock(start), clocktesting.NewFakePassiveClock(start)
@@ -88,6 +89,16 @@ func TestTheWiredAnalyzerReadsTheFleetAsABareOneDoes(t *testing.T) {
 	bare := NewThroughputAnalyzer().WithClock(bareClock)
 	wired := NewThroughputAnalyzer().WithClock(wiredClock).WithSettleView(tracker).WithCapacityStore(store).
 		WithOptimizationInterval(15 * time.Second).WithSlopeHoldFor(24 * time.Hour)
+	// The settle view is read from learner PR 4b-2 on, under its switches
+	// (settle.go, settle_test.go): off on both here, each line judges the
+	// settle from its own trace, and the rest of the wiring is what the
+	// equality holds.
+	off := map[string]bool{}
+	for _, name := range settleSwitches {
+		off[name] = false
+	}
+	require.NoError(t, bare.SetSwitchesForReplay(off))
+	require.NoError(t, wired.SetSwitchesForReplay(off))
 	policy := &config.ScalingPolicy{}
 	ctx := context.Background()
 

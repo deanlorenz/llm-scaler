@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // A measured mu whose age is unknown resolves to the safe side
@@ -35,7 +36,7 @@ func unknownAgeRig(t *testing.T, on bool, rate float64, written time.Duration) (
 // as can be, it gave way to a derived figure three times it on sight.
 func TestMuUnknownAge_UnderDerivedKeepsTheLowHold(t *testing.T) {
 	tn := tuningOf(nil)
-	derived := derivedMu{ok: true, rate: 3.0}
+	derived := whatif.DerivedMu{OK: true, Rate: 3.0}
 	for _, tc := range []struct {
 		written time.Duration
 		on      bool
@@ -59,7 +60,7 @@ func TestMuUnknownAge_NoTimeAtAllIsHeld(t *testing.T) {
 	for _, on := range []bool{true, false} {
 		a, now := unknownAgeRig(t, on, 1.0, time.Minute)
 		got := a.measuredYieldsToDerived(muRepeatKey, throughputReading{rate: 1.0, samples: 3},
-			derivedMu{ok: true, rate: 3.0}, 0, tuningOf(nil), now)
+			whatif.DerivedMu{OK: true, Rate: 3.0}, 0, tuningOf(nil), now)
 		assert.Equal(t, !on, got, "switch %v", on)
 	}
 }
@@ -72,7 +73,7 @@ func TestMuUnknownAge_OverDerivedIsStillStale(t *testing.T) {
 	for _, on := range []bool{true, false} {
 		a, now := unknownAgeRig(t, on, 3.0, time.Minute)
 		reading := a.saturatedThroughputReading(muRepeatKey)
-		got := a.measuredYieldsToDerived(muRepeatKey, reading, derivedMu{ok: true, rate: 1.0}, 0, tuningOf(nil), now)
+		got := a.measuredYieldsToDerived(muRepeatKey, reading, whatif.DerivedMu{OK: true, Rate: 1.0}, 0, tuningOf(nil), now)
 		assert.True(t, got, "switch %v", on)
 	}
 }

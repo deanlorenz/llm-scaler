@@ -81,21 +81,50 @@ import (
 // Since learner PR 4b-1 the rows above (#275's two switches, #438's) are
 // earlier seams (earlierSeams); 4b-1's own two are learner4b1Seams.
 //
-// Since the what-if PR P1 (docs/proposals/slo-capacity-planner.md, the PR
-// plan) this PR's is the saturation analyzer's prefill observation
-// (saturation.SwitchPrefillCapacityObserve). Its base is main after 4b-1
-// merged (1c9a34fe8, #456), whose goldens are 4b-1's all-on run. It moves no
+// Since learner PR 4b-2 this PR's are the throughput analyzer's ITL line on
+// the engine's settle tracker, six switches, as learner PR 4a split the
+// saturation and slo lines' (throughput/settle.go). Its base is main after
+// 4b-1 merged (1c9a34fe8, #456), whose goldens are 4b-1's all-on run. The
+// fixtures that run the throughput analyzer are the in-process three
+// (acceptance, engine, mu-paths), and none was recorded with the analyzer
+// given the engine's view (start.ThroughputConfig is absent): the replay
+// builds it with none, and its line reads the tracker the analyzer observes
+// itself. Measured, each alone against all off:
+//
+//   - SwitchITLReadsSettle moves nothing. The PR first measured it moving
+//     acceptance/variant-capacities.csv and engine/variant-capacities.csv
+//     (3 and 2 rows changed bytes):
+//     after a clock jump past an hour, the analyzer's own tracker read the
+//     gap as an absence (settle.Rejoined) for model-01, the first model
+//     analyzed, and its line settled, while every later model, evicted
+//     meanwhile, was first-seen and did not. Its review made a model the
+//     own tracker has not seen for ownSettleTimeout first-seen whatever the
+//     order (throughput/settle.go, observeOwnSettle), and the goldens came
+//     back byte for byte to main's. Its unit tests hold it.
+//   - SwitchITLWaitsAfterRestart moves nothing: an analyzer with no engine
+//     view never waits. It moves the throughput-sweep-restart recording when
+//     that lands (recorded on 4b-0, with the view). Its unit tests hold it.
+//   - The other four move nothing, as their 4a twins moved nothing; their
+//     unit tests hold them.
+//
+// The what-if PR P1 (docs/proposals/slo-capacity-planner.md, the PR plan)
+// adds one: the saturation analyzer's prefill observation
+// (saturation.SwitchPrefillCapacityObserve), on the same base. It moves no
 // golden: it only logs (prefill-capacity-observed), and writes no state an
 // output reads. Its unit tests hold it (heldBy).
 var replaySwitches = map[string][]string{
-	saturation.SwitchPrefillCapacityObserve: nil,
+	saturation.SwitchPrefillCapacityObserve:          nil,
+	throughput.SwitchITLReadsSettle:                  nil,
+	throughput.SwitchITLWaitsAfterRestart:            nil,
+	throughput.SwitchITLKeepsSettleThroughMissingRow: nil,
+	throughput.SwitchITLRestartUnderName:             nil,
+	throughput.SwitchITLIdleOnEvidence:               nil,
+	throughput.SwitchITLReadsFinitePodMean:           nil,
 }
 
 // learner4b1Seams is learner PR 4b-1's switches, earlier seams now (merged
 // into earlierSeams), with the outputs 4b-1 measured each to move, each
-// alone against all off from f7b4f7e47 (4b-0). The fixtures that run the
-// throughput analyzer are the in-process three (acceptance, engine,
-// mu-paths); no cluster recording does yet.
+// alone against all off from f7b4f7e47 (4b-0):
 //
 //   - The steady gate moves the throughput rows of results.csv and
 //     variant-capacities.csv in all three, and, through the composite, the
@@ -315,6 +344,32 @@ var heldBy = map[string][]heldTest{
 		{"../slo", "TestForget_DropsTheAcceleratorMemo"},
 		{"../slo", "TestForget_ReportsEachForgottenKey"},
 	},
+	// Learner PR 4b-2's throughput line on the engine's settle tracker: each
+	// test runs the switch on and off through Analyze on the engine's rig.
+	// The move names no output; its tests hold its two own rules directly
+	// (a rollout under the same name, a gap between cycles).
+	throughput.SwitchITLReadsSettle: {
+		{"../throughput", "TestITLSettle_ANewRevisionUnderTheSameNameStartsTheSettle"},
+		{"../throughput", "TestITLSettle_AGapBetweenCyclesPastTheToleranceSettlesAgain"},
+	},
+	throughput.SwitchITLWaitsAfterRestart: {
+		{"../throughput", "TestITLSettle_AControllerRestartWaitsTheSettle"},
+		{"../throughput", "TestITLSettle_AfterAControllerRestartTheLineIsSilentForTheSettle"},
+		{"../throughput", "TestThroughputPropertySettleMutants"},
+		{"../throughput", "TestThroughputProbe_AControllerRestartOnTheEngineTrackerWaitsItsSettle"},
+	},
+	throughput.SwitchITLKeepsSettleThroughMissingRow: {
+		{"../throughput", "TestITLSettle_OneMissingRowKeepsTheSettle"},
+	},
+	throughput.SwitchITLRestartUnderName: {
+		{"../throughput", "TestITLSettle_ANewReadyTimeUnderTheSameNameStartsTheSettle"},
+	},
+	throughput.SwitchITLIdleOnEvidence: {
+		{"../throughput", "TestITLSettle_AScrapeThatReadNothingIsNotIdle"},
+	},
+	throughput.SwitchITLReadsFinitePodMean: {
+		{"../throughput", "TestITLSettle_APodWithAnAbsentRankIsNoReading"},
+	},
 	saturation.SwitchITLKeepsSettleThroughMissingRow: {
 		{"../saturation", "TestITLSettle_OneMissingRowKeepsTheSettle"},
 	},
@@ -495,9 +550,20 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch of this PR names, as the
-// base commit's goldens hold it (main at 1c9a34fe8, learner PR 4b-1
-// merged). P1's switch names none.
-var switchBase = map[string]string{}
+// base commit's goldens hold it (main at 1c9a34fe8, learner PR 4b-1 merged). It also
+// holds the base digests of the outputs a 4b-2 switch could move that the
+// expectation does not name, so the measured rows need no new lookup.
+var switchBase = map[string]string{
+	"acceptance/results.csv":            "7aef7e7391f761fe984f89720d61b0583048b330989c449098dce8ec2d285981",
+	"acceptance/variant-capacities.csv": "47ad82ad3c017924b6cc5398d9578ddd28ab95fdc547adcec6decb69abcc91b3",
+	"engine/composite-holds.csv":        "ce02c822639f90959858c2ddc1e4681dc5b65d281a13d033520cfaa9945d3e0c",
+	"engine/composite-release.csv":      "f796638c7d8c1f0544cd3ab0d9850a206a470b166cad3b2318ea323f4ed03eaf",
+	"engine/composite-variants.csv":     "9cb3149dc328096552a9b5aa640ffb2195e92f562e73266d5d89e92fd9e09828",
+	"engine/results.csv":                "fdef165cd21f47deb81d73870af4953c05d9c303180975e713e39e4a138845e9",
+	"engine/variant-capacities.csv":     "bded174c24f569874299866fb541e7f4ac4cc72294adbaf8e626f1e9ea06712f",
+	"mu-paths/results.csv":              "83fca27f185344e2784706b0b6ae2e3ea8fe0ae70ecabe332862f04f4f4e951c",
+	"mu-paths/variant-capacities.csv":   "dd5b3186f6fe513520ba6e0309d88520e668d60f84003326f57bd7dee0ca0275",
+}
 
 // The slow tests of this package run in parallel with each other (each
 // marked "reads the goldens, writes only to its own copies"): each replays

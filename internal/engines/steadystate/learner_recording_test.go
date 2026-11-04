@@ -1000,7 +1000,9 @@ func assertResultsPriced(t *testing.T, recording []byte) {
 	t.Helper()
 	events, err := readEvents(recording)
 	require.NoError(t, err)
-	priced := map[string]int{}
+	// priced counts the variants each analyzer priced; throughputPriced the
+	// throughput analyzer's, by variant and reason.
+	priced, throughputPriced := map[string]int{}, map[string]int{}
 	for _, ev := range events {
 		var res *domain.AnalyzerResult
 		var errText string
@@ -1025,6 +1027,9 @@ func assertResultsPriced(t *testing.T, recording []byte) {
 		for _, vc := range res.VariantCapacities {
 			if vc.PerReplicaCapacity > 0 {
 				priced[ev.Kind]++
+				if ev.Kind == throughput.KindAnalyze {
+					throughputPriced[vc.VariantName+" "+vc.Reason]++
+				}
 			}
 		}
 	}
@@ -1033,10 +1038,18 @@ func assertResultsPriced(t *testing.T, recording []byte) {
 	// settle tracker's absence tolerance): it has no line, and prices
 	// nothing, on those cycles. The throughput line, on the shared tracker
 	// since learner PR 4b-1, needs 10 readings in its window and settled
-	// replicas before it prices: the run's twelve cycles price 21 of its
-	// variants, where the line from one cycle's rows priced 52.
-	assert.Equal(t, map[string]int{saturation.KindAnalyze: 64, slo.KindAnalyze: 6, throughput.KindAnalyze: 21}, priced,
+	// replicas before it prices: the run's twelve cycles priced 21 of its
+	// variants, where the line from one cycle's rows priced 52. Since 4b-2
+	// it reads the engine's settle tracker and waits like the slo line,
+	// after the controller start and after each day the clock jumps
+	// (throughput.SwitchITLWaitsAfterRestart and the tracker's absence
+	// tolerance). Its above-band fallback does not wait after the restart
+	// (it is one-sided): it prices 8, 4 of them pd-d from above the band
+	// (T2-above-band), which the wait kept silent before 4b-2's review.
+	assert.Equal(t, map[string]int{saturation.KindAnalyze: 64, slo.KindAnalyze: 6, throughput.KindAnalyze: 8}, priced,
 		"variants priced per analyzer")
+	assert.Equal(t, map[string]int{"agg-a T1-ols": 1, "agg-a T2-held": 2, "pd-d T2-above-band": 4, "pd-d T2-default": 1},
+		throughputPriced, "the throughput analyzer's priced variants, by reason")
 }
 
 // readEvents is learnrec.Read's events.

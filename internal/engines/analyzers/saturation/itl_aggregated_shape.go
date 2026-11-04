@@ -14,6 +14,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/fleet"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // The ITL line of an aggregated variant, by request shape (issue #275,
@@ -42,7 +43,7 @@ import (
 //     which hold KV and emit no token (sigma, from Little's law);
 //   - a variant's figure sizes once the GPS check has agreed with it for
 //     aggLiftCycles cycles (noteAggregatedLift), and never above a measured
-//     rate of the variant's own (derivedMu.capAtMeasured).
+//     rate of the variant's own (whatif.DerivedMu.CapAtMeasured).
 //
 // The analyzer runs one cycle of a model on one goroutine; a.mu is taken
 // and released several times in a cycle only to guard against other models'
@@ -410,7 +411,7 @@ func (c *cycle) aggregatedShapeNow(variant string, params *capacity.EngineParams
 		if rm.VariantName != variant || rm.FromWarmPool {
 			continue
 		}
-		if ct := capacityTokensFor(params, rm.Ranks(), rm.TotalKvCapacityTokens); ct > 0 {
+		if ct := whatif.CapacityTokens(params, rm.Ranks(), rm.TotalKvCapacityTokens); ct > 0 {
 			caps = append(caps, ct)
 		}
 	}
@@ -825,7 +826,7 @@ func occupancyFactor(decodeSteps, ilEff, sigma float64) (float64, bool) {
 // second the priced slope predicts there against the replica's own. ok false
 // when the replica gives no comparison (as itl.GPSErrorPct).
 //
-// capacityTokens is the whole replica's KV (capacityTokensFor), every rank
+// capacityTokens is the whole replica's KV (whatif.CapacityTokens), every rank
 // of a data-parallel pod, as the sequences are counted over it. The line is
 // per token on an engine that speculates (itl_per_token.go), so its rate is
 // already in tokens; a line in step time (perStepLine) emits 1+s tokens a
@@ -854,7 +855,7 @@ func gpsErrorPct(ac *aggCycle, b float64, rm domain.ReplicaMetrics, capacityToke
 // figure, the line it was priced from, the occupancy correction, and
 // whether it is reported only.
 type aggPrice struct {
-	derived    derivedMu
+	derived    whatif.DerivedMu
 	model      itl.Model
 	occupancy  float64
 	reportOnly bool
@@ -870,31 +871,31 @@ func (c *cycle) priceAggregated(ac *aggCycle, rm domain.ReplicaMetrics, line itl
 	if !ac.figure {
 		// No figure for the shape now: nothing is derived, not even to
 		// report (resolveAggregatedPrice).
-		p.derived = derivedMu{why: ac.priceCase}
+		p.derived = whatif.DerivedMu{Why: ac.priceCase}
 		return p
 	}
 	p.model = itl.Model{A: ac.a, B: line.B}
-	p.derived = deriveMuAtCap(p.model, params, batchCap, rm.Ranks(), rm.TotalKvCapacityTokens,
+	p.derived = whatif.DeriveMuAtCap(p.model, params, batchCap, rm.Ranks(), rm.TotalKvCapacityTokens,
 		muShape, kPrice, c.muDivisor)
-	if p.derived.ok && ac.sigmaOK {
+	if p.derived.OK && ac.sigmaOK {
 		occ, ok := occupancyFactor(ac.decodeSteps(c.muDivisor), muShape.ILeff, ac.sigma)
 		if !ok {
-			p.derived = derivedMu{why: aggCaseOccupancyUnknown}
+			p.derived = whatif.DerivedMu{Why: aggCaseOccupancyUnknown}
 			return p
 		}
 		p.occupancy = occ
-		p.derived.rate *= occ
-		p.derived.tokenSec *= occ
+		p.derived.Rate *= occ
+		p.derived.TokenSec *= occ
 	}
 	if ac.sigmaOK && !rm.FromWarmPool {
-		if errPct, ok := gpsErrorPct(ac, line.B, rm, capacityTokensFor(params, rm.Ranks(), rm.TotalKvCapacityTokens),
+		if errPct, ok := gpsErrorPct(ac, line.B, rm, whatif.CapacityTokens(params, rm.Ranks(), rm.TotalKvCapacityTokens),
 			fleetShape.KVreq, fleetShape.AvgOutputTokens, fleetShape.ILeff); ok {
 			ac.errs = append(ac.errs, errPct)
 		}
 	}
 	if ac.sizes(c.a.itlAggSizes, c.shapeChanging) {
 		p.reportOnly = false
-		p.derived.capAtMeasured = true
+		p.derived.CapAtMeasured = true
 	}
 	return p
 }

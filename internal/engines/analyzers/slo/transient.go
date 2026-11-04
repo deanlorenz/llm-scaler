@@ -7,6 +7,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // minTransientGrace is the least time after a transient ends that its requests
@@ -104,7 +105,7 @@ func transientOf(states []domain.VariantReplicaState, in func(domain.VariantRepl
 func transientGrace(rows []domain.ReplicaMetrics) time.Duration {
 	longest := 0.0
 	for _, rm := range rows {
-		if rm.Ready && !rm.FromWarmPool && finite(rm.AvgServiceTime) && rm.AvgServiceTime > longest {
+		if rm.Ready && !rm.FromWarmPool && whatif.Finite(rm.AvgServiceTime) && rm.AvgServiceTime > longest {
 			longest = rm.AvgServiceTime
 		}
 	}

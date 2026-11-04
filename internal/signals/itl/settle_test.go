@@ -230,3 +230,65 @@ func TestAdmissionReadyAgainOnTheTrackerStartsTheSettle(t *testing.T) {
 		t.Errorf("settling cycles %v, want %v", got, want)
 	}
 }
+
+// ForgetTraces drops only the matched keys' replica traces: their windows,
+// intercepts and held slopes stay, and another key keeps its traces. The
+// next Observe reads every replica as on the key's first sight: a replica
+// the settle tracker saw join that cycle, which the key would have read as
+// a joiner, settles only with WaitsAfterRestart.
+func TestTracker_ForgetTracesKeepsEverythingButTheTraces(t *testing.T) {
+	const joinAt = 12
+	run := func(forget, waits bool) Reading {
+		tr := NewTracker()
+		st := settle.NewTracker()
+		st.SetInterval(settleTestCycle)
+		adm := Admission{Settle: &Settle{View: st, Model: "ns/m"}}
+		var r Reading
+		for i := range joinAt + 1 {
+			rows := settleTestFleet()
+			if i < joinAt {
+				rows = rows[:2]
+			}
+			st.Observe("ns/m", settlerow.Of(rows, nil), every(i))
+			tr.Observe("other", "v", rows, Admission{}, every(i))
+			if i == joinAt && forget {
+				before := tr.WindowLen("k")
+				b, bOK := tr.Baseline("k")
+				slope, slopeOK := tr.Slopes()["k"]
+				if !slopeOK || before == 0 {
+					t.Fatalf("premise: the key fitted before the forget (window %d, slope held %v)", before, slopeOK)
+				}
+				if n := tr.ForgetTraces(func(key string) bool { return key == "k" }); n != 1 {
+					t.Fatalf("ForgetTraces dropped %d keys' traces, want 1", n)
+				}
+				if _, ok := tr.traces["k"]; ok {
+					t.Error("the key's traces survived ForgetTraces")
+				}
+				if _, ok := tr.traces["other"]; !ok {
+					t.Error("ForgetTraces dropped a key it did not match")
+				}
+				if got := tr.WindowLen("k"); got != before {
+					t.Errorf("window %d after ForgetTraces, was %d", got, before)
+				}
+				if got, ok := tr.Baseline("k"); got != b || ok != bOK {
+					t.Errorf("intercept %v (%v) after ForgetTraces, was %v (%v)", got, ok, b, bOK)
+				}
+				if got := tr.Slopes()["k"]; got != slope {
+					t.Errorf("held slope %+v after ForgetTraces, was %+v", got, slope)
+				}
+				adm.WaitsAfterRestart = waits
+			}
+			r = tr.Observe("k", "v", rows, adm, every(i))
+		}
+		return r
+	}
+	if r := run(false, false); r.Settling == 0 {
+		t.Error("premise: without the forget the joiner settles")
+	}
+	if r := run(true, false); r.Settling != 0 {
+		t.Errorf("after ForgetTraces %d readings settled, want none: the key's first sight is no settle", r.Settling)
+	}
+	if r := run(true, true); r.Settling == 0 {
+		t.Error("after ForgetTraces with WaitsAfterRestart the joiner did not settle")
+	}
+}

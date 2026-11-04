@@ -84,7 +84,7 @@ const SwitchBatchCapITLAdmission = "batch-cap-itl-admission"
 const SwitchBatchCapDecodeView = "batch-cap-decode-view"
 
 // SwitchBatchCapDerivedMu is the replay switch for the derived mu's batch
-// cap (issue #420). On, deriveMuAtCap caps the resident sequences at the cap
+// cap (issue #420). On, whatif.DeriveMuAtCap caps the resident sequences at the cap
 // the derived k2 is priced at (pricingBatchCap). Off, as before, at the
 // flags' cap or the parser's default of 256.
 const SwitchBatchCapDerivedMu = "batch-cap-derived-mu"

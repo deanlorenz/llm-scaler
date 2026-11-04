@@ -60,10 +60,26 @@ type ThroughputAnalyzer struct {
 	// learner PR 4b-1 (itl_line.go): SwitchITLSteadyGate and
 	// SwitchITLKeepsWindowOnGPSMismatch. On by the constructor.
 	itlSteadyGate, itlKeepsOnGPSMismatch bool
+	// itlReadsSettle, itlWaitsAfterRestart, itlKeepsSettle,
+	// itlRestartUnderName, itlIdleOnEvidence and itlFiniteOnly are the
+	// replay switches of learner PR 4b-2 (settle.go): the line's six settle
+	// changes. On by the constructor.
+	itlReadsSettle, itlWaitsAfterRestart, itlKeepsSettle  bool
+	itlRestartUnderName, itlIdleOnEvidence, itlFiniteOnly bool
+	// ownSettle is the settle tracker the analyzer observes itself when the
+	// engine gave it none (settle.go), and ownSettled when it last observed
+	// each model into it.
+	ownSettle  *settle.Tracker
+	ownSettled map[string]time.Time
 	// noAboveBandFallback turns the line's above-band fallback off
 	// (itl.Admission.AboveBandFallback), for the tests' negative controls
 	// only: set by withoutAboveBandFallback, which only tests define.
 	noAboveBandFallback bool
+	// aboveBandWaitsAfterRestart stamps the above-band readings with the
+	// restart's wait (itl.Admission.AboveBandWaitsAfterRestart), for the
+	// tests' negative controls only: set by withAboveBandRestartWait, which
+	// only tests define.
+	aboveBandWaitsAfterRestart bool
 	// paths counts the line's fits by path, for the replay (path_counts.go).
 	paths pathCounters
 }
@@ -122,6 +138,14 @@ func NewThroughputAnalyzer() *ThroughputAnalyzer {
 		itlLogged:             make(map[string]itlLogged),
 		itlSteadyGate:         true,
 		itlKeepsOnGPSMismatch: true,
+		itlReadsSettle:        true,
+		itlWaitsAfterRestart:  true,
+		itlKeepsSettle:        true,
+		itlRestartUnderName:   true,
+		itlIdleOnEvidence:     true,
+		itlFiniteOnly:         true,
+		ownSettle:             settle.NewTracker(),
+		ownSettled:            make(map[string]time.Time),
 	}
 }
 
@@ -285,6 +309,7 @@ func (a *ThroughputAnalyzer) observe(
 			delete(a.itlLogged, key)
 		}
 	}
+	a.evictOwnSettleLocked(now)
 	// The tracker's keys go with their variant state, as its window did. The
 	// tracker never calls back into the analyzer, so its lock under a.mu is
 	// safe.
@@ -379,6 +404,10 @@ func (a *ThroughputAnalyzer) analyze(
 	// Demand is unaffected -- this analyzer takes demand from the model-level
 	// arrival rate, which already includes whatever a bridge is serving.
 	ownMetrics := ownReplicasOnly(input.ReplicaMetrics)
+
+	// With no engine view, the analyzer observes its own settle tracker,
+	// every row included, before the line reads it (settle.go).
+	a.observeOwnSettle(input, now)
 
 	// observe updates internal state (acquires/releases a.mu internally).
 	// One admission for the model's variants until the line reads each
@@ -673,7 +702,12 @@ func (a *ThroughputAnalyzer) VariantState(modelID, namespace, variantName string
 // because neither Kubernetes resource names nor operator-provided model IDs can
 // contain a null byte.
 func variantKey(namespace, modelID, variantName string) string {
-	return namespace + "\x00" + modelID + "\x00" + variantName
+	return modelKeyPrefix(namespace, modelID) + variantName
+}
+
+// modelKeyPrefix is what every variantKey of the model begins with.
+func modelKeyPrefix(namespace, modelID string) string {
+	return namespace + "\x00" + modelID + "\x00"
 }
 
 // getOrCreateVariantState returns the variantState for the given key, creating

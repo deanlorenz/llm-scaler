@@ -95,7 +95,7 @@ func pricedAt(t *testing.T, params capacity.EngineParams, edit func(*Analyzer)) 
 // #420 the default of 256 bounded it, and the target alone priced it at
 // 120 sequences: 1.6x what the engine runs.
 func TestBatchCap_AReplicaIsPricedAtItsDeclaredCap(t *testing.T) {
-	assert.InDelta(t, 64/line.ITLAt(0.32), pricedAt(t, declared(), nil), 1e-6)
+	assert.InDelta(t, 64/testLine.ITLAt(0.32), pricedAt(t, declared(), nil), 1e-6)
 }
 
 // The switch off prices at the flags' cap or the default, as before #420.
@@ -104,8 +104,8 @@ func TestBatchCap_ThePerRankSwitchPicksTheSource(t *testing.T) {
 	assert.InDelta(t, 120/0.044, pricedAt(t, declared(), off), 1e-6)
 	// The flags' cap is read either way.
 	stated := capacity.EngineParams{MaxNumSeqs: 64, MaxNumSeqsSet: true, DeclaredBatchCap: 128}
-	assert.InDelta(t, 64/line.ITLAt(0.32), pricedAt(t, stated, off), 1e-6)
-	assert.InDelta(t, 64/line.ITLAt(0.32), pricedAt(t, stated, nil), 1e-6, "the flags win over the annotation")
+	assert.InDelta(t, 64/testLine.ITLAt(0.32), pricedAt(t, stated, off), 1e-6)
+	assert.InDelta(t, 64/testLine.ITLAt(0.32), pricedAt(t, stated, nil), 1e-6, "the flags win over the annotation")
 }
 
 // pricedDetail warms agg's line as pricedAt does, then prices it once more

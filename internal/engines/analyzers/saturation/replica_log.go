@@ -35,7 +35,7 @@ const summaryEntryBudget = criMaxLogLineBytes / 2
 // logReplicaCapacitySummary writes replica-capacity-summary at the shipped
 // verbosity: which replicas of each variant were priced this cycle and what
 // each was priced at (replicaSummary). muMissing maps a decode pod with no
-// derived mu to why (derivedMu.why). A variant whose entries would pass
+// derived mu to why (whatif.DerivedMu.Why). A variant whose entries would pass
 // summaryEntryBudget is written over several lines, each with "part" and
 // "parts"; "priced" is always the variant's whole count.
 func logReplicaCapacitySummary(logger logr.Logger, modelID, namespace string,

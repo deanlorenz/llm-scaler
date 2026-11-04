@@ -17,7 +17,7 @@ import (
 // is resident as if it had been computed. With multi-turn reuse most hits are
 // of that kind, and pricing the resident request at ILeff + D*OL/2 then
 // over-counts the sequences a cache holds, up to about 4x. The derived mu
-// (deriveMuAtCap) sizes its sequence count by that figure, so an over-counted
+// (whatif.DeriveMuAtCap) sizes its sequence count by that figure, so an over-counted
 // count over-states mu and under-orders replicas.
 //
 // The engine says how many requests it holds (vllm:num_requests_running,
@@ -206,7 +206,7 @@ func minResidentOf(noHit shape.Shape) int {
 // RunningRequests), so they describe the same requests. A replica lent by the
 // warm pool is not counted, as the ITL line counts none (noteITL), and nor is
 // one whose live capacity is unread or the collector's overflow sentinel
-// (capacityTokensFor): its tokens in use are unknown.
+// (whatif.CapacityTokens): its tokens in use are unknown.
 func fleetResidentKVPerRequest(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string, minK float64) residentReading {
 	r := residentReading{minK: minK}
 	for _, rm := range replicas {
