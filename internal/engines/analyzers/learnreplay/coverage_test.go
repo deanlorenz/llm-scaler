@@ -76,7 +76,11 @@ var reviewed = map[reflect.Type]buckets{
 		// reads and nothing restores.
 		// LearnerReports copies each model's last cycle of learner reports,
 		// which the analyzer overwrites every cycle and nothing restores.
-		readers: []string{"Name", "Horizons", "BorrowTickGap", "PathCounts", "LearnerReports"},
+		// ITLReadings copies a key's readings, and PricingBatchCap reads the
+		// cap without stamping a learned one as used: the what-if planner's
+		// views (whatif_view.go).
+		readers: []string{"Name", "Horizons", "BorrowTickGap", "PathCounts", "LearnerReports",
+			"ITLReadings", "PricingBatchCap"},
 		// WithSettleView hands k2 the engine's settle tracker; the replay hands
 		// it its own, observed from the settle events (settle.go).
 		builders: []string{"WithHorizons", "WithOptimizationInterval", "WithClock", "WithRecorder", "WithSettleView"},

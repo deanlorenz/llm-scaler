@@ -817,6 +817,23 @@ func (t *Tracker) Newest(key string) time.Time {
 	return time.Time{}
 }
 
+// Readings is a copy of the readings filed under key: every reading the
+// window holds, and the steady ones the full fit is taken from (a steady
+// reading may outlive the main window by up to DefaultSteadyCarry). Both
+// are nil for a key with no window. Read-only: the what-if planner bands a
+// line by refitting it from these (internal/signals/whatif, BootstrapLines).
+func (t *Tracker) Readings(key string) (all, steady []Observation) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if w, ok := t.windows[key]; ok {
+		all = w.Observations()
+	}
+	if w, ok := t.steady[key]; ok {
+		steady = w.Observations()
+	}
+	return all, steady
+}
+
 // WindowLens returns, for every key holding a window, how many readings it
 // holds.
 func (t *Tracker) WindowLens() map[string]int {
