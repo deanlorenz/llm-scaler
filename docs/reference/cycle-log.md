@@ -181,7 +181,7 @@ prefill fleet in one cycle.
 adds a reading to its lower bound: `computedTokenRate`, `effectiveInputTokens`,
 and `reading`, their ratio in requests per second.
 
-### `replica-start-measured` and `replica-start-outlier-rejected`
+### `replica-start-measured`, `replica-start-outlier-rejected` and `replica-start-change-confirmed`
 
 How long a replica takes to become Ready, per variant. The throughput floor
 prices the backlog over this time, so a long start raises `projectedBacklog`.
@@ -191,12 +191,35 @@ became Ready: `namespace`, `variant`, `observations` (replicas counted this
 cycle), `estimateSeconds` (the estimate now in force) and `source` (`measured`,
 or `seed` while the default is in force).
 
-`replica-start-outlier-rejected` is logged when one replica's start is much
-longer than the estimate and is left out: `namespace`, `variant`, `pod`,
-`sampleSeconds`, `estimateSeconds` and `factor`. A readiness probe that fails
-and recovers reports the pod's age as its start time, which is the usual cause.
-After three rejections in a row the next sample is accepted, so a variant that
-really got slower moves its estimate.
+`replica-start-outlier-rejected` is logged when one replica's start is more
+than `factor` (3) times the estimate and is left out: `namespace`, `variant`,
+`pod`, `sampleSeconds`, `estimateSeconds`, `factor`, `distinctPods` (how many
+different pods have been left out so far; 0 when a new pod's start inside the
+bound cleared the count on the same cycle), `needed` (how many it takes, 3)
+and `reason` (`start-above-bound`). Two causes are common: a readiness probe
+that fails and recovers, which makes a pod report its age as its start time,
+and a real change, such as a slower image or node.
+
+- A pod is logged when it is first left out, and again every 10 minutes
+  while it still is.
+- One pod reporting again and again counts once, so a single blip never
+  moves the estimate.
+- The pods count across rollouts, not only while they run together. A
+  variant with one replica learns a slower image on its third slow start.
+- A start inside the bound from a new pod clears the count.
+
+`replica-start-change-confirmed` is logged when `needed` different pods have
+been left out: the estimate becomes the median of their starts.
+`distinctPods`, `medianSeconds` and `previousEstimateSeconds` say what
+changed.
+
+If the variant really got slower and you do not want to wait for three slow
+starts, forget its learned state with the `llm-d.ai/forget-learned-state`
+annotation ([troubleshooting](troubleshooting.md#reset-one-variants-learned-state)).
+On the next cycle the starts of the pods running then are measured afresh.
+There is no other way to set the
+estimate today: the ScaledObject's
+[`replicaStartSeconds`](scaledobject-trigger.md) is read but not used yet.
 
 ### `learner-start`
 

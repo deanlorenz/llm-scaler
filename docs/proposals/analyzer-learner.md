@@ -2122,14 +2122,19 @@ pacing at the seed.
   parent projects nothing (`startSource: none`); the PR projects over 120 s.
 
 **B. Confirm by distinct pod** (`start-confirms-by-distinct-pod`). A refused
-outlier is remembered per key as a set of pods. The guard opens when N
-distinct pods are over 3x; one pod repeating never opens it. The set is
-pruned with the pods, as `startSeenPods` is. The guard compares a sample with
-the measured part of the estimate only, never with P.
-- Effect: one pod with a readiness blip no longer lifts the estimate on its
-  fourth cycle, so the projection, and the floor, stop over-ordering on it
-  (**down** only). `replica-start-outlier-rejected` gains `distinctPods` and
-  `needed`.
+outlier is remembered per key as a run of pods. The guard opens when N
+distinct pods across the run are over 3x; one pod repeating never opens it.
+Pods that left stay in the run (as first written, the set was pruned with
+the pods; review of 5b found that a variant with one or two replicas then
+never learned a slowdown). The guard compares a sample with the measured
+part of the estimate only, never with P. As built, see "5b as built".
+- Effect, both directions: one pod with a readiness blip no longer lifts the
+  estimate on its fourth cycle (**down**); a confirmed change installs the
+  run's median rather than folding one pod at α (**up**, to the new level);
+  and until N distinct slow pods are seen, a real slowdown is not followed
+  at all, where the parent followed it after 3 refusals (**down**, by up to
+  the change, for those starts). `replica-start-outlier-rejected` gains
+  `distinctPods` and `needed`.
 - Negative control: estimate 70, one pod reporting 2700 s on 4 cycles. The
   parent folds it on cycle 4 (about 860 s); the PR keeps 70.
 
@@ -2294,7 +2299,7 @@ shared cluster, torn down on every exit path. No PR waits for it.
 | --- | --- | --- |
 | 5a | Parse the seed and carry it in the input, read by nothing. The frozen v0.10.1 decoder and the v0.10.0 and v0.10.1 fixtures. Zero golden diff | none |
 | (recording) | the run above, from 5a, base goldens committed first | — |
-| 5b | B | down only, on a pod that blips |
+| 5b | B | down on a pod that blips, and on a real slowdown until N distinct slow pods; up to the new level once they confirm |
 | 5c | A and C together: the seed's bound is part of the blend, and the property cases need both. The gauge's source rename with its prometheus.md and upgrade notes. `startSamples`, `startAdmittedAt`, learner `start` | up only: during a variant's first N starts, and for a seeded, unmeasured role |
 | 5d | D and E, snapshot on only. `startCounted`, `settle` | lower during the minutes after a restart |
 | later, optional | the GPU witness | — |
@@ -2663,6 +2668,116 @@ killed):
 | one-sided with a learned B | `TestITLCap_ALearnedBEndsTheOneSidedPriceAndAForgetBringsItBack` |
 | the summary omits `pinnedAtLeastITL` | the probe |
 | the negative control's knob ignored | the bias table and the probe |
+
+#### 5b as built
+
+Built on main 0fec87b18 (5a merged). Change B only, behind
+`saturation.SwitchStartConfirmsByDistinctPod` (`start-confirms-by-distinct-pod`),
+on from the constructor.
+
+- **The rule.** `D/start_est.go` keeps, per start key, a run of the pods
+  refused as over `maxStartOutlierFactor` (3) times the estimate
+  (`startOutlierPods`, keyed like `startSeenPods`), each with its latest
+  start. A refused pod is not counted as seen, as before, so it reports
+  again next cycle; again it adds no pod to the run. When the run holds
+  `startConfirmPods` (3, a named constant marked unmeasured) distinct pods,
+  the guard opens: the estimate becomes the **median** of their starts, and
+  the run's pods still running are counted as seen. The parent opened after
+  three refusals and admitted the fourth sample, whoever sent them; one pod
+  reporting its age on four cycles moved 70 s to 859 s.
+- **Pods that left stay in the run.** As first built, a refused pod was
+  dropped when it left. Review found the consequence: a variant never has
+  three slow pods up at once if it runs one or two replicas, so it never
+  learned a slowdown. A one-replica variant rolled ten times to a 300 s
+  image stayed at 70 s (the parent reaches 293.5 s); two steady slow pods
+  stayed at 70 s (the parent reaches 187.3 s). Nothing cleared it: the key
+  carries no image digest, a live variant is never swept, and the estimate
+  is in the snapshot. Whole-node 8-GPU variants are usually one or two
+  replicas, and an estimate that is too short orders too little on a
+  scale-up. Now the run counts across rollouts: the third slow pod opens it,
+  up together or not.
+- **The run ends** only on a start inside the bound from a pod not in the
+  run. That is applied after every sample of the cycle is judged, so it does
+  not depend on the order the pods are listed in (as first built, the refused
+  pods re-joined the set after an in-range start earlier in the same cycle,
+  and the reset depended on order). A run pod whose own start is now in range
+  leaves the run without ending it. Samples are still compared, one by one,
+  with the estimate as the cycle's in-range starts move it, as on the parent.
+- **The median, not the EWMA.** All N pods were refused against the old
+  estimate; that is the evidence it no longer describes the variant. Folding
+  them at α keeps most of the weight on the figure they refute: 70 s to
+  3000 s on three pods stalled near 949 s, and the pods, now counted, never
+  moved it further. The median takes the level from the pods, and is robust
+  to one of them being a blip: two pods at 300 s and one reporting 2700 s
+  give 300 s, where the mean gives 1100 s.
+- **Bounded.** Between cycles a run holds at most `startConfirmPods` - 1 = 2
+  pods per key: the cycle that brings it to 3 opens the guard and empties it.
+  It is working state (`learnedMap.working`): not in the snapshot, not
+  cleared by a flush, dropped by a forget and by the variant sweep, which
+  counts each key once in `Evicted.StartOutliers`. After a restart the run
+  starts empty, and a running slow pod (not counted, since `startSeenPods` is
+  not restored either) joins it again.
+- **Limits.** Pods counted across a run can be far apart in time: three
+  pods blipping hours apart, with no pod starting in range between them,
+  open the guard at their median age (at most 3600 s, past which the
+  collector reports no start). Until a third slow pod, a real slowdown is
+  not followed at all, where the parent followed it after three refusals:
+  for a one-replica variant the first two slow rollouts are sized at the old
+  estimate. The operator's remedy is the `llm-d.ai/forget-learned-state`
+  annotation, which drops the key's estimate so the running pods are measured
+  afresh (troubleshooting, "Reset one variant's learned state"). The 5a
+  seed is read by nothing until 5c.
+- **"Never with P"**: in 5b `startSeconds` holds measured figures only, so
+  the guard already compares with the measurement. 5c, which publishes a
+  blend, must keep the guard on m.
+- **Learned-state reuse** does not reach the start estimate: it lends k2
+  and ITL lines. The only writers of `startSeconds` are the fold and the
+  snapshot restore of the key's own estimate; a restored estimate is
+  corrected by rollouts as a measured one is (tested).
+- **The log.** `replica-start-outlier-rejected` has a neutral `reason`,
+  `start-above-bound` (a blip is the usual cause, not the only one), gains
+  `distinctPods` (the run's pods after the cycle: 0 on a cycle whose
+  in-range start ended it) and `needed`, and is logged on a pod's first
+  refusal in the run and again every `startOutlierRelog` (10 min, at exactly
+  the interval) while it stays refused. With the switch off the line is the
+  parent's byte for byte, reason included (a test pins it). A
+  new line, `replica-start-change-confirmed`, says the guard opened, with
+  `distinctPods`, `medianSeconds` and `previousEstimateSeconds`.
+- **Zero golden diff.** Measured alone against all off, the switch moves no
+  output of any recording (`TestGoldens_TheSwitchRuns`). Its row is in
+  `replaySwitches` with no outputs, held by its unit tests (`heldBy`). 4b-2's
+  six switches stay in that table, as main has them after #460 (P1, whose
+  `SwitchPrefillCapacityObserve` row sits beside this one); #465 (4b-3)
+  moves them to `earlierSeams`.
+- **Tests** (`D/start_confirm_test.go`), each the figure with the switch on
+  and, where it decides, off:
+
+  | case | on | off (the parent) |
+  | --- | --- | --- |
+  | (a) one pod, age 2700 s growing 30 s a cycle | 70 after 60 cycles | 886 on cycle 4 |
+  | (b) one replica, ten rollouts to a 300 s image | 70, 70, then 300 from the third | 139, 187.3, ... 293.5 |
+  | (b) the same from a restored 70 s | 300 at the third pod | — |
+  | (c) two steady slow pods, 50 cycles, then a third | 70, then 300 | 187.3 |
+  | (d) 70 to 3000 s on three pods | 3000 on the first cycle | 949 on cycle 2, 1995.01 from then on (within 0.01) |
+
+  Also: the median by a table (100/200/300 gives 200; 100/200/300/400 in
+  one cycle gives 250), the median with a blip in the run, the bound (at 70
+  s, 210 s admitted and 210.001 s refused), the re-log at exactly its
+  interval, the reset in either order, a run ended this cycle logged as 0
+  pods, a run pod back in range, the bound on the run's size, two keys of
+  one variant kept apart, a controller restart dropping the run (the
+  snapshot holds the estimate, not the run, so three fresh pods are needed
+  again), (b) driven through `Analyze` (70, 70, 300 on; 187.3 off after
+  three rollouts), the lines, and the sweep (counted once) and forget. The property edge
+  `start-time/confirmations-3`, which pinned the parent's "one pod taken on
+  cycle 4", is replaced by `one-pod-repeating` (not taken on cycle 3, 4 or
+  20) and `distinct-pods-3` (taken at 3 pods, not 2). Twenty-three mutants,
+  each killed, among them the code as first built (pods pruned as they
+  left), the reset applied inside the loop, the EWMA, the mean, the lower
+  or the upper middle instead of the median, the bound at `>=`, the re-log
+  at `>`, the pod count read before the close, the off path's reason,
+  `Analyze` not feeding the estimate, runs shared across a variant's keys,
+  the sweep counting a key twice, and the parent (switch off everywhere).
 
 ## 8. Risks and limits
 
