@@ -4,14 +4,16 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/learnreplay"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 )
 
-func runGenerate(ctx context.Context, args []string, out io.Writer) error {
+func runGenerate(ctx context.Context, args []string, out, _ io.Writer) error {
 	fs := newFlags("generate", out)
 	in := fs.String("in", "", "the capture (whatif capture -o), gzipped or not (required)")
 	dst := fs.String("o", "", "where to write the recording; a name ending in .gz is gzipped (required)")
@@ -26,10 +28,18 @@ func runGenerate(ctx context.Context, args []string, out io.Writer) error {
 		return usageError{err}
 	}
 	rep, err := learnreplay.Replay(ctx, capture, learnreplay.Options{Mode: learnreplay.Generate})
-	if err != nil {
+	var bad *learnreplay.CaptureError
+	switch {
+	case errors.As(err, &bad):
 		return usageError{err}
+	case err != nil:
+		return fmt.Errorf("generate: %w", err)
 	}
 	recording := rep.Recording
+	start, err := startOf(recording)
+	if err != nil {
+		return err
+	}
 	if len(*dst) > 3 && (*dst)[len(*dst)-3:] == ".gz" {
 		if recording, err = learnreplay.Gzip(recording); err != nil {
 			return err
@@ -38,8 +48,24 @@ func runGenerate(ctx context.Context, args []string, out io.Writer) error {
 	if err := os.WriteFile(*dst, recording, 0o600); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "generated %d cycles into %s: %d bytes, analyzes %v\n", rep.Applied, *dst, len(recording), rep.Analyzes)
+	fmt.Fprintf(out, "generated %d steps into %s: %d bytes, analyzes %v\n", rep.Applied, *dst, len(recording), rep.Analyzes)
+	for _, c := range start.Caveats {
+		fmt.Fprintf(out, "  caveat: %s\n", c)
+	}
 	return nil
+}
+
+// startOf is a recording's start line.
+func startOf(recording []byte) (learnrec.Start, error) {
+	var start learnrec.Start
+	read, err := learnrec.Read(recording)
+	if err != nil {
+		return start, err
+	}
+	if len(read.Events) == 0 || read.Events[0].Kind != learnrec.KindStart {
+		return start, errors.New("generate: the generated recording has no start line")
+	}
+	return start, read.Events[0].DecodeData(&start)
 }
 
 // readMaybeGzipped reads a file, gunzipping it when it is gzipped.

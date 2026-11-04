@@ -3,6 +3,7 @@ package learnreplay
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -122,16 +123,17 @@ func TestGenerate_PlaysEachStepInTheEnginesOrder(t *testing.T) {
 	want := []string{
 		// 1. the slo cycle
 		slo.KindBeginCycle,
-		// 2. presence: the active variants model by model, saturation then
-		// slo, then the parked ones
+		// 2. the settle tracker keeps the models with a variant that has
+		// replicas (no event); 3. presence: the active variants model by
+		// model, saturation then slo, then the parked ones
 		saturation.KindNoteVariantsPresent, slo.KindNoteVariantsPresent, // idle: i
 		saturation.KindNoteVariantsPresent, slo.KindNoteVariantsPresent, // m: a
 		saturation.KindNoteVariantsPresent, slo.KindNoteVariantsPresent, // m: b, parked
-		// 3. the sweeps
+		// 4. the sweeps
 		saturation.KindEvictStaleHistory, capacity.KindEvictStale, slo.KindEvictStale,
-		// 4. idle has no rows: held, and nothing more
+		// 5. idle has no rows: held, and nothing more
 		settle.KindHold,
-		// 4-6. m: observed, its variant filed, analyzed
+		// 5-7. m: observed, its variant filed, analyzed
 		settle.KindObserve,
 		saturation.KindStableAcceleratorFor, capacity.KindFileScaleTarget,
 		saturation.KindAnalyze, slo.KindAnalyze, throughput.KindAnalyze,
@@ -247,6 +249,8 @@ func TestGenerate_RefusesABrokenCapture(t *testing.T) {
 			_, err := Replay(context.Background(), c.capture, c.opts)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), c.want)
+			var bad *CaptureError
+			assert.Equal(t, c.name != "switches", errors.As(err, &bad), "the capture's fault, or the caller's")
 		})
 	}
 
@@ -263,5 +267,90 @@ func TestGenerate_RefusesABrokenCapture(t *testing.T) {
 		_, err := Replay(context.Background(), buf.Bytes(), Options{Mode: Generate})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not in the capture's window")
+		var bad *CaptureError
+		assert.True(t, errors.As(err, &bad))
 	})
+}
+
+// parkCapture is a capture of two models, "n" active at every step and "m"
+// whose variant "a" has replicas at the first and last steps and is parked
+// whole between them; at the step allParked, when not negative, both are
+// parked.
+func parkCapture(t *testing.T, steps, allParked int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	rec := learnrec.New(&buf, 0)
+	rec.Record(learnrec.KindStart, genAt, defaultStart())
+	params := capacity.EngineParams{Engine: inferenceengine.EngineVLLM, MaxNumSeqs: 64, BlockSize: 16, TensorParallelSize: 1}
+	rec.Record(KindCaptureWindow, genAt, CaptureWindow{Namespace: "ns", From: genAt, Step: 15 * time.Second,
+		Roles: "role-of", Flags: []string{"rollouts not seen: every scale target filed as not rolling out"},
+		Variants: []CaptureVariant{
+			{ModelID: "m", Name: "a", Accelerator: "H100", GpuCount: 1, Params: params},
+			{ModelID: "n", Name: "c", Accelerator: "H100", GpuCount: 1, Params: params},
+		}})
+	policy := &config.ScalingPolicy{KvCacheThreshold: 0.8, QueueLengthThreshold: 5, ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.7}
+	cycle := func(model, variant string, active bool) CaptureCycle {
+		if !active {
+			return CaptureCycle{Input: learnrec.InputOf(domain.AnalyzerInput{ModelID: model, Namespace: "ns"}),
+				Parked: []string{variant}}
+		}
+		return CaptureCycle{Input: learnrec.InputOf(domain.AnalyzerInput{
+			ModelID: model, Namespace: "ns", Config: policy,
+			ReplicaMetrics: []domain.ReplicaMetrics{genRow(model, variant, variant+"-0", 0.4)},
+			VariantStates: []domain.VariantReplicaState{{VariantName: variant, CurrentReplicas: 1, DesiredReplicas: 1,
+				GPUsPerReplica: 1, AcceleratorName: "H100"}},
+		})}
+	}
+	for s := range steps {
+		at := genAt.Add(time.Duration(s) * 15 * time.Second)
+		rec.Record(KindCaptureCycle, at, cycle("m", "a", s == 0 || s == steps-1))
+		rec.Record(KindCaptureCycle, at, cycle("n", "c", s != allParked))
+	}
+	require.NoError(t, rec.Err())
+	return buf.Bytes()
+}
+
+// A model parked whole is in no model group, so the engine's prune forgets
+// its settle record (retainSettle), and Generate does the same: back after
+// one parked step, its replica joins again, where a tracker that kept the
+// stale sighting would carry it on as already watched.
+func TestGenerate_ForgetsTheSettleRecordOfAModelParkedWhole(t *testing.T) {
+	rep, err := Replay(context.Background(), parkCapture(t, 3, -1), Options{Mode: Generate})
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), rep.Paths[settlePathPrefix+string(settle.Joined)],
+		"m's replica, n's, and m's again after its parked step")
+	assert.Zero(t, rep.Paths[settlePathPrefix+string(settle.Rejoined)])
+
+	// A step at which every model is parked is the engine's cycle with no
+	// active variant: the slo cycle and the forgetting, and nothing more.
+	rep, err = Replay(context.Background(), parkCapture(t, 3, 1), Options{Mode: Generate})
+	require.NoError(t, err)
+	steps := stepKinds(t, rep.Recording)
+	require.Len(t, steps, 2, "the all-parked step records nothing")
+	assert.Equal(t, int64(4), rep.Paths[settlePathPrefix+string(settle.Joined)], "n is forgotten too, and joins again")
+}
+
+// The capture's flags reach the generated recording's start line, and a
+// Fidelity replay of it keeps them.
+func TestGenerate_CarriesTheCapturesFlags(t *testing.T) {
+	rep, err := Replay(context.Background(), parkCapture(t, 2, -1), Options{Mode: Generate})
+	require.NoError(t, err)
+	want := []string{"rollouts not seen: every scale target filed as not rolling out"}
+	startOf := func(recording []byte) learnrec.Start {
+		read, err := learnrec.Read(recording)
+		require.NoError(t, err)
+		var s learnrec.Start
+		require.NoError(t, read.Events[0].DecodeData(&s))
+		return s
+	}
+	assert.Equal(t, want, startOf(rep.Recording).Caveats)
+	again, err := Replay(context.Background(), rep.Recording, Options{Mode: Fidelity})
+	require.NoError(t, err)
+	assert.Empty(t, again.Failed())
+	assert.Equal(t, want, startOf(again.Recording).Caveats)
+
+	// The export keeps them: their words are the capture's own.
+	exported, _, err := Export(rep.Recording, ExportOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, want, startOf(exported).Caveats)
 }

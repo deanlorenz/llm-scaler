@@ -13,7 +13,10 @@
 // learnergolden export pseudonymises and learnergolden add accepts at the
 // commit that generated it.
 //
-// Exit codes: 0 done; 2 a usage or input error; 1 anything else.
+// Exit codes: 0 done; 2 a usage or input error (a bad flag, an unreadable
+// or malformed capture, overlapping --role-of selectors, a window too large
+// without --force); 1 anything else (a failed Prometheus query, a Generate
+// that fails inside the analyzers).
 package main
 
 import (
@@ -29,7 +32,7 @@ import (
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	err := run(ctx, os.Args[1:], os.Stdout)
+	err := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
 	stop()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "whatif:", err)
@@ -59,8 +62,8 @@ func exitCode(err error) int {
 const usage = "usage: whatif capture|generate [flags]; -h after a command lists its flags"
 
 // command is one subcommand: it parses its own flags from args and writes
-// what it reports to out.
-type command func(ctx context.Context, args []string, out io.Writer) error
+// what it reports to out, and its warnings to warn (stderr).
+type command func(ctx context.Context, args []string, out, warn io.Writer) error
 
 // commands is every subcommand, by name. The planner's answer commands
 // (slo-to-rate, replicas-to-slo) join them in D3.
@@ -70,7 +73,7 @@ var commands = map[string]command{
 }
 
 // run runs one command. Asking for help is not an error.
-func run(ctx context.Context, args []string, out io.Writer) error {
+func run(ctx context.Context, args []string, out, warn io.Writer) error {
 	if len(args) == 0 {
 		return usageError{errors.New(usage)}
 	}
@@ -78,7 +81,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	if !ok {
 		return usagef("unknown command %q; %s", args[0], usage)
 	}
-	return cmd(ctx, args[1:], out)
+	return cmd(ctx, args[1:], out, warn)
 }
 
 // newFlags is a flag set for one command that reports its errors as usage

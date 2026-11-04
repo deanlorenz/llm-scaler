@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -43,10 +44,11 @@ func fleetServer(t *testing.T) *promtest.Server {
 	return srv
 }
 
-// runCLI runs whatif with args and returns its output and error.
+// runCLI runs whatif with args and returns its output and error; what it
+// warns about is dropped (runCLIWarn keeps it).
 func runCLI(args ...string) (string, error) {
 	var out bytes.Buffer
-	err := run(context.Background(), args, &out)
+	err := run(context.Background(), args, &out, io.Discard)
 	return out.String(), err
 }
 
@@ -91,7 +93,8 @@ func TestCapture_WritesTheWindowAtItsStep(t *testing.T) {
 	rec := filepath.Join(dir, "run.jsonl")
 	text, err = runCLI("generate", "-in", out, "-o", rec)
 	require.NoError(t, err)
-	assert.Contains(t, text, "generated 3 cycles")
+	assert.Contains(t, text, "generated 3 steps")
+	assert.Contains(t, text, "caveat: roles inferred from Pod names")
 	b, err := os.ReadFile(rec)
 	require.NoError(t, err)
 	rep, err := learnreplay.Replay(context.Background(), b, learnreplay.Options{Mode: learnreplay.Fidelity})
@@ -199,7 +202,7 @@ func TestCapture_HelpIsNotAnError(t *testing.T) {
 	text, err := runCLI("capture", "-h")
 	require.NoError(t, err)
 	for _, flag := range []string{"-prometheus", "-namespace", "-kube-state-metrics", "-role-of", "-from", "-to", "-step",
-		"-policy", "-bearer-token-file", "-ca-file", "-insecure-skip-verify", "-batch-cap", "-engine-args"} {
+		"-policy", "-bearer-token-file", "-ca-file", "-insecure-skip-verify", "-batch-cap", "-engine-args", "-timeout", "-force"} {
 		assert.True(t, strings.Contains(text, flag), "help lists %s", flag)
 	}
 }

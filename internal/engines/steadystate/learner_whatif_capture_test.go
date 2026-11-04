@@ -474,14 +474,15 @@ func wiCycle(t *testing.T, ctx context.Context, e *Engine, base *clocktesting.Fa
 	}
 }
 
-// generateWindow captures the fleet's window and plays it with Generate.
-func generateWindow(t *testing.T, prom promv1.API) (*learnreplay.Report, []byte) {
+// generateWindow captures the fleet's window, each range query in parts of
+// at most points steps (0 for the default), and plays it with Generate.
+func generateWindow(t *testing.T, prom promv1.API, points int) (*learnreplay.Report, []byte) {
 	t.Helper()
 	policy := wiPolicy(t)
 	var buf bytes.Buffer
 	_, err := whatifsource.Capture(context.Background(), whatifsource.Options{
 		Prometheus: prom, Namespace: wiNS, From: wiStart, To: wiStart.Add((wiSteps - 1) * wiStep), Step: wiStep,
-		KubeStateMetrics: true, Policy: &policy, EngineArgs: wiArgs,
+		KubeStateMetrics: true, Policy: &policy, EngineArgs: wiArgs, RangeQueryPoints: points,
 	}, &buf)
 	require.NoError(t, err)
 	r, err := gzip.NewReader(&buf)
@@ -511,10 +512,11 @@ func wiPromAPI(t *testing.T, srv *promtest.Server) promv1.API {
 }
 
 // wiRun records the controller over the fleet's window and generates the
-// same window from a capture: the engine's recording and Generate's.
-func wiRun(t *testing.T) (recorded, generated []byte) {
+// same window from a capture, its range queries in parts of at most points
+// steps: the engine's recording, Generate's, and the fake Prometheus.
+func wiRun(t *testing.T, points int) (recorded, generated []byte, srv *promtest.Server) {
 	t.Helper()
-	srv := promtest.New()
+	srv = promtest.New()
 	t.Cleanup(srv.Close)
 	reg := source.NewSourceRegistry()
 	require.NoError(t, reg.Register("prometheus", source.NewNoOpSource()))
@@ -534,7 +536,7 @@ func wiRun(t *testing.T) (recorded, generated []byte) {
 	})
 	prom := wiPromAPI(t, srv)
 	recorded = recordWindow(t, prom)
-	rep, _ := generateWindow(t, prom)
+	rep, _ := generateWindow(t, prom, points)
 
 	// The run exercised what it is meant to: every analyzer judged, the slo
 	// one with the router, lines published, and a model held.
@@ -547,12 +549,33 @@ func wiRun(t *testing.T) (recorded, generated []byte) {
 	require.Equal(t, 2*wiSteps+1, run[throughput.KindAnalyze])
 	require.Positive(t, run[saturation.KindPublishLine], "no ITL line was published")
 	require.Equal(t, wiSteps-1, run[settle.KindHold], "acme/idle is held on every cycle after its first")
-	return recorded, rep.Recording
+	return recorded, rep.Recording, srv
 }
 
 func TestWhatifCapture_GenerateReproducesTheControllersRun(t *testing.T) {
-	recorded, generated := wiRun(t)
+	recorded, generated, _ := wiRun(t, 0)
+	wiSameRun(t, recorded, generated)
+}
 
+// A window asked in parts (whatifsource maxPointsPerQuery, set small here)
+// is joined with no step lost or doubled: the same run as asked whole.
+func TestWhatifCapture_GenerateReproducesTheControllersRunAcrossSplitRangeQueries(t *testing.T) {
+	const points = 5
+	recorded, generated, srv := wiRun(t, points)
+	node := whatifsource.KSMQueries(wiNS).PodNode
+	var parts []promtest.Request
+	for _, r := range srv.Requests() {
+		if r.Path == "/api/v1/query_range" && r.Query == node {
+			parts = append(parts, r)
+		}
+	}
+	require.Len(t, parts, (wiSteps+points-1)/points, "the window was not split")
+	wiSameRun(t, recorded, generated)
+}
+
+// wiSameRun holds a generated run to the controller's recorded one.
+func wiSameRun(t *testing.T, recorded, generated []byte) {
+	t.Helper()
 	// Every event, in order: the same kind at the same instant with the same
 	// data. Each Analyze carries its whole input, its result and the store
 	// records it read, so this holds the captured input to the collected
@@ -583,7 +606,7 @@ func TestWhatifCapture_GenerateReproducesTheControllersRun(t *testing.T) {
 // as the kinds each recorded at each instant, so a change of order names
 // itself even where it would change no value.
 func TestWhatifCapture_GenerateCallsInTheEnginesOrder(t *testing.T) {
-	recorded, generated := wiRun(t)
+	recorded, generated, _ := wiRun(t, 0)
 	want, got := wiKindsByStep(t, recorded), wiKindsByStep(t, generated)
 	require.Len(t, want, wiSteps)
 	for i := range want {

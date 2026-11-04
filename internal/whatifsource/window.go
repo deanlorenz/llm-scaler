@@ -13,8 +13,8 @@ import (
 
 // maxPointsPerQuery bounds one range query's steps: Prometheus refuses a
 // query of more than 11,000 points per series, so a longer window is asked
-// in parts and joined.
-var maxPointsPerQuery = 10_000
+// in parts and joined. Options.RangeQueryPoints sets a smaller bound.
+const maxPointsPerQuery = 10_000
 
 // windowAPI is a Prometheus API that answers an instant query, at the step
 // it is set to, from one range query over the whole window.
@@ -36,14 +36,23 @@ type windowAPI struct {
 	promv1.API
 	// prom is the real client: QueryRange is the only call made on it, and
 	// a range query reads, never writes.
-	prom  promv1.API
-	start time.Time
-	end   time.Time
-	step  time.Duration
+	prom   promv1.API
+	start  time.Time
+	end    time.Time
+	step   time.Duration
+	points int
+	// abort cancels the capture's context with the first range query that
+	// fails, so the collector's retries (QueryPrometheusWithBackoff) stop at
+	// once instead of sleeping through their backoff on an answer that is
+	// memoized and cannot change.
+	abort context.CancelCauseFunc
 
 	mu   sync.Mutex
 	at   time.Time
 	memo map[string]*rangeAnswer
+	// failed is the first range query that failed. Every query a capture
+	// asks is required (Capture), so it fails the capture.
+	failed error
 }
 
 // rangeAnswer is one expression's range query, fetched once.
@@ -54,9 +63,17 @@ type rangeAnswer struct {
 	err      error
 }
 
-func newWindowAPI(prom promv1.API, start, end time.Time, step time.Duration) *windowAPI {
-	return &windowAPI{prom: prom, start: start, end: end, step: step, at: start,
-		memo: map[string]*rangeAnswer{}}
+// newWindowAPI answers instant queries from range queries over start to end
+// at step, each in parts of at most points steps (maxPointsPerQuery when
+// points is not positive). abort, when not nil, is called with the first
+// range query that fails.
+func newWindowAPI(prom promv1.API, start, end time.Time, step time.Duration, points int,
+	abort context.CancelCauseFunc) *windowAPI {
+	if points <= 0 {
+		points = maxPointsPerQuery
+	}
+	return &windowAPI{prom: prom, start: start, end: end, step: step, points: points, abort: abort,
+		at: start, memo: map[string]*rangeAnswer{}}
 }
 
 // setStep sets the instant the next instant queries are answered at.
@@ -73,6 +90,27 @@ func (w *windowAPI) ranges() int {
 	return len(w.memo)
 }
 
+// failure is the first range query that failed, nil while none has.
+func (w *windowAPI) failure() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.failed
+}
+
+// fail records err as the window's failure, when it is the first, and
+// aborts the capture with it.
+func (w *windowAPI) fail(err error) {
+	w.mu.Lock()
+	first := w.failed == nil
+	if first {
+		w.failed = err
+	}
+	w.mu.Unlock()
+	if first && w.abort != nil {
+		w.abort(err)
+	}
+}
+
 // Query answers an instant query at the step setStep set, whatever ts the
 // caller passed (the collector passes the wall clock).
 func (w *windowAPI) Query(ctx context.Context, query string, _ time.Time, _ ...promv1.Option) (model.Value, promv1.Warnings, error) {
@@ -84,7 +122,12 @@ func (w *windowAPI) Query(ctx context.Context, query string, _ time.Time, _ ...p
 	}
 	at := w.at
 	w.mu.Unlock()
-	a.once.Do(func() { a.byTime, a.warnings, a.err = w.fetch(ctx, query) })
+	a.once.Do(func() {
+		a.byTime, a.warnings, a.err = w.fetch(ctx, query)
+		if a.err != nil {
+			w.fail(a.err)
+		}
+	})
 	if a.err != nil {
 		return nil, a.warnings, a.err
 	}
@@ -95,12 +138,12 @@ func (w *windowAPI) Query(ctx context.Context, query string, _ time.Time, _ ...p
 	return vec, a.warnings, nil
 }
 
-// fetch asks query over the window, in parts of at most maxPointsPerQuery
-// steps, and indexes its samples by the instant they were evaluated at.
+// fetch asks query over the window, in parts of at most w.points steps,
+// and indexes its samples by the instant they were evaluated at.
 func (w *windowAPI) fetch(ctx context.Context, query string) (map[model.Time]model.Vector, promv1.Warnings, error) {
 	out := map[model.Time]model.Vector{}
 	var warnings promv1.Warnings
-	chunk := time.Duration(maxPointsPerQuery-1) * w.step
+	chunk := time.Duration(w.points-1) * w.step
 	for from := w.start; !from.After(w.end); from = from.Add(chunk + w.step) {
 		to := from.Add(chunk)
 		if to.After(w.end) {
@@ -120,11 +163,24 @@ func (w *windowAPI) fetch(ctx context.Context, query string) (map[model.Time]mod
 		}
 		for _, stream := range matrix {
 			for _, p := range stream.Values {
+				if !w.onGrid(p.Timestamp) {
+					return nil, warnings, fmt.Errorf("range query %q: a sample at %s, off the step grid from %s every %s: "+
+						"the server did not evaluate at the start it was asked, as a query frontend that aligns start "+
+						"to step (Thanos, Mimir) does; capture from a --from that is a multiple of --step, or turn that alignment off",
+						query, p.Timestamp.Time().UTC().Format(time.RFC3339Nano), w.start.Format(time.RFC3339Nano), w.step)
+				}
 				out[p.Timestamp] = append(out[p.Timestamp], &model.Sample{Metric: stream.Metric, Value: p.Value, Timestamp: p.Timestamp})
 			}
 		}
 	}
 	return out, warnings, nil
+}
+
+// onGrid reports whether ts is one of the window's steps, to the
+// millisecond Prometheus keeps.
+func (w *windowAPI) onGrid(ts model.Time) bool {
+	d := int64(ts) - w.start.UnixMilli()
+	return d >= 0 && d%w.step.Milliseconds() == 0
 }
 
 // errNotCaptured is a method of the Prometheus API a capture does not

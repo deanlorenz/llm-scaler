@@ -25,16 +25,13 @@ func stepValue(labels map[string]string) promtest.Series {
 }
 
 func TestCapture_EveryStepReadsItsOwnSamplesAcrossChunkedRangeQueries(t *testing.T) {
-	old := maxPointsPerQuery
-	maxPointsPerQuery = 10
-	defer func() { maxPointsPerQuery = old }()
-
 	srv := promtest.New()
 	defer srv.Close()
 	srv.Set(promQL(t, registration.QueryKvCacheUsage), stepValue(podLabels(testPod)))
 	srv.Set(promQL(t, registration.QueryQueueLength), promtest.Const(podLabels(testPod), 1))
 	opts := roleOfOpts(t, srv)
 	opts.To = t0.Add(24 * 15 * time.Second)
+	opts.RangeQueryPoints = 10
 	d, sum := capture(t, opts)
 
 	require.Equal(t, 25, sum.Steps)

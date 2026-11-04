@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -61,6 +62,15 @@ const (
 	// accelerator could not be read from kube-state-metrics.
 	FlagGPUsFromFlags        = "GPUs per replica from flags: kube-state-metrics has no GPU request for a variant"
 	FlagAcceleratorFromFlags = "accelerator from flags: kube-state-metrics has no node label for a variant"
+	// FlagNoRollouts: a capture cannot see a rollout, so Generate files every
+	// scale target as settled (not rolling out), and a variant rolled out in
+	// the window reads as one that was not.
+	FlagNoRollouts = "rollouts not seen: every scale target filed as not rolling out"
+	// FlagMultiPodGroups: a variant runs multi-Pod groups (a LeaderWorkerSet,
+	// or Pods a StatefulSet owns), whose replica spans several Pods; its GPUs
+	// per replica are read from one Pod's request, not the group's. A format:
+	// how many variants.
+	FlagMultiPodGroups = "multi-Pod groups in %d variants: GPUs per replica read from one Pod's request, not the group's"
 )
 
 // Options configure a capture.
@@ -91,7 +101,28 @@ type Options struct {
 	// does not give.
 	GPUsPerReplica int
 	Accelerator    string
+	// Force captures a window larger than MaxStepQueries.
+	Force bool
+	// RangeQueryPoints bounds the steps of one range query; a longer window
+	// is asked in parts and joined. Zero is Prometheus' bound
+	// (maxPointsPerQuery); tests set it small to split a short window.
+	RangeQueryPoints int
 }
+
+// MaxStepQueries bounds a capture's steps times the queries it may ask.
+// Every range query's samples are held in memory for the whole capture, one
+// vector per step per query, so this bounds the memory a capture takes:
+// about a day at a 15 s step with every template. A larger window needs
+// Options.Force (--force).
+const MaxStepQueries = 1_000_000
+
+// ErrWindowTooLarge is a window of more steps times queries than
+// MaxStepQueries, without Force.
+var ErrWindowTooLarge = errors.New("the window is too large to hold in memory")
+
+// ErrRoleOverlap is --role-of selectors that can pick the same Pod: two
+// whose inferred Pod-name prefixes nest, or a Pod two selectors match.
+var ErrRoleOverlap = errors.New("--role-of selectors overlap")
 
 // Summary is what a capture wrote.
 type Summary struct {
@@ -119,6 +150,8 @@ func (o *Options) validate() error {
 		return errors.New("no namespace")
 	case o.Step <= 0:
 		return fmt.Errorf("step %v is not positive", o.Step)
+	case o.Step%time.Millisecond != 0:
+		return fmt.Errorf("step %v is not a whole number of milliseconds, which is what Prometheus keeps", o.Step)
 	case o.From.IsZero() || o.To.IsZero():
 		return errors.New("the window needs both ends")
 	case o.To.Before(o.From):
@@ -129,6 +162,24 @@ func (o *Options) validate() error {
 		return fmt.Errorf("batch cap %d is negative", o.BatchCap)
 	case o.GPUsPerReplica < 0:
 		return fmt.Errorf("GPUs per replica %d is negative", o.GPUsPerReplica)
+	}
+	return CheckRoleOf(o.RoleOf)
+}
+
+// CheckRoleOf refuses --role-of selectors whose inferred Pod-name prefixes
+// nest: app=qwen infers "qwen-", which also begins every "qwen-prefill-"
+// Pod, so the first selector would claim the second's Pods (and the
+// router's, "qwen-epp-"). A Pod both selectors match by their labels is
+// refused when it is read (fleet attribute).
+func CheckRoleOf(roles []RoleOf) error {
+	for i, a := range roles {
+		for j, b := range roles {
+			if i != j && a.prefix != "" && b.prefix != "" && strings.HasPrefix(b.prefix, a.prefix) {
+				return fmt.Errorf("%w: %s infers the Pod-name prefix %q, which also begins %s's %q; select by labels "+
+					"(--kube-state-metrics with --metric-labels-allowlist) or name prefixes that do not nest",
+					ErrRoleOverlap, a, a.prefix, b, b.prefix)
+			}
+		}
 	}
 	return nil
 }
@@ -146,6 +197,9 @@ type variantInfo struct {
 	// Pods' accelerators; empty without kube-state-metrics.
 	gpus   map[int]int
 	accels map[string]int
+	// multiPod is whether kube-state-metrics shows its Pods in multi-Pod
+	// groups (FlagMultiPodGroups).
+	multiPod bool
 }
 
 // windowScan is the first pass over the window: every variant whose Pods
@@ -154,6 +208,11 @@ type windowScan struct {
 	variants map[string]*variantInfo
 	// live is, per step, the variants with a KV series then.
 	live map[time.Time]map[string]bool
+	// engines is every Pod with a KV series at some step of the window: the
+	// engine Pods, which a variant's replicas are counted from. A Pod a
+	// selector picks that never had one (the router's, say) is not a
+	// replica.
+	engines map[string]bool
 	// inferred and noRoleLabel are the role map's caveats, and ksmGaps the
 	// steps at which kube-state-metrics listed no Pod.
 	inferred, noRoleLabel bool
@@ -170,7 +229,18 @@ type windowScan struct {
 // each step: each template's PromQL is asked once as a range query over the
 // window (windowAPI) and each step reads the samples evaluated at it. Every
 // query is a range query: a capture reads, and writes nothing.
+//
+// Every query is required: one that fails fails the capture, naming the
+// query, at once. A failed query leaves its field absent at every step of
+// the window, and a capture cannot tell that from a field the window did
+// not have, so a capture that went on would hand Generate inputs a
+// controller never read, with nothing to say so. The usual failure is a
+// limit (query.max-samples, a timeout) on a histogram over many steps; a
+// shorter window or a longer step fits under it.
 func Capture(ctx context.Context, opts Options, w io.Writer) (*Summary, error) {
+	// Prometheus keeps milliseconds: a start finer than that is asked at
+	// the millisecond below it and every step would read off the grid.
+	opts.From, opts.To = opts.From.Truncate(time.Millisecond), opts.To.Truncate(time.Millisecond)
 	if err := opts.validate(); err != nil {
 		return nil, err
 	}
@@ -180,7 +250,9 @@ func Capture(ctx context.Context, opts Options, w io.Writer) (*Summary, error) {
 	if opts.GPUsPerReplica == 0 {
 		opts.GPUsPerReplica = 1
 	}
-	api := newWindowAPI(opts.Prometheus, opts.From, opts.To, opts.Step)
+	ctx, abort := context.WithCancelCause(ctx)
+	defer abort(nil)
+	api := newWindowAPI(opts.Prometheus, opts.From, opts.To, opts.Step, opts.RangeQueryPoints, abort)
 	src := promsource.NewPrometheusSource(ctx, api, promsource.PrometheusSourceConfig{DefaultTTL: time.Second})
 	defer src.Close()
 	registry := source.NewSourceRegistry()
@@ -196,9 +268,17 @@ func Capture(ctx context.Context, opts Options, w io.Writer) (*Summary, error) {
 	registration.RegisterAlwaysOnQueries(registry)
 
 	steps := windowSteps(opts.From, opts.To, opts.Step)
+	queries := len(src.QueryList().List())
+	if opts.KubeStateMetrics {
+		queries += reflect.TypeFor[KSM]().NumField()
+	}
+	if n := len(steps) * queries; n > MaxStepQueries && !opts.Force {
+		return nil, fmt.Errorf("%w: %d steps times %d queries is %d, over the %d a capture holds without --force; "+
+			"shorten the window or lengthen the step", ErrWindowTooLarge, len(steps), queries, n, MaxStepQueries)
+	}
 	scan, err := scanWindow(ctx, api, src, opts, steps)
 	if err != nil {
-		return nil, err
+		return nil, captureErr(api, err)
 	}
 	variants, flags := windowVariants(scan, opts)
 	if len(variants) == 0 {
@@ -229,14 +309,19 @@ func Capture(ctx context.Context, opts Options, w io.Writer) (*Summary, error) {
 	}
 	clk := &stepClock{}
 	for _, at := range steps {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+		if ctx.Err() != nil {
+			return nil, captureErr(api, context.Cause(ctx))
 		}
 		api.setStep(at)
 		clk.at = at
 		cycles, err := captureStep(ctx, api, src, opts, clk, scan, byKey, models)
+		if err == nil {
+			// The collector reads a failed query as an absent field, and
+			// goes on: the failure is the window's.
+			err = api.failure()
+		}
 		if err != nil {
-			return nil, fmt.Errorf("step %s: %w", at.Format(time.RFC3339), err)
+			return nil, fmt.Errorf("step %s: %w", at.Format(time.RFC3339), captureErr(api, err))
 		}
 		for _, c := range cycles {
 			rec.Record(learnreplay.KindCaptureCycle, at, c)
@@ -261,6 +346,17 @@ func windowSteps(from, to time.Time, step time.Duration) []time.Time {
 		out = append(out, at)
 	}
 	return out
+}
+
+// captureErr is the error a capture fails with: the window's failed query
+// when one failed, whatever err its abort caused downstream (a cancelled
+// context, say); err otherwise.
+func captureErr(api *windowAPI, err error) error {
+	if failed := api.failure(); failed != nil {
+		return fmt.Errorf("%w (every query a capture asks is required: shorten the window, lengthen the step, "+
+			"or raise the server's limit)", failed)
+	}
+	return err
 }
 
 // roleSource names where the role map came from.
@@ -289,7 +385,8 @@ func scanWindow(ctx context.Context, api *windowAPI, src source.MetricsSource, o
 	if err != nil {
 		return nil, err
 	}
-	scan := &windowScan{variants: map[string]*variantInfo{}, live: map[time.Time]map[string]bool{}}
+	scan := &windowScan{variants: map[string]*variantInfo{}, live: map[time.Time]map[string]bool{},
+		engines: map[string]bool{}}
 	sawRoleLabel := false
 	for _, at := range steps {
 		api.setStep(at)
@@ -309,11 +406,15 @@ func scanWindow(ctx context.Context, api *windowAPI, src source.MetricsSource, o
 				name = string(s.Metric["pod_name"])
 			}
 			p := f.lookup(name)
+			if p != nil && len(p.overlap) > 1 {
+				return nil, overlapErr(p)
+			}
 			modelID := string(s.Metric["model_name"])
 			if p == nil || p.variant == "" || modelID == "" {
 				continue
 			}
 			live[p.variant] = true
+			scan.engines[name] = true
 			v := scan.variants[p.variant]
 			if v == nil {
 				v = &variantInfo{model: modelID, role: p.role, gpus: map[int]int{}, accels: map[string]int{}}
@@ -321,6 +422,7 @@ func scanWindow(ctx context.Context, api *windowAPI, src source.MetricsSource, o
 			}
 			scan.inferred = scan.inferred || p.inferred
 			if p.ksm {
+				v.multiPod = v.multiPod || p.inGroup()
 				if p.gpus > 0 {
 					v.gpus[p.gpus]++
 				}
@@ -357,9 +459,13 @@ func mostCommon[K int | string](counts map[K]int) (best K, ok bool) {
 func windowVariants(scan *windowScan, opts Options) ([]learnreplay.CaptureVariant, []string) {
 	var flags []string
 	gpusFromFlags, accelFromFlags := false, false
+	multiPod := 0
 	out := make([]learnreplay.CaptureVariant, 0, len(scan.variants))
 	for _, name := range slices.Sorted(maps.Keys(scan.variants)) {
 		info := scan.variants[name]
+		if info.multiPod {
+			multiPod++
+		}
 		gpus, ok := mostCommon(info.gpus)
 		if !ok {
 			gpus, gpusFromFlags = opts.GPUsPerReplica, opts.KubeStateMetrics
@@ -393,6 +499,10 @@ func windowVariants(scan *windowScan, opts Options) ([]learnreplay.CaptureVarian
 	if accelFromFlags {
 		flags = append(flags, FlagAcceleratorFromFlags)
 	}
+	if multiPod > 0 {
+		flags = append(flags, fmt.Sprintf(FlagMultiPodGroups, multiPod))
+	}
+	flags = append(flags, FlagNoRollouts)
 	return out, flags
 }
 
@@ -519,7 +629,7 @@ func captureStep(ctx context.Context, api *windowAPI, src source.MetricsSource, 
 		cycle := learnreplay.CaptureCycle{Parked: parked}
 		in := domain.AnalyzerInput{ModelID: modelID, Namespace: opts.Namespace}
 		if len(active) > 0 {
-			if err := collectModel(ctx, c, f, opts, modelID, active, variants, &in); err != nil {
+			if err := collectModel(ctx, c, f, opts, scan.engines, modelID, active, variants, &in); err != nil {
 				return nil, fmt.Errorf("model %s: %w", modelID, err)
 			}
 		}
@@ -533,7 +643,7 @@ func captureStep(ctx context.Context, api *windowAPI, src source.MetricsSource, 
 // collects it (prepareModelData, buildAnalyzerInput): the rows, the
 // variants' states, the policy, the scheduler queue, the arrival rate, the
 // router latency and the flow-control pools.
-func collectModel(ctx context.Context, c *collector.ReplicaMetricsCollector, f *fleet, opts Options,
+func collectModel(ctx context.Context, c *collector.ReplicaMetricsCollector, f *fleet, opts Options, engines map[string]bool,
 	modelID string, active []string, variants map[string]learnreplay.CaptureVariant, in *domain.AnalyzerInput) error {
 	targets := make(map[string]scaletarget.ScaleTargetAccessor, len(active))
 	for _, name := range active {
@@ -555,7 +665,7 @@ func collectModel(ctx context.Context, c *collector.ReplicaMetricsCollector, f *
 	policy := policyFor(opts, modelID, opts.Namespace)
 	in.ReplicaMetrics = rows
 	in.Config = &policy
-	in.VariantStates = variantStates(f, opts, active, variants, rows)
+	in.VariantStates = variantStates(f, opts, engines, active, variants, rows)
 	if len(rows) > 0 {
 		in.SchedulerQueue = c.CollectSchedulerQueueMetrics(ctx, modelID, opts.Namespace)
 		in.ArrivalRate = c.CollectModelArrivalRate(ctx, modelID, opts.Namespace)
@@ -568,8 +678,11 @@ func collectModel(ctx context.Context, c *collector.ReplicaMetricsCollector, f *
 // variantStates is each active variant's state, in name order: its replicas
 // from kube-state-metrics (current, desired, not Ready) or, without it, its
 // rows; its GPUs per replica, role and accelerator from the window line.
-func variantStates(f *fleet, opts Options, active []string, variants map[string]learnreplay.CaptureVariant,
-	rows []domain.ReplicaMetrics) []domain.VariantReplicaState {
+// Only engine Pods count as replicas: those with a KV series at some step
+// of the window (windowScan.engines). A Pod that never had one, as the
+// router's Pod a name prefix also picks, is not a replica.
+func variantStates(f *fleet, opts Options, engines map[string]bool, active []string,
+	variants map[string]learnreplay.CaptureVariant, rows []domain.ReplicaMetrics) []domain.VariantReplicaState {
 	out := make([]domain.VariantReplicaState, 0, len(active))
 	for _, name := range slices.Sorted(slices.Values(active)) {
 		v := variants[name]
@@ -577,7 +690,7 @@ func variantStates(f *fleet, opts Options, active []string, variants map[string]
 			AcceleratorName: v.Accelerator}
 		if opts.KubeStateMetrics && len(f.pods) > 0 {
 			for _, p := range f.pods {
-				if p.variant != name || p.deleting {
+				if p.variant != name || p.deleting || !engines[p.name] {
 					continue
 				}
 				vs.CurrentReplicas++

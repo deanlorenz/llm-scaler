@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -91,6 +93,11 @@ type pod struct {
 	// and inferred whether that came from its name alone.
 	variant, role string
 	inferred      bool
+	// overlap is every --role-of that picked it; more than one is refused
+	// (ErrRoleOverlap).
+	overlap []string
+	// ownerKind is the kind kube-state-metrics says owns it.
+	ownerKind string
 
 	running, ready, deleting bool
 	created, started, since  time.Time
@@ -181,7 +188,11 @@ func fleetAt(ctx context.Context, api *windowAPI, namespace string, ksm bool, ro
 	owner := map[string]string{}
 	for _, s := range ownerV {
 		name := string(s.Metric["pod"])
-		if name == "" || f.pods[name] == nil || s.Metric["owner_kind"] != "ReplicaSet" {
+		if name == "" || f.pods[name] == nil {
+			continue
+		}
+		f.pods[name].ownerKind = string(s.Metric["owner_kind"])
+		if s.Metric["owner_kind"] != "ReplicaSet" {
 			continue
 		}
 		rs := string(s.Metric["owner_name"])
@@ -219,7 +230,33 @@ func fleetAt(ctx context.Context, api *windowAPI, namespace string, ksm bool, ro
 	for name, p := range f.pods {
 		f.attribute(p, owner[name])
 	}
+	for _, name := range slices.Sorted(maps.Keys(f.pods)) {
+		if p := f.pods[name]; len(p.overlap) > 1 {
+			return nil, overlapErr(p)
+		}
+	}
 	return f, nil
+}
+
+// overlapErr is a Pod more than one --role-of picked.
+func overlapErr(p *pod) error {
+	return fmt.Errorf("%w: Pod %s is picked by %s; narrow the selectors so each Pod has one",
+		ErrRoleOverlap, p.name, strings.Join(p.overlap, " and "))
+}
+
+// inGroup reports whether kube-state-metrics shows p in a multi-Pod group:
+// a LeaderWorkerSet's labels, where they are exported, or a StatefulSet
+// owner, which is how a LeaderWorkerSet runs its groups.
+func (p *pod) inGroup() bool {
+	if p.ownerKind == "StatefulSet" || p.ownerKind == "LeaderWorkerSet" {
+		return true
+	}
+	for _, k := range []string{lwsv1.WorkerIndexLabelKey, lwsv1.SetNameLabelKey} {
+		if _, ok := p.labels[ksmLabelName(k)]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
@@ -233,14 +270,17 @@ func unixTime(v float64) time.Time {
 	return time.Unix(int64(sec), int64(math.Round(frac*1e9))).UTC()
 }
 
-// attribute sets p's variant and role: the first --role-of that picks it,
-// else the Deployment kube-state-metrics says owns it, with the role its
-// llm-d.ai/role label names.
+// attribute sets p's variant and role: the --role-of that picks it, else
+// the Deployment kube-state-metrics says owns it, with the role its
+// llm-d.ai/role label names. Every --role-of that picks it is noted in
+// p.overlap; more than one is refused by the caller.
 func (f *fleet) attribute(p *pod, deployment string) {
 	for _, r := range f.roleOf {
 		if ok, inferred := r.matches(p.name, p.labels); ok {
-			p.variant, p.role, p.inferred = r.Variant, r.Role, inferred
-			return
+			if len(p.overlap) == 0 {
+				p.variant, p.role, p.inferred = r.Variant, r.Role, inferred
+			}
+			p.overlap = append(p.overlap, r.String())
 		}
 	}
 	if len(f.roleOf) > 0 || deployment == "" {

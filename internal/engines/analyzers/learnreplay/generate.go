@@ -38,30 +38,39 @@ import (
 // step, the lines of a step together and the steps in time order.
 //
 // Per step, at the step's instant, as the engine's cycle does
-// (steadystate engine.go beginSLOCycle, notePresentVariants,
-// evictStaleLearnedState; engine_v2.go runAnalyzers and buildAnalyzerInput):
+// (steadystate engine.go beginSLOCycle, optimizeV2's prune,
+// notePresentVariants, evictStaleLearnedState; engine_v2.go runAnalyzers
+// and buildAnalyzerInput):
 //
 //  1. slo BeginCycle;
-//  2. NoteVariantsPresent on saturation and then slo, model by model in key
+//  2. the settle tracker keeps only the models with a variant that has
+//     replicas this step (the engine's retainSettle, from optimizeV2's
+//     prune): a model parked whole is in no model group, and its record is
+//     forgotten. A step with no such model stops here, as the engine's
+//     cycle with no active variant returns before anything below;
+//  3. NoteVariantsPresent on saturation and then slo, model by model in key
 //     order, for the variants with replicas and then for the parked ones;
-//  3. the three sweeps: saturation's EvictStaleHistory, the store's
+//  4. the three sweeps: saturation's EvictStaleHistory, the store's
 //     EvictStale and slo's EvictStale;
 //
 // then per model, in key order:
 //
-//  4. the settle tracker: observed with the model's rows, or held for a
+//  5. the settle tracker: observed with the model's rows, or held for a
 //     model with variants and no rows (the engine's onNothingObserved), which
 //     then runs nothing more;
-//  5. per variant, in name order, StableAcceleratorFor and then
+//  6. per variant, in name order, StableAcceleratorFor and then
 //     FileScaleTarget with the capture's engine parameters (the engine's
 //     LoadFromScaleTarget). A capture has no annotation history, so no
 //     variant is forgotten on request;
-//  6. Analyze: saturation, then slo and throughput when the policy lists
+//  7. Analyze: saturation, then slo and throughput when the policy lists
 //     them and the start built them, the slo analyzer's router serving the
 //     captured router latency.
 //
-// A model whose variants are all parked is only stamped present (2), as the
+// A model whose variants are all parked is only stamped present (3), as the
 // engine, which analyzes active variants only, does.
+//
+// The recording's start line carries the capture window's flags as its
+// Caveats, so a golden made from it says what the capture could not see.
 const (
 	// KindCaptureWindow is a capture's second line, with CaptureWindow.
 	KindCaptureWindow = "capture.Window"
@@ -124,42 +133,57 @@ type genModel struct {
 	parked []string
 }
 
+// CaptureError is a capture Generate cannot play: unreadable, cut off, out
+// of order, or naming a variant its window does not. The capture is at
+// fault, not the analyzers; cmd/whatif exits 2 for it, and 1 for any other
+// error.
+type CaptureError struct{ Err error }
+
+func (e *CaptureError) Error() string { return e.Err.Error() }
+func (e *CaptureError) Unwrap() error { return e.Err }
+
+// badCapture marks err as the capture's fault (CaptureError).
+func badCapture(err error) error { return &CaptureError{Err: err} }
+
 // generate plays a capture through the analyzers (Mode Generate).
 func generate(ctx context.Context, capture []byte, opts Options) (*Report, error) {
-	read, err := learnrec.Read(capture)
-	if err != nil {
-		return nil, err
-	}
-	events := read.Events
-	if read.TornTail != "" {
-		return nil, errors.New("learnreplay: the capture's last line is cut off; a capture is written whole or not at all")
-	}
-	if len(events) < 2 || events[0].Kind != learnrec.KindStart || events[1].Kind != KindCaptureWindow {
-		return nil, errors.New("learnreplay: a capture starts with a start line and a window line")
-	}
-	var start learnrec.Start
-	if err := events[0].DecodeData(&start); err != nil {
-		return nil, fmt.Errorf("learnreplay: start: %w", err)
-	}
-	var window CaptureWindow
-	if err := events[1].DecodeData(&window); err != nil {
-		return nil, fmt.Errorf("learnreplay: window: %w", err)
-	}
-	if window.Step <= 0 {
-		return nil, fmt.Errorf("learnreplay: the capture's step is %v", window.Step)
-	}
 	if len(opts.Switches) > 0 {
 		return nil, errors.New("learnreplay: Generate takes no switches; generate the recording, then replay it with them")
 	}
+	read, err := learnrec.Read(capture)
+	if err != nil {
+		return nil, badCapture(err)
+	}
+	events := read.Events
+	if read.TornTail != "" {
+		return nil, badCapture(errors.New("learnreplay: the capture's last line is cut off; a capture is written whole or not at all"))
+	}
+	if len(events) < 2 || events[0].Kind != learnrec.KindStart || events[1].Kind != KindCaptureWindow {
+		return nil, badCapture(errors.New("learnreplay: a capture starts with a start line and a window line"))
+	}
+	var start learnrec.Start
+	if err := events[0].DecodeData(&start); err != nil {
+		return nil, badCapture(fmt.Errorf("learnreplay: start: %w", err))
+	}
+	var window CaptureWindow
+	if err := events[1].DecodeData(&window); err != nil {
+		return nil, badCapture(fmt.Errorf("learnreplay: window: %w", err))
+	}
+	if window.Step <= 0 {
+		return nil, badCapture(fmt.Errorf("learnreplay: the capture's step is %v", window.Step))
+	}
 	// The recording is this build's: it carries this build's commit, so a
-	// replay at that commit (learnergolden add) reproduces it.
+	// replay at that commit (learnergolden add) reproduces it. It carries
+	// the capture's caveats, so a golden made from it shows them.
 	start.Commit = learnrec.Commit()
+	start.Caveats = slices.Clone(window.Flags)
 	var buf bytes.Buffer
 	rec := learnrec.New(&buf, 0)
 	opts.Engine = noEngine{}
 	r, err := build(start, events[0].Now, opts, rec)
 	if err != nil {
-		return nil, err
+		// The start line is the capture's.
+		return nil, badCapture(err)
 	}
 	r.settle.tracker.SetInterval(window.Step)
 	rec.Record(learnrec.KindStart, events[0].Now, start)
@@ -171,7 +195,7 @@ func generate(ctx context.Context, capture []byte, opts Options) (*Report, error
 	}
 	steps, err := captureSteps(events[2:])
 	if err != nil {
-		return nil, err
+		return nil, badCapture(err)
 	}
 	for _, step := range steps {
 		if err := ctx.Err(); err != nil {
@@ -262,7 +286,20 @@ func (r *replayer) generateStep(ctx context.Context, now time.Time, models []gen
 	if r.slo != nil {
 		r.slo.BeginCycle()
 	}
-	// 2. Presence, before the sweeps: the active variants, then the parked.
+	// 2. The settle tracker keeps the models with a variant that has
+	// replicas, as the engine's prune does; a step with none is the
+	// engine's cycle with no active variant, which ends here.
+	active := map[string]bool{}
+	for _, m := range models {
+		if len(m.input.VariantStates) > 0 {
+			active[m.key] = true
+		}
+	}
+	r.settle.tracker.Retain(active)
+	if len(active) == 0 {
+		return nil
+	}
+	// 3. Presence, before the sweeps: the active variants, then the parked.
 	note := func(ns, model string, names []string) {
 		if len(names) == 0 {
 			return
@@ -284,7 +321,7 @@ func (r *replayer) generateStep(ctx context.Context, now time.Time, models []gen
 	for _, m := range models {
 		note(m.input.Namespace, m.input.ModelID, m.parked)
 	}
-	// 3. The sweeps, before anything stamps state this cycle.
+	// 4. The sweeps, before anything stamps state this cycle.
 	r.sat.EvictStaleHistory()
 	r.store.EvictStale(now, capacity.EvictionTimeout)
 	if r.slo != nil {
@@ -302,12 +339,12 @@ func (r *replayer) generateStep(ctx context.Context, now time.Time, models []gen
 }
 
 // generateModel plays one model's cycle: the settle tracker, the store, the
-// analyzers (steps 4 to 6 of Generate).
+// analyzers (steps 5 to 7 of Generate).
 func (r *replayer) generateModel(ctx context.Context, now time.Time, m genModel,
 	variants map[string]CaptureVariant, interval time.Duration) error {
 	in := m.input
 	ev := settle.ObserveEvent{Namespace: in.Namespace, ModelID: in.ModelID, Interval: interval}
-	// 4. The settle tracker first; a model with no rows is held, and the
+	// 5. The settle tracker first; a model with no rows is held, and the
 	// analyzers do not run for it.
 	if len(in.ReplicaMetrics) == 0 || m.policy == nil {
 		r.rec.Record(settle.KindHold, now, ev)
@@ -321,7 +358,7 @@ func (r *replayer) generateModel(ctx context.Context, now time.Time, m genModel,
 	}
 	r.settle.tracker.Observe(m.key, settlerow.Of(in.ReplicaMetrics, roles), now)
 
-	// 5. Each variant's scale target, filed under its stabilised
+	// 6. Each variant's scale target, filed under its stabilised
 	// accelerator.
 	names := make([]string, 0, len(in.VariantStates))
 	for _, vs := range in.VariantStates {
@@ -331,13 +368,13 @@ func (r *replayer) generateModel(ctx context.Context, now time.Time, m genModel,
 	for _, name := range names {
 		v, ok := variants[utils.GetNamespacedKey(in.ModelID, name)]
 		if !ok {
-			return fmt.Errorf("variant %s is in a cycle and not in the capture's window", name)
+			return badCapture(fmt.Errorf("variant %s is in a cycle and not in the capture's window", name))
 		}
 		accel := r.sat.StableAcceleratorFor(in.Namespace, name, v.Accelerator)
 		r.store.FileScaleTarget(in.Namespace, in.ModelID, name, accel, v.GpuCount, v.Params, false, now)
 	}
 
-	// 6. Saturation first, then the listed analyzers.
+	// 7. Saturation first, then the listed analyzers.
 	r.rep.Analyzes[saturation.KindAnalyze]++
 	if _, err := r.sat.Analyze(ctx, in); err != nil {
 		// The engine's cycle fails the model here, and so does this one: the
