@@ -39,8 +39,9 @@ type ForgetMarkSnapshot struct {
 // windows and what is kept beside them, its ITL window, baseline and the line
 // it published, its start estimate, its accelerator memo, anything pending
 // from a restore -- its own figure from previous engine arguments, and its
-// capacity record, and records token as acted on. It returns how many
-// entries it dropped.
+// capacity record, and the prefill observation's keys, and records token as
+// acted on. It returns how many entries it dropped, the observation's not
+// among them.
 //
 // Its lower bounds are ENDED, not dropped (spendLowerBoundsLocked). The
 // windows it drops are what a bound falls back on, so a dropped bound
@@ -81,7 +82,14 @@ func (a *SaturationAnalyzer) forgetVariant(namespace, modelID, variant, token st
 		}
 	}
 	a.forgotten[name] = forgetMark{token: token, seen: a.now()}
+	// A bound stashed for the variant, which no cycle took.
+	delete(a.prefillBounds, prefillBoundStashKey(namespace, modelID, variant))
 	a.mu.Unlock()
+
+	// The prefill observation (prefill_observe.go): its keys begin with the
+	// variant key's fields, as the ITL state's do. Not counted: it is a log
+	// that no output reads, and the count is what the forget changed.
+	a.prefillObserver.Forget(itlPrefix)
 
 	// The store has its own lock. The engine reloads a record from the
 	// scale target on the same cycle, so what is gone is the live figure.

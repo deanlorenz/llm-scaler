@@ -106,7 +106,14 @@ import (
 //     that lands (recorded on 4b-0, with the view). Its unit tests hold it.
 //   - The other four move nothing, as their 4a twins moved nothing; their
 //     unit tests hold them.
+//
+// The what-if PR P1 (docs/proposals/slo-capacity-planner.md, the PR plan)
+// adds one: the saturation analyzer's prefill observation
+// (saturation.SwitchPrefillCapacityObserve), on the same base. It moves no
+// golden: it only logs (prefill-capacity-observed), and writes no state an
+// output reads. Its unit tests hold it (heldBy).
 var replaySwitches = map[string][]string{
+	saturation.SwitchPrefillCapacityObserve:          nil,
 	throughput.SwitchITLReadsSettle:                  nil,
 	throughput.SwitchITLWaitsAfterRestart:            nil,
 	throughput.SwitchITLKeepsSettleThroughMissingRow: nil,
@@ -308,6 +315,12 @@ func withSeams(more, rows map[string][]string) map[string][]string {
 // test that holds the same on either side is a control, not a hold, and is
 // not listed here.
 var heldBy = map[string][]heldTest{
+	// P1's prefill observation: it runs the switch on and off through
+	// Analyze and asserts both (a line per cycle on, none off).
+	saturation.SwitchPrefillCapacityObserve: {
+		{"../saturation", "TestPrefillObserve_TheSwitchLogsTheObservation"},
+		{"../saturation", "TestPrefillObserve_AnSGLangVariantIsRefusedVP"},
+	},
 	// Issue #275's lift: an aggregated figure sizes once the GPS check has
 	// agreed. Both run the switch on and fail with it off: the first checks
 	// the lifted rate against a run with it off, the second needs the lift

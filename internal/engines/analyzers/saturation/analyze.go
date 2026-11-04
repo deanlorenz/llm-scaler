@@ -113,6 +113,9 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 
 	caps, err := c.priceReplicas(ctx)
 	if err != nil {
+		// The bounds stashed before the error are this cycle's: the next
+		// cycle must not observe them as its own.
+		c.takePrefillBounds()
 		return nil, err
 	}
 	// After the last replica is priced: k2's and mu's reports and
@@ -120,6 +123,9 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 	a.closeK2Cycle(ctx, input.Namespace, input.ModelID)
 	a.closeMuCycle(ctx, input.Namespace, input.ModelID, caps)
 	a.closeITLCycle(input.Namespace, input.ModelID, c.rolesByVariant)
+	// Prefill capacity, observed and logged; nothing below reads it
+	// (prefill_observe.go).
+	c.observePrefill()
 	c.settleShape(caps)
 
 	d := c.priceDemand(caps)
