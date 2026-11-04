@@ -122,6 +122,9 @@ func (a *SaturationAnalyzer) learnedMapsLocked() []learnedMap {
 		registered("itlLogged", scopeITLKey, a.itlLogged).working(),
 		registered("itlCycles", scopeShared, a.itlCycles),
 		registered("itlForgotten", scopeShared, a.itlForgotten),
+		// The back-pressure bound each prefill variant read this cycle, handed
+		// to the prefill observation and emptied by it (prefill_observe.go).
+		registered("prefillBounds", scopeShared, a.prefillBounds),
 	}
 }
 

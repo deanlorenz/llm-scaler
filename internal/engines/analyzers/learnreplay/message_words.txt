@@ -61,6 +61,7 @@
 A
 AMD
 AcceleratorNotResolved
+AggregatedServiceTimeIncludesDecode
 Analyze
 Applied
 Applying
@@ -183,13 +184,20 @@ NewTypeInventoryWithUsage
 No
 NoBatchCap
 NoCapacity
+NoComputedTokens
 NoDecodeReplicas
 NoLine
+NoPrefillCapacity
+NoPromptSpread
+NoPromptVariance
 NoTPOTHistogram
 NoTraffic
+NonPositiveIntercept
+NonPositiveSlope
 NotTriggerScaleUp
 Nothing
 OLS
+OnePod
 Optimization
 Optimizer
 P/D
@@ -262,6 +270,7 @@ SCALE_FROM_ZERO_ENGINE_MAX_CONCURRENCY
 SCALING
 SCALING_POLICY_CONFIG_MAP_NAME
 SGLang
+SGLangNoComputedTokens
 STOP
 Safety
 Saturated
@@ -294,6 +303,8 @@ TargetBelowFloor
 The
 This
 TokenGapPercentile
+TooFewImbalanceMinutes
+TooFewLowLoadMinutes
 TooManySlots
 TriggeredScaleUp
 UP
@@ -338,6 +349,13 @@ Workloads
 _
 __name__
 a
+aIntercept
+aOverhead
+aOverheadKnown
+aPromptMax
+aPromptMin
+aRefused
+aSamples
 abort
 about
 above
@@ -453,6 +471,7 @@ avgOutputTokens
 awaiting-return
 b
 back
+back-pressure-bound
 backlog
 backlogGrew
 backlogGrowth.fraction
@@ -542,6 +561,8 @@ busiest-rank-max_over_time
 busiestPod
 busiestRankKvUsage
 busiestRankQueue
+busy-minutes
+busyMinutes
 but
 by
 byRole
@@ -782,6 +803,7 @@ donorVariant
 donors
 doubles
 down
+downstreamSaturated
 dp_size
 drainSeconds
 drains
@@ -883,6 +905,9 @@ exported
 external
 externalClusterQuotas
 externalNamespaceQuotas
+f
+fRefused
+fSamples
 factor
 factory
 failed
@@ -1335,6 +1360,7 @@ localQueueDemand
 locator.New
 long
 longer
+longestQueuedRun
 loop
 lose
 lost
@@ -1672,6 +1698,7 @@ path
 paused
 paused-replicas
 pd-pair-borrows-whole
+peak-under-queue
 peakClaimGPUs
 peaks
 peaks-exceed-budget
@@ -1744,13 +1771,17 @@ preemptions
 preempts
 prefill
 prefill-bound
+prefill-capacity-observe
+prefill-capacity-observed
 prefill-catchup
 prefill-demand-held
 prefill-required
 prefill-throughput-bound-reading
+prefillBounds
 prefillDemandAfter
 prefillDemandBefore
 prefillKnown
+prefillObservations
 prefillRefused
 prefillStepsPerToken
 prefix-cache-scorer
@@ -1809,6 +1840,7 @@ queueMean
 queueOverThreshold
 queueThreshold
 queued
+queuedMinutes
 queuedRequests
 quiet
 quota
@@ -1870,6 +1902,7 @@ redistribution
 refilled
 refresh
 refreshInterval
+refused
 refused-filling
 refused-no-completion
 refused-under-derived
@@ -2169,6 +2202,7 @@ sloEntries
 slope
 slopeAge
 slopeAgeSeconds
+slopeBound
 slopeHeld
 slots
 slow
@@ -2497,6 +2531,12 @@ vllm:num_requests_running
 vllm:request_generation_tokens_count
 vllm:spec_decode_num_accepted_tokens_total
 volume
+vp
+vpAboveSlopeBound
+vpLowerBound
+vpRefused
+vpSamples
+vpSource
 wait
 waitBeforeReverseMove
 waiting

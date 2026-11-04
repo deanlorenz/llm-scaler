@@ -1510,6 +1510,50 @@ cycle (`TestMuKeyBucket_TheKeysShareABucket`). The switch is
   bucket with no derived mu is still priced from the shorter bucket's higher
   mu, as a borrow: that is the neighbour borrow's behaviour, not changed here.
 
+## Prefill capacity, observed
+
+The what-if PR P1 ([what-if capacity](../proposals/slo-capacity-planner.md),
+the PR plan) learns what the end-to-end TTFT model
+([end-to-end TTFT](../proposals/slo-capacity-planner-ttft.md)) needs of a
+prefill pod, and only logs it. `internal/signals/prefill` holds the
+estimators; `prefill_observe.go` feeds it each prefill variant's rows after
+the replicas are priced, with this analyzer's decode back-pressure
+(`decodeSaturated`) and the prefill lower-bound window (`prefill_bound.go`,
+passed through `prefillBounds`). Nothing sizes from it.
+
+| Figure | From | Refused |
+| --- | --- | --- |
+| `V_P`, computed tokens/s | busy minutes (median of at least 5; needs the queue's minimum over the minute, which no query reads yet), else the peak under a queue sustained over 3 minutes, else the back-pressure bound (at least 2 readings). The last two are lower bounds. In a default production install only the peak under a queue is live: busy minutes need `QueueMin` (recorder PR R1), and the bound needs `enablePrefillThroughputBound` | `NoPrefillCapacity`, logged with `queuedMinutes`, `longestQueuedRun` and `busyMinutes` to say which source fell short; `SGLangNoComputedTokens` on SGLang |
+| `a`, seconds | an untrimmed fit of `AvgServiceTime` against the effective prompt (`PrefillComputedTokenRate / RequestRate`) over low-load minutes (no queue, occupancy at most 0.1, prompt steady within 10% of every reading in the last 2 minutes, with at least one there), plus the least `AvgTTFT - AvgServiceTime`. `1/slope` is logged as `slopeBound`, an upper bound on `V_P` for validation only. On `ols-sweep`: intercept 8.36 ms, overhead 2.68 ms, `a` 11.04 ms, `slopeBound` about 520k tok/s | aggregated, fewer than 5 minutes, prompts spanning less than 1.5x between the second shortest and the second longest (so each end holds two minutes), one prompt length throughout (`NoPromptVariance`), a non-positive slope or intercept |
+| `f` | the busiest pod's share of computed tokens over the mean, less the expected max of `N_p` Poisson counts, over minutes with at least 100 requests a pod on average; median of at least 5. It reads low on a real imbalance at few requests (2:1:1:1 reads about 1.50 for 1.6 at 100 a pod) and high on equal pods with variable prompts (about 1.03 at `Cs²` = 1); `imbalance.go` says why. Above 10,000 requests a pod the Poisson excess is its normal approximation (within 0.33% of the exact sum there, up to 64 pods), so its cost does not grow with the rate | `OnePod`, `NoComputedTokens`, `TooFewImbalanceMinutes` |
+
+"Cannot over-state" holds up to the noise of `rate()`: the peak under a queue
+is the max, over up to 6 hours, of each 3-minute window's least one-minute
+rate, up to 358 overlapping windows a replica, so it keeps the luckiest one.
+`vpLowerBound` keeps its name with that limit stated at the field
+(`prefill.Estimate`).
+
+A row is read only from a Ready, non-bridge replica settled for 2 minutes on
+the settle tracker. Samples are spaced a minute apart and kept 6 hours, at most
+360 a replica; the state is not persisted. It is keyed by the variant key's fields (namespace,
+model, variant, the accelerator read through `stableAcceleratorFor`, which
+touches nothing, and GPUs) and the engine arguments (`ArgsTag`, behind `#`),
+so a redeploy under other arguments starts its own `V_P`, `a` and `f` and the
+old key ages out; an image change alone does not.
+`llm-d.ai/forget-learned-state` forgets it: `forgetVariant` drops the
+variant's keys (not counted in its return), and `forgetLearnedState` drops
+every key. The analyzer's eviction sweep (`EvictStaleHistory`) forgets a key
+with no cycle for 6 hours, so a key does not outlive its variant or its
+model, and counts it as `prefillObservations`. The back-pressure bound is
+stashed for the cycle that read it only, at the highest a replica of the
+variant read: the cycle takes its model's stashed bounds, those of variants
+it does not have included; a cycle whose pricing fails clears them too;
+`forgetVariant` drops the variant's; and the eviction sweep drops any left
+over a minute, counted as `prefillBounds`.
+The line is `prefill-capacity-observed`, at `--v=3`, one per prefill variant
+per cycle. The replay switch is `prefill-capacity-observe`; it moves no
+golden output.
+
 ## Constants
 
 | constant | value | package |

@@ -106,7 +106,14 @@ import (
 //     that lands (recorded on 4b-0, with the view). Its unit tests hold it.
 //   - The other four move nothing, as their 4a twins moved nothing; their
 //     unit tests hold them.
+//
+// The what-if PR P1 (docs/proposals/slo-capacity-planner.md, the PR plan)
+// adds one: the saturation analyzer's prefill observation
+// (saturation.SwitchPrefillCapacityObserve), on the same base. It moves no
+// golden: it only logs (prefill-capacity-observed), and writes no state an
+// output reads. Its unit tests hold it (heldBy).
 var replaySwitches = map[string][]string{
+	saturation.SwitchPrefillCapacityObserve:          nil,
 	throughput.SwitchITLReadsSettle:                  nil,
 	throughput.SwitchITLWaitsAfterRestart:            nil,
 	throughput.SwitchITLKeepsSettleThroughMissingRow: nil,
@@ -115,10 +122,9 @@ var replaySwitches = map[string][]string{
 	throughput.SwitchITLReadsFinitePodMean:           nil,
 
 	// Learner PR 5b, on main after 5a (0fec87b18): the start guard opens on
-	// distinct Pods. 4b-2's six above stay this table's rows rather than
-	// moving to earlierSeams here, so the PRs open beside this one (#460,
-	// #465) that rewrite the table's head do not conflict with it; whichever
-	// merges with them moves them. Measured alone against all off, it moves
+	// distinct Pods. 4b-2's six above stay this table's rows, as main has
+	// them after #460 (P1's row is above too); #465 (4b-3) moves them to
+	// learner4b2Seams, and this row stays here. Measured alone against all off, it moves
 	// nothing: it changes only when a start over three times the estimate
 	// is admitted, and no output any recording replays differs on it. Its
 	// unit tests hold it (heldBy).
@@ -318,6 +324,12 @@ func withSeams(more, rows map[string][]string) map[string][]string {
 // test that holds the same on either side is a control, not a hold, and is
 // not listed here.
 var heldBy = map[string][]heldTest{
+	// P1's prefill observation: it runs the switch on and off through
+	// Analyze and asserts both (a line per cycle on, none off).
+	saturation.SwitchPrefillCapacityObserve: {
+		{"../saturation", "TestPrefillObserve_TheSwitchLogsTheObservation"},
+		{"../saturation", "TestPrefillObserve_AnSGLangVariantIsRefusedVP"},
+	},
 	// Issue #275's lift: an aggregated figure sizes once the GPS check has
 	// agreed. Both run the switch on and fail with it off: the first checks
 	// the lifted rate against a run with it off, the second needs the lift

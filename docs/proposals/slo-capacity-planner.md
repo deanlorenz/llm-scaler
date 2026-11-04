@@ -268,7 +268,13 @@ moments of the current distribution.
 From the `ols-sweep` golden: the last published line (`A` = 0.004438,
 `B` = 0.001557 s), `C` = 131,072 tokens, batch cap 64, one rank, one prefill and
 one decode pod. `IL` = `OL` = 1000, no prefix hits. `a` = 10.1 ms plus the
-2.5 ms overhead, from the golden. **`V_P` = 30,000 tok/s is assumed**: the
+2.5 ms overhead, from the golden. (That 10.1 ms is an intercept fitted
+against the long-window prompt mean; P1's fit against the effective prompt
+gives 8.36 ms and the overhead 2.68 ms, so `a` is 11.04 ms, not 12.6
+([end-to-end TTFT](slo-capacity-planner-ttft.md#what-is-derivable-today)).
+The example is left as computed: `a` enters only the request's own
+latency, not utilization or the knee, so the TTFT figures and the TTFT
+floor below would each read about 1.6 ms lower.) **`V_P` = 30,000 tok/s is assumed**: the
 golden's prefill pod never queued, so the tool refuses `V_P` from it. Prompt
 spread: coefficient of variation 1, assumed. Flow control inferred off. The
 figures are reproduced by two independent scripts.
@@ -469,6 +475,25 @@ is made.**
 | M2 | The staircase run; an operator page in `docs/reference/`; drops UNVALIDATED if it passes | — | D4, P3 |
 | Only if asked | The controller endpoint and two gauges | none | P3 |
 | Later | Prefill line and learned batch cap in the snapshot; the floor's prefill mu from `V_P`; a shared prefill/decode budget; #275, #277 | — | — |
+
+**P1 and busy minutes.** `V_P`'s first source, busy minutes, needs each pod's
+least waiting count over the minute (`min_over_time` of
+`num_requests_waiting`), which no query reads today. P1 takes it as
+`prefill.Cycle.QueueMin` and is fed none, so busy minutes never fire and
+`V_P` comes only from the lower-bound sources (the peak under a queue, the
+back-pressure bound). R1 adds a per-pod `QueueMin` with a presence bit
+(`QueueMinKnown`); once R1 merges, a follow-up to P1 wires it into the
+observation.
+
+**P3 and the bias of `f`.** P1's `f` is de-biased for Poisson arrivals, and
+the de-bias errs both ways
+([where it is most wrong](slo-capacity-planner-ttft.md#where-it-is-most-wrong)).
+On a real imbalance it reads low: four pods at 2:1:1:1 (`f` 1.6) read about
+1.50 at 100 requests a pod, about 6% low, and about 1.57 at 1500. A low `f`
+over-promises TTFT. On equal pods with variable prompts it reads high, by
+about `√(1+Cs²)` times the request count's excess less that excess: about
+1.03 at 100 requests a pod with `Cs²` = 1. P1 corrects neither; P3 carries
+both as stated limits.
 
 The `ols-sweep-slo` run (flow control off, scales out, router TTFT recorded)
 is worth preserving now, before any capture tool exists, as a Prometheus

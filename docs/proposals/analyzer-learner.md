@@ -2403,9 +2403,9 @@ on from the constructor.
 - **Zero golden diff.** Measured alone against all off, the switch moves no
   output of any recording (`TestGoldens_TheSwitchRuns`). Its row is in
   `replaySwitches` with no outputs, held by its unit tests (`heldBy`). 4b-2's
-  six switches stay in that table here rather than moving to `earlierSeams`,
-  so #460 and #465, which rewrite the table's head, do not conflict with
-  this PR.
+  six switches stay in that table, as main has them after #460 (P1, whose
+  `SwitchPrefillCapacityObserve` row sits beside this one); #465 (4b-3)
+  moves them to `earlierSeams`.
 - **Tests** (`D/start_confirm_test.go`). The plan's negative control (one pod
   at 2700 s for 20 cycles keeps 70; off, cycle 4 gives 859), three distinct
   pods open it at 0.7·70 + 0.3·300, a pod that left is not counted, an
