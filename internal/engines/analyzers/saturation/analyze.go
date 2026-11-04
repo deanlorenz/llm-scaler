@@ -119,6 +119,9 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 	a.closeK2Cycle(ctx, input.Namespace, input.ModelID)
 	a.closeMuCycle(ctx, input.Namespace, input.ModelID, caps)
 	a.closeITLCycle(input.Namespace, input.ModelID, c.rolesByVariant)
+	// Prefill capacity, observed and logged; nothing below reads it
+	// (prefill_observe.go).
+	c.observePrefill()
 	c.settleShape(caps)
 
 	d := c.priceDemand(caps)

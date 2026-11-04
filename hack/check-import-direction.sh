@@ -49,7 +49,11 @@ layer_of() {
         # floor and its subpackages and put them back at 30 -- silently, with
         # the clean tree still passing.
         internal/signals/floor|internal/signals/floor/*) echo 31 ;;
-        internal/engines/aggregation|internal/signals/*) echo 30 ;;
+        # prefill (the what-if PR P1) only measures: it learns V_P, a and f
+        # from the rows, and whatif (32) and the analyzers read it. So it
+        # keeps the measuring packages' rank, named so that an edge from
+        # it up to floor or whatif reads as the inversion it is.
+        internal/engines/aggregation|internal/signals/prefill|internal/signals/*) echo 30 ;;
         internal/collector|internal/collector/*) echo 20 ;;
         internal/actuator|internal/scaler|internal/registry) echo 20 ;;
         internal/decision) echo 10 ;;

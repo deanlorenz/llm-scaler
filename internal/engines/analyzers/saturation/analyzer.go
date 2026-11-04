@@ -14,6 +14,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/prefill"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 )
 
@@ -397,6 +398,14 @@ type SaturationAnalyzer struct {
 	// judged by (beginK2Cycle).
 	k2Pending  map[string]*k2PendingReadings
 	analyzeSeq uint64
+	// prefillObserve is SwitchPrefillCapacityObserve (PR P1): on from the
+	// constructor; a replay turns it off (SetSwitchesForReplay).
+	// prefillObserver is what each prefill variant has taught it
+	// (prefill_observe.go), and prefillBounds the back-pressure bound each
+	// variant read in the cycle in progress, for it.
+	prefillObserve  bool
+	prefillObserver *prefill.Observer
+	prefillBounds   map[string]prefill.Bound
 }
 
 // Evicted is what one sweep of the analyzer's learned state removed, counted
@@ -588,6 +597,9 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		itlPerToken:            true,
 		itlWithheldLogged:      make(map[string]itlWithheldReasons),
 		k2Pending:              make(map[string]*k2PendingReadings),
+		prefillObserve:         true,
+		prefillObserver:        prefill.NewObserver(),
+		prefillBounds:          make(map[string]prefill.Bound),
 	}
 }
 

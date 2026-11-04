@@ -214,5 +214,7 @@ func (a *SaturationAnalyzer) notePrefillBound(rm domain.ReplicaMetrics, cfg *con
 	// saturation, which is the one thing a fleet the bound is working for
 	// stops producing.
 	ra.TouchAt(a.now())
+	// The bound in tokens/s, for the prefill observation (prefill_observe.go).
+	a.stashPrefillBound(rm, ra.Max(), ra.Len())
 	return prefillBoundReading{rate: ra.Max() / ileff, samples: ra.Len()}
 }

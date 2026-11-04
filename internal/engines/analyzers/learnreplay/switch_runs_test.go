@@ -79,13 +79,23 @@ import (
 // as the base goldens were written (analyzer-learner.md, 2.5).
 //
 // Since learner PR 4b-1 the rows above (#275's two switches, #438's) are
-// earlier seams (earlierSeams), and this PR's are the throughput analyzer's
-// two: its ITL line on the shared tracker (throughput.SwitchITLSteadyGate)
-// and the GPS-mismatch clear dropped
-// (throughput.SwitchITLKeepsWindowOnGPSMismatch). Its base is f7b4f7e47
-// (4b-0). The fixtures that run the throughput analyzer are the in-process
-// three (acceptance, engine, mu-paths); no cluster recording does yet.
-// Measured, each alone against all off:
+// earlier seams (earlierSeams); 4b-1's own two are learner4b1Seams.
+//
+// Since the what-if PR P1 (docs/proposals/slo-capacity-planner.md, the PR
+// plan) this PR's is the saturation analyzer's prefill observation
+// (saturation.SwitchPrefillCapacityObserve). Its base is main after 4b-1
+// merged (1c9a34fe8, #456), whose goldens are 4b-1's all-on run. It moves no
+// golden: it only logs (prefill-capacity-observed), and writes no state an
+// output reads. Its unit tests hold it (heldBy).
+var replaySwitches = map[string][]string{
+	saturation.SwitchPrefillCapacityObserve: nil,
+}
+
+// learner4b1Seams is learner PR 4b-1's switches, earlier seams now (merged
+// into earlierSeams), with the outputs 4b-1 measured each to move, each
+// alone against all off from f7b4f7e47 (4b-0). The fixtures that run the
+// throughput analyzer are the in-process three (acceptance, engine,
+// mu-paths); no cluster recording does yet.
 //
 //   - The steady gate moves the throughput rows of results.csv and
 //     variant-capacities.csv in all three, and, through the composite, the
@@ -96,7 +106,7 @@ import (
 //   - The GPS-mismatch switch alone moves the throughput rows of
 //     variant-capacities.csv in all three: the in-process rows trip the check,
 //     and kept, the window reaches a full fit where the clear had emptied it.
-var replaySwitches = map[string][]string{
+var learner4b1Seams = map[string][]string{
 	throughput.SwitchITLSteadyGate: {
 		"acceptance/results.csv", "acceptance/variant-capacities.csv",
 		"engine/composite-holds.csv", "engine/composite-release.csv", "engine/composite-variants.csv",
@@ -169,8 +179,8 @@ func switchPackage(name string) string {
 // stays on, at its constructor default, in this PR's runs; off alone, from
 // all on, it may move only what it named. A seam's row goes with the seam,
 // in the PR, or cleanup PR, that deletes it with zero golden diff. Learner
-// PR 4a's rows are learner4aSeams, merged in.
-var earlierSeams = withSeams(learner4aSeams, map[string][]string{
+// PR 4a's rows are learner4aSeams, and 4b-1's learner4b1Seams, merged in.
+var earlierSeams = withSeams(learner4b1Seams, withSeams(learner4aSeams, map[string][]string{
 	// #275 (two switches) and #438, this file's own rows before learner PR
 	// 4b-1 (see replaySwitches).
 	saturation.SwitchZeroReplicaDataParallel: nil,
@@ -253,7 +263,7 @@ var earlierSeams = withSeams(learner4aSeams, map[string][]string{
 		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
 		"engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
 	},
-})
+}))
 
 // withSeams is rows with more's rows added; a name in both is a row given
 // twice, and panics.
@@ -276,6 +286,12 @@ func withSeams(more, rows map[string][]string) map[string][]string {
 // test that holds the same on either side is a control, not a hold, and is
 // not listed here.
 var heldBy = map[string][]heldTest{
+	// P1's prefill observation: it runs the switch on and off through
+	// Analyze and asserts both (a line per cycle on, none off).
+	saturation.SwitchPrefillCapacityObserve: {
+		{"../saturation", "TestPrefillObserve_TheSwitchLogsTheObservation"},
+		{"../saturation", "TestPrefillObserve_AnSGLangVariantIsRefusedVP"},
+	},
 	// Issue #275's lift: an aggregated figure sizes once the GPS check has
 	// agreed. Both run the switch on and fail with it off: the first checks
 	// the lifted rate against a run with it off, the second needs the lift
@@ -479,18 +495,9 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch of this PR names, as the
-// base commit's goldens hold it (f7b4f7e47, learner PR 4b-0).
-var switchBase = map[string]string{
-	"acceptance/results.csv":            "948487bf37d359a8bd3d7967fa4394a2558409844030ab153ea661132e535915",
-	"acceptance/variant-capacities.csv": "b4932d51ae2e081430e2161eb6f3c3bdd9a839f84ad77f035fc4ad47ce325346",
-	"engine/composite-holds.csv":        "c26c788b73e0a292e70789ed60520fd9c83254c0dc3c294f29283c297d518dc7",
-	"engine/composite-release.csv":      "4fc0b13906d8d1fdb039493b3cc6182cb7cce1b3af61bdfb2975d8b23e9a6fe5",
-	"engine/composite-variants.csv":     "43bb85189c577d3c09508de664d37c55c5302fa22cb41f03f1d581722b3f078f",
-	"engine/results.csv":                "61718c5eee24d49ae90051c0c42ba862587dc9ee2436e04f467593bc1d1455f4",
-	"engine/variant-capacities.csv":     "c97cb118dda1a6abb54296e45650437cb7f8d86e78970645e5116362547a0f05",
-	"mu-paths/results.csv":              "f87ec1d3d61babdba014fc786e2a4e52e2b947bcdce15ab6f20cdcfa619c450b",
-	"mu-paths/variant-capacities.csv":   "62b4c7881d656e45126691ef86e4af91e35925a7e361c69b02076f008a48ec94",
-}
+// base commit's goldens hold it (main at 1c9a34fe8, learner PR 4b-1
+// merged). P1's switch names none.
+var switchBase = map[string]string{}
 
 // The slow tests of this package run in parallel with each other (each
 // marked "reads the goldens, writes only to its own copies"): each replays
