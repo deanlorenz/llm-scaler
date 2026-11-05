@@ -91,7 +91,7 @@ func TestTTFT_SaysUnvalidatedAndAssumedInTextAndJSON(t *testing.T) {
 		assert.Contains(t, w.Note, "UNVALIDATED")
 		assert.Contains(t, w.Note, "V_P ASSUMED")
 		assert.Contains(t, w.Note, "is not a bound")
-		i := slices.IndexFunc(w.Roles, func(r wireRole) bool { return r.Role == "prefill" })
+		i := slices.IndexFunc(w.Roles, func(r wireRole) bool { return r.Role == rolePrefill })
 		require.GreaterOrEqual(t, i, 0, out)
 		r := w.Roles[i].Results.TTFT
 		if r == nil {
@@ -468,7 +468,7 @@ func TestTTFT_SaturatedIsARefusal(t *testing.T) {
 	out, code := runCmd(t, "replicas-to-slo", "--recording", shortRun, "--assume-vp", "130000", "--rate", "1000", "-o", "json")
 	require.Equal(t, 3, code, out)
 	w := decodeOutput(t, out)
-	i := slices.IndexFunc(w.Roles, func(r wireRole) bool { return r.Role == "prefill" })
+	i := slices.IndexFunc(w.Roles, func(r wireRole) bool { return r.Role == rolePrefill })
 	require.GreaterOrEqual(t, i, 0, out)
 	r := w.Roles[i].Results.TTFT
 	require.NotNil(t, r)
@@ -693,7 +693,7 @@ func TestPrometheus_TheTTFTAnswerIsTheFilesAnswer(t *testing.T) {
 	out, code := runCmd(t, slices.Concat([]string{"slo-to-rate"}, window, []string{"--assume-vp", "100000", "--ttft", "2s@p90", "-o", "json"})...)
 	require.Equal(t, 0, code, out)
 	w := decodeOutput(t, out)
-	i := slices.IndexFunc(w.Roles, func(r wireRole) bool { return r.Role == "prefill" })
+	i := slices.IndexFunc(w.Roles, func(r wireRole) bool { return r.Role == rolePrefill })
 	require.GreaterOrEqual(t, i, 0, out)
 	require.NotNil(t, w.Roles[i].Results.Rate.Answer, "no answer to compare:\n%s", out)
 	assert.Equal(t, "learned", w.Roles[i].TTFT.FixedLatencySource)

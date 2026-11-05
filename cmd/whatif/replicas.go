@@ -216,7 +216,7 @@ func tpotInputs(st *learnreplay.State, target, q float64, r whatif.TPOTRatio) *w
 	case r.Assumed:
 		t.RatioSource = "assumed"
 	default:
-		t.RatioSource = "learned"
+		t.RatioSource = sourceLearned
 	}
 	return t
 }

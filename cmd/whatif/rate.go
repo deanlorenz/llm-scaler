@@ -172,7 +172,7 @@ func (a *rateAnswer) wireTTFT() []wireRole {
 		decode = a.fleet.pv.state.Variant
 	}
 	return []wireRole{
-		{Role: "prefill", Variant: a.fleet.variant, TTFT: &a.fleet.in, Results: wireResults{Rate: toWire(a.ttft, unitRate)}},
+		{Role: rolePrefill, Variant: a.fleet.variant, TTFT: &a.fleet.in, Results: wireResults{Rate: toWire(a.ttft, unitRate)}},
 		{Role: "fleet", Variant: decode, Results: wireResults{Rate: toWire(a.fleetRate, unitRate)}},
 	}
 }

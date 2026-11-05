@@ -364,7 +364,7 @@ func (w *wireOutput) addTTFTNote(fleets []*pricedFleet) {
 
 // wire is the fleet's prefill role.
 func (o operatingTTFT) wire() wireRole {
-	return wireRole{Role: "prefill", Variant: o.fleet.variant, TTFT: &o.fleet.in, Results: wireResults{
+	return wireRole{Role: rolePrefill, Variant: o.fleet.variant, TTFT: &o.fleet.in, Results: wireResults{
 		Knee: toWire(o.knee, unitRate), TTFT: toWire(o.ttft, unitSeconds)}}
 }
 

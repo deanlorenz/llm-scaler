@@ -40,6 +40,13 @@ const (
 	upstreamKVThreshold    = 0.8
 )
 
+// The words the JSON and the text name a source or a role by.
+const (
+	sourceLearned    = "learned"
+	sideDecodeEngine = "decode engine"
+	rolePrefill      = "prefill"
+)
+
 // assumedPoisson is S1's flag for Poisson arrivals: P3 has none for it.
 const assumedPoisson whatif.Flag = "AssumedPoissonArrivals"
 
@@ -81,7 +88,7 @@ func (f *answerFlags) checkTTFT() error {
 
 // ttftFlagged reports whether any flag asks about TTFT.
 func (f *answerFlags) ttftFlagged() bool {
-	return slices.ContainsFunc([]string{"ttft", "ttft-percentile", "assume-vp", "prefill", "prefill-variant"},
+	return slices.ContainsFunc([]string{"ttft", "ttft-percentile", "assume-vp", rolePrefill, "prefill-variant"},
 		func(name string) bool { return f.set[name] })
 }
 
@@ -287,7 +294,7 @@ func (f *answerFlags) prefillInputs(pf *pricedFleet, ps *learnreplay.PrefillStat
 	learned := ps.EstimateRead && est.VP > 0 && est.VPRefused == ""
 	switch {
 	case learned:
-		pf.in.VPSource, pf.in.VPOrigin = "learned", string(est.VPSource)
+		pf.in.VPSource, pf.in.VPOrigin = sourceLearned, string(est.VPSource)
 		if f.set["assume-vp"] {
 			pf.in.AssumeVPNotUsed = &f.assumeVP
 		}
@@ -319,7 +326,7 @@ func (f *answerFlags) prefillInputs(pf *pricedFleet, ps *learnreplay.PrefillStat
 		p.VPAssumed, p.VPMargin, p.CurveSlope, p.CurveCurvature = true, 0, 0, 0
 	}
 	pf.in.VP, pf.in.VPPromptTokens = p.VP, p.VPPromptTokens
-	pf.in.FixedLatencySeconds, pf.in.FixedLatencySource = p.FixedLatency, "learned"
+	pf.in.FixedLatencySeconds, pf.in.FixedLatencySource = p.FixedLatency, sourceLearned
 
 	p.Replicas = ps.Pods
 	pf.in.Replicas, pf.in.ReplicasFrom = ps.Pods, "recording"
@@ -342,7 +349,7 @@ func (f *answerFlags) prefillInputs(pf *pricedFleet, ps *learnreplay.PrefillStat
 // pod's exact 1 never reaches two.
 func imbalanceAt(ps *learnreplay.PrefillState, pods int) (f float64, assumed bool, source string) {
 	if v, ok := ps.Estimate.FByPods[pods]; ok && v >= 1 {
-		return v, false, "learned"
+		return v, false, sourceLearned
 	}
 	if pods == 1 {
 		return 0, false, "one pod"
@@ -406,8 +413,8 @@ func (pf *pricedFleet) decodeSide() {
 		pf.fleet.DecodeTTFT = pf.pv.state.DecodeTTFT.EngineTTFT
 	}
 	if pf.fleet.DecodeTTFT.Seconds > 0 {
-		pf.in.TransferSecondsPerToken, pf.in.TransferSource = 0, "decode engine"
-		pf.in.DecodeSide = "decode engine"
+		pf.in.TransferSecondsPerToken, pf.in.TransferSource = 0, sideDecodeEngine
+		pf.in.DecodeSide = sideDecodeEngine
 		pf.in.DecodeTTFTSeconds = pf.fleet.DecodeTTFT.Seconds
 		pf.in.DecodeTTFTPromptTokens = pf.fleet.DecodeTTFT.PromptTokens
 		return
@@ -456,7 +463,7 @@ func (pf *pricedFleet) describe() {
 	switch pf.in.DecodeSide {
 	case "line":
 		b.WriteString("; decode by its line")
-	case "decode engine":
+	case sideDecodeEngine:
 		fmt.Fprintf(&b, "; decode engine TTFT %.1f ms at %s tokens, measured", 1000*pf.fleet.DecodeTTFT.Seconds, num(round(pf.fleet.DecodeTTFT.PromptTokens)))
 	default:
 		b.WriteString("; decode side omitted")
@@ -645,7 +652,7 @@ func (pf *pricedFleet) writeInputs(b *strings.Builder, inputsLabel, assumedLabel
 func (o operatingTTFT) writeRows(b *strings.Builder) {
 	pf := o.fleet
 	if k, ok := o.knee.(whatif.Answer); ok {
-		row(b, "prefill knee", rateText(k.Value), "", fmt.Sprintf("N_p x V_P / (f x prompt); %s", pf.verdict()))
+		row(b, "prefill knee", rateText(k.Value), "", "N_p x V_P / (f x prompt); "+pf.verdict())
 	}
 	switch v := o.ttft.(type) {
 	case whatif.TTFT:
@@ -663,7 +670,7 @@ func (o operatingTTFT) writeRows(b *strings.Builder) {
 // writeRateRows prints question 1's prefill and fleet rows, for layout's
 // columns.
 func writeRateRows(b *strings.Builder, layout string, pf *pricedFleet, fleets int, q ttftQuestion, ttft, fleet whatif.Result) {
-	role := pf.label("prefill", fleets)
+	role := pf.label(rolePrefill, fleets)
 	switch r := ttft.(type) {
 	case whatif.Answer:
 		fmt.Fprintf(b, layout, role, rateText(r.Value), ttftBoundText(q, r.Basis.BoundBy), pf.verdict())
