@@ -36,7 +36,7 @@ func TestDecodeEngineTTFTIsAdded(t *testing.T) {
 		relNear(t, "TTFT at no load", v.Seconds, 0.0126+1000.0/30000+d, 1e-12)
 		relNear(t, "floor", v.Floor, 0.0126+1000.0/30000+d, 1e-12)
 		relNear(t, "decode engine part", v.Parts.DecodeEngine, d, 0)
-		if v.Parts.FirstStep != 0 || v.HasFlag(DecodeTTFTUnmeasured) || !v.HasFlag(DecodeSideOmitted) {
+		if v.Parts.FirstStep != 0 || v.HasFlag(DecodeTTFTUnmeasured) || v.HasFlag(DecodeSideOmitted) || !v.HasFlag(DecodeEngineMeasured) {
 			t.Errorf("q %g: first step %g, flags %v", q, v.Parts.FirstStep, v.Flags)
 		}
 	}
@@ -91,13 +91,13 @@ func TestDecodeEngineTTFTScalesUpOnly(t *testing.T) {
 // prompt, is refused.
 func TestDecodeEngineTTFTUnmeasured(t *testing.T) {
 	v := mustTTFT(t, ttftAt(t, measuredFleet(0), 5, 0.9))
-	if !v.HasFlag(DecodeTTFTUnmeasured) || !v.HasFlag(DecodeSideOmitted) || v.Parts.DecodeEngine != 0 {
+	if !v.HasFlag(DecodeTTFTUnmeasured) || !v.HasFlag(DecodeSideOmitted) || v.HasFlag(DecodeEngineMeasured) || v.Parts.DecodeEngine != 0 {
 		t.Errorf("unmeasured: %v, part %g", v.Flags, v.Parts.DecodeEngine)
 	}
 	for name, d := range map[string]DecodeTTFT{
 		"negative": {Seconds: -0.01, PromptTokens: 1000}, "NaN": {Seconds: math.NaN(), PromptTokens: 1000},
 		"infinite": {Seconds: math.Inf(1), PromptTokens: 1000}, "no prompt": {Seconds: 0.04},
-		"NaN prompt": {Seconds: 0.04, PromptTokens: math.NaN()},
+		"NaN prompt": {Seconds: 0.04, PromptTokens: math.NaN()}, "under a token": {Seconds: 0.04, PromptTokens: 0.5},
 	} {
 		fl := measuredFleet(0)
 		fl.DecodeTTFT = d
@@ -107,7 +107,39 @@ func TestDecodeEngineTTFTUnmeasured(t *testing.T) {
 	}
 }
 
+// A decode term that overflows is refused, never answered as an infinite
+// TTFT or floor: a prompt of 1e-320 tokens (below MinDecodeTTFTPrompt) and a
+// figure of 1e308 s, which is finite alone and infinite once scaled to a
+// prompt twice as long. Both at the mean and at p90, for both questions.
+func TestDecodeEngineTTFTNeverInfinite(t *testing.T) {
+	for name, d := range map[string]DecodeTTFT{
+		"denormal prompt": {Seconds: 0.04, PromptTokens: 1e-320},
+		"huge figure":     {Seconds: 1e308, PromptTokens: 500},
+	} {
+		fl := measuredFleet(0)
+		fl.DecodeTTFT = d
+		for _, q := range []float64{0, 0.9} {
+			r := ttftAt(t, fl, 5, q)
+			if v, ok := r.(TTFT); ok {
+				t.Errorf("%s q %g: answered %g s, floor %g, decode %g", name, q, v.Seconds, v.Floor, v.Parts.DecodeEngine)
+			} else if !isInvalid(r) {
+				t.Errorf("%s q %g: %#v, want InvalidInput", name, q, r)
+			}
+			if a := rateForTTFT(t, fl, TTFTTarget{Seconds: 1, Percentile: q}); !isInvalid(a) {
+				t.Errorf("%s q %g: RateForTTFT %#v, want InvalidInput", name, q, a)
+			}
+		}
+	}
+	// A large figure that stays finite is priced.
+	fl := measuredFleet(0)
+	fl.DecodeTTFT = DecodeTTFT{Seconds: 1e300, PromptTokens: 1000}
+	if v := mustTTFT(t, ttftAt(t, fl, 5, 0.9)); !(v.Seconds >= 1e300) || !Finite(v.Seconds) {
+		t.Errorf("finite 1e300 s: %g", v.Seconds)
+	}
+}
+
 // curveFleet is a prefill pod whose V_P was read at 30k tokens, with P1's
+
 // pooled curve (runs 3 and 4: b 7.1815e-7, c 2.0280e-10).
 func curveFleet(prompt float64) TTFTFleet {
 	return TTFTFleet{Prefill: Prefill{VP: 134775.41, FixedLatency: 0.01086, Replicas: 1, PromptTokens: prompt,

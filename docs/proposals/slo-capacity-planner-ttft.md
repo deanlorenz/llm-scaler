@@ -474,10 +474,11 @@ been compared with a measured TTFT.
 | `PrefillFromEstimate(est)` | Maps P1's `prefill.Estimate` to `V_P`, `a`, `f`, the prompt `V_P` was read at and, with the curve, its `b` and `c`; sets the margin `DefaultVPMargin`; carries P1's refusals |
 
 A `TTFTFleet` is a `Prefill`, an optional `*Decode`, a `DecodeTTFT` and a
-`FlowControl`. With no decode line, `W_decode` is not priced, the answer is
-flagged `DecodeSideOmitted`, and decode's part is the decode engine's
-measured TTFT, `DecodeTTFT` ([after P2](#as-built-p3-after-p2)); unmeasured,
-it is left out and flagged `DecodeTTFTUnmeasured`. This is the shape S1
+`FlowControl`. With no decode line, `W_decode` is not priced, and decode's
+part is the decode engine's measured TTFT, `DecodeTTFT`, flagged
+`DecodeEngineMeasured` ([after P2](#as-built-p3-after-p2)); unmeasured, it
+is left out and flagged `DecodeSideOmitted` and `DecodeTTFTUnmeasured`.
+ This is the shape S1
 needs to price one prefill variant in shadow; the rate per replica is the
 answer over `N_p`, priced at the actual `N_p` with `f` held. With flow control on and no decode role, the
 decode onset cannot be placed: the answer is flagged `DecodeOnsetUnchecked`,
@@ -560,7 +561,9 @@ roles' rates.
   `VPAboveSlopeBound`, `AssumedImbalance`, `AssumedPromptSpread`,
   `TransferOmitted`, `DecodeSideOmitted`, `FlowControlInferredOff`,
   `AboveFlowControlOnset`, `HeldByDecodeAdmission` and
-  `DecodeOnsetUnchecked`. When decode
+  `DecodeOnsetUnchecked`; after P2, `DecodeTTFTUnmeasured`,
+  `DecodeEngineMeasured`, `VPScaledToPrompt` and `VPShapeMoved`
+  ([after P2](#as-built-p3-after-p2)). When decode
   admission holds the TTFT rate below what the prefill side alone allows,
   the answer is bound by `TTFT` and then `decode admission`. The worked
   example's 11.10 r/s at p95 is such a case: decode takes `β` ≈ 0.03 of the
@@ -572,7 +575,7 @@ roles' rates.
   Pollaczek-Khinchine mean, Allen-Cunneen against an independent Erlang C,
   the Cramér-Lundberg root against its equation, and the incomplete gamma
   against its closed forms.
-- **Never below the truth.**
+- **Never below the reference.**
   - At cv 0 the wait's quantiles are compared with Erlang's exact M/D/1
     waiting-time distribution, summed in 1024-bit floats. The model is at
     or above it at every `ρ` from 0.1 to 0.95 and `q` of 0.9, 0.99 and 0.999.
@@ -625,8 +628,12 @@ roles' rates.
    (open question 4)?
 2. **The wait tail.** How far above per-pod `request_queue_time_seconds`
    (R1's histograms) does the tail rule sit, at the real prompt spread? It
-   is conservative against queueing theory. A real pod's chunked
-   prefill is not the M/G/1 server it assumes.
+   is at or above the references it is checked against (Erlang's exact
+   M/D/1 wait and a Lindley simulation of M/G/1, [the tests](#what-the-tests-check)),
+   which is not the same as conservative on a real pod: a real pod's chunked
+   prefill is not the M/G/1 server it assumes, and on P2's goldens the whole
+   prediction reads up to about 34% under the router's p90 at light load
+   ([after P2](#as-built-p3-after-p2)).
 3. **The gamma prompt.** Is a gamma with the measured cv a fair stand-in for
    the prompt histogram? P2 should compare the floor and the low-load
    quantiles.
@@ -680,10 +687,15 @@ and 159 ms at 37k.
 - **The transfer is in it.** The decode engine's TTFT includes the KV pull,
   so `TransferSecondsPerToken` is not priced beside it, and `TransferOmitted`
   is not raised.
-- **Unmeasured** (`Seconds` 0): the term is left out and the answer flagged
-  `DecodeTTFTUnmeasured`, which no caller acts on. It is never a silent zero.
-  A negative or non-finite figure, or one with no prompt, is refused
-  (`InvalidInput`).
+- **Flags.** Measured, the answer is flagged `DecodeEngineMeasured`, which
+  is informational, not a hold; `DecodeSideOmitted` is not raised.
+  Unmeasured (`Seconds` 0), the term is left out and the answer flagged
+  `DecodeSideOmitted` and `DecodeTTFTUnmeasured`, which always coincide; no
+  caller acts on them. It is never a silent zero. A negative or non-finite
+  figure, a measured figure with a prompt under one token
+  (`MinDecodeTTFTPrompt`; `PromptTokens` is required when `Seconds` > 0), or
+  one whose term overflows at the prompt asked, is refused (`InvalidInput`).
+
 - **Where it is learned:** S1, per decode variant, from the R1 field
   `domain.ReplicaMetrics.AvgTTFT` on the variant's Ready decode rows
   ([S1 decisions, 3](slo-tiers.md#3-what-s1-passes-to-ttftat-and-rateforttft)).

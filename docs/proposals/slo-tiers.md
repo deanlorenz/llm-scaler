@@ -558,11 +558,11 @@ any caller:
 - **Decode role.** With flow control on, the decode role must be passed:
   without it the decode onset cannot be placed, and P3 answers flagged
   `DecodeOnsetUnchecked`, possibly above that onset (S1 does not price
-  then: `no-decode-side`). With flow control off and no decode role, the
-  answer is flagged `DecodeSideOmitted`, and decode's part is the measured
-  decode-engine TTFT, `TTFTFleet.DecodeTTFT` ([the decode engine's
-  TTFT](#3-what-s1-passes-to-ttftat-and-rateforttft)); unmeasured, it is
-  flagged `DecodeTTFTUnmeasured`.
+  then: `no-decode-side`). With flow control off and no decode role,
+  decode's part is the measured decode-engine TTFT, `TTFTFleet.DecodeTTFT`
+  ([the decode engine's TTFT](#3-what-s1-passes-to-ttftat-and-rateforttft)),
+  flagged `DecodeEngineMeasured`; unmeasured, it is left out and flagged
+  `DecodeSideOmitted` and `DecodeTTFTUnmeasured`, which always coincide.
 
 `ols-sweep-slo` gives S1 router TTFT, `AvgTTFT`, `AvgServiceTime` and the
 arrival rate: enough to fit `a` and check a low-load mean, not to fit `V_P` (no
@@ -828,8 +828,13 @@ answers such a fleet flagged `DecodeOnsetUnchecked`, and its "What S1 calls"
 note says S1 must pass the decode role there; S1 never publishes such an
 answer. With flow control off and no decode line, S1 prices prefill with
 the decode engine's measured TTFT in place of decode's part, flagged
-`DecodeSideOmitted`: published, with no TTFT contribution, because it still
-leaves out `W_decode`.
+`DecodeEngineMeasured`: published. That flag is informational and not on
+S2's no-act list; the answer leaves out `W_decode` and holds the decode
+term at its mean and at the rate it was measured at, biases the TTFT page
+states, and S2 is held back from it by `UnvalidatedTTFT` and the gate items
+([6](#6-the-p2-recordings-and-what-they-must-show), item 4 fails today),
+not by a flag. Unmeasured, it is flagged `DecodeSideOmitted` and
+`DecodeTTFTUnmeasured`, which are no-act.
 
 **The decode engine's TTFT** (`TTFTFleet.DecodeTTFT`, read by P3 only with no
 decode line). The R1 field `AvgTTFT` on the decode variant's Ready decode
@@ -1031,7 +1036,7 @@ by name.
 The flag series zero-fills a fixed list, `constants.SLOTTFTFlags`, in this
 order: P3's TTFT flags (`UnvalidatedTTFT`, `AssumedVP`, `VPLowerBound`,
 `VPAboveSlopeBound`, `AssumedImbalance`, `AssumedPromptSpread`,
-`TransferOmitted`, `DecodeSideOmitted`, `DecodeTTFTUnmeasured`, `VPScaledToPrompt`, `VPShapeMoved`, `FlowControlInferredOff`,
+`TransferOmitted`, `DecodeSideOmitted`, `DecodeTTFTUnmeasured`, `DecodeEngineMeasured`, `VPScaledToPrompt`, `VPShapeMoved`, `FlowControlInferredOff`,
 `AboveFlowControlOnset`, `HeldByDecodeAdmission`, `DecodeOnsetUnchecked`),
 the decode flags a TTFT answer can carry (`BelowFittedBand`,
 `KVBoundSlots`), and S1's (`AssumedPoissonArrivals`,
@@ -1134,7 +1139,9 @@ asserted.
   still scale in. S2 does not act on a rate answer with:
   - a reason other than `priced`: `decode-bound`, `routing-bound`,
     `no-decode-side`, `no-estimate`, and every refusal;
-  - `DecodeSideOmitted`, and `DecodeTTFTUnmeasured`;
+  - `DecodeSideOmitted` and `DecodeTTFTUnmeasured`, which coincide (no
+    measured decode-engine TTFT). `DecodeEngineMeasured` is not on the list;
+    a measured term is gated by `UnvalidatedTTFT` and the gate items;
   - `AssumedPromptSpread` or `PromptSpreadClamped`, so Q1 is a hard gate;
   - `VPShapeMoved`, `VPAboveSlopeBound` or `VPScaledToPrompt` (the rescale
     read 1.5% above the served `V_P` on run 2 at 37k; lifted when a second
@@ -1246,7 +1253,10 @@ exists) and passes on the PR; each switch is also held by the golden runs.
     `FlowControlInferredOff`; declared `disabled` with series, and
     `enabled` without, warn and flag `FlowControlMismatch`.
 14. The decode side: `no-decode-side` with flow control on and no decode;
-    `DecodeSideOmitted` with it off; one decode variant only.
+    with it off, `DecodeEngineMeasured` when the decode engine's TTFT is
+    measured and `DecodeSideOmitted` with `DecodeTTFTUnmeasured` when it is
+    not; one decode variant only.
+
 15. `decode-bound` at more than 10% and not at 10% or less; at the decode
     onset.
 16. Current-rate refusals (`Saturated`, `AboveDecodeOnset`) and

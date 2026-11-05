@@ -72,11 +72,18 @@ const (
 	// nixl_xfer_time_seconds is not collected, so T_xfer is left out, and
 	// the answer over-promises by it.
 	TransferOmitted Flag = "TransferOmitted"
-	// DecodeSideOmitted is a TTFT priced with no decode line: the decode
-	// admission wait is not in it, and decode's part is the decode engine's
-	// measured TTFT (TTFTFleet.DecodeTTFT), or nothing with
-	// DecodeTTFTUnmeasured.
+	// DecodeSideOmitted is a TTFT priced with no decode line and no measured
+	// decode-engine TTFT: neither the decode admission wait nor any part of
+	// decode's TTFT is in it. It is raised with DecodeTTFTUnmeasured, and the
+	// two always coincide; both are kept, DecodeSideOmitted for what the
+	// answer leaves out and DecodeTTFTUnmeasured for why.
 	DecodeSideOmitted Flag = "DecodeSideOmitted"
+	// DecodeEngineMeasured is a TTFT priced with no decode line, decode's part
+	// taken from the decode engine's measured TTFT (TTFTFleet.DecodeTTFT) in
+	// place of the decode admission wait, T_xfer and ITL(k_d). Informational,
+	// not a hold: the term's known biases (its spread, its rate) are stated on
+	// the TTFT page and gated with UnvalidatedTTFT.
+	DecodeEngineMeasured Flag = "DecodeEngineMeasured"
 	// DecodeTTFTUnmeasured is a TTFT priced with no decode line and no
 	// measured decode-engine TTFT: decode's part, the KV pull and its first
 	// token, is left out, and the answer over-promises by it (by 25% to 65%
@@ -159,7 +166,10 @@ type TTFT struct {
 	Pooled float64
 	// Floor is the lowest TTFT any number of replicas reaches at this
 	// percentile: a + I_q * (1/V_P + T_xfer per token) + ITL(band.Lo), the
-	// last term only with a decode side.
+	// last term only with a decode side (the decode engine's measured TTFT
+	// with none). V_P is the unmargined one, rescaled to the prompt: there
+	// is no queue at no load.
+
 	Floor float64
 	// DecodeShare is beta, the share 1 - q of the tail given to the decode
 	// admission wait by the optimised split; 0 for the mean.

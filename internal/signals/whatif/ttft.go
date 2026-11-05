@@ -164,11 +164,12 @@ type FlowControl struct {
 // role it hands to, and flow control.
 type TTFTFleet struct {
 	Prefill Prefill
-	// Decode is the decode role; nil means no decode line, flagged
-	// DecodeSideOmitted: W_decode is not priced, and decode's part of the
-	// TTFT is DecodeTTFT, measured, in place of T_xfer + ITL(k_d). The SLO
-	// analyzer's shadow pricing of a prefill variant (S1) with flow control
-	// off is that case.
+	// Decode is the decode role; nil means no decode line: W_decode is not
+	// priced, and decode's part of the TTFT is DecodeTTFT, measured, in place
+	// of T_xfer + ITL(k_d), flagged DecodeEngineMeasured, or left out,
+	// flagged DecodeSideOmitted and DecodeTTFTUnmeasured. The SLO analyzer's
+	// shadow pricing of a prefill variant (S1) with flow control off is that
+	// case.
 	Decode *Decode
 	// DecodeTTFT is the decode engine's measured TTFT, read only when Decode
 	// is nil. On P/D the router's TTFT is the prefill engine's and then the
@@ -195,16 +196,23 @@ type DecodeTTFT struct {
 	// pull grows with the prompt and there is a fixed part besides, so the
 	// term is priced at Seconds * max(1, I/PromptTokens): scaled up for a
 	// longer prompt (the fixed part makes that high), held for a shorter one
-	// (the pull makes that high). Required when Seconds is above 0. It is
+	// (the pull makes that high). Required, at least MinDecodeTTFTPrompt,
+	// when Seconds is above 0. It is
 	// E[I_eff], the computed prompt, while the KV pull moves the whole
 	// prompt, prefix hits included: with prefix hits the ratio I/PromptTokens
 	// tracks the pull only as far as the hit rate holds.
 	PromptTokens float64
 }
 
-// at is the decode term for a prompt of i tokens.
+// MinDecodeTTFTPrompt is the least prompt, in tokens, a measured decode-engine
+// TTFT may be read at: one token. A smaller one is not a measured mean prompt,
+// and dividing by it overflows the term.
+const MinDecodeTTFTPrompt = 1.0
+
+// at is the decode term for a prompt of i tokens: 0 when unmeasured or with no
+// prompt to scale by (plan refuses a measured figure without one).
 func (d DecodeTTFT) at(i float64) float64 {
-	if d.Seconds == 0 {
+	if d.Seconds == 0 || !(d.PromptTokens > 0) {
 		return 0
 	}
 	return d.Seconds * max(1, i/d.PromptTokens)
@@ -499,9 +507,14 @@ func (fl TTFTFleet) plan() (ttftPlan, *Unanswerable) {
 			u := refuse(InvalidInput, fmt.Sprintf("decode engine TTFT %g s", dt.Seconds))
 			return ttftPlan{}, &u
 		case dt.Seconds == 0:
-			pf.flags = append(pf.flags, DecodeTTFTUnmeasured)
-		case !Finite(dt.PromptTokens) || !(dt.PromptTokens > 0):
-			u := refuse(InvalidInput, fmt.Sprintf("decode engine TTFT measured at %g prompt tokens", dt.PromptTokens))
+			pf.flags = append(pf.flags, DecodeTTFTUnmeasured, DecodeSideOmitted)
+		case !Finite(dt.PromptTokens) || !(dt.PromptTokens >= MinDecodeTTFTPrompt):
+			u := refuse(InvalidInput, fmt.Sprintf("decode engine TTFT %g s measured at %g prompt tokens: a measured TTFT (Seconds > 0) requires a prompt of at least %g tokens",
+				dt.Seconds, dt.PromptTokens, MinDecodeTTFTPrompt))
+			return ttftPlan{}, &u
+		case !Finite(dt.at(pf.p.PromptTokens)):
+			u := refuse(InvalidInput, fmt.Sprintf("decode engine TTFT %g s at %g prompt tokens overflows at the prompt asked, %g tokens",
+				dt.Seconds, dt.PromptTokens, pf.p.PromptTokens))
 			return ttftPlan{}, &u
 		default:
 			// The decode engine's TTFT holds the KV pull: pricing T_xfer
@@ -510,8 +523,8 @@ func (fl TTFTFleet) plan() (ttftPlan, *Unanswerable) {
 			pf.xfer = 0
 			pf.setVP(pf.vp)
 			pf.flags = slices.DeleteFunc(pf.flags, func(f Flag) bool { return f == TransferOmitted })
+			pf.flags = append(pf.flags, DecodeEngineMeasured)
 		}
-		pf.flags = append(pf.flags, DecodeSideOmitted)
 	}
 	pl.pf, pl.flags = pf, pf.flags
 	switch fl.FlowControl.State {
@@ -722,9 +735,16 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 		// a mean, added at its mean to every percentile: its own spread is
 		// not priced.
 		first = pl.decodeTTFT.at(pl.pf.p.PromptTokens)
+		if !Finite(first) {
+			// plan refuses an overflowing term; kept so that no infinite
+			// figure is ever answered as a TTFT.
+			u := refuse(InvalidInput, fmt.Sprintf("decode engine TTFT %g s at %g prompt tokens", first, pl.pf.p.PromptTokens))
+			return priced{u: &u}
+		}
 		floorStep = first
 		out.Parts.DecodeEngine = first
 	}
+
 	if pl.d != nil {
 		out.Parts.FirstStep = first
 	}
@@ -748,7 +768,12 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 		u := refuse(Saturated, fmt.Sprintf("no finite TTFT at %g r/s", rate))
 		return priced{u: &u}
 	}
+	if !Finite(a + v + first) {
+		u := refuse(InvalidInput, fmt.Sprintf("no finite TTFT at %g r/s: a %g s, decode %g s", rate, a, first))
+		return priced{u: &u}
+	}
 	out.Seconds, out.DecodeShare = a+v+first, beta
+
 	out.Floor = a + pl.pf.own().quantile(q) + floorStep
 	out.Independent = out.Seconds
 	if extras {
