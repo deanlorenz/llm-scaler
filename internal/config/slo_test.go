@@ -57,6 +57,9 @@ var _ = Describe("SLOPolicy", func() {
 			Expect(err).To(MatchError(ContainSubstring(wantErr)))
 		},
 		Entry("a mean TPOT", SLOPolicy{TPOT: &SLOObjective{Target: SLODuration{100 * time.Millisecond}}}, ""),
+		Entry("flow control declared on", SLOPolicy{FlowControl: SLOFlowControlEnabled}, ""),
+		Entry("flow control declared off", SLOPolicy{FlowControl: SLOFlowControlDisabled}, ""),
+		Entry("a third flow-control value", SLOPolicy{FlowControl: "on"}, "flowControl must be"),
 		Entry("a TPOT percentile: TPOT is a mean",
 			SLOPolicy{TPOT: &SLOObjective{Target: SLODuration{100 * time.Millisecond}, Percentile: 90}},
 			"tpot is a mean"),

@@ -96,8 +96,8 @@ func (a *Analyzer) SlopeHoldFor() time.Duration { return a.slopeHoldFor }
 // SwitchITLReadsSettle, SwitchITLWaitsAfterRestart,
 // SwitchITLKeepsSettleThroughMissingRow, SwitchITLReadsFinitePodMean,
 // SwitchITLRestartUnderName, SwitchITLIdleOnEvidence and
-// SwitchITLForgetReachesTheLine and SwitchITLOneSidedAtCap; a name it does
-// not know is an error, and sets nothing. Never called on a production
+// SwitchITLForgetReachesTheLine, SwitchITLOneSidedAtCap and SwitchTTFTPrice; a
+// name it does not know is an error, and sets nothing. Never called on a production
 // path; a test holds that.
 func (a *Analyzer) SetSwitchesForReplay(switches map[string]bool) error {
 	rest := maps.Clone(switches)
@@ -135,6 +135,10 @@ func (a *Analyzer) switchFields() map[string]*bool {
 		// Issue #467: the line priced one-sided at the sequence cap while B
 		// is unlearned (one_sided.go).
 		SwitchITLOneSidedAtCap: &a.itlOneSidedAtCap,
+
+		// S1: each prefill variant priced against the TTFT target, in shadow
+		// (ttft.go).
+		SwitchTTFTPrice: &a.ttftPrice,
 	}
 }
 

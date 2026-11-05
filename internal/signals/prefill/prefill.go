@@ -429,7 +429,7 @@ func (o *Observer) Observe(c Cycle) Estimate {
 		if ieffOK {
 			ps.notePrompt(ieff, c.Now)
 		}
-		if !c.Settle.settled(rm, c.Now) {
+		if !c.Settle.Settled(rm, c.Now) {
 			est.Refused[rowSettling]++
 			allAdmitted = false
 			continue
@@ -501,10 +501,10 @@ func (o *Observer) sweep(now time.Time) int {
 	return n
 }
 
-// settled reports whether the replica of rm has been settled for SteadyFor
+// Settled reports whether the replica of rm has been settled for SteadyFor
 // at now. A nil Settle admits every replica; a replica the tracker does not
 // know is not settled.
-func (s *Settle) settled(rm domain.ReplicaMetrics, now time.Time) bool {
+func (s *Settle) Settled(rm domain.ReplicaMetrics, now time.Time) bool {
 	if s == nil || s.View == nil {
 		return true
 	}
@@ -581,6 +581,36 @@ func effectivePrompt(rm domain.ReplicaMetrics, sglang bool) (float64, bool) {
 	}
 	ieff := rm.AvgInputTokensRecent * (1 - hit)
 	return ieff, finitePositive(ieff)
+}
+
+// MeanEffectivePrompt is E[I_eff] over the serving rows, each row's effective
+// prompt as Observe reads it, weighted by its request rate; equal weights when
+// no row read one. False when no row gives a prompt.
+func MeanEffectivePrompt(rows []domain.ReplicaMetrics, sglang bool) (float64, bool) {
+	var weighted, weight, sum float64
+	n := 0
+	for _, rm := range rows {
+		if !Serving(rm) {
+			continue
+		}
+		ieff, ok := effectivePrompt(rm, sglang)
+		if !ok {
+			continue
+		}
+		sum += ieff
+		n++
+		if rr, ok := requestRate(rm); ok {
+			weighted += rr * ieff
+			weight += rr
+		}
+	}
+	switch {
+	case weight > 0:
+		return weighted / weight, true
+	case n > 0:
+		return sum / float64(n), true
+	}
+	return 0, false
 }
 
 // finitePositive reports whether x is finite and above zero; NaN is not.

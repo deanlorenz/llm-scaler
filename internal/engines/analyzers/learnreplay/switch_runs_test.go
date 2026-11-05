@@ -184,6 +184,20 @@ var replaySwitches = map[string][]string{
 	// a stated cap. Its unit tests hold it (heldBy).
 	slo.SwitchITLOneSidedAtCap: nil,
 
+	// S1 of the TTFT track (docs/proposals/slo-tiers.md, decision 4), on main
+	// after #482 (59772fce2): each prefill variant of a model with a TTFT
+	// target is priced against it, in shadow. It moves slo-published.csv in
+	// the two goldens with a TTFT target and a prefill variant, and nothing
+	// else: no result moves, so no replica count can. Alone from all off,
+	// P1's observation is off too, so the reason reads no-estimate; with it
+	// on, as committed, no-prefill-capacity
+	// (TestGoldens_TTFTPriceReadsTheObservation holds the pair). The
+	// engine golden's P/D model is TPOT-only, and the ttft-* recordings have
+	// no slo.Analyze to replay.
+	slo.SwitchTTFTPrice: {
+		"ols-sweep-slo/slo-published.csv", "ols-sweep-slo-restart/slo-published.csv",
+	},
+
 	// Learner PR 5c, on main after 5b (602054e98): the replicaStartSeconds
 	// seed is the prior (SwitchStartReadsSeed), and the first starts blend
 	// with it (SwitchStartBlendsFirstSamples). Measured, each alone against
@@ -789,6 +803,10 @@ var switchBase = map[string]string{
 	// ttft-saturated as #482 added it, before 5c (1ffdb6ad8).
 	"ttft-saturated/composite-results.csv": "a94dd5a36fea549888a525795b152e7199969f46319e25d95bf2f5c8211688bd",
 	"ttft-saturated/results.csv":           "4c1da5e9d1ecb5f7c084703c99c1907811de56e7974fc62b6d96ec965f05b7d7",
+
+	// S1's outputs (slo.SwitchTTFTPrice), at main 59772fce2.
+	"ols-sweep-slo/slo-published.csv":         "24b0954e3b5811850a2fcc460cf46b7790d478081cb9bee49db1e38847bb3446",
+	"ols-sweep-slo-restart/slo-published.csv": "e9b48abe22e4d484e861290c5f417edb5f28b652ceeb21c89d8aaeb2dd516008",
 }
 
 // The slow tests of this package run in parallel with each other (each

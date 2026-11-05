@@ -28,7 +28,8 @@ import (
 // and the accelerator memo (accelerators), as the saturation analyzer drops
 // its lastAccelerator: a variant forgotten after a move to new hardware
 // would otherwise key its next line under the old card for any cycle whose
-// pods do not resolve one. What it keeps: transients, the model's recent
+// pods do not resolve one; and the TTFT windows (imbalance, decodeTTFT). What
+// it keeps: transients, the model's recent
 // fleet history, which is no learned state of the variant; ownSettled (and
 // ownSettle), when each replica was last seen, which the line reads its
 // settle from and the engine's tracker keeps alike; paths, the replay's
@@ -65,6 +66,15 @@ func (a *Analyzer) forgetVariant(namespace, modelID, variant string) (int, []lea
 	}
 	if _, ok := a.accelerators[namespace+"/"+variant]; ok {
 		delete(a.accelerators, namespace+"/"+variant)
+		n++
+	}
+	key := prefillBoundKey(namespace, modelID, variant)
+	if _, ok := a.imbalance[key]; ok {
+		delete(a.imbalance, key)
+		n++
+	}
+	if _, ok := a.decodeTTFT[key]; ok {
+		delete(a.decodeTTFT, key)
 		n++
 	}
 	return n, forgotten

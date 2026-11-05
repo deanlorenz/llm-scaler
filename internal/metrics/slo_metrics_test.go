@@ -51,6 +51,92 @@ var _ = Describe("PublishSLO", func() {
 		Expect(InitMetrics(registry)).To(Succeed())
 	})
 
+	Describe("the TTFT series", func() {
+		reading := func() SLOTTFTReading {
+			return SLOTTFTReading{Variant: "pre", Statistic: "p90", Predicted: 1.5, PerReplica: 2, VPSource: "busy-minutes",
+				Reason: constants.SLOTTFTReasonPriced, Flags: []string{"UnvalidatedTTFT", "AssumedPoissonArrivals"}}
+		}
+		publish := func(t SLOTTFTReading) {
+			snap := snapshot("m")
+			snap.TTFT = []SLOTTFTReading{t}
+			PublishSLO(snap, t0)
+		}
+		value := func(name string) []float64 {
+			var out []float64
+			for _, m := range family(name) {
+				out = append(out, m.GetGauge().GetValue())
+			}
+			return out
+		}
+		oneHot := func(name, labelName string) []string {
+			var on []string
+			for _, m := range family(name) {
+				if m.GetGauge().GetValue() == 1 {
+					on = append(on, label(m, labelName))
+				}
+			}
+			return on
+		}
+
+		It("publishes a priced variant under the four labels, and zero-fills exactly the three lists", func() {
+			publish(reading())
+			Expect(value(constants.WVASLOPredictedTTFTSeconds)).To(Equal([]float64{1.5}))
+			Expect(value(constants.WVASLOTTFTReplicaRequestsPerSecond)).To(Equal([]float64{2.0}))
+			Expect(value(constants.WVASLOTTFTUnmet)).To(Equal([]float64{0.0}))
+			m := family(constants.WVASLOPredictedTTFTSeconds)[0]
+			Expect(label(m, constants.LabelVariantName)).To(Equal("pre"))
+			Expect(label(m, constants.LabelStatistic)).To(Equal("p90"))
+
+			Expect(family(constants.WVASLOTTFTFlag)).To(HaveLen(len(constants.SLOTTFTFlags)))
+			Expect(family(constants.WVASLOTTFTReason)).To(HaveLen(len(constants.SLOTTFTReasons)))
+			Expect(family(constants.WVASLOTTFTVPSource)).To(HaveLen(len(constants.SLOTTFTVPSources)))
+			var flags []string
+			for _, m := range family(constants.WVASLOTTFTFlag) {
+				flags = append(flags, label(m, constants.LabelFlag))
+			}
+			Expect(flags).To(ConsistOf(constants.SLOTTFTFlags))
+			Expect(oneHot(constants.WVASLOTTFTFlag, constants.LabelFlag)).To(ConsistOf("UnvalidatedTTFT", "AssumedPoissonArrivals"))
+			Expect(oneHot(constants.WVASLOTTFTReason, constants.LabelReason)).To(ConsistOf(constants.SLOTTFTReasonPriced))
+			Expect(oneHot(constants.WVASLOTTFTVPSource, constants.LabelVPSource)).To(ConsistOf("busy-minutes"))
+		})
+
+		It("reads a refusal as a reason: no number, no unmet", func() {
+			publish(SLOTTFTReading{Variant: "pre", Statistic: "p90", Predicted: math.NaN(), PerReplica: math.NaN(),
+				VPSource: constants.SLOTTFTVPNone, Reason: constants.SLOTTFTReasonNoPrefillCapacity})
+			Expect(family(constants.WVASLOPredictedTTFTSeconds)).To(BeEmpty())
+			Expect(family(constants.WVASLOTTFTReplicaRequestsPerSecond)).To(BeEmpty())
+			Expect(family(constants.WVASLOTTFTUnmet)).To(BeEmpty())
+			Expect(oneHot(constants.WVASLOTTFTReason, constants.LabelReason)).To(ConsistOf(constants.SLOTTFTReasonNoPrefillCapacity))
+		})
+
+		It("reads a rate past the knee as unmet with no prediction", func() {
+			r := reading()
+			r.Predicted, r.Unmet = math.NaN(), true
+			publish(r)
+			Expect(family(constants.WVASLOPredictedTTFTSeconds)).To(BeEmpty())
+			Expect(value(constants.WVASLOTTFTUnmet)).To(Equal([]float64{1.0}))
+		})
+
+		It("deletes the series when the reading goes", func() {
+			publish(reading())
+			PublishSLO(snapshot("m"), t0)
+			Expect(family(constants.WVASLOTTFTFlag)).To(BeEmpty())
+			Expect(family(constants.WVASLOTTFTReason)).To(BeEmpty())
+			Expect(family(constants.WVASLOPredictedTTFTSeconds)).To(BeEmpty())
+		})
+
+		It("says it is not a bound, in its help", func() {
+			publish(reading())
+			mfs, err := registry.Gather()
+			Expect(err).NotTo(HaveOccurred())
+			for _, mf := range mfs {
+				if mf.GetName() == constants.WVASLOPredictedTTFTSeconds {
+					Expect(mf.GetHelp()).To(And(ContainSubstring("Not a bound"), ContainSubstring("34%")))
+				}
+			}
+		})
+	})
+
 	It("publishes a percentile in the +Inf bucket as +Inf, not as absent", func() {
 		snap := snapshot("m")
 		snap.Objectives[0].Observed = math.Inf(1)

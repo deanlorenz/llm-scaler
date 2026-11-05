@@ -479,12 +479,13 @@ type ReplicaMetrics struct {
 	// is not known.
 	RequestRateKnown bool
 
-	// --- Recorded for the TTFT model; only QueueMin is read yet ---
+	// --- Recorded for the TTFT model ---
 	//
 	// The fields below are what the what-if planner and the slo analyzer's
-	// TTFT pricing learn from (docs/proposals/analyzer-learner.md, 2.9). One
-	// is read: QueueMin, by the saturation analyzer's prefill observation
-	// (busy minutes, logs only); no analyzer reads the rest. Each is behind a
+	// TTFT pricing learn from (docs/proposals/analyzer-learner.md, 2.9).
+	// QueueMin is read by the saturation analyzer's prefill observation (busy
+	// minutes), and AvgTTFT, AvgKVTransferTime and ComputedTokensBuckets by
+	// the slo analyzer's TTFT pricing; no analyzer reads the rest. Each is behind a
 	// presence bit, or is a histogram that is nil when absent, and each is
 	// left out of a learner recording
 	// while it is zero (learnrec.OmitZeroTag), so a recording made before
@@ -526,6 +527,12 @@ type ReplicaMetrics struct {
 	// request_prompt_tokens_bucket; SGLang prompt_tokens_histogram_bucket
 	// (behind --collect-tokens-histogram). Nil when absent.
 	PromptTokensBuckets []LengthBucket `learnrec:"omitzero"`
+	// ComputedTokensBuckets is the per-request histogram of computed prefill
+	// tokens, the prompt net of prefix hits. vLLM
+	// request_prefill_kv_computed_tokens_bucket. No collector fills it yet
+	// (Q1, docs/proposals/slo-capacity-planner.md); the slo analyzer reads
+	// the prompt's spread from it where a row carries it. Nil when absent.
+	ComputedTokensBuckets []LengthBucket `learnrec:"omitzero"`
 	// OutputTokensBuckets is the output-length histogram, tokens per
 	// request, over [5m] like AvgOutputTokens: the buckets
 	// AvgOutputTokensSquared is reduced from. vLLM

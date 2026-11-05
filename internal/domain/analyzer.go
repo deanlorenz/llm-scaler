@@ -92,7 +92,8 @@ type AnalyzerInput struct {
 	// FlowControlPools is the flow-control layer of each InferencePool that
 	// serves this model alone, in pool-name order, the names not kept. Nil
 	// when no pool is joined to the model: flow control off, no series yet,
-	// or a pool shared with another model. Read by nothing yet.
+	// or a pool shared with another model. Set only while a learner recording
+	// is on. The slo analyzer's TTFT pricing reads whether it is set.
 	FlowControlPools []FlowControlPool
 }
 

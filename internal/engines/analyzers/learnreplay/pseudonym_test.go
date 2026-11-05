@@ -131,7 +131,8 @@ func TestExport_EveryRecordedStringIsClassified(t *testing.T) {
 	assert.Empty(t, stale, "table entries no recorded field matches")
 	// Pinned, so a new field is a reviewed change.
 	t.Logf("%d string value sites, %d string-keyed maps", len(values), len(keys))
-	assert.Len(t, values, 133, "string value sites")
+	// 140 since S1: SLOTTFTReading's six, and SLOPolicy.FlowControl.
+	assert.Len(t, values, 140, "string value sites")
 	// 51 since learner PR 5c: LearnedState.StartSamples and StartAdmittedAt,
 	// keyed like StartSeconds, and AnalyzerResult.RoleStartSeeded, by role.
 	assert.Len(t, keys, 51, "string-keyed maps")

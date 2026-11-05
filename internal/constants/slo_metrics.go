@@ -54,11 +54,47 @@ const (
 	// Labels: namespace, model_name, objective, reason.
 	WVASLOExcluded = "wva_slo_excluded"
 
+	// WVASLOPredictedTTFTSeconds is the TTFT the model predicts for a prefill
+	// variant at its current rate, at the objective's percentile. A shadow
+	// figure, not a bound: it reads low at light load, up to about 34% under
+	// the router's p90 on the prefill-stress recordings. Published with the
+	// reasons priced, decode-bound and routing-bound; absent otherwise, and
+	// absent when the model refuses the current rate.
+	// Labels: namespace, model_name, variant_name, statistic.
+	WVASLOPredictedTTFTSeconds = "wva_slo_predicted_ttft_seconds"
+	// WVASLOTTFTUnmet is 1 when a prefill variant's current rate misses the
+	// TTFT target (the prediction is above it, or the model refused the rate
+	// at or over the prefill knee or the decode onset, or the rate is above
+	// the prefill flow-control onset), 0 when met, and absent when not priced.
+	// Labels: namespace, model_name, variant_name, statistic.
+	WVASLOTTFTUnmet = "wva_slo_ttft_unmet"
+	// WVASLOTTFTReplicaRequestsPerSecond is the request rate per replica at
+	// which the bounded TTFT meets the target, at the current replica count.
+	// Absent unless wva_slo_ttft_reason reads priced.
+	// Labels: namespace, model_name, variant_name, statistic.
+	WVASLOTTFTReplicaRequestsPerSecond = "wva_slo_ttft_replica_requests_per_second"
+	// WVASLOTTFTVPSource is 1 for where a prefill variant's capacity V_P came
+	// from and 0 for the others (SLOTTFTVPSources).
+	// Labels: namespace, model_name, variant_name, statistic, vp_source.
+	WVASLOTTFTVPSource = "wva_slo_ttft_vp_source"
+	// WVASLOTTFTReason is 1 for the reason of a prefill variant's TTFT pricing
+	// and 0 for the others (SLOTTFTReasons).
+	// Labels: namespace, model_name, variant_name, statistic, reason.
+	WVASLOTTFTReason = "wva_slo_ttft_reason"
+	// WVASLOTTFTFlag is 1 for each flag on a prefill variant's TTFT answer and
+	// 0 for the others (SLOTTFTFlags).
+	// Labels: namespace, model_name, variant_name, statistic, flag.
+	WVASLOTTFTFlag = "wva_slo_ttft_flag"
+
 	// LabelObjective names an SLO objective: "ttft" or "tpot".
 	LabelObjective = "objective"
 	// LabelStatistic names the statistic an objective is judged on: "mean", or
 	// "p" followed by the percentile ("p90").
 	LabelStatistic = "statistic"
+	// LabelVPSource names where a prefill variant's V_P came from.
+	LabelVPSource = "vp_source"
+	// LabelFlag names a flag on a TTFT answer.
+	LabelFlag = "flag"
 )
 
 // SLO objective label values.
@@ -117,6 +153,74 @@ const (
 
 // SLOExcludedReasons is every exclusion reason, in the order they are published.
 var SLOExcludedReasons = []string{SLOExcludedZeroReplicas, SLOExcludedStarting, SLOExcludedUnobserved}
+
+// Where a prefill variant's V_P came from: P1's sources, or none.
+const (
+	SLOTTFTVPBusyMinutes       = "busy-minutes"
+	SLOTTFTVPPeakUnderQueue    = "peak-under-queue"
+	SLOTTFTVPBackPressureBound = "back-pressure-bound"
+	SLOTTFTVPNone              = "none"
+)
+
+// SLOTTFTVPSources is every V_P source value, in the order they are published.
+var SLOTTFTVPSources = []string{SLOTTFTVPBusyMinutes, SLOTTFTVPPeakUnderQueue, SLOTTFTVPBackPressureBound, SLOTTFTVPNone}
+
+// The reasons of a prefill variant's TTFT pricing.
+const (
+	// SLOTTFTReasonPriced: the per-replica rate is published.
+	SLOTTFTReasonPriced = "priced"
+	// SLOTTFTReasonNoEstimate: no P1 estimate from this cycle.
+	SLOTTFTReasonNoEstimate = "no-estimate"
+	// SLOTTFTReasonNoDecodeSide: flow control is on and no decode line is
+	// priced, so the decode onset cannot be placed.
+	SLOTTFTReasonNoDecodeSide = "no-decode-side"
+	// SLOTTFTReasonDecodeBound: decode sets the rate, so more prefill replicas
+	// cannot raise it.
+	SLOTTFTReasonDecodeBound = "decode-bound"
+	// SLOTTFTReasonRoutingBound: one pod takes at least 80% of the work, so
+	// the fix is the router's scoring, not replicas.
+	SLOTTFTReasonRoutingBound = "routing-bound"
+	// The model's refusals, in kebab case.
+	SLOTTFTReasonNoPrefillCapacity = "no-prefill-capacity"
+	SLOTTFTReasonNoFixedLatency    = "no-fixed-latency"
+	SLOTTFTReasonNoImbalance       = "no-imbalance"
+	SLOTTFTReasonNoPrefillReplicas = "no-prefill-replicas"
+	SLOTTFTReasonNoDecodeReplicas  = "no-decode-replicas"
+	SLOTTFTReasonNoCapacity        = "no-capacity"
+	SLOTTFTReasonNoBatchCap        = "no-batch-cap"
+	SLOTTFTReasonAboveDecodeOnset  = "above-decode-onset"
+	SLOTTFTReasonSaturated         = "saturated"
+	SLOTTFTReasonTargetBelowFloor  = "target-below-floor"
+	SLOTTFTReasonNoTraffic         = "no-traffic"
+	SLOTTFTReasonTooManySlots      = "too-many-slots"
+	SLOTTFTReasonInputInvalid      = "input-invalid"
+)
+
+// SLOTTFTReasons is every TTFT reason value, in the order they are published.
+var SLOTTFTReasons = []string{
+	SLOTTFTReasonPriced, SLOTTFTReasonNoEstimate, SLOTTFTReasonNoDecodeSide,
+	SLOTTFTReasonDecodeBound, SLOTTFTReasonRoutingBound,
+	SLOTTFTReasonNoPrefillCapacity, SLOTTFTReasonNoFixedLatency, SLOTTFTReasonNoImbalance,
+	SLOTTFTReasonNoPrefillReplicas, SLOTTFTReasonNoDecodeReplicas, SLOTTFTReasonNoCapacity,
+	SLOTTFTReasonNoBatchCap, SLOTTFTReasonAboveDecodeOnset, SLOTTFTReasonSaturated,
+	SLOTTFTReasonTargetBelowFloor, SLOTTFTReasonNoTraffic, SLOTTFTReasonTooManySlots,
+	SLOTTFTReasonInputInvalid,
+}
+
+// SLOTTFTFlags is every flag the flag series zero-fills, in the order they are
+// published: the TTFT model's, the decode flags a TTFT answer can carry, and
+// the SLO analyzer's own. The names are whatif.Flag values, spelled here
+// because this package imports nothing; a test in the slo package holds them
+// to whatif's. AssumedVP and DecodeOnsetUnchecked always read 0: the analyzer
+// assumes no V_P and publishes no unchecked answer.
+var SLOTTFTFlags = []string{
+	"UnvalidatedTTFT", "AssumedVP", "VPLowerBound", "VPAboveSlopeBound", "AssumedImbalance",
+	"AssumedPromptSpread", "TransferOmitted", "DecodeSideOmitted", "DecodeTTFTUnmeasured",
+	"DecodeEngineMeasured", "VPScaledToPrompt", "VPShapeMoved", "FlowControlInferredOff",
+	"AboveFlowControlOnset", "HeldByDecodeAdmission", "DecodeOnsetUnchecked",
+	"BelowFittedBand", "KVBoundSlots",
+	"AssumedPoissonArrivals", "PromptSpreadClamped", "FlowControlMismatch",
+}
 
 // SLOSources is every SLO source value, in the order they are published.
 var SLOSources = []string{
