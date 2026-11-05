@@ -758,8 +758,9 @@ and a tail on the sweep (steps 2 and 4). What its replay reached, by
 Every settling reading is the wait after a controller start: no joiner is
 recorded, since the one decode pod never scales. The test replays with
 `throughput.SwitchITLWaitsAfterRestart` off, and with
-`throughput.SwitchITLAdmitsAtSequenceCap` off, and requires that floor to
-fail. The held slope ran 0 times: through the 35 minutes of light load the
+`throughput.SwitchITLAdmitsAtSequenceCap` off, and requires exactly the
+floors each rests on to fail: settling for the first, at-cap and pinned
+(`throughput-sweep-restart`) for the second. The held slope ran 0 times: through the 35 minutes of light load the
 line was silent with cause `shape-change`, so the held slope stays synthetic.
 
 It needs 2 H200 (one decode, one prefill) for about 2 hours, setup

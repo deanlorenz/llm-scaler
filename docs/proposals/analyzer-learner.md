@@ -1679,7 +1679,10 @@ decode pod at 64 running with requests waiting, at mean k 0.77 to 0.90
 readings above it. The raw rows give the same 20. By peak `KvCacheUsage` 22
 rows qualify: on the rise, the 22:11:50Z and 22:12:05Z rows read in the band
 at mean k 0.50 and 0.60. The preemption total reached 37 and 4 decode rows of
-the restart recording show preemption, none of them among the 20.
+the restart recording show preemption, none of them among the 20. All 14
+pinned fits of the restart recording come from those readings: with
+`throughput-itl-admits-at-sequence-cap` off, pinned falls to 0 and 7
+above-band fits take their place.
 
 The held slope stays synthetic (2.8): it ran 0 times in both. A shape change
 drops the held slope with the window, and through the 35 min of light load
