@@ -17,33 +17,32 @@ import (
 // when the throughput analyzer's in-flight work lands.
 const DefaultBaselineSec = 0.006
 
-// DefaultBPrior is the upper prior on B the one-sided rule at the cap pins
-// (Admission.BPrior) when no variant has learned one (BPrior): 30 ms. It is
-// the top of the grid the rule was measured on (issue #467: B of 10 to
-// 30 ms on A of 0.01 and 0.05), so the grid's worst case is priced exactly,
-// and every point under it is over-priced by (30 ms - B)(1 - k/k_cap) and
-// no more. Measured intercepts on the clusters this was built for were 1.5
-// to 15 ms; a whole-node decode with a true B above 30 ms is under-priced by
-// (B - 30 ms)(1 - k/k_cap) until it learns its own.
+// DefaultBPrior is the floor of the upper prior on B the one-sided rule at
+// the cap pins (Admission.BPrior; BPrior): 30 ms. It is the top of the grid
+// the rule was measured on (issue #467: B of 10 to 30 ms on A of 0.01 and
+// 0.05), so the grid's worst case is priced exactly. Measured intercepts on
+// the clusters this was built for were 1.5 to 15 ms; a whole-node decode
+// with a true B above 30 ms is under-priced by (B - 30 ms)(1 - k/kbar) until
+// it learns its own, or another variant on its physics key does.
 const DefaultBPrior = 0.030
 
-// BPrior is the prior the one-sided rule pins: the largest learned B among
-// learned, the intercepts other variants have measured (a full fit's, kept
-// positive), when there is one; else DefaultBPrior. A learned B is a floor
-// some engine measured, and the largest of them bounds the floors seen, as
-// the constant bounds the grid; a non-finite or non-positive entry is
+// BPrior is the prior the one-sided rule pins, before the window's cap
+// (Admission.BPrior): DefaultBPrior, raised to the largest of learned, the
+// intercepts measured on the variant's own physics key (the accelerator and
+// the engine shape it runs), when one is larger. A learned B only ever
+// raises the prior. One some other engine of the same physics measured says
+// B can be that high; a lower one says nothing about this variant's, and
+// the fleet's intercepts (1.5 to 15 ms) would otherwise pull every prior
+// under a whole-node decode's B. A non-finite or non-positive entry is
 // skipped.
 func BPrior(learned ...float64) float64 {
-	b := 0.0
+	b := DefaultBPrior
 	for _, v := range learned {
 		if v > 0 && !math.IsInf(v, 0) {
 			b = max(b, v)
 		}
 	}
-	if b > 0 {
-		return b
-	}
-	return DefaultBPrior
+	return b
 }
 
 // FitPinnedB fits ITL(k) = A*k + B with B held at the value given: A is the

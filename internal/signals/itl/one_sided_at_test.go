@@ -40,21 +40,25 @@ var priorGrid = []struct{ a, b, kCap float64 }{
 	{0.05, 0.010, 0.92}, {0.01, 0.030, 0.92},
 }
 
-// boundAt is the price the prior's line gives at k, worked by hand from the
-// least-ITL reading (k_r, ITL_r) the pinned fit read from the key's windows
-// (pinnedReadings): BPrior + max(0, ITL_r - BPrior) k / k_r. With the slope
-// above zero it is the truth plus (BPrior - B)(1 - k/k_r); floored at zero
-// (ITL_r under the prior) it is BPrior itself.
+// boundAt is the most the prior's line can price at k, worked by hand from
+// the readings the pinned fit read (pinnedReadings): through the mean at-cap
+// point (kbar, ITLbar) with intercept the uncapped prior, DefaultBPrior +
+// max(0, ITLbar - DefaultBPrior) k / kbar. With the slope above zero it is
+// the truth plus (BPrior - B)(1 - k/kbar); floored at zero it is the prior
+// itself. The window's cap (priorCap) only lowers the intercept toward B,
+// which can only tighten it, so the rule is held to at most this, not to it.
 func boundAt(tr *Tracker, k float64) float64 {
 	rs := tr.Readings("k")
 	read, _ := pinnedReadings(rs.All, rs.Steady)
-	best := Observation{ITLSec: math.Inf(1)}
+	var sumK, sumITL float64
+	n := 0
 	for _, o := range read {
-		if atOrPastKSat(o.K) && o.ITLSec < best.ITLSec {
-			best = o
+		if atOrPastKSat(o.K) {
+			sumK, sumITL, n = sumK+o.K, sumITL+o.ITLSec, n+1
 		}
 	}
-	return DefaultBPrior + max(0, best.ITLSec-DefaultBPrior)*k/best.K
+	kbar, itlbar := sumK/float64(n), sumITL/float64(n)
+	return DefaultBPrior + max(0, itlbar-DefaultBPrior)*k/kbar
 }
 
 // atPrice is an admission priced one-sided at the default pricing k (0.68)
@@ -67,10 +71,11 @@ func atPrice() Admission {
 // default B, the price is under the truth by the derived term (B0 - B)(1 -
 // k/kbar). On, with the prior at DefaultBPrior, at or above the truth for
 // every B at or under the prior, over by exactly the derived bound
-// (boundAt): (BPrior - B)(1 - k/k_r), k_r the least reading's fill, or, where
-// that reading's ITL is under the prior and the slope floors at 0, the prior
-// itself; the truth exactly where B is the prior. The line returned passes through the default B with A
-// above zero.
+// (boundAt): (BPrior - B)(1 - k/kbar), kbar the at-cap readings' mean fill,
+// or, where their mean ITL is under the prior and the slope floors at 0, the
+// prior itself; less where the window's cap lowers the prior. The truth
+// exactly where B is the prior. The line returned passes through the default
+// B with A above zero.
 func TestBPrior_ThePricingKIsAtOrAboveTheTruthAndBounded(t *testing.T) {
 	const kPrice = 0.68
 	for _, g := range priorGrid {
@@ -92,8 +97,8 @@ func TestBPrior_ThePricingKIsAtOrAboveTheTruthAndBounded(t *testing.T) {
 		if !on.PinnedAtBPrior || on.PinnedAtLeastITL || atK < truth*(1-1e-12) {
 			t.Errorf("on: priced %.5f s against the truth %.5f s (at the prior %v)", atK, truth, on.PinnedAtBPrior)
 		}
-		if math.Abs(errOn-bound) > 1e-9 {
-			t.Errorf("on: over by %+.4f%%, want the bound %+.4f%%", errOn, bound)
+		if errOn > bound+1e-9 {
+			t.Errorf("on: over by %+.4f%%, past the bound %+.4f%%", errOn, bound)
 		}
 		if on.Model.B != DefaultBaselineSec || !(on.Model.A > 0) {
 			t.Errorf("on: the line %+v, want one through the default B with A above zero", on.Model)
@@ -102,7 +107,8 @@ func TestBPrior_ThePricingKIsAtOrAboveTheTruthAndBounded(t *testing.T) {
 }
 
 // A true B above the prior is under-priced, by at most (B - BPrior)(1 -
-// k/k_r): bounded, and less than the default B alone.
+// k/kbar): bounded, and less than the default B alone. The cap does not
+// apply (every reading is above the prior), so the price is the bound.
 func TestBPrior_ATrueBAboveThePriorIsUnderByTheBound(t *testing.T) {
 	const kPrice, a, b, kCap = 0.68, 0.01, 0.040, 0.97
 	truth := a*kPrice + b
@@ -114,6 +120,8 @@ func TestBPrior_ATrueBAboveThePriorIsUnderByTheBound(t *testing.T) {
 	bound := 100 * (boundAt(tr, kPrice) - truth) / truth
 	t.Logf("B 40 ms: on %+.2f%% (bound %+.2f%%), off %+.2f%%", errOn, bound, errOff)
 	if math.Abs(errOn-bound) > 1e-9 || !(errOn < 0) || !(errOn > errOff) {
+		// The window's cap is the least ITL, at least B + A k: above the
+		// 30 ms prior, so it does not bind and the price is the bound.
 		t.Errorf("on %+.4f%%, want the bound %+.4f%%, under the truth and over the default B's %+.4f%%", errOn, bound, errOff)
 	}
 }
@@ -228,29 +236,105 @@ func TestBPrior_TheLinesAreComparedAtThePricingK(t *testing.T) {
 	}
 }
 
-// The prior's line is through the least at-cap reading, slope floored at 0;
-// readings under kSat are not read.
-func TestBPrior_ThePriorLineIsThroughTheLeastReading(t *testing.T) {
-	obs := []Observation{{K: 0.80, ITLSec: 0.010}, {K: 0.95, ITLSec: 0.060}, {K: 0.90, ITLSec: 0.055}}
+// The prior's line passes through the mean at-cap point, its intercept the
+// prior capped at the window's least ITL at any k, its slope floored at 0;
+// readings under kSat set the cap but not the mean.
+func TestBPrior_ThePriorLineIsThroughTheMeanAtCapPoint(t *testing.T) {
+	obs := []Observation{{K: 0.95, ITLSec: 0.060}, {K: 0.90, ITLSec: 0.054}}
 	m, ok := priorLine(obs, 0.030)
-	if !ok || math.Abs(m.A-(0.055-0.030)/0.90) > 1e-15 || m.B != 0.030 {
-		t.Errorf("%+v, want B 0.030 through (0.90, 0.055)", m)
+	if !ok || math.Abs(m.A-(0.057-0.030)/0.925) > 1e-12 || m.B != 0.030 {
+		t.Errorf("%+v, want B 0.030 through the mean (0.925, 0.057)", m)
 	}
-	if m, _ := priorLine([]Observation{{K: 0.90, ITLSec: 0.020}}, 0.030); m.A != 0 {
-		t.Errorf("a least ITL under the prior: A %g, want 0", m.A)
+	// A reading under kSat at 0.010 s caps the prior at it, and is not in
+	// the mean.
+	capped := append([]Observation{{K: 0.20, ITLSec: 0.010}}, obs...)
+	if m, _ := priorLine(capped, 0.030); m.B != 0.010 || math.Abs(m.A-(0.057-0.010)/0.925) > 1e-12 {
+		t.Errorf("capped: %+v, want B 0.010 through the mean (0.925, 0.057)", m)
+	}
+	if m, _ := priorLine([]Observation{{K: 0.90, ITLSec: 0.020}}, 0.030); m.A != 0 || m.B != 0.020 {
+		t.Errorf("a mean under the prior: %+v, want flat at the cap 0.020", m)
 	}
 	if _, ok := priorLine([]Observation{{K: 0.80, ITLSec: 0.05}}, 0.030); ok {
-		t.Error("a line from readings under kSat")
+		t.Error("a line from readings under kSat alone")
 	}
 }
 
-// BPrior is the largest learned B, else DefaultBPrior.
-func TestBPrior_IsTheLargestLearnedB(t *testing.T) {
+// BPrior is DefaultBPrior, raised by a learned B above it, never lowered.
+func TestBPrior_ALearnedBOnlyRaisesThePrior(t *testing.T) {
 	if got := BPrior(); got != DefaultBPrior {
 		t.Errorf("none learned: %g, want %g", got, DefaultBPrior)
 	}
-	if got := BPrior(0.004, 0.012, math.NaN(), -1, math.Inf(1)); got != 0.012 {
-		t.Errorf("learned: %g, want 0.012", got)
+	if got := BPrior(0.003, 0.008, 0.015); got != DefaultBPrior {
+		t.Errorf("small learned Bs: %g, want the floor %g", got, DefaultBPrior)
+	}
+	if got := BPrior(0.004, 0.045, math.NaN(), -1, math.Inf(1)); got != 0.045 {
+		t.Errorf("a learned B above the floor: %g, want 0.045", got)
+	}
+}
+
+// An outlier prior (an 80 ms fit on the same physics key) is capped at the
+// window's least ITL, which no reading puts under B: the price is bounded by
+// the cap, and still at or above the truth.
+func TestBPrior_TheWindowCapsAnOutlierPrior(t *testing.T) {
+	const kPrice, a, b, kCap = 0.68, 0.01, 0.020, 0.97
+	truth := a*kPrice + b
+	adm := atPrice()
+	adm.BPrior = 0.080
+	tr := NewTracker()
+	on := capWindow(tr, adm, a, b, kCap, nil)
+	rs := tr.Readings("k")
+	read, _ := pinnedReadings(rs.All, rs.Steady)
+	least, sumK, sumITL, n := math.Inf(1), 0.0, 0.0, 0
+	for _, o := range read {
+		least = min(least, o.ITLSec)
+		if atOrPastKSat(o.K) {
+			sumK, sumITL, n = sumK+o.K, sumITL+o.ITLSec, n+1
+		}
+	}
+	// The prior's line at the cap, by hand: intercept the least ITL, through
+	// the mean at-cap point. Uncapped, the 80 ms intercept would price 80 ms.
+	kbar, itlbar := sumK/float64(n), sumITL/float64(n)
+	bound := least + max(0, itlbar-least)*kPrice/kbar
+	p := on.Model.ITLAt(kPrice)
+	t.Logf("outlier 80 ms: priced %.5f s, truth %.5f s, capped bound %.5f s (cap %.5f s)", p, truth, bound, least)
+	if p < truth*(1-1e-12) || math.Abs(p-bound) > 1e-12 || !(p < 0.080) {
+		t.Errorf("priced %.5f s, want the capped bound %.5f s, at or above the truth %.5f s", p, bound, truth)
+	}
+	// The over-price is the cap's error over B, not the outlier's.
+	if over, uncapped := (p-truth)/truth, (0.080-truth)/truth; !(over < uncapped/10) {
+		t.Errorf("over-priced by %.2f%%, uncapped would be %.2f%%: the cap did not bound it", 100*over, 100*uncapped)
+	}
+}
+
+// The scope reads only keys of the same model, accelerator, GPUs, engine
+// arguments and role, the variant's own key always.
+func TestBPrior_TheScopeIsThePhysicsKey(t *testing.T) {
+	args := map[string]string{
+		"ns|m|v1|H200|8": "a1", "ns|m|v2|H200|8": "a1", "ns|m|v3|H200|8": "a2",
+		"ns|m|v4|H100|8": "a1", "ns|m|v5|H200|4": "a1", "ns|m2|v6|H200|8": "a1", "ns|m|p1|H200|8": "a1",
+		"ns2|m|v7|H200|8": "a1",
+	}
+	roles := map[string]string{"v1": "decode", "v2": "decode", "v3": "decode", "v4": "decode", "v5": "decode",
+		"v6": "decode", "p1": "prefill"}
+	s := PriorScope{Key: "ns|m|v1|H200|8", Args: "a1",
+		ArgsOf: func(k string) string { return args[k] }, RoleOf: func(v string) string { return roles[v] }}
+	for key, want := range map[string]bool{
+		"ns|m|v1|H200|8": true, "ns|m|v2|H200|8": true,
+		"ns|m|v3|H200|8": false, "ns|m|v4|H100|8": false, "ns|m|v5|H200|4": false,
+		"ns|m2|v6|H200|8": false, "ns|m|p1|H200|8": false, "ns2|m|v7|H200|8": false, "bad": false,
+	} {
+		if got := s.In(key); got != want {
+			t.Errorf("%s: in scope %v, want %v", key, got, want)
+		}
+	}
+	if (PriorScope{Key: "ns|m|v1|H200|8"}).In("ns|m|v2|H200|8") {
+		t.Error("no arguments known: a sibling is in scope")
+	}
+	tr := NewTracker()
+	tr.SetBaseline("ns|m|v2|H200|8", 0.040)
+	tr.SetBaseline("ns|m|v4|H100|8", 0.090)
+	if got := tr.ScopedBaselines(s); len(got) != 1 || got[0] != 0.040 {
+		t.Errorf("scoped baselines %v, want [0.040]", got)
 	}
 }
 

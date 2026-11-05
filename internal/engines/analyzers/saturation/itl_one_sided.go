@@ -1,6 +1,9 @@
 package saturation
 
-import "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+import (
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+)
 
 // SwitchITLOneSidedAtCap is the replay switch for the one-sided price at
 // the sequence cap on the ITL line (issue #467; analyzer-learner.md, 4b-3
@@ -12,45 +15,71 @@ import "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 // whenever the true B' is above the 6 ms default, so too high a derived mu
 // and too few replicas. On, while B is unlearned and the window holds
 // readings at k >= kSat, the pinned fit is set against the line through the
-// least of those readings' ITL with its intercept a stated upper prior on B
-// (itl.Admission.BPrior: itlBPrior), compared at the k the line is priced
-// at (pricingK; itl.Admission.OneSidedAt), and the higher there is the line.
-// A held slope keeps the A that prices the chosen line there. A learned B
-// ends it. Off, as before, the fit through the default B is the line.
+// mean of those readings with its intercept an upper prior on B
+// (itl.Admission.BPrior: itlBPrior, capped at the window's least ITL),
+// compared at the k the line is priced at (pricingK;
+// itl.Admission.OneSidedAt), and the higher there is the line. A held slope
+// keeps the A that prices the chosen line there. A learned B ends it. Off,
+// as before, the fit through the default B is the line.
 const SwitchITLOneSidedAtCap = "saturation-itl-one-sided-at-cap"
 
 // itlOneSided sets on adm the one-sided price at the cap, under
 // SwitchITLOneSidedAtCap, at kPrice, the fill the line is priced at, pinned
-// at the analyzer's prior on B (itlBPrior). A variant with no stated cap
-// admits nothing at it, and the rule has nothing past kSat to read but what
-// the window took at the cap: it is set all the same, and does nothing
-// there.
-func (a *SaturationAnalyzer) itlOneSided(adm *itl.Admission, kPrice float64) {
+// at the prior on B of the variant's physics (itlBPrior). A variant with no
+// stated cap admits nothing at it, and the rule has nothing past kSat to
+// read but what the window took at the cap: it is set all the same, and does
+// nothing there.
+func (a *SaturationAnalyzer) itlOneSided(adm *itl.Admission, kPrice float64, scope itl.PriorScope, physicsKey string) {
 	a.mu.Lock()
 	on := a.itlOneSidedAtCap
 	a.mu.Unlock()
-	if on {
-		adm.OneSidedAboveKSat, adm.OneSidedAt, adm.BPrior = true, kPrice, a.itlBPrior()
+	if !on {
+		return
 	}
+	adm.OneSidedAboveKSat, adm.OneSidedAt, adm.BPrior = true, kPrice, a.itlBPrior(scope, physicsKey)
+	a.mu.Lock()
+	a.itlOneSidedLast[scope.Key] = itl.Admission{OneSidedAboveKSat: true, OneSidedAt: kPrice, BPrior: adm.BPrior}
+	a.mu.Unlock()
 }
 
 // itlBPrior is the prior on B the one-sided rule pins (itl.BPrior): the
-// largest B learned on any key of the ITL tracker, or of a line published
-// for sharing, else itl.DefaultBPrior. A published line through the default
-// B is no learned floor (every key without one publishes it) and is left
-// out. Called without a.mu held.
-func (a *SaturationAnalyzer) itlBPrior() float64 {
-	bs := a.itlTracker.Baselines()
-	learned := make([]float64, 0, len(bs))
-	for _, b := range bs {
-		learned = append(learned, b)
-	}
+// floor itl.DefaultBPrior, raised by the largest B learned on the variant's
+// own physics, never lowered by it. Two sources are read, and only within
+// that physics. One is the B of the tracker's keys in scope (itl.PriorScope:
+// the same model, accelerator and GPU count, under the same engine
+// arguments, in the same role). The other is the line published for the
+// variant's own physics key (itlPhysicsKey: the model, the accelerator and
+// the engine fingerprint). One published through the default B (every key
+// without a learned one publishes it) is under the floor and moves nothing.
+// Called without a.mu held.
+func (a *SaturationAnalyzer) itlBPrior(scope itl.PriorScope, physicsKey string) float64 {
+	learned := a.itlTracker.ScopedBaselines(scope)
 	a.mu.Lock()
-	for _, l := range a.itlLines {
-		if l.model.B != itl.DefaultBaselineSec {
-			learned = append(learned, l.model.B)
-		}
+	if l, ok := a.itlLines[physicsKey]; ok {
+		learned = append(learned, l.model.B)
 	}
 	a.mu.Unlock()
 	return itl.BPrior(learned...)
+}
+
+// itlPriorScope is the scope of the variant's prior on B (itl.PriorScope):
+// its window key, the engine arguments it runs, the arguments each key was
+// last fitted under (itlArgs), and the role of each of the model's variants
+// this cycle.
+func (a *SaturationAnalyzer) itlPriorScope(key, args string, roles map[string]string) itl.PriorScope {
+	a.mu.Lock()
+	argsOf := make(map[string]string, len(a.itlArgs))
+	for k, v := range a.itlArgs {
+		argsOf[k] = v
+	}
+	a.mu.Unlock()
+	return itl.PriorScope{Key: key, Args: args,
+		ArgsOf: func(k string) string { return argsOf[k] },
+		RoleOf: func(v string) string {
+			r, ok := roles[v]
+			if !ok {
+				return ""
+			}
+			return domain.CanonicalRole(r)
+		}}
 }

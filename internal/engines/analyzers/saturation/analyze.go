@@ -551,8 +551,12 @@ func (c *cycle) fitLines() {
 		c.a.itlSettleAdmission(&adm, c.input.Namespace, c.input.ModelID)
 		// Readings at the cap sit above kSat, where a pinned fit through the
 		// default B prices under the truth: priced one-sided at the line's
-		// pricing k until B is learned (itl_one_sided.go).
-		c.a.itlOneSided(&adm, pricingK(c.cfg))
+		// pricing k until B is learned, against a prior on B read within the
+		// variant's own physics (itl_one_sided.go).
+		c.a.itlOneSided(&adm, pricingK(c.cfg),
+			c.a.itlPriorScope(variantKey, windowArgs(params), c.rolesByVariant),
+			itlLineKeyForRole(c.a.itlPhysicsKey(c.input.Namespace, c.input.ModelID, variant,
+				c.accelByVariant[variant], c.gpusByVariant[variant], c.fpByVariant[variant]), role, c.fpByVariant[variant]))
 		// An aggregated variant priced by shape (issue #275,
 		// itl_aggregated_shape.go): the shape now against the window's,
 		// before the window takes this cycle's readings, and the steps a

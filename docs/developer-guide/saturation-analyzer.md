@@ -751,32 +751,43 @@ readings it prices under the true line by `(B0 - B)(1 - k/k_cap)` at a fill
 `k`. Under `SwitchITLOneSidedAtCap` (`saturation-itl-one-sided-at-cap`,
 `itl_one_sided.go`) the admission sets `itl.Admission.OneSidedAboveKSat`, as
 the throughput line does, with `OneSidedAt` the line's pricing k
-(`pricingK`) and `BPrior` the prior on B (`itlBPrior`: the largest B learned
-on any tracker key or published line, else `itl.DefaultBPrior`, 30 ms). The
-tracker then sets the fit through the default B against the line with
-intercept `BPrior` through the least at-cap ITL (`priorLine`: `A = max(0,
-(ITL_r - BPrior)/k_r)`), compares them at that k, and when the latter is
-higher returns the line through the default B that prices the same there
-(`oneSidedLine`): A above zero, B the pin, so `DeriveMuAtCap`, `ValidModel`
-and line sharing read it as any pinned fit. The held A is that line's A, so a
-hold prices the same. `itl-fit` logs `pinnedAtBPrior`.
+(`pricingK`) and `BPrior` the prior on B (`itlBPrior`).
 
-Every reading is at least `B + A k`, so the prior's line is over the truth at
-`k` under `k_r` by at least `(BPrior - B)(1 - k/k_r)`: never under while
-`B <= BPrior`, and under by at most `(B - BPrior)(1 - k/k_r)` when B is
-higher. The throughput line sets no prior and keeps 4b-3's line through the
-least ITL (`atLeastITLLine`).
+- **Scope.** `itlBPrior` reads only the variant's physics: the tracker's
+  keys in `itl.PriorScope` (the same model, accelerator and GPU count, the
+  same engine arguments in `itlArgs`, the same role this cycle; another
+  namespace is out of scope, since its role is unknown here), and the line
+  published for the variant's own physics key (`itlPhysicsKey`, shared only
+  with `enableLearnedStateReuse`).
+- **Floor.** `itl.BPrior` is `max(itl.DefaultBPrior, largest learned B in
+  scope)`: a learned B only raises the prior, never lowers it under 30 ms.
+- **Cap.** `itl.priorCap` caps the prior at the least ITL of any reading in
+  the variant's own window, at any k: every reading is at least B.
+- **Mean point.** `itl.priorLine` passes the prior's line through the mean
+  `(kbar, ITLbar)` of the window's readings at k >= kSat: `A = (ITLbar - b)/
+  kbar`, never negative since the cap puts `b` under every ITL. The bound
+  `(b - B)(1 - k/kbar)` holds without noise; with noise the mean's error
+  falls by sqrt(n), and the least reading's selection bias is gone.
+
+The tracker compares that line with the fit through the default B at the
+pricing k, and when it is higher returns the line through the default B that
+prices the same there (`oneSidedLine`): A above zero, B the pin, so
+`DeriveMuAtCap`, `ValidModel` and line sharing read it as any pinned fit. The
+held A is that line's A, so a hold prices the same. `itl-fit` logs
+`pinnedAtBPrior`. The throughput line sets no prior and keeps 4b-3's line
+through the least ITL (`atLeastITLLine`).
 
 The slo line sets the same flag and prior under its own switch
-(`slo-itl-one-sided-at-cap`, `slo/one_sided.go`) with
-`itl.Admission.OneSidedTarget`, the TPOT target: each line is judged at the
-fill where it meets the target (`pricedFill`, `PriceTPOT`'s clamp), and the
-lower fill wins.
+(`slo-itl-one-sided-at-cap`, `slo/one_sided.go`), scoped the same way on its
+own tracker and `args`, with `itl.Admission.OneSidedTarget`, the TPOT target:
+each line is judged at the fill where it meets the target (`pricedFill`,
+`PriceTPOT`'s clamp), and the lower fill wins.
 
 The what-if bands rerun the same choice: `itl.Refit` takes the admission's
 one-sided fields, `whatif.Refit.OneSided` carries them, and
-`learnreplay.VariantState.refit` passes the analyzer's
-(`SaturationAnalyzer.ITLOneSided`) for a pinned line through the default B.
+`learnreplay.VariantState.refit` passes the admission the analyzer last
+priced the key with (`SaturationAnalyzer.ITLOneSided`, kept per key in
+`itlOneSidedLast`) for a pinned line through the default B.
 
 #### When a replica's settle starts (learner PR 4a)
 

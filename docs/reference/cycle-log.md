@@ -438,24 +438,32 @@ B is learned, against an upper prior on B rather than the least ITL. With no
 learned B, the line through the default 6 ms prices under the truth: at the
 saturation line's pricing point (k 0.68 with the default thresholds) by 3 to
 20 % on a true B of 10 to 30 ms, which made the derived mu too high and
-ordered too few replicas. Each line now also draws a line through the
-replica's least ITL at the cap with its intercept the prior, and prices on
-the higher of the two where the line is priced. The prior is the largest B
-any variant of the analyzer has learned, or 30 ms when none has. Without
-noise the price is never under the truth while the true B is at most the
-prior, and over it by at most the prior's error: on the grid, 0 to 13 % at
-the 30 ms prior. A true B above the prior is still under-priced, by less:
-6 % at a true B of 40 ms against 22 % before. With 2 % gauge noise, where
-the true B equals the prior, it was up to 5 % under in simulation (the least
-reading sits under the line by about the noise).
+ordered too few replicas. Each line now also draws a line through the mean
+of its readings at the cap, with its intercept the prior, and prices on the
+higher of the two where the line is priced.
+
+The prior is 30 ms, raised to the largest B another variant has learned on
+the same physics: the same model, accelerator and GPU count, under the same
+engine arguments, in the same role. A learned B only ever raises the prior.
+A variant on other hardware, or another engine, never lowers it, so a fleet
+of small intercepts cannot pull a whole-node decode under its B. The prior
+is then capped at the least ITL the variant's own window shows, which no
+reading can put under the true B, so an outlier fit cannot inflate it.
+
+Without noise the price is never under the truth while the true B is at
+most the prior, and over it by at most the prior's error: on the grid, 0 to
+14 % at the 30 ms prior. A true B above the prior is still under-priced, by
+less: 6 % at a true B of 40 ms against 22 % before. With 2 % gauge noise,
+where the true B equals the prior, it was at most 1.1 % under in simulation.
 
 The slo line prices the fill where its ITL meets the TPOT target, and a
 line under the truth met it at too high a fill. It now meets it at or under
 the truth's fill, without noise, for a true B at most the prior. It abstains
-(`infeasible`) only where even the prior's line is past the target across
-the band, which happens when the target is closer to B than the prior's
-error. `itl-fit` logs `pinnedAtBPrior`, and `slo-variant` logs
-`linePinnedAtBPrior`, when the price came from the prior's line.
+(`infeasible`) only where the target is under every ITL the variant has
+read, so nothing it measured shows B is under the target; one reading under
+the target is enough to price it. `itl-fit` logs `pinnedAtBPrior`, and
+`slo-variant` logs `linePinnedAtBPrior`, when the price came from the
+prior's line.
 
 | `cause` | Meaning |
 |---|---|

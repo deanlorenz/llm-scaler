@@ -447,7 +447,7 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	// Readings at the cap sit above kSat, where a pinned fit through the
 	// default B prices under the truth: priced one-sided until B is learned
 	// (one_sided.go).
-	a.oneSided(&adm, tpotTarget)
+	a.oneSided(&adm, tpotTarget, a.priorScope(key, args, input.VariantStates))
 	// The fill is clamped to the band the line is fitted over.
 	band := whatif.FillBand{Lo: adm.MinK, Hi: adm.MaxK}
 	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, adm, now)

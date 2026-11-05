@@ -1,7 +1,6 @@
 package saturation
 
 import (
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
@@ -38,14 +37,14 @@ func (a *SaturationAnalyzer) ITLReadings(key string) itl.KeyReadings {
 	return a.itlTracker.Readings(key)
 }
 
-// ITLOneSided is how the analyzer prices a line one-sided at the sequence
-// cap under cfg (SwitchITLOneSidedAtCap): the admission's one-sided fields,
-// at its pricing k, for itl.Refit. The zero Admission with the switch off,
-// where nothing is priced one-sided.
-func (a *SaturationAnalyzer) ITLOneSided(cfg *config.ScalingPolicy) itl.Admission {
-	var adm itl.Admission
-	a.itlOneSided(&adm, pricingK(cfg))
-	return adm
+// ITLOneSided is how the analyzer last priced the line filed under key
+// one-sided at the sequence cap (SwitchITLOneSidedAtCap): the admission's
+// one-sided fields, at its pricing k and its prior on B, for itl.Refit. The
+// zero Admission for a key it has not priced so, or with the switch off.
+func (a *SaturationAnalyzer) ITLOneSided(key string) itl.Admission {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.itlOneSidedLast[key]
 }
 
 // PricingBatchCap is the batch cap per engine rank the analyzer prices a

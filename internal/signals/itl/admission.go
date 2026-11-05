@@ -124,18 +124,20 @@ type Admission struct {
 	// chosen line's fill. OneSidedAt is not read.
 	OneSidedTarget float64
 	// BPrior, above zero, is the stated upper prior on B the one-sided rule
-	// pins instead of the least ITL (issue #467): the line set against the
-	// fit through DefaultBaselineSec is pinned through the least ITL among
-	// the readings at k >= DefaultKSat, at that reading's fill k_r, with its
-	// intercept BPrior and its slope solved through the reading, A =
-	// max(0, (ITL_least - BPrior) / k_r) (priorLine). Every reading is at
-	// least B + A k, so at a fill k under k_r the line is over the truth by
-	// at least (BPrior - B)(1 - k/k_r): it never prices under the truth while
-	// the true B is at most BPrior, and it over-prices by the prior's error,
-	// not by a line flattened to the cap's ITL. A true B above BPrior is
-	// under-priced by at most (B - BPrior)(1 - k/k_r). Zero keeps the line
-	// through the least ITL (atLeastITLLine), the throughput line's. The
-	// saturation and slo analyzers set it (Reading.PinnedAtBPrior).
+	// pins instead of the least ITL (issue #467). The analyzers set BPrior's
+	// value: DefaultBPrior, raised, never lowered, by B learned on the
+	// variant's physics key. The line set against the fit through
+	// DefaultBaselineSec has as intercept BPrior capped at the least ITL of
+	// any reading in the window (priorCap), and passes through the mean point
+	// (kbar, ITLbar) of the readings at k >= DefaultKSat: A = (ITLbar - b) /
+	// kbar (priorLine). On readings of the true line, at a fill k
+	// under kbar, it is over the truth by (b - B)(1 - k/kbar). It never prices
+	// under the truth while the true B is at most the prior (the cap, which
+	// no reading can put under B, keeps that), and it over-prices by the
+	// prior's error, not by a line flattened to the cap's ITL. A true B above
+	// the prior is under-priced by at most (B - b)(1 - k/kbar). Zero keeps
+	// the line through the least ITL (atLeastITLLine), the throughput line's.
+	// The saturation and slo analyzers set it (Reading.PinnedAtBPrior).
 	BPrior float64
 	// AboveBandWaitsAfterRestart stamps the above-band window's readings
 	// with the restart's wait too (WaitsAfterRestart), as learner PR 4b-2

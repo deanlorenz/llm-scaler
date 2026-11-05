@@ -430,6 +430,10 @@ type SaturationAnalyzer struct {
 	// itl_one_sided.go): on from the constructor; a replay turns it off
 	// (SetSwitchesForReplay).
 	itlOneSidedAtCap bool
+	// itlOneSidedLast is, per ITL key, the one-sided fields of the admission
+	// the line was last priced under (itlOneSided), for the what-if refit
+	// (ITLOneSided): its prior on B depends on the cycle's physics.
+	itlOneSidedLast map[string]itl.Admission
 }
 
 // Evicted is what one sweep of the analyzer's learned state removed, counted
@@ -634,6 +638,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		prefillBusyMinutes:     true,
 		prefillAQuadratic:      true,
 		itlOneSidedAtCap:       true,
+		itlOneSidedLast:        make(map[string]itl.Admission),
 		prefillObserver:        prefill.NewObserver(),
 		prefillBounds:          make(map[string]stashedBound),
 	}

@@ -157,9 +157,11 @@ var replaySwitches = map[string][]string{
 	// Issue #467, on main after #471 (602054e98): the saturation line priced
 	// one-sided at the sequence cap while B is unlearned
 	// (itl.Admission.OneSidedAboveKSat, at the line's pricing k), against the
-	// line through the least at-cap ITL with intercept the prior on B
-	// (itl.Admission.BPrior, 30 ms with none learned). Measured alone against
-	// all off, it moves e1 and e1-tuned, the two cluster recordings whose
+	// line through the mean at-cap point with intercept the prior on B
+	// (itl.Admission.BPrior: 30 ms, raised by B learned on the physics, capped
+	// at the window's least ITL; neither recording learns one). Measured
+	// alone against all off, it moves e1 and e1-tuned, the two cluster
+	// recordings whose
 	// decode replica sits at its stated cap above the band with no B learned:
 	// model-02's variant-01 line through the default 6 ms is raised where the
 	// prior's line is higher at k 0.68 (first moved row: A 0.0856 -> 0.0874

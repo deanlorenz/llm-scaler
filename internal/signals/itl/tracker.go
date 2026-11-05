@@ -522,25 +522,55 @@ func atLeastITLLine(obs []Observation) (Model, bool) {
 	return fitAboveBand(past, aboveBandB(past))
 }
 
-// priorLine is the line with intercept bPrior through the reading with the
-// least ITL among obs's readings at a k of at least DefaultKSat, its slope
-// floored at 0 (Admission.BPrior). ok is false when there is no such
-// reading with a finite positive ITL.
+// priorLine is the line with intercept b through the mean at-cap point
+// (kbar, ITLbar) of obs's readings at a k of at least DefaultKSat: A =
+// (ITLbar - b) / kbar (Admission.BPrior). b is bPrior capped at the least ITL
+// of any reading in obs (priorCap), so b is at most every ITL and so at most
+// their mean, and A is never negative: no floor is needed. ok is false when
+// there is no usable reading at or past kSat.
+//
+// The mean point, not the least reading. On readings without noise every
+// reading is on the true line, so the mean is too, and the bound (b - B)(1 -
+// k/kbar) holds as through any one of them. With noise the mean's error
+// falls by the square root of the readings, and the least reading's
+// selection bias (under the line by about 4 % of it at some 30 readings of
+// 2 % noise) is gone.
 func priorLine(obs []Observation, bPrior float64) (Model, bool) {
-	var least Observation
-	found := false
+	var sumK, sumITL float64
+	n := 0
 	for _, o := range obs {
-		if !atOrPastKSat(o.K) || math.IsInf(o.K, 0) || !(o.ITLSec > 0) || math.IsInf(o.ITLSec, 0) {
+		if !atOrPastKSat(o.K) || !usable(o) {
 			continue
 		}
-		if !found || o.ITLSec < least.ITLSec {
-			least, found = o, true
-		}
+		sumK += o.K
+		sumITL += o.ITLSec
+		n++
 	}
-	if !found {
+	if n == 0 {
 		return Model{}, false
 	}
-	return Model{A: max(0, (least.ITLSec-bPrior)/least.K), B: bPrior}, true
+	b := priorCap(obs, bPrior)
+	kbar, itlbar := sumK/float64(n), sumITL/float64(n)
+	return Model{A: (itlbar - b) / kbar, B: b}, true
+}
+
+// priorCap is bPrior capped at the least ITL of any usable reading in obs,
+// at any k. Every reading is ITL = B + A k with A >= 0, so that least ITL is
+// an upper bound on B the window itself proves, and a prior above it (an
+// outlier fit on the same physics key, say) would only add over-price.
+func priorCap(obs []Observation, bPrior float64) float64 {
+	b := bPrior
+	for _, o := range obs {
+		if usable(o) {
+			b = min(b, o.ITLSec)
+		}
+	}
+	return b
+}
+
+// usable reports whether a reading has a finite positive k and ITL.
+func usable(o Observation) bool {
+	return o.K > 0 && !math.IsInf(o.K, 0) && o.ITLSec > 0 && !math.IsInf(o.ITLSec, 0)
 }
 
 // atOrPastKSat reports whether a reading at fill k lies at or past

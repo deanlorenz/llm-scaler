@@ -384,10 +384,8 @@ func (r *replayer) stateOf(in domain.AnalyzerInput, cycle int, now time.Time, sh
 	}
 	learning := st.Policy != nil && st.Policy.EnableBatchCapLearning
 	minSettled := st.Policy.ITLSteadiness().MinSettledSamples
-	oneSided := r.sat.ITLOneSided(st.Policy)
 	for _, vc := range res.VariantCapacities {
-		vs := VariantState{Variant: vc.VariantName, Role: vc.Role, Replicas: vc.ReplicaCount, MinSettled: minSettled,
-			oneSided: oneSided}
+		vs := VariantState{Variant: vc.VariantName, Role: vc.Role, Replicas: vc.ReplicaCount, MinSettled: minSettled}
 		if sr := vc.ServiceRate; sr != nil && sr.HasLine {
 			vs.Line = itl.Model{A: sr.LineSlope, B: sr.LineIntercept}
 		}
@@ -403,6 +401,7 @@ func (r *replayer) stateOf(in domain.AnalyzerInput, cycle int, now time.Time, sh
 		if rep.PricingKey != "" {
 			vs.PricingKey = rep.PricingKey
 			vs.Readings = r.sat.ITLReadings(rep.PricingKey)
+			vs.oneSided = r.sat.ITLOneSided(rep.PricingKey)
 		}
 		vs.refit()
 		var params *capacity.EngineParams
