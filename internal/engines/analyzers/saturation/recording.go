@@ -120,7 +120,8 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 // SwitchKVPerRequestHitsResident, SwitchZeroReplicaDataParallel,
 // SwitchITLFitsAggregated, SwitchITLAggregatedShapeTerm,
 // SwitchITLAggregatedSizes, SwitchPrefillCapacityObserve,
-// SwitchStartConfirmsByDistinctPod and SwitchPrefillBusyMinutes; a name it
+// SwitchStartConfirmsByDistinctPod, SwitchPrefillBusyMinutes and
+// SwitchPrefillAQuadratic; a name it
 // does not know is an error, and sets nothing. Never called on a production
 // path; a test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
@@ -199,6 +200,10 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		// P1's busy minutes: the rows' queue minimum read into the
 		// observation (prefill_observe.go).
 		SwitchPrefillBusyMinutes: &a.prefillBusyMinutes,
+
+		// a's curved fit: the quadratic where the prompt clusters carry it
+		// (prefill/fixed.go).
+		SwitchPrefillAQuadratic: &a.prefillAQuadratic,
 	}
 }
 
