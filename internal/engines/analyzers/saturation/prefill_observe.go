@@ -49,9 +49,14 @@ const SwitchPrefillBusyMinutes = "prefill-busy-minutes"
 // fixed latency a (prefill/fixed.go). On, a is the intercept of the convex
 // curve s0 + b*I + c*I*I through the low-load minutes' prompt-length
 // clusters where at least prefill.MinQuadraticClusters of them span
-// prefill.MinQuadraticSpread, and of the straight line otherwise. Off, a is
-// always the line's intercept, as P1 shipped. It moves no golden output: the
-// observation writes no state any output reads.
+// prefill.MinQuadraticSpread, and of the straight line otherwise, and an
+// intercept extrapolated from prompts all longer than
+// prefill.MaxAShortestPrompt is refused (NoShortPrompts), as is a curve's
+// intercept whose standard error is above prefill.MaxAInterceptRelSE of it
+// (AUncertain); the slope bound on V_P is the curve's at V_P's prompt
+// length. Off, a and the bound are always the line's, as P1 shipped. It
+// moves no golden output: the observation writes no state any output
+// reads.
 const SwitchPrefillAQuadratic = "prefill-a-quadratic"
 
 // prefillKVFull is the pods of rows whose KV cache is full (kvFull at
@@ -219,6 +224,8 @@ func (c *cycle) observePrefill() {
 			"aPromptMin", est.APromptMin, "aPromptMax", est.APromptMax,
 			"aModel", string(est.AModel), "aLineReason", string(est.ALineReason),
 			"aSlope", est.ASlope, "aCurve", est.ACurve, "aClusters", est.AClusters,
+			"aInterceptSE", est.AInterceptSE, "aShortestPrompt", est.AShortestPrompt,
+			"aExtrapolated", est.AExtrapolated, "vpPromptTokens", est.VPPromptTokens,
 			"queuedMinutes", est.VPQueuedMinutes, "longestQueuedRun", est.VPLongestQueuedRun,
 			"busyMinutes", est.VPBusyMinutes, "busyMinutesOn", a.prefillBusyMinutes,
 			"queueMinPods", queueMinPods, "kvFullPods", len(kvFullPods),

@@ -70,24 +70,62 @@ Three derivations matter here:
   token from 8k to 30k and 1.33e-5 from 30k to 37k. A straight line through
   the 86 low-load rows meets the axis at −52 ms, and P1 refused `a`
   (`NonPositiveIntercept`). So `a` is the intercept of a convex curve
-  `s0 + b·I + c·I²` (`c > 0`) where the minutes can carry three parameters,
-  and of the line otherwise (`prefill/fixed.go`, `Estimate.AModel`). The
-  minutes are grouped into prompt clusters: sorted by length, a minute
-  within 10% (`MaxPromptDrift`) of the one before it joins its cluster. The
-  curve is fitted when at least 3 clusters of at least 3 minutes each are
-  left, and the longest cluster's median prompt is at least 3x the
-  shortest's. It is fitted through each cluster's median prompt and median
-  service time, not through the minutes: the intercept is extrapolated from
-  the shortest cluster, and one slow minute (run 3's 0.375 s at 38k, against
-  0.30 s for the other minutes at that length) moves an untrimmed curve's
-  intercept from 3.7 ms to 21.5 ms. A fitted `c` that is not above zero
-  falls back to the line. A curve whose intercept is not above zero is
-  refused. Through P1's 15 admitted minutes of run 3, the curve gives `s0`
-  3.69 ms, `b` 1.59e-6 s a token and `c` 1.77e-10 s a token², so `a` is
-  16.3 ms with the least overhead of 12.6 ms. Through the medians of all 86
-  rows it gives 2.8 ms. `ols-sweep` (1k and 6k) is two clusters and keeps
-  the line. The 1/slope validation bound is always the line's. The replay
-  switch is `prefill-a-quadratic`.
+  `s0 + b·I + c·I²` (`c > 0`) where the minutes can carry it, and of the
+  line otherwise (`prefill/fixed.go`, `Estimate.AModel`):
+  - **Clusters.** The minutes are sorted by prompt length. A minute within
+    10% (`MaxPromptDrift`) of the one before it joins its cluster, and no
+    cluster is wider than 1.2x (`MaxClusterWidth`). Without the cap,
+    neighbours a few percent apart chain into one cluster: run 3's 86 rows
+    from 29k to 38k do, and so does a slow drift from 8k to 37k.
+  - **The curve.** It is fitted when at least 4 clusters of at least 3
+    minutes each are left, so a fourth length checks the curve the other
+    three set. The longest cluster's median prompt must be at least 3x the
+    shortest's. Fewer clusters, or a narrower spread, keep the line.
+  - **The fit.** The curve goes through each cluster's median prompt and
+    median service time, weighted by relative error (1/s²), because the
+    noise grows with the service time. Medians, because one slow minute no
+    state identifies (run 3's 0.375 s at 38k, against 0.30 s for the other
+    minutes at that length) moves a fit through the minutes. One minute 25%
+    off, anywhere in runs 3 and 4 pooled, moves the fit through the minutes
+    by up to 0.55 ms and the fit through the medians by up to 0.14 ms.
+  - **Refusals.** A fitted `c` that is not above zero keeps the line. An
+    intercept that is not above zero is refused. The curve's intercept
+    carries a standard error from each cluster's spread, and one above half
+    of the intercept is refused (`AUncertain`).
+  - **Extrapolation.** `a` is not observed below the shortest prompts the
+    fit reads; it is extrapolated there. If the true curve is flat or
+    concave below them, the extrapolated `a` reads low, which is the unsafe
+    side: it prices TTFT low and asks for fewer replicas. So an intercept
+    whose shortest prompts are over 2,500 tokens (`MaxAShortestPrompt`) is
+    refused (`NoShortPrompts`, `AExtrapolated`), for the curve and the line
+    alike. The curve's shortest is its shortest counted cluster's median;
+    the line's is its second shortest minute, as its spread test reads it.
+
+  Three recordings agree on 8 to 9 ms, and an intercept extrapolated from
+  long prompts reads low:
+
+  | Recording | Prompts | Model | Intercept | SE |
+  |---|---|---|---|---|
+  | ols-sweep | 1k, 6k | line | 8.36 ms | |
+  | run 4 | 1k, 2k, 4k, 16k | curve, 4 clusters | 8.67 ms | 0.15 ms |
+  | runs 3 and 4 pooled | 1k to 38k | curve, 7 clusters | 7.95 ms | 0.19 ms |
+  | run 3 | 8k, 30k, 37k | line, 3 clusters | refused, `NoShortPrompts` | |
+
+  Over all 185 low-load rows of runs 3 and 4, a relative-error fit gives
+  7.98 ms (SE 0.10). The curve through pooled minutes from a shortest
+  cluster at 1k gives 7.98 ms, at 2k 6.91 ms, and at 4k 5.55 ms; a
+  straight line on prompts under 3k gives 8.86 ms, under 6k 7.53 ms, and
+  under 8k 5.10 ms. The 2,500-token cutoff admits a shortest cluster at 2k,
+  at most about 14% low, and refuses one at 4k, about 30% low. Run 3 alone,
+  fitted through its three medians, gave 3.69 ms: half the agreed value.
+  An earlier revision said the medians of run 3's 86 rows give 2.8 ms; that
+  came from grouping the rows by sweep level, not from this code, which
+  admits 15 of those rows.
+
+  Run 4 also shows the line P1 shipped reading low inside its own spread:
+  over 1k to 16k it published 0.84 ms. With the curve on, the line is held
+  to the same 2,500-token cutoff. The replay switch is
+  `prefill-a-quadratic`.
 
 ## Prefill capacity
 
@@ -128,23 +166,34 @@ The **low-load slope** of service time against prompt length is an upper bound,
 not a source. A lone prompt runs as `T(I) = s0 + c·I`, and a busy pod's steps of
 `B` tokens run at `B/(s0 + c·B) < 1/c`, so `1/slope ≥ V_P`: on `ols-sweep` about
 520k tok/s against an offered peak of 30k. It is a validation signal only.
-On long prompts the curve is convex, and the line's slope is its chord, so
-the bound is looser there, not wrong.
+On a convex pod the bound is the curve's marginal rate `1/(b + c·I)` at the
+prompt length `I` the busy pod was fed. A straight line's slope is a chord
+of the curve, steeper than the curve at the short end of the fit, so
+`1/slope` reads under the bound at the long lengths it spans. On run 3 the
+line's 1/slope is 105k tok/s, under the curve's 147k at 30k, and a true
+`V_P` there would be flagged `VPAboveSlopeBound` wrongly. So with the curve,
+the bound is `1/(b + c·I)` at `VPPromptTokens`, the mean prompt length of
+the minutes `V_P` rests on. With no such length (the back-pressure bound
+records none) there is no bound and no flag.
 
 **What the curve means for `own_prefill`.** P3 prices a request's own
-prefill as `a + I/V_P`, which is linear in `I`. With a convex curve, the
-time per token at the current length is
-`b + c·I`, above the line's slope at a short length. The curve is used for
-`a` only, and `own_prefill` stays linear. That holds as long as `V_P` comes
-from the current prompt length: a busy pod's steps cost what that length
-costs, so a `V_P` measured there already includes the attention cost, and
-`I/V_P` at that length is consistent with it. A `V_P` measured on shorter
-prompts would read high on long ones and over-promise. S1's `VPShapeMoved`
-rule prevents that: it flags a `V_P` whose prompt length differs from the
-current mean by more than 1.2x either way
-([S1 decisions, 2](slo-tiers.md#2-v_p-in-production)). The curve gives no
-reason to change P3. The intercept it supplies is a positive fixed cost
-where the line gave none.
+prefill as `a + I/V_P`, which is linear in `I`. The curve is used for `a`
+only, and `own_prefill` stays linear. That is consistent for a request at
+the prompt length `V_P` was measured at: a busy pod's steps cost what that
+length costs, so `V_P` there already includes the attention cost. A `V_P`
+measured on shorter prompts reads high on long ones and over-promises.
+S1's `VPShapeMoved` rule catches that: it flags a `V_P` whose prompt length
+differs from the current mean by more than 1.2x either way
+([S1 decisions, 2](slo-tiers.md#2-v_p-in-production)).
+
+**A limit of P3: a mix of lengths.** On a convex curve, a mix of prompt
+lengths costs more than its mean length does (Jensen's inequality). P3
+prices at the mean, and `VPShapeMoved` compares means, so neither sees it.
+On the pooled curve, an even mix of 8k and 52k prompts (mean 30k) priced
+at a `V_P` read at 30k is 32% under its true prefill time, and a single 52k
+request 40% under. This PR does not change P3. Per-bucket `V_P` is
+[open question 4](#open-questions).
+
 `--assume-vp` supplies `V_P` by hand for an illustration or for hardware not yet
 measured; every answer built on it is flagged ASSUMED.
 
@@ -386,9 +435,11 @@ in all its repeats ([S1 decisions](slo-tiers.md#s1-decisions)):
    `T_xfer` leaves "omitted".
 4. **Does `V_P` vary with prompt length?** It does: run 3's low-load medians
    cost about 60% more per token from 30k to 37k than from 8k to 30k. `a`
-   takes the curve (above), and S1 flags a `V_P` learned at another length
-   (`VPShapeMoved`). *Recommend:* key `V_P` by input bucket; add a term to
-   `own_prefill` only if bucket B misses by more than 15%.
+   takes the curve (above), and S1 flags a `V_P` learned at another mean
+   length (`VPShapeMoved`). A mix of lengths at one mean is under-priced
+   ([a limit of P3](#prefill-capacity)), and no flag sees it. *Recommend:*
+   key `V_P` by input bucket; add a term to `own_prefill` only if bucket B
+   misses by more than 15%.
 5. **Burstiness.** *Recommend:* estimate `Ca²` from the arrival rate's variance,
    cap that estimate at 4; the sticky-routing term is not capped.
 6. **Several priority bands.** *Recommend:* the highest band only, flagged.

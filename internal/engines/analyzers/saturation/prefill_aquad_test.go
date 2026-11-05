@@ -15,7 +15,7 @@ import (
 )
 
 // a's curved fit through Analyze (SwitchPrefillAQuadratic): a prefill pod at
-// low load swept over 8k, 30k and 37k prompts, its service time convex in
+// low load swept over 1k, 8k, 30k and 37k prompts, its service time convex in
 // the prompt as run 3 of the TTFT recordings measured it.
 
 // lowLoadPrefillCycle runs one cycle of the harness's P/D model with the
@@ -42,14 +42,14 @@ func (h *observeHarness) lowLoadPrefillCycle(ieff float64) string {
 	return obs[0]
 }
 
-// aQuadRun drives a harness through five minutes at each of run 3's prompt
+// aQuadRun drives a harness through five minutes at each of 1k and run 3's
 // levels with SwitchPrefillAQuadratic set to on, and returns the last line.
 func aQuadRun(t *testing.T, on bool) string {
 	t.Helper()
 	h := newObserveHarness(t, &capacity.EngineParams{Engine: inferenceengine.EngineVLLM})
 	require.NoError(t, h.a.SetSwitchesForReplay(map[string]bool{SwitchPrefillAQuadratic: on}))
 	var last string
-	for _, l := range []float64{8000, 30000, 37000} {
+	for _, l := range []float64{1000, 8000, 30000, 37000} {
 		for range 5 {
 			last = h.lowLoadPrefillCycle(l)
 		}
@@ -64,7 +64,7 @@ func TestPrefillAQuad_TheSwitchFitsTheCurve(t *testing.T) {
 	on := aQuadRun(t, true)
 	assert.Contains(t, on, `"aModel"="quadratic"`)
 	assert.Contains(t, on, `"aLineReason"=""`)
-	assert.Contains(t, on, `"aClusters"=3`)
+	assert.Contains(t, on, `"aClusters"=4`)
 	assert.Contains(t, on, `"aRefused"=""`)
 	m := regexp.MustCompile(`"aIntercept"=([0-9.e+-]+)`).FindStringSubmatch(on)
 	require.Len(t, m, 2, on)

@@ -70,6 +70,7 @@
 :demand
 A
 AMD
+AUncertain
 AcceleratorNotResolved
 AggregatedServiceTimeIncludesDecode
 Analyze
@@ -212,6 +213,7 @@ NoLine
 NoPrefillCapacity
 NoPromptSpread
 NoPromptVariance
+NoShortPrompts
 NoTPOTHistogram
 NoTraffic
 NonPositiveIntercept
@@ -384,7 +386,9 @@ a
 a-zA-Z0-9_
 aClusters
 aCurve
+aExtrapolated
 aIntercept
+aInterceptSE
 aLineReason
 aModel
 aOverhead
@@ -393,6 +397,7 @@ aPromptMax
 aPromptMin
 aRefused
 aSamples
+aShortestPrompt
 aSlope
 abort
 about
@@ -2662,6 +2667,7 @@ vp
 vpAboveSlopeBound
 vpLowerBound
 vpLowerBoundReason
+vpPromptTokens
 vpRefused
 vpSamples
 vpSource
