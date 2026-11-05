@@ -94,3 +94,48 @@ func TestImbalance_ARewrittenMinuteTakesItsPodCount(t *testing.T) {
 	est := run(NewObserver(), a, b)
 	assert.Equal(t, map[int]int{2: 1}, est.FSamplesByPods)
 }
+
+// Serving is the pod rule every per-count figure is counted by: Ready, and
+// not a warm-pool bridge.
+func TestServing_ReadyAndNotABridge(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		ready, bridge bool
+		want          bool
+		reason        string
+	}{
+		{"ready", true, false, true, ""},
+		{"not ready", false, false, false, rowNotReady},
+		{"bridge, not ready", false, true, false, rowNotReady},
+		{"ready bridge", true, true, false, rowBridge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rm := base("p")
+			rm.Ready, rm.FromWarmPool = tc.ready, tc.bridge
+			assert.Equal(t, tc.want, Serving(rm))
+			assert.Equal(t, tc.reason, refusalFor(rm))
+		})
+	}
+}
+
+// Observe counts pods by Serving: three serving rows, one bridge and one
+// row not Ready keep their minutes at 3 pods, and refuse the other two by
+// the reason refusalFor names.
+func TestImbalance_ByPodsCountsServingPodsOnly(t *testing.T) {
+	rng := rand.New(rand.NewPCG(9, 1))
+	cs := fixedShares(rng, 6, 1, 1, 1)
+	for i := range cs {
+		br := base("bridge")
+		br.FromWarmPool = true
+		br.RequestRate, br.PrefillComputedTokenRate = 7, 7000
+		down := base("down")
+		down.Ready = false
+		cs[i].Rows = append(cs[i].Rows, br, down)
+		cs[i].Now = t0.Add(time.Duration(i) * minute)
+	}
+	est := run(NewObserver(), cs...)
+	assert.Equal(t, map[int]int{3: 6}, est.FSamplesByPods)
+	assert.Equal(t, 3, est.FPodsLast)
+	assert.Contains(t, est.FByPods, 3)
+	assert.Equal(t, map[string]int{rowBridge: 1, rowNotReady: 1}, est.Refused)
+}

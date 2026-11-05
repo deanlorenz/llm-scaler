@@ -119,10 +119,66 @@ func TestPrefillEstimates_NoHandleReadsNothing(t *testing.T) {
 	assert.False(t, ok)
 }
 
+// The read takes no lock of the slo analyzer's: a caller already holding
+// a.mu, as an Analyze path in S1b may, reads without deadlocking itself
+// (sync.Mutex is not reentrant).
+func TestPrefillEstimates_TheReadTakesNoSLOLock(t *testing.T) {
+	p := newStashPair()
+	_, err := p.sat.Analyze(context.Background(), stashInput("m"))
+	require.NoError(t, err)
+	got := make(chan bool, 1)
+	p.slo.mu.Lock()
+	go func() {
+		_, ok := p.slo.prefillEstimate("ns", "m", "prefill", p.clk.Now())
+		got <- ok
+	}()
+	select {
+	case ok := <-got:
+		assert.True(t, ok)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the read blocked on slo's mu")
+	}
+	p.slo.mu.Unlock()
+}
+
+// The slow interval end to end: at a 120 s step, the engine's order each
+// cycle -- saturation's sweep, saturation's Analyze, then slo's read --
+// reads the cycle's estimate every cycle. Swept on a minute, the sweep
+// dropped the last cycle's entry, which Analyze then rewrote; the read
+// holds either way, and this pins it.
+func TestPrefillEstimates_ASlowIntervalReadsEveryCycle(t *testing.T) {
+	p := newStashPair()
+	for i := range 6 {
+		p.clk.SetTime(stashAt.Add(time.Duration(i) * 120 * time.Second))
+		ev := p.sat.EvictStaleHistory()
+		assert.Zero(t, ev.PrefillEstimates, "cycle %d: nothing evicted", i)
+		_, err := p.sat.Analyze(context.Background(), stashInput("m"))
+		require.NoError(t, err)
+		_, ok := p.slo.prefillEstimate("ns", "m", "prefill", p.clk.Now())
+		assert.True(t, ok, "cycle %d", i)
+	}
+}
+
+// A flush refuses the read until the next saturation cycle writes again.
+func TestPrefillEstimates_AFlushRefusesUntilTheNextCycle(t *testing.T) {
+	p := newStashPair()
+	_, err := p.sat.Analyze(context.Background(), stashInput("m"))
+	require.NoError(t, err)
+	p.sat.ForgetLearnedState()
+	_, ok := p.slo.prefillEstimate("ns", "m", "prefill", p.clk.Now())
+	assert.False(t, ok, "after the flush")
+	p.clk.SetTime(stashAt.Add(30 * time.Second))
+	_, err = p.sat.Analyze(context.Background(), stashInput("m"))
+	require.NoError(t, err)
+	_, ok = p.slo.prefillEstimate("ns", "m", "prefill", p.clk.Now())
+	assert.True(t, ok, "the next cycle's write")
+}
+
 // Lock order (S1 test 3): saturation cycles, its forget, flush and sweep run
-// while the slo analyzer reads the stash under its own lock, from several
-// goroutines. Run under -race, a lock taken out of order is a deadlock this
-// test would hang on, and a stash read outside a.mu a reported race.
+// while slo readers, from several goroutines, read the stash and then take
+// slo's own mu, the order S1b keeps (the read before slo.mu, never inside
+// it). Run under -race, a lock taken out of order is a deadlock this test
+// would hang on, and an unguarded stash a reported race.
 func TestPrefillEstimates_ConcurrentReadsAndSaturationCycles(t *testing.T) {
 	p := newStashPair()
 	// The clock is fixed for the run: the reads must find the estimates of
@@ -166,9 +222,13 @@ func TestPrefillEstimates_ConcurrentReadsAndSaturationCycles(t *testing.T) {
 					return
 				default:
 				}
-				if _, ok := p.slo.prefillEstimate("ns", model, "prefill", p.clk.Now()); ok {
+				_, ok := p.slo.prefillEstimate("ns", model, "prefill", p.clk.Now())
+				// Then slo's own lock, after the read, as S1b takes it.
+				p.slo.mu.Lock()
+				if ok {
 					reads.Add(1)
 				}
+				p.slo.mu.Unlock()
 				p.slo.EvictStale(p.clk.Now())
 			}
 		}()

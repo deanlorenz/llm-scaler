@@ -243,7 +243,10 @@ type Estimate struct {
 	// MinImbalanceMinutes of them; FSamplesByPods is how many minutes each
 	// count kept, whether or not it gives an f. An f learned at one count
 	// is not an f at another (docs/proposals/slo-tiers.md, decision 1).
-	// Nil when no minute was kept.
+	// Nil when no minute was kept (one pod never keeps one). A reader looks
+	// up its count (FByPods[n], ok) and never tests FByPods == nil: an empty
+	// map (minutes kept, none at a count with enough) and nil both mean no
+	// learned f at any count.
 	FByPods        map[int]float64
 	FSamplesByPods map[int]int
 
@@ -369,13 +372,8 @@ func (o *Observer) Observe(c Cycle) Estimate {
 	var shares []share
 	allAdmitted, serving := true, 0
 	for _, rm := range c.Rows {
-		if !Serving(rm) {
-			if !rm.Ready {
-				est.Refused[rowNotReady]++
-			} else {
-				// A bridge serves the variant's load on another engine.
-				est.Refused[rowBridge]++
-			}
+		if reason := refusalFor(rm); reason != "" {
+			est.Refused[reason]++
 			continue
 		}
 		serving++
@@ -433,7 +431,20 @@ func (o *Observer) Observe(c Cycle) Estimate {
 // FByPods), so a caller that reads f at a pod count (the slo analyzer's
 // N_p, docs/proposals/slo-tiers.md decision 3) counts pods by it too.
 func Serving(rm domain.ReplicaMetrics) bool {
-	return rm.Ready && !rm.FromWarmPool
+	return refusalFor(rm) == ""
+}
+
+// refusalFor is why rm is not a serving pod, "" when it is: the one rule
+// Serving and Observe both read, so the two cannot drift.
+func refusalFor(rm domain.ReplicaMetrics) string {
+	switch {
+	case !rm.Ready:
+		return rowNotReady
+	case rm.FromWarmPool:
+		// A bridge serves the variant's load on another engine.
+		return rowBridge
+	}
+	return ""
 }
 
 // sweep forgets the keys with no cycle for Retention, and returns how many.

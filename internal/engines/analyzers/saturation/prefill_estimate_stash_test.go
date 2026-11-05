@@ -101,10 +101,6 @@ func TestPrefillEstimate_TheHandleReturnsACopy(t *testing.T) {
 	assert.Equal(t, map[int]int{3: 8}, again.FSamplesByPods, "FSamplesByPods is a copy")
 }
 
-// Forgetting the variant deletes its stashed estimate and leaves a
-// sibling's; the eviction sweep drops one older than the variant timeout
-// and counts it, and keeps a younger one.
-
 // At a 120s interval, the sweep that runs before each cycle finds the last
 // cycle's estimate two minutes old: it keeps it, and evicts nothing, every
 // cycle. Swept on prefillBoundsStaleAfter, it was evicted (and the engine
@@ -121,6 +117,11 @@ func TestPrefillEstimate_ASlowIntervalEvictsNothing(t *testing.T) {
 	_, _, ok := h.a.PrefillEstimate("test-ns", "test-model", "prefill")
 	assert.True(t, ok)
 }
+
+// Forgetting the variant deletes its stashed estimate and leaves a
+// sibling's; a flush clears it and the next cycle writes it again; the
+// eviction sweep drops one older than the variant timeout and counts it,
+// and keeps a younger one.
 func TestPrefillEstimate_ForgetAndEvictionDeleteIt(t *testing.T) {
 	t.Run("forget", func(t *testing.T) {
 		h := newObserveHarness(t, &capacity.EngineParams{Engine: inferenceengine.EngineVLLM})
@@ -140,6 +141,12 @@ func TestPrefillEstimate_ForgetAndEvictionDeleteIt(t *testing.T) {
 		h.a.ForgetLearnedState()
 		_, _, ok := h.a.PrefillEstimate("test-ns", "test-model", "prefill")
 		assert.False(t, ok, "a flush takes it with the observation")
+		// The flush clears the map, not nils it: the next cycle writes again.
+		at := h.clock
+		h.cycle(20000)
+		_, stamped, ok := h.a.PrefillEstimate("test-ns", "test-model", "prefill")
+		assert.True(t, ok, "the next cycle after the flush stashes again")
+		assert.Equal(t, at, stamped)
 	})
 	t.Run("eviction", func(t *testing.T) {
 		h := newObserveHarness(t, &capacity.EngineParams{Engine: inferenceengine.EngineVLLM})

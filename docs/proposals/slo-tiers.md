@@ -626,8 +626,11 @@ inputs and keep a second copy of six hours of samples.
   that build the SLO analyzer: `steadystate/engine.go` (passed `satV2`) and
   `learnreplay/replay.go` (passed `r.sat`). `whatifsource/capture.go`
   builds one too and passes none, so it prices no TTFT.
-- **Lock order:** the SLO analyzer's `mu`, then the saturation analyzer's
-  `mu`, then the observer's lock. Nothing takes them in another order, so a
+- **Lock order:** the saturation analyzer's `mu`, then the observer's lock;
+  the SLO analyzer's own `mu` is taken only after the read, never around
+  it. S1 reads the estimate before taking `slo.mu`, so an `Analyze` path
+  that holds `slo.mu` never calls the handle (`sync.Mutex` is not
+  reentrant), and the saturation analyzer never calls back into `slo`, so a
   read from S1 cannot deadlock a saturation cycle.
 - **The same cycle's estimate.** The engine runs saturation first, always
   (`runSaturation`, before `analyzerRunEntries` in `runAnalyzers`), so S1
@@ -1170,8 +1173,8 @@ exists) and passes on the PR; each switch is also held by the golden runs.
    delete it.
 2. Replay order: a replay with `slo` run before saturation reads
    `no-estimate` (a guard against reordering).
-3. Lock order: a concurrent test runs saturation cycles and S1 reads under
-   `-race` without deadlock.
+3. Lock order: a concurrent test runs saturation cycles and S1 reads, with
+   no `slo.mu` held across the read, under `-race` without deadlock.
 4. `f` per count: `FByPods` keeps counts apart; a learned `f` at 3 pods is
    not read at 4; at a count with too few minutes, the assumed `f` is used.
 5. `f_raw`: the raw share, the 5-cycle max, the reset on a count change, the
