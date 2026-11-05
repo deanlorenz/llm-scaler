@@ -64,9 +64,58 @@ type Prefill struct {
 	// TransferSecondsPerToken is the KV transfer's time per prompt token,
 	// kappa/BW. 0 omits T_xfer, flagged TransferOmitted: it is folded into
 	// the request's own latency, a + I*(1/V_P + kappa/BW), not the queue's
-	// work.
+	// work. With no decode line and the decode engine's TTFT measured
+	// (TTFTFleet.DecodeTTFT) it is not priced: that TTFT holds the KV pull.
 	TransferSecondsPerToken float64
+	// VPPromptTokens is I_vp, the mean effective prompt V_P was read at
+	// (prefill.Estimate.VPPromptTokens); 0 is unknown.
+	VPPromptTokens float64
+	// CurveSlope and CurveCurvature are b and c of P1's low-load curve
+	// s0 + b*I + c*I*I (prefill.Estimate.ASlope and ACurve, with AModel
+	// quadratic): a prompt of length I costs b + c*I per token in a busy
+	// step. Both positive is a curve; otherwise there is none, and V_P is
+	// not rescaled (shapedVP).
+	CurveSlope, CurveCurvature float64
+	// VPMargin is the relative margin taken off V_P near the knee, in
+	// [0, MaxVPMargin]: none below MarginRampStart of the worst pod's
+	// utilization, all of it from MarginRampFull, linear between
+	// (prefillPlan.atRate). PrefillFromEstimate sets DefaultVPMargin; 0 is
+	// none.
+	VPMargin float64
 }
+
+// MaxVPShapeRatio is how far, either way, the mean prompt may be from the one
+// V_P was read at before V_P is flagged VPShapeMoved, when there is no curve
+// to rescale it by (S1's 1.2x rule, docs/proposals/slo-tiers.md, decision 2).
+const MaxVPShapeRatio = 1.2
+
+// DefaultVPMargin is the margin PrefillFromEstimate puts on a learned V_P near
+// the knee: 5%, ten times the 0.5% by which run 2's pod under a queue served
+// away from its busy-minute V_P at the prompt it was learned on
+// (docs/proposals/slo-capacity-planner-ttft.md, "As built (P3 after P2)").
+// A stated margin, not a measured one: a change of prompt length is the
+// curve's to price, not the margin's.
+const DefaultVPMargin = 0.05
+
+// MaxVPMargin bounds VPMargin at 1 - MarginRampFull, so the margin is whole
+// before the margined pod saturates and the knee is (1 - VPMargin) of the
+// unmargined one (prefillPlan.knee).
+const MaxVPMargin = 1 - MarginRampFull
+
+// MarginRampStart and MarginRampFull are the worst pod's utilization, at the
+// unmargined V_P, where the margin starts and where it is whole. Near the
+// knee TTFT is most sensitive to V_P: on the M/M/1 sojourn, the model's
+// tail at cv 1, a V_P read (1 + e) high puts TTFT at
+// (1-rho)/((1+e)(1-rho) + e*rho) of the truth. At e = DefaultVPMargin that
+// is 9.1% short at rho 0.5, 10.0% at 0.55, 14.3% at 0.7 and 25% at 0.85: it
+// crosses the S1 mark's 10% under-side at 0.55, and the ramp is centred on
+// that crossing (TestVPMarginRampIsWhereTTFTTurnsSensitive). Below it the
+// error is under the mark on its own, and no margin is spent. The ramp is
+// linear, not a step, so TTFT has no jump in the rate.
+const (
+	MarginRampStart = 0.5
+	MarginRampFull  = 0.6
+)
 
 // maxPrefillReplicas bounds N_p: the pooled figure's Erlang C recursion
 // runs once per pod, as the admission chain runs once per slot.
@@ -113,11 +162,44 @@ type FlowControl struct {
 // role it hands to, and flow control.
 type TTFTFleet struct {
 	Prefill Prefill
-	// Decode is the decode role; nil prices the prefill side alone, flagged
-	// DecodeSideOmitted (no W_decode, no first step). The SLO analyzer's
-	// shadow pricing of a prefill variant (S1) is that case.
-	Decode      *Decode
+	// Decode is the decode role; nil means no decode line, flagged
+	// DecodeSideOmitted: W_decode is not priced, and decode's part of the
+	// TTFT is DecodeTTFT, measured, in place of T_xfer + ITL(k_d). The SLO
+	// analyzer's shadow pricing of a prefill variant (S1) with flow control
+	// off is that case.
+	Decode *Decode
+	// DecodeTTFT is the decode engine's measured TTFT, read only when Decode
+	// is nil. On P/D the router's TTFT is the prefill engine's and then the
+	// decode engine's (the KV pull and decode's first step): P2 found the
+	// router's median less the two at -7 to +15 ms on 6 of 7 levels. Zero
+	// Seconds is unmeasured: the decode term is left out, flagged
+	// DecodeTTFTUnmeasured, which no caller acts on.
+	DecodeTTFT  DecodeTTFT
 	FlowControl FlowControl
+}
+
+// DecodeTTFT is the decode engine's mean TTFT, measured: on P/D, the time from
+// the request reaching the decode pod to its first token, the KV pull
+// included. S1 learns it per decode variant from the R1 field
+// domain.ReplicaMetrics.AvgTTFT on the variant's Ready decode rows
+// (docs/proposals/slo-tiers.md, decision 3).
+type DecodeTTFT struct {
+	// Seconds is the mean, in seconds; 0 is unmeasured.
+	Seconds float64
+	// PromptTokens is the mean effective prompt it was measured at. The KV
+	// pull grows with the prompt and there is a fixed part besides, so the
+	// term is priced at Seconds * max(1, I/PromptTokens): scaled up for a
+	// longer prompt (the fixed part makes that high), held for a shorter one
+	// (the pull makes that high). Required when Seconds is above 0.
+	PromptTokens float64
+}
+
+// at is the decode term for a prompt of i tokens.
+func (d DecodeTTFT) at(i float64) float64 {
+	if d.Seconds == 0 {
+		return 0
+	}
+	return d.Seconds * max(1, i/d.PromptTokens)
 }
 
 // TTFTTarget is a TTFT service level, end to end.
@@ -136,10 +218,81 @@ type prefillPlan struct {
 	// cv is the prompt's coefficient of variation as priced (0 below
 	// minPromptCV); ca2, cs2 are Ca^2 and Cs^2 = cv^2.
 	cv, ca2, cs2 float64
+	// vp is V_P at the question's prompt (shapedVP), before the margin;
+	// xfer the transfer per token priced in the own latency, 0 where the
+	// decode engine's measured TTFT holds it.
+	vp, xfer float64
+	// margin is VPMargin, and applied the share of it taken at the rate
+	// this plan was made for (atRate); 0 on the plan check returns.
+	margin, applied float64
 	// work is E[S_work] = E[I]/V_P, the queue's work per request; ownRate
-	// is the own latency per prompt token, 1/V_P + kappa/BW.
+	// is the own latency per prompt token, 1/V_P + kappa/BW, each at V_P
+	// less the margin applied.
 	work, ownRate float64
 	flags         []Flag
+}
+
+// setVP sets the work and the own latency per token at V_P = vp.
+func (pl *prefillPlan) setVP(vp float64) {
+	pl.work = pl.p.PromptTokens / vp
+	pl.ownRate = 1/vp + pl.xfer
+}
+
+// marginAt is the share of V_P taken off at utilization rho0, read at the
+// unmargined V_P: 0 up to MarginRampStart, the whole margin from
+// MarginRampFull, linear between.
+func (pl prefillPlan) marginAt(rho0 float64) float64 {
+	return pl.margin * min(max((rho0-MarginRampStart)/(MarginRampFull-MarginRampStart), 0), 1)
+}
+
+// atRate is the plan at rate, with the margin on V_P that utilization asks
+// for. The worst pod's utilization at the margined V_P,
+// rho0/(1 - marginAt(rho0)), rises with rho0, so TTFT still rises with the
+// rate; it reaches 1 at rho0 = 1 - margin, the margined knee.
+func (pl prefillPlan) atRate(rate float64) prefillPlan {
+	m := pl.marginAt(pl.utilization(rate))
+	if m == 0 {
+		return pl
+	}
+	q := pl
+	q.applied = m
+	q.setVP(pl.vp * (1 - m))
+	return q
+}
+
+// shapedVP is V_P at the question's mean prompt E[I], read at I_vp
+// (VPPromptTokens), and the flag it raises.
+//
+// A busy pod's step of B tokens of prompts of length I costs about
+// s0 + (b + c*I)*B (prefill.Estimate.SlopeBound), so
+//
+//	V_P(I)/V_P(I_vp) = (s0/B + b + c*I_vp) / (s0/B + b + c*I).
+//
+// With a curve, s0/B unknown, the ratio is taken at s0/B = 0,
+// s(I_vp)/s(I) with s(I) = b + c*I. For I above I_vp that is below the true
+// ratio whatever s0/B is, so V_P is rescaled down by it, flagged
+// VPScaledToPrompt: never above the truth. For I below I_vp it is above the
+// true ratio (it over-reads the gain), so V_P is held at the learned figure,
+// which the true V_P is at or above. Without a curve, or with I_vp unknown,
+// V_P is held, and a mean prompt more than MaxVPShapeRatio from I_vp either
+// way, or an unknown I_vp, is flagged VPShapeMoved. An assumed V_P is the
+// caller's for the prompt asked, and is neither rescaled nor flagged.
+func (p Prefill) shapedVP() (float64, Flag) {
+	if p.VPAssumed {
+		return p.VP, ""
+	}
+	i, ivp := p.PromptTokens, p.VPPromptTokens
+	if p.CurveSlope > 0 && p.CurveCurvature > 0 && ivp > 0 {
+		if i > ivp {
+			s := func(x float64) float64 { return p.CurveSlope + p.CurveCurvature*x }
+			return p.VP * s(ivp) / s(i), VPScaledToPrompt
+		}
+		return p.VP, ""
+	}
+	if !(ivp > 0) || i > MaxVPShapeRatio*ivp || i*MaxVPShapeRatio < ivp {
+		return p.VP, VPShapeMoved
+	}
+	return p.VP, ""
 }
 
 // check refuses a Prefill the model cannot price, naming the first input
@@ -170,23 +323,32 @@ func (p Prefill) check() (prefillPlan, *Unanswerable) {
 		u = refuse(InvalidInput, fmt.Sprintf("Ca^2 %g, want a finite value of at least 0 (0 is Poisson)", p.ArrivalCV2))
 	case !Finite(p.TransferSecondsPerToken) || p.TransferSecondsPerToken < 0:
 		u = refuse(InvalidInput, fmt.Sprintf("transfer %g s per token", p.TransferSecondsPerToken))
+	case !Finite(p.VPPromptTokens) || p.VPPromptTokens < 0:
+		u = refuse(InvalidInput, fmt.Sprintf("V_P read at %g prompt tokens", p.VPPromptTokens))
+	case !Finite(p.CurveSlope) || p.CurveSlope < 0 || !Finite(p.CurveCurvature) || p.CurveCurvature < 0:
+		u = refuse(InvalidInput, fmt.Sprintf("curve b %g, c %g, want finite values of at least 0", p.CurveSlope, p.CurveCurvature))
+	case !(p.VPMargin >= 0 && p.VPMargin <= MaxVPMargin):
+		u = refuse(InvalidInput, fmt.Sprintf("V_P margin %g, want 0 <= margin <= %g", p.VPMargin, MaxVPMargin))
 	default:
 		cv := p.PromptCV
 		if cv < minPromptCV {
 			cv = 0
 		}
-		pl := prefillPlan{p: p, f: max(p.Imbalance, 1), ca2: p.ArrivalCV2, cv: cv, cs2: cv * cv}
+		pl := prefillPlan{p: p, f: max(p.Imbalance, 1), ca2: p.ArrivalCV2, cv: cv, cs2: cv * cv,
+			xfer: p.TransferSecondsPerToken, margin: p.VPMargin}
 		if pl.ca2 == 0 {
 			pl.ca2 = 1
 		}
-		pl.work = p.PromptTokens / p.VP
-		pl.ownRate = 1/p.VP + p.TransferSecondsPerToken
+		vp, shape := p.shapedVP()
+		pl.vp = vp
+		pl.setVP(vp)
 		pl.flags = []Flag{UnvalidatedTTFT}
 		for _, c := range []struct {
 			on bool
 			f  Flag
 		}{
 			{p.VPAssumed, AssumedVP}, {p.VPLowerBound, VPLowerBound}, {p.VPAboveSlopeBound, VPAboveSlopeBound},
+			{shape != "", shape},
 			{p.ImbalanceAssumed, AssumedImbalance}, {p.PromptCVAssumed, AssumedPromptSpread},
 			{p.TransferSecondsPerToken == 0, TransferOmitted},
 		} {
@@ -199,13 +361,15 @@ func (p Prefill) check() (prefillPlan, *Unanswerable) {
 	return prefillPlan{}, &u
 }
 
-// knee is the prefill knee, N_p * V_P / (f * E[I_eff]): the rate at which the
-// worst pod saturates.
+// knee is the prefill knee, N_p * V_P * (1 - VPMargin) / (f * E[I_eff]), V_P
+// at the question's prompt: the rate at which the worst pod saturates. The
+// margin is whole there (MaxVPMargin).
 func (pl prefillPlan) knee() float64 {
-	return float64(pl.p.Replicas) * pl.p.VP / (pl.f * pl.p.PromptTokens)
+	return float64(pl.p.Replicas) * pl.vp * (1 - pl.margin) / (pl.f * pl.p.PromptTokens)
 }
 
-// utilization is rho_w, the worst pod's: f * rate * E[I_eff] / (N_p * V_P).
+// utilization is rho_w, the worst pod's: f * rate * E[I_eff] / (N_p * V_P),
+// at the plan's V_P (unmargined on a checked plan, margined after atRate).
 func (pl prefillPlan) utilization(rate float64) float64 {
 	return pl.f * rate * pl.work / float64(pl.p.Replicas)
 }
@@ -280,6 +444,7 @@ func (pl prefillPlan) queueLength(rho float64) float64 {
 // pod's queue binds long before its KV does (run PK held 730 waiting at 25%
 // KV).
 func (pl prefillPlan) meanScore(rate, threshold float64) float64 {
+	pl = pl.atRate(rate)
 	n := float64(pl.p.Replicas)
 	rw := pl.utilization(rate)
 	if rw >= 1 {
@@ -294,11 +459,14 @@ func (pl prefillPlan) meanScore(rate, threshold float64) float64 {
 
 // ttftPlan is a checked fleet.
 type ttftPlan struct {
-	pf     prefillPlan
-	d      *Decode
-	fc     FlowControl
-	onsets Onsets
-	flags  []Flag
+	pf prefillPlan
+	d  *Decode
+	// decodeTTFT is the decode engine's measured TTFT, set only with no
+	// decode line.
+	decodeTTFT DecodeTTFT
+	fc         FlowControl
+	onsets     Onsets
+	flags      []Flag
 }
 
 // plan checks a fleet and places its flow-control onsets.
@@ -312,10 +480,29 @@ func (fl TTFTFleet) plan() (ttftPlan, *Unanswerable) {
 			return ttftPlan{}, u
 		}
 	}
-	pl := ttftPlan{pf: pf, d: fl.Decode, fc: fl.FlowControl, flags: pf.flags}
+	pl := ttftPlan{pf: pf, d: fl.Decode, fc: fl.FlowControl}
 	if fl.Decode == nil {
-		pl.flags = append(pl.flags, DecodeSideOmitted)
+		dt := fl.DecodeTTFT
+		switch {
+		case !Finite(dt.Seconds) || dt.Seconds < 0:
+			u := refuse(InvalidInput, fmt.Sprintf("decode engine TTFT %g s", dt.Seconds))
+			return ttftPlan{}, &u
+		case dt.Seconds == 0:
+			pf.flags = append(pf.flags, DecodeTTFTUnmeasured)
+		case !Finite(dt.PromptTokens) || !(dt.PromptTokens > 0):
+			u := refuse(InvalidInput, fmt.Sprintf("decode engine TTFT measured at %g prompt tokens", dt.PromptTokens))
+			return ttftPlan{}, &u
+		default:
+			// The decode engine's TTFT holds the KV pull: pricing T_xfer
+			// beside it would count the pull twice.
+			pl.decodeTTFT = dt
+			pf.xfer = 0
+			pf.setVP(pf.vp)
+			pf.flags = slices.DeleteFunc(pf.flags, func(f Flag) bool { return f == TransferOmitted })
+		}
+		pf.flags = append(pf.flags, DecodeSideOmitted)
 	}
+	pl.pf, pl.flags = pf, pf.flags
 	switch fl.FlowControl.State {
 	case FlowControlOff:
 	case FlowControlNoSeries:
@@ -465,14 +652,16 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 		}
 	}
 
-	rho := pl.pf.utilization(rate)
-	theta := pl.pf.waitScale(rho)
-	wait, tail := pl.pf.engineWait(rho)
+	pf := pl.pf.atRate(rate)
+	out.VPMarginApplied = pf.applied
+	rho := pf.utilization(rate)
+	theta := pf.waitScale(rho)
+	wait, tail := pf.engineWait(rho)
 	if rho > 0 && (!Finite(tail) || !(tail > 0)) {
 		u := refuse(Saturated, fmt.Sprintf("no finite wait tail at %g r/s (decay rate %g)", rate, tail))
 		return priced{u: &u}
 	}
-	own := pl.pf.own()
+	own := pf.own()
 	a := pl.pf.p.FixedLatency
 	b1 := block{wait: wait, own: own}
 	out.PrefillUtilization, out.WaitScale = rho, 1/tail
@@ -516,8 +705,18 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 			dec = expWait(adm.WaitProbability, adm.Decay)
 			out.Parts.DecodeWait = adm.MeanWait()
 		}
+	} else {
+		// No decode line: decode's part is the decode engine's TTFT,
+		// measured (0, flagged DecodeTTFTUnmeasured, when it is not). It is
+		// a mean, added at its mean to every percentile: its own spread is
+		// not priced.
+		first = pl.decodeTTFT.at(pl.pf.p.PromptTokens)
+		floorStep = first
+		out.Parts.DecodeEngine = first
 	}
-	out.Parts.FirstStep = first
+	if pl.d != nil {
+		out.Parts.FirstStep = first
+	}
 
 	if q == 0 {
 		mean := out.Parts.EngineWait + out.Parts.OwnPrefill + out.Parts.DecodeWait + first
@@ -526,9 +725,9 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 			return priced{u: &u}
 		}
 		out.Seconds, out.Independent = mean, mean
-		out.Floor = a + own.mean + floorStep
+		out.Floor = a + pl.pf.own().mean + floorStep
 		if extras {
-			out.Pooled = pl.pooledWait(rate).mean() + out.Parts.OwnPrefill + out.Parts.DecodeWait + first
+			out.Pooled = pf.pooledWait(rate).mean() + out.Parts.OwnPrefill + out.Parts.DecodeWait + first
 		}
 		return priced{out: out}
 	}
@@ -539,7 +738,7 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 		return priced{u: &u}
 	}
 	out.Seconds, out.DecodeShare = a+v+first, beta
-	out.Floor = a + own.quantile(q) + floorStep
+	out.Floor = a + pl.pf.own().quantile(q) + floorStep
 	out.Independent = out.Seconds
 	if extras {
 		// The two waits always sum (a single-piece wait and the decode
@@ -548,7 +747,7 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 		if both, ok := b1.wait.sum(dec); ok && len(dec.w) > 0 {
 			out.Independent = a + block{wait: both, own: own}.quantile(1-q) + first
 		}
-		pv, _ := split(block{wait: pl.pooledWait(rate), own: own}, dec, q)
+		pv, _ := split(block{wait: pf.pooledWait(rate), own: own}, dec, q)
 		out.Pooled = a + pv + first
 	}
 	return priced{out: out}
@@ -557,11 +756,11 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 // pooledWait is the optimistic wait: the N_p pods as one M/G/N_p queue with
 // no imbalance (Allen-Cunneen), P(W > t) = C * exp(-t/theta_p), C Erlang C at
 // the offered load and theta_p = E[S](Ca^2 + Cs^2) / (2 N_p (1 - rho)).
-func (pl ttftPlan) pooledWait(rate float64) waitTail {
-	n := pl.pf.p.Replicas
-	load := rate * pl.pf.work
+func (pl prefillPlan) pooledWait(rate float64) waitTail {
+	n := pl.p.Replicas
+	load := rate * pl.work
 	rho := load / float64(n)
-	thetaP := pl.pf.work * (pl.pf.ca2 + pl.pf.cs2) / (2 * float64(n) * (1 - rho))
+	thetaP := pl.work * (pl.ca2 + pl.cs2) / (2 * float64(n) * (1 - rho))
 	return expWait(erlangCProb(n, load), 1/thetaP)
 }
 

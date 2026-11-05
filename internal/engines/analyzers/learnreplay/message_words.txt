@@ -119,6 +119,7 @@ DataParallelRanks
 Datastore
 DecodeOnsetUnchecked
 DecodeSideOmitted
+DecodeTTFTUnmeasured
 Deleted
 Deployment
 Discarding
@@ -380,6 +381,8 @@ VLLM_ALL2ALL_BACKEND
 VLLM_USE_V1
 VPAboveSlopeBound
 VPLowerBound
+VPScaledToPrompt
+VPShapeMoved
 V_P
 Variant
 VariantAutoscaling
@@ -643,6 +646,7 @@ but
 by
 byRole
 bytes
+c
 cache
 cacheKey.name
 cacheKey.namespace
@@ -784,6 +788,7 @@ current
 current-replicas
 currentNeedGPUs
 currentReplicas
+curve
 cv
 cycle
 cycles
@@ -2669,6 +2674,7 @@ validated
 validation
 value
 valueFrom
+values
 variable
 variant
 variant-capacity-source

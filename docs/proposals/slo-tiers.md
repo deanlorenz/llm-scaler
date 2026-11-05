@@ -559,7 +559,10 @@ any caller:
   without it the decode onset cannot be placed, and P3 answers flagged
   `DecodeOnsetUnchecked`, possibly above that onset (S1 does not price
   then: `no-decode-side`). With flow control off and no decode role, the
-  answer is flagged `DecodeSideOmitted`.
+  answer is flagged `DecodeSideOmitted`, and decode's part is the measured
+  decode-engine TTFT, `TTFTFleet.DecodeTTFT` ([the decode engine's
+  TTFT](#3-what-s1-passes-to-ttftat-and-rateforttft)); unmeasured, it is
+  flagged `DecodeTTFTUnmeasured`.
 
 `ols-sweep-slo` gives S1 router TTFT, `AvgTTFT`, `AvgServiceTime` and the
 arrival rate: enough to fit `a` and check a low-load mean, not to fit `V_P` (no
@@ -765,6 +768,21 @@ Why:
   adds points.
   A shorter prompt than `V_P` was learned on under-reads `V_P`, the safe
   side; it is flagged too, so a shape change is visible either way.
+
+  **With a curve, P3 rescales instead of holding**
+  ([P3 after P2](slo-capacity-planner-ttft.md#as-built-p3-after-p2)). When
+  P1 took `a` from the quadratic (`AModel` quadratic) and `VPPromptTokens`
+  is known, `PrefillFromEstimate` passes `b` and `c`, and P3 prices
+  `V_P(I) = V_P(I_vp)·s(I_vp)/s(I)`, `s(I) = b + c·I`, for a longer prompt,
+  flagged `VPScaledToPrompt`. It holds `V_P` for a shorter one, which is the
+  safe side. `VPScaledToPrompt` is not on S2's no-act list: the rescale is
+  at or under the true `V_P` whatever a step's fixed cost is. The 1.2x rule
+  is now P3's own fallback for when there is no curve: P3 raises
+  `VPShapeMoved` itself (`whatif.MaxVPShapeRatio`), and S1 no longer
+  computes it. S1 passes `VPPromptTokens` and the curve through
+  `PrefillFromEstimate` and copies P3's flag. On run 2's 37k level the
+  rescale reads 117,645 tok/s against the 115,953 served; held at 30k's
+  figure, it read 134,775.
 - **P1's estimate is not persisted** (the plan's "Later" row). After a
   controller restart every prefill variant reads `no-prefill-capacity` until
   a pod queues again, and makes no TTFT contribution.
@@ -783,13 +801,14 @@ P3's on the answer.
 
 | Input | From |
 | --- | --- |
-| `V_P`, `a` and their flags | P1's stashed estimate, through `whatif.PrefillFromEstimate` |
+| `V_P`, `a` and their flags; `VPPromptTokens`, the curve's `b` and `c`, and the margin | P1's stashed estimate, through `whatif.PrefillFromEstimate`, which carries `VPPromptTokens` and, with the quadratic, `ASlope` and `ACurve`, and sets `VPMargin` to `DefaultVPMargin` |
 | `f` | [Decision 1](#1-the-imbalance-f), at `pods` |
 | `N_p` | `pods`: the variant's Ready replicas for S1, each `N'` for S2 |
 | `PromptTokens` | The effective prompt, `E[I_eff]` (prefix hits are not prefill work), as P1 reads it |
 | `PromptCV` | Measured from the computed-prefill-token histogram where a row carries it (Q1); otherwise 2, flagged `AssumedPromptSpread` ([below](#the-prompt-spread)) |
 | `ArrivalCV2` | 0, Poisson (P3's open question 5), flagged `AssumedPoissonArrivals`: an S1 flag, since P3 has none for it. Poisson over-promises on bursty traffic. Lifted by the staircase's bursty bucket ([which bucket lifts which flag](slo-capacity-planner-ttft.md#ground-truth-and-the-staircase)) |
-| `TransferSecondsPerToken` | Measured: the mean of the R1 field `AvgKVTransferTime` over Ready decode rows with `AvgKVTransferTimeKnown`, divided by `E[I_eff]`. Run 2 recorded it on 374 of 386 decode rows. `TransferOmitted` (0 passed) only where no decode row carries it, which in production is until Q1 issues the query |
+| `TransferSecondsPerToken` | Measured: the mean of the R1 field `AvgKVTransferTime` over Ready decode rows with `AvgKVTransferTimeKnown`, divided by `E[I_eff]`. Run 2 recorded it on 374 of 386 decode rows. `TransferOmitted` (0 passed) only where no decode row carries it, which in production is until Q1 issues the query. With no decode line and `DecodeTTFT` measured, P3 does not price it (the decode engine's TTFT holds the pull) |
+| `DecodeTTFT` | With no decode line only: the decode variant's measured `AvgTTFT` and the prompt it was read at ([below](#3-what-s1-passes-to-ttftat-and-rateforttft)); 0 when no row carries it (`DecodeTTFTUnmeasured`) |
 | `Decode` | The model's decode variant, from the inputs S1 already prices TPOT with: its line, band, capacity tokens, `KVreq`, `O`, batch cap times ranks, and Ready replicas `N_d`. Only when the model has exactly one decode variant and its line prices (`own` or `pinned`; not `pinned-default`, `no-line` or `declined`) |
 | `FlowControl` | The tier's `slo.flowControl` when it is set ([below](#the-flow-control-state)): `enabled` passes `FlowControlOn`, `disabled` passes `FlowControlOff`. Unset, it is inferred from the series: on when the router's flow-control queue series exists for the model, `FlowControlNoSeries` (flagged `FlowControlInferredOff`) otherwise. On always carries the upstream detector thresholds 5 and 0.8, which this repository's install leaves unchanged, so P3's `FlowControlUnknown` cannot arise |
 | The rate | The model's arrival rate times the variant's share of the Ready prefill replicas |
@@ -800,9 +819,25 @@ price, and the reason is `no-decode-side`: without decode, P3 cannot place
 the decode onset, above which TTFT is not priced at all (P3's review). P3
 answers such a fleet flagged `DecodeOnsetUnchecked`, and its "What S1 calls"
 note says S1 must pass the decode role there; S1 never publishes such an
-answer. With flow control off, S1 prices prefill alone, flagged
-`DecodeSideOmitted`: published, with no TTFT contribution, because it leaves
-out `W_decode` and decode's first step and so over-promises.
+answer. With flow control off and no decode line, S1 prices prefill with
+the decode engine's measured TTFT in place of decode's part, flagged
+`DecodeSideOmitted`: published, with no TTFT contribution, because it still
+leaves out `W_decode`.
+
+**The decode engine's TTFT** (`TTFTFleet.DecodeTTFT`, read by P3 only with no
+decode line). The R1 field `AvgTTFT` on the decode variant's Ready decode
+rows with `AvgTTFTKnown`, taken as the mean over the rows weighted by
+`RequestRate`, is `DecodeTTFT.Seconds`. The rows' mean effective prompt
+(the prefill variant's `E[I_eff]` in the same cycle) is
+`DecodeTTFT.PromptTokens`. It is learned per decode variant in the SLO
+analyzer, as `decodeTTFT map[string]decodeTTFTWindow` keyed
+`namespace|model|variant` under its `mu`: the last 5 cycles' means, of
+which S1 passes the largest. It is forgotten and evicted with the
+variant's lines. `AvgTTFT` is a scaling query, collected every cycle, so
+production has it. With no row carrying it, S1 passes 0, and P3 flags
+`DecodeTTFTUnmeasured`, which is on S2's no-act list. On P/D the decode
+engine's TTFT is its own clock, the KV pull and the first token, so it
+replaces `T_xfer`: P3 does not price `TransferSecondsPerToken` beside it.
 
 ###### The flow-control state
 
@@ -983,10 +1018,10 @@ by name.
 The flag series zero-fills a fixed list, `constants.SLOTTFTFlags`, in this
 order: P3's TTFT flags (`UnvalidatedTTFT`, `AssumedVP`, `VPLowerBound`,
 `VPAboveSlopeBound`, `AssumedImbalance`, `AssumedPromptSpread`,
-`TransferOmitted`, `DecodeSideOmitted`, `FlowControlInferredOff`,
+`TransferOmitted`, `DecodeSideOmitted`, `DecodeTTFTUnmeasured`, `VPScaledToPrompt`, `VPShapeMoved`, `FlowControlInferredOff`,
 `AboveFlowControlOnset`, `HeldByDecodeAdmission`, `DecodeOnsetUnchecked`),
 the decode flags a TTFT answer can carry (`BelowFittedBand`,
-`KVBoundSlots`), and S1's (`AssumedPoissonArrivals`, `VPShapeMoved`,
+`KVBoundSlots`), and S1's (`AssumedPoissonArrivals`,
 `PromptSpreadClamped`, `FlowControlMismatch`). `AssumedVP` and `DecodeOnsetUnchecked` always read 0
 under S1, which assumes no `V_P` and publishes no unchecked answer; they are
 listed so the series set does not change when that does. `UnvalidatedTTFT`
@@ -1086,9 +1121,10 @@ asserted.
   still scale in. S2 does not act on a rate answer with:
   - a reason other than `priced`: `decode-bound`, `routing-bound`,
     `no-decode-side`, `no-estimate`, and every refusal;
-  - `DecodeSideOmitted`;
+  - `DecodeSideOmitted`, and `DecodeTTFTUnmeasured`;
   - `AssumedPromptSpread` or `PromptSpreadClamped`, so Q1 is a hard gate;
-  - `VPShapeMoved` or `VPAboveSlopeBound`;
+  - `VPShapeMoved` or `VPAboveSlopeBound` (not `VPScaledToPrompt`, which
+    reads at or under the true `V_P`);
   - `TransferOmitted`, raised only when no transfer time was measured;
   - `AssumedPoissonArrivals`, until the staircase's bursty bucket passes;
   - `AboveFlowControlOnset` on the rate answer, where the per-pod model is
@@ -1179,8 +1215,7 @@ exists) and passes on the PR; each switch is also held by the golden runs.
 6. `f` at `N'`: `min(N', max(1.5, f))`, never 1 at `N'` ≥ 2.
 7. `routing-bound` at `f ÷ N_p` ≥ 0.8, with `predicted_ttft` present and no
    per-replica rate.
-8. `VPPromptTokens` per source, and `VPShapeMoved` above 1.2x either way,
-   not at or below it, and at 0.
+8. `VPPromptTokens` per source, passed through `PrefillFromEstimate` with the curve; P3's `VPShapeMoved` (no curve, above 1.2x either way, not at or below it, and at 0) and `VPScaledToPrompt` copied to the flag series.
 9. The measured `cv`: upper-bound second moment reads at or above the true
    `cv` on a bucketed sample; pooled over pods; `+Inf` mass and `cv` > 3
    give 3 and `PromptSpreadClamped`; the 2000/1800 counterexample reads 0.82
@@ -1234,9 +1269,11 @@ exists) and passes on the PR; each switch is also held by the golden runs.
 6. **Several prefill variants per model.** The router's TTFT is per model,
    so a per-variant prediction cannot be scored one to one. *Recommend:*
    score the request-weighted mixture of the variants' predicted tails.
-7. **The `VPShapeMoved` threshold: closed, 1.2x** ([decision 2](#2-v_p-in-production)).
-   Scaling `V_P` by a fitted per-token slope, in place of flagging, waits
-   for more than run 2's two points.
+7. **The `VPShapeMoved` threshold: closed, 1.2x** ([decision 2](#2-v_p-in-production)),
+   and now P3's own fallback. With P1's curve (#475), P3 rescales `V_P`
+   along it in place of flagging
+   ([P3 after P2](slo-capacity-planner-ttft.md#as-built-p3-after-p2)); the
+   flag stands only where there is no curve.
 8. **Transfer per request or per chunk** (the TTFT page's open question 3):
    per chunk, the measured mean under-reads.
 9. **Scale-in: closed.** S2 searches from 1 ([decision 5](#5-s2-as-a-sketch)),
