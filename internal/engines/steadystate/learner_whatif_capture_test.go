@@ -414,8 +414,12 @@ func (a atClock) Query(ctx context.Context, q string, _ time.Time, opts ...promv
 }
 
 // recordWindow runs a controller over the fleet, recorded, one cycle per
-// step, and returns its recording and its settle tracker's verdicts.
-func recordWindow(t *testing.T, prom promv1.API) ([]byte, map[settle.Reason]int64) {
+// step, and returns its recording and its settle tracker's verdicts. At
+// step failAt, when not negative, the cycle fails before it begins, as an
+// optimize that returns an error before beginSLOCycle does, and the
+// failure lasts an interval: the next cycle begins twice
+// (beginSLOCycle's catch-up).
+func recordWindow(t *testing.T, prom promv1.API, failAt int) ([]byte, map[settle.Reason]int64) {
 	t.Helper()
 	ctx := context.Background()
 	base := clocktesting.NewFakePassiveClock(wiStart)
@@ -456,6 +460,11 @@ func recordWindow(t *testing.T, prom promv1.API) ([]byte, map[settle.Reason]int6
 	}
 	models := slices.Sorted(maps.Keys(byModel))
 	for i := range wiSteps {
+		if i == failAt {
+			// beginSLOCycle reads the failure's age off the wall clock.
+			e.sloFailedSince = time.Now().Add(-time.Hour)
+			continue
+		}
 		wiCycle(t, ctx, e, base, wiStart.Add(time.Duration(i)*wiStep), models, byModel)
 	}
 	require.NoError(t, e.learnRec.Err())
@@ -600,7 +609,16 @@ func wiPromAPI(t *testing.T, srv *promtest.Server) promv1.API {
 // steps: the engine's recording, Generate's, and the fake Prometheus.
 func wiRun(t *testing.T, points int, roleOf ...string) (recorded, generated []byte, srv *promtest.Server) {
 	t.Helper()
-	srv = promtest.New()
+	srv, prom := wiProm(t)
+	recorded, verdicts := recordWindow(t, prom, -1)
+	rep, _ := generateWindow(t, prom, points, roleOf...)
+	return wiCheckRun(t, recorded, verdicts, rep), rep.Recording, srv
+}
+
+// wiProm is the fake Prometheus serving the fleet's series.
+func wiProm(t *testing.T) (*promtest.Server, promv1.API) {
+	t.Helper()
+	srv := promtest.New()
 	t.Cleanup(srv.Close)
 	reg := source.NewSourceRegistry()
 	require.NoError(t, reg.Register("prometheus", source.NewNoOpSource()))
@@ -618,9 +636,13 @@ func wiRun(t *testing.T, points int, roleOf ...string) (recorded, generated []by
 		require.NoError(t, err, name)
 		return s
 	})
-	prom := wiPromAPI(t, srv)
-	recorded, verdicts := recordWindow(t, prom)
-	rep, _ := generateWindow(t, prom, points, roleOf...)
+	return srv, wiPromAPI(t, srv)
+}
+
+// wiCheckRun holds the engine's run and Generate's to the fleet's, and a
+// Fidelity replay of the engine's recording to its settle verdicts.
+func wiCheckRun(t *testing.T, recorded []byte, verdicts map[settle.Reason]int64, rep *learnreplay.Report) []byte {
+	t.Helper()
 
 	// The run exercised what it is meant to: every analyzer judged, the slo
 	// one with the router, lines published, and a model held.
@@ -648,7 +670,51 @@ func wiRun(t *testing.T, points int, roleOf ...string) (recorded, generated []by
 	for _, r := range settle.Reasons() {
 		require.Equal(t, verdicts[r], rep.Paths["settle-"+string(r)], "settle verdict %s", r)
 	}
-	return recorded, rep.Recording, srv
+	// And a replay of the engine's own recording reaches them too: the
+	// engine records no event for its prune, and the replay forgets the
+	// parked model's record where the engine did.
+	replayed, err := learnreplay.Replay(context.Background(), recorded, learnreplay.Options{Mode: learnreplay.Fidelity})
+	require.NoError(t, err)
+	require.Empty(t, replayed.Failed())
+	for _, r := range settle.Reasons() {
+		require.Equal(t, verdicts[r], replayed.Paths["settle-"+string(r)], "replayed settle verdict %s", r)
+	}
+	return recorded
+}
+
+// A cycle that failed for an interval is the next cycle begun twice
+// (beginSLOCycle's catch-up), which the replay counts as one: acme/park,
+// observed before the failure and after it, kept its settle record in the
+// engine, whose prune did not run while the cycle failed, and keeps it in
+// the replay. Counted as two cycles, the replay would forget it and its
+// replica would join again. Generate is not compared: a capture plays
+// every step, and has no failed cycle.
+func TestWhatifCapture_ReplayCountsACatchUpCycleOnce(t *testing.T) {
+	_, prom := wiProm(t)
+	const failAt = 2 // acme/park has replicas on both sides
+	require.Less(t, failAt+1, wiParkedFrom)
+	recorded, verdicts := recordWindow(t, prom, failAt)
+
+	begun := map[time.Time]int{}
+	for _, ev := range wiEvents(t, recorded) {
+		if ev.Kind == slo.KindBeginCycle {
+			begun[ev.Now]++
+		}
+	}
+	require.Len(t, begun, wiSteps-1, "the failed step began no cycle")
+	require.Equal(t, 2, begun[wiStart.Add((failAt+1)*wiStep)], "the cycle after the failure begins twice")
+
+	replayed, err := learnreplay.Replay(context.Background(), recorded, learnreplay.Options{Mode: learnreplay.Fidelity})
+	require.NoError(t, err)
+	require.Empty(t, replayed.Failed())
+	pods := 0
+	for _, v := range wiFleet() {
+		pods += v.pods
+	}
+	require.Equal(t, int64(pods+1), verdicts[settle.Joined], "only acme/park's parked steps join it again")
+	for _, r := range settle.Reasons() {
+		require.Equal(t, verdicts[r], replayed.Paths["settle-"+string(r)], "replayed settle verdict %s", r)
+	}
 }
 
 func TestWhatifCapture_GenerateReproducesTheControllersRun(t *testing.T) {

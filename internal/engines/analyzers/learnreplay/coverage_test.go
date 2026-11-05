@@ -78,9 +78,11 @@ var reviewed = map[reflect.Type]buckets{
 		// which the analyzer overwrites every cycle and nothing restores.
 		// ITLReadings copies a key's readings, and PricingBatchCap reads the
 		// cap without stamping a learned one as used: the what-if planner's
-		// views (whatif_view.go).
+		// views (whatif_view.go). PrefillEstimate copies a prefill variant's
+		// stashed estimate for the slo analyzer, which the analyzer
+		// overwrites every cycle and nothing restores (prefill_observe.go).
 		readers: []string{"Name", "Horizons", "BorrowTickGap", "PathCounts", "LearnerReports",
-			"ITLReadings", "PricingBatchCap"},
+			"ITLReadings", "PricingBatchCap", "PrefillEstimate"},
 		// WithSettleView hands k2 the engine's settle tracker; the replay hands
 		// it its own, observed from the settle events (settle.go).
 		builders: []string{"WithHorizons", "WithOptimizationInterval", "WithClock", "WithRecorder", "WithSettleView"},
@@ -93,8 +95,10 @@ var reviewed = map[reflect.Type]buckets{
 		readers: []string{"Name", "StateTimeout", "SlopeHoldFor", "Judging", "PathCounts"},
 		// WithSettleView hands the slo line the engine's settle tracker; the
 		// replay hands it its own, as it does k2's (settle.go).
+		// WithPrefillEstimates hands it the saturation analyzer's prefill
+		// estimates; the replay hands it its own saturation analyzer.
 		builders: []string{"WithClock", "WithStateTimeout", "WithSlopeHoldFor", "WithRecorder", "WithSettleView",
-			"WithOptimizationInterval"},
+			"WithOptimizationInterval", "WithPrefillEstimates"},
 		seams: []string{"SetSwitchesForReplay"},
 	},
 	reflect.TypeFor[*throughput.ThroughputAnalyzer](): {

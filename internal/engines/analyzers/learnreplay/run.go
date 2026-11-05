@@ -28,7 +28,9 @@ type Mismatch struct {
 	// What says what diverged: "store" for the check before an Analyze,
 	// "line" for an event the replay recorded differently, "evict" for a
 	// store eviction that removed another count, "router" for a router asked
-	// when the run did not ask it, or the reverse.
+	// when the run did not ask it, or the reverse, "settle-no-cycles" for
+	// settle events the replay cannot retain by (settleNoCycles, reported
+	// only).
 	What string
 	// Detail is a readable account: the differing fields, or the two lines
 	// around their first difference.

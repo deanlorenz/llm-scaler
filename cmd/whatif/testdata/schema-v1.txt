@@ -166,3 +166,9 @@ source.model string
 source.namespace string
 source.recording string
 source.totalCycles number
+source.window object
+source.window.from string
+source.window.prometheus string
+source.window.roles string
+source.window.stepSeconds number
+source.window.to string
