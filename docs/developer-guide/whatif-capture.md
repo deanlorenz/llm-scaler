@@ -46,6 +46,13 @@ file with mode 0600, through a temporary file renamed over it.
 `make whatif` builds `bin/whatif`, with the commit in the build. The command
 is not in the manager image.
 
+To answer the planner's questions from a window without writing either
+file, give the same flags to `whatif replicas-to-slo` or `whatif
+slo-to-rate` in place of `--recording`: they capture and generate in memory
+along this same path, and answer as `--recording` would on the files.
+[Prometheus mode](../proposals/slo-capacity-planner.md#prometheus-mode-as-built-d4)
+in the planner's CLI reference has the details.
+
 Exit codes: 0 done; 2 the caller's input (a bad flag, invalid options,
 overlapping `--role-of` selectors, no Pod the role map attributes with a
 KV-cache series, a window too large without `--force`, a capture `generate`

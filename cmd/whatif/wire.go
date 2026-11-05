@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"net/url"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/learnreplay"
@@ -37,18 +38,35 @@ type wireError struct {
 	Message string `json:"message"`
 }
 
-// wireSource is what the answer was read from.
+// wireSource is what the answer was read from: a recording file, or a
+// window of Prometheus captured and generated in memory (Window, and
+// Recording empty).
 type wireSource struct {
-	Recording  string `json:"recording"`
-	Namespace  string `json:"namespace"`
-	Model      string `json:"model"`
-	FirstCycle int    `json:"firstCycle"`
-	LastCycle  int    `json:"lastCycle"`
+	Recording string `json:"recording"`
+	// Window is the Prometheus window the recording was made from, with
+	// --prometheus; absent with --recording.
+	Window     *wireWindow `json:"window,omitempty"`
+	Namespace  string      `json:"namespace"`
+	Model      string      `json:"model"`
+	FirstCycle int         `json:"firstCycle"`
+	LastCycle  int         `json:"lastCycle"`
 	// TotalCycles is how many cycles of the model the recording holds;
 	// LastCycle is the one the answer was read at.
 	TotalCycles int       `json:"totalCycles"`
 	FirstAt     time.Time `json:"firstAt"`
 	LastAt      time.Time `json:"lastAt"`
+}
+
+// wireWindow is the window of Prometheus an answer was captured from.
+type wireWindow struct {
+	// Prometheus is the base URL, its password redacted.
+	Prometheus  string    `json:"prometheus"`
+	From        time.Time `json:"from"`
+	To          time.Time `json:"to"`
+	StepSeconds float64   `json:"stepSeconds"`
+	// Roles is where the role map came from: kube-state-metrics, or
+	// --role-of.
+	Roles string `json:"roles"`
 }
 
 // wireBands is how the bands were drawn.
@@ -214,7 +232,7 @@ func toWire(r whatif.Result, unit string) *wireResult {
 // newWireOutput starts a command's JSON output from the state it read.
 func newWireOutput(question string, f *answerFlags, st *learnreplay.State, variants []pricedVariant, code int) wireOutput {
 	r := f.resampling()
-	return wireOutput{
+	w := wireOutput{
 		SchemaVersion: schemaVersion, Question: question, ExitCode: code, Roles: []wireRole{},
 		Source: &wireSource{Recording: f.recording, Namespace: st.Namespace, Model: st.ModelID,
 			FirstCycle: 1, LastCycle: st.Cycle, TotalCycles: st.Cycles, FirstAt: st.FirstAt, LastAt: st.At},
@@ -222,6 +240,24 @@ func newWireOutput(question string, f *answerFlags, st *learnreplay.State, varia
 			LoPercent: 10, HiPercent: 90},
 		Note: footer(st, variants),
 	}
+	if o := f.captured; o != nil {
+		roles := "role-of"
+		if o.KubeStateMetrics {
+			roles = "kube-state-metrics"
+		}
+		w.Source.Window = &wireWindow{Prometheus: redactedURL(f.window.prometheus), From: o.From, To: o.To,
+			StepSeconds: o.Step.Seconds(), Roles: roles}
+	}
+	return w
+}
+
+// redactedURL is a URL with any password in it replaced, for output.
+func redactedURL(s string) string {
+	u, err := url.Parse(s)
+	if err != nil {
+		return s
+	}
+	return u.Redacted()
 }
 
 // inputsOf is the wire's account of what a variant was priced from.

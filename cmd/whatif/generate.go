@@ -42,12 +42,8 @@ func generate(ctx context.Context, in, dst string, out io.Writer) error {
 	if err != nil {
 		return usageError{err}
 	}
-	rep, err := learnreplay.Replay(ctx, capture, learnreplay.Options{Mode: learnreplay.Generate})
-	var bad *learnreplay.CaptureError
-	switch {
-	case errors.As(err, &bad):
-		return usageError{err}
-	case err != nil:
+	rep, err := generateRecording(ctx, capture)
+	if err != nil {
 		return err
 	}
 	recording := rep.Recording
@@ -71,6 +67,23 @@ func generate(ctx context.Context, in, dst string, out io.Writer) error {
 		fmt.Fprintf(out, "  caveat: %s\n", c)
 	}
 	return nil
+}
+
+// generateRecording plays a capture, gunzipped, through the analyzers
+// (learnreplay, Generate mode): the one place both generate and the answer
+// commands' --prometheus mode turn a capture into a recording. A capture
+// Generate cannot read is a usage error; any other failure is not the
+// capture's.
+func generateRecording(ctx context.Context, capture []byte) (*learnreplay.Report, error) {
+	rep, err := learnreplay.Replay(ctx, capture, learnreplay.Options{Mode: learnreplay.Generate})
+	var bad *learnreplay.CaptureError
+	switch {
+	case errors.As(err, &bad):
+		return nil, usageError{err}
+	case err != nil:
+		return nil, err
+	}
+	return rep, nil
 }
 
 // startOf is a recording's start line.

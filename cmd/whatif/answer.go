@@ -21,6 +21,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/whatifsource"
 )
 
 // The output formats -o takes.
@@ -32,27 +33,36 @@ const (
 // answerFlags are the flags both questions take: where to read the fleet,
 // and what to assume about it.
 type answerFlags struct {
-	recording, cycle, model, namespace, variant, output string
-	decode                                              int
-	batchCap                                            int64
-	inputTokens, outputTokens                           float64
-	headroom, tpotRatio                                 float64
-	seed                                                uint64
+	recording, cycle, model, variant, output string
+	decode                                   int
+	batchCap                                 int64
+	inputTokens, outputTokens                float64
+	headroom, tpotRatio                      float64
+	seed                                     uint64
 	// ttft, prefill and assumeVP are the TTFT half's flags, refused until
 	// the TTFT model lands (the planner's P3).
 	ttft, ttftPercentile, assumeVP string
 	prefill                        int
 	set                            map[string]bool
+	// window is the --prometheus mode's flags, capture's own, and its
+	// namespace the --namespace both modes take; captured is the window
+	// read, once it is. question names the command, and warn is where a
+	// capture's warnings go (stderr).
+	window   captureFlags
+	captured *whatifsource.Options
+	question string
+	warn     io.Writer
 }
 
 func (f *answerFlags) register(fs *flag.FlagSet) {
-	fs.StringVar(&f.recording, "recording", "", "a learner recording (.jsonl or .jsonl.gz) to answer from (required)")
+	fs.StringVar(&f.recording, "recording", "", "a learner recording (.jsonl or .jsonl.gz) to answer from; this or --prometheus is required")
 	fs.StringVar(&f.cycle, "cycle", "last", "the model's cycle to answer at: a number from 1, or last")
 	fs.StringVar(&f.model, "model", "", "the model to answer for; empty takes the recording's only model")
-	fs.StringVar(&f.namespace, "namespace", "", "the model's namespace; empty matches any")
+	fs.StringVar(&f.window.namespace, "namespace", "", "the model's namespace; empty matches any (with --prometheus, the namespace to capture: required)")
 	fs.StringVar(&f.variant, "variant", "", "price this decode variant only; empty prices every decode variant")
 	fs.IntVar(&f.decode, "decode", 0, "decode replicas to price; 0 takes the recorded count")
-	fs.Int64Var(&f.batchCap, "batch-cap", 0, "batch cap per engine rank; 0 takes the one the analyzer priced at")
+	fs.Int64Var(&f.batchCap, "batch-cap", 0, "batch cap per engine rank; 0 takes the one the analyzer priced at "+
+		"(with --prometheus, the engine's batch cap the window is captured with, as capture --batch-cap)")
 	fs.Float64Var(&f.inputTokens, "assume-input-tokens", 0, "mean prompt length to price at, in place of the recorded one (flagged)")
 	fs.Float64Var(&f.outputTokens, "assume-output-tokens", 0, "mean output length to price at, in place of the recorded one (flagged)")
 	fs.Float64Var(&f.headroom, "headroom", 0, "the operating point as a fraction of the knee; default the policy's scaleUpThreshold")
@@ -64,6 +74,10 @@ func (f *answerFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.ttftPercentile, "ttft-percentile", "", "TTFT percentile: not supported in this build")
 	fs.StringVar(&f.assumeVP, "assume-vp", "", "prefill token throughput: not supported in this build")
 	fs.IntVar(&f.prefill, "prefill", 0, "prefill replicas: not supported in this build")
+	f.window.registerWindow(fs)
+	fs.Lookup("prometheus").Usage = "answer from a window of this Prometheus (base URL), captured and generated in memory, in place of --recording"
+	fs.Lookup("from").Usage = "with --prometheus, the window's start: RFC 3339 or Unix seconds, to the millisecond (required)"
+	fs.Lookup("to").Usage = "with --prometheus, the window's end: RFC 3339 or Unix seconds, to the millisecond (required)"
 }
 
 // check validates the flags both questions share once they are parsed.
@@ -75,9 +89,10 @@ func (f *answerFlags) check(fs *flag.FlagSet) error {
 			return usagef("--%s: TTFT and prefill are not supported in this build", name)
 		}
 	}
+	if err := f.checkSource(); err != nil {
+		return err
+	}
 	switch {
-	case f.recording == "":
-		return usagef("--recording is required")
 	case f.output != outputText && f.output != outputJSON:
 		return usagef("-o %q, want text or json", f.output)
 	case f.decode < 0:
@@ -91,6 +106,33 @@ func (f *answerFlags) check(fs *flag.FlagSet) error {
 	}
 	if _, err := f.cycleNumber(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// checkSource checks where the answer is read from: a recording, or a
+// window of Prometheus (--prometheus), never both. The window's flags are
+// capture's and are refused without --prometheus. With it, --batch-cap is
+// the engine's batch cap the window is captured with, as capture's is, not
+// a cap to price at: the answer is then the one capture, generate and
+// --recording give, flag for flag.
+func (f *answerFlags) checkSource() error {
+	switch {
+	case f.recording != "" && f.prometheus():
+		return usagef("--recording and --prometheus both name where to answer from; give one")
+	case f.recording == "" && !f.prometheus():
+		return usagef("--recording or --prometheus is required")
+	case f.prometheus():
+		if f.batchCap < 0 {
+			return usagef("--batch-cap %d, want 0 (the engine's default) or more", f.batchCap)
+		}
+		f.window.batchCap, f.batchCap = int(f.batchCap), 0
+		return nil
+	}
+	for _, name := range windowFlags {
+		if f.set[name] {
+			return usagef("--%s is for --prometheus, and the answer is read from --recording", name)
+		}
 	}
 	return nil
 }
@@ -109,37 +151,89 @@ func (f *answerFlags) cycleNumber() (int, error) {
 	return n, nil
 }
 
-// readState replays the recording to the cycle asked for. A file that cannot
-// be read or is no recording, and a model or a cycle the recording does not
-// hold, are input errors; a recording that fails inside the analyzers, or a
-// replay cancelled, is an internal one.
+// readState replays the recording to the cycle asked for: the --recording
+// file, or with --prometheus the window captured and generated in memory
+// (windowRecording). A file that cannot be read or is no recording, and a
+// model or a cycle the recording does not hold, are input errors; a
+// recording that fails inside the analyzers, or a replay cancelled, is an
+// internal one.
 func (f *answerFlags) readState(ctx context.Context) (*learnreplay.State, error) {
-	data, err := os.ReadFile(f.recording)
+	name, data, err := f.recordingData(ctx)
 	if err != nil {
-		return nil, usageError{err}
-	}
-	if data, err = gunzipped(data); err != nil {
-		return nil, usagef("%s: %v", f.recording, err)
+		return nil, err
 	}
 	rec, err := learnrec.Read(data)
 	if err != nil {
-		return nil, usagef("%s: not a learner recording: %v", f.recording, err)
+		return nil, usagef("%s: not a learner recording: %v", name, err)
 	}
 	if len(rec.Events) == 0 || rec.Events[0].Kind != learnrec.KindStart {
-		return nil, usagef("%s: not a learner recording: no start line", f.recording)
+		return nil, usagef("%s: not a learner recording: no start line", name)
 	}
 	cycle, _ := f.cycleNumber()
 	st, err := learnreplay.StateAt(ctx, data, learnreplay.Options{},
-		learnreplay.StateQuery{Namespace: f.namespace, ModelID: f.model, Cycle: cycle})
+		learnreplay.StateQuery{Namespace: f.window.namespace, ModelID: f.model, Cycle: cycle})
 	var q *learnreplay.QueryError
 	switch {
 	case errors.As(err, &q):
-		return nil, usagef("%s: %v", f.recording, err)
+		return nil, usagef("%s: %v", name, err)
 	case err != nil:
-		return nil, fmt.Errorf("%s: %w", f.recording, err)
+		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	return st, nil
 }
+
+// recordingData is the recording to answer from, gunzipped, and the name
+// errors call it by: the --recording file, or the window --prometheus
+// names, captured and generated in memory.
+func (f *answerFlags) recordingData(ctx context.Context) (string, []byte, error) {
+	if f.prometheus() {
+		data, err := f.windowRecording(ctx)
+		return redactedURL(f.window.prometheus), data, err
+	}
+	data, err := os.ReadFile(f.recording)
+	if err != nil {
+		return "", nil, usageError{err}
+	}
+	if data, err = gunzipped(data); err != nil {
+		return "", nil, usagef("%s: %v", f.recording, err)
+	}
+	return f.recording, data, nil
+}
+
+// windowRecording is the recording `whatif capture` and then `whatif
+// generate` would write for the window the flags name, made in memory
+// along the same path: whatifsource.Capture writes the capture as capture
+// writes its file, gzipped, and generateRecording plays it as generate
+// does. The answer is therefore the one --recording gives on the files.
+// Errors carry capture's and generate's prefixes and exit codes: 2 for
+// the caller's input (a window too large without --force, a role map that
+// attributes nothing), 1 for a failed query or a replay that fails inside
+// the analyzers.
+func (f *answerFlags) windowRecording(ctx context.Context) ([]byte, error) {
+	opts, err := f.window.options(f.question, f.warn)
+	if err != nil {
+		return nil, err
+	}
+	f.captured = &opts
+	var capture bytes.Buffer
+	if _, err := whatifsource.Capture(ctx, opts, &capture); err != nil {
+		return nil, captureError(err)
+	}
+	raw, err := gunzipped(capture.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("capture: %w", err)
+	}
+	rep, err := generateRecording(ctx, raw)
+	if err != nil {
+		// generateRecording's usage error, if any, keeps its exit code.
+		return nil, fmt.Errorf("generate: %w", err)
+	}
+	return rep.Recording, nil
+}
+
+// prometheus reports whether the flags ask to answer from Prometheus
+// rather than from a recording.
+func (f *answerFlags) prometheus() bool { return f.window.prometheus != "" }
 
 // pricedVariant is one decode variant as a question prices it: the state
 // read from the recording, the Decode built from it, and the flags every

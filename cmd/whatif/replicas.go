@@ -21,13 +21,13 @@ type replicasAnswer struct {
 // runReplicasToSLO answers question 2 (docs/proposals/slo-capacity-planner.md,
 // "Question 2: from replicas to an SLO") for decode: the knee the replicas
 // saturate at, the operating rate below it, and the TPOT held there.
-func runReplicasToSLO(ctx context.Context, args []string, out io.Writer) error {
-	return asJSONError("replicas-to-slo", args, out, replicasToSLO(ctx, args, out))
+func runReplicasToSLO(ctx context.Context, args []string, out, warn io.Writer) error {
+	return asJSONError("replicas-to-slo", args, out, replicasToSLO(ctx, args, out, warn))
 }
 
-func replicasToSLO(ctx context.Context, args []string, out io.Writer) error {
+func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) error {
 	fs := newAnswerFlags("replicas-to-slo", args, out)
-	var f answerFlags
+	f := answerFlags{question: "replicas-to-slo", warn: warn}
 	f.register(fs)
 	rate := fs.Float64("rate", 0, "the operating rate, requests per second over the fleet, in place of headroom x knee")
 	pct := fs.String("tpot-percentile", "", "report the TPOT at this per-request percentile too, in percent (90)")
