@@ -419,7 +419,10 @@ func newEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 		WithSettleView(settleTracker).
 		WithOptimizationInterval(cfg.OptimizationInterval()).
 		WithStateTimeout(satV2.Horizons().VariantTimeout).
-		WithSlopeHoldFor(satV2.Horizons().BucketRetention)
+		WithSlopeHoldFor(satV2.Horizons().BucketRetention).
+		// P1's prefill estimates, from the observer saturation runs first
+		// each cycle, on the same cycle clock.
+		WithPrefillEstimates(satV2)
 
 	engine = Engine{
 		client:                  client,

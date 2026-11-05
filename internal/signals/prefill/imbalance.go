@@ -113,10 +113,10 @@ func (ks *keyState) noteImbalance(shares []share, allAdmitted bool, now time.Tim
 		return
 	}
 	if n := len(ks.f); n > 0 && now.Sub(ks.f[n-1].at) < SampleSpacing {
-		ks.f[n-1].f = f
+		ks.f[n-1].f, ks.f[n-1].pods = f, len(shares)
 		return
 	}
-	ks.f = append(ks.f, fSample{at: now, f: f})
+	ks.f = append(ks.f, fSample{at: now, f: f, pods: len(shares)})
 	if len(ks.f) > maxSamples {
 		ks.f = ks.f[len(ks.f)-maxSamples:]
 	}
@@ -124,10 +124,12 @@ func (ks *keyState) noteImbalance(shares []share, allAdmitted bool, now time.Tim
 
 // imbalance sets f on est from the key's minutes, and names the refusal by
 // the cycle's own shares when there are too few: serving is how many of
-// the variant's replicas served this cycle, admitted or not.
+// the variant's replicas served this cycle, admitted or not. It sets the
+// per-count figures too (imbalanceByPods), whether or not F is refused.
 func (est *Estimate) imbalance(ks *keyState, shares []share, serving int) {
 	est.FPodsLast = serving
 	est.FSamples = len(ks.f)
+	est.FByPods, est.FSamplesByPods = imbalanceByPods(ks.f)
 	if len(ks.f) >= MinImbalanceMinutes {
 		fs := make([]float64, len(ks.f))
 		for i, s := range ks.f {
@@ -144,6 +146,27 @@ func (est *Estimate) imbalance(ks *keyState, shares []share, serving int) {
 	default:
 		est.FRefused = TooFewImbalanceMinutes
 	}
+}
+
+// imbalanceByPods is the median f at each pod count, of the minutes taken at
+// that count only, for the counts with at least MinImbalanceMinutes, and how
+// many minutes each count kept. Both nil when no minute was kept.
+func imbalanceByPods(fs []fSample) (map[int]float64, map[int]int) {
+	if len(fs) == 0 {
+		return nil, nil
+	}
+	byPods := map[int][]float64{}
+	for _, s := range fs {
+		byPods[s.pods] = append(byPods[s.pods], s.f)
+	}
+	f, samples := map[int]float64{}, make(map[int]int, len(byPods))
+	for pods, xs := range byPods {
+		samples[pods] = len(xs)
+		if len(xs) >= MinImbalanceMinutes {
+			f[pods] = median(xs)
+		}
+	}
+	return f, samples
 }
 
 // anyRate reports whether any share read a computed-token rate.

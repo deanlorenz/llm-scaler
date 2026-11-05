@@ -17,7 +17,9 @@ import (
 // the model is docs/proposals/slo-capacity-planner-ttft.md). Each prefill
 // variant's rows go to internal/signals/prefill, which learns V_P, a and f,
 // and the result is logged at perReplicaLogLevel as prefill-capacity-observed.
-// Nothing sizes from it.
+// Nothing sizes from it. Each variant's latest estimate is stashed, stamped
+// with the cycle, for the slo analyzer's TTFT pricing to read
+// (PrefillEstimate).
 //
 // It is wired here, not in the slo analyzer, because two of its inputs are
 // this analyzer's: whether decode is back-pressuring prefill this cycle
@@ -27,8 +29,9 @@ import (
 
 // SwitchPrefillCapacityObserve is the replay switch for the observation. On,
 // each prefill variant's rows are observed and logged every cycle. Off,
-// nothing is observed or logged. It moves no golden output: the observation
-// writes no state any output reads.
+// nothing is observed or logged. It moves no golden output in S1a: the
+// observation writes no state any output reads there. S1b's TTFT pricing
+// reads the stashed estimate (PrefillEstimate).
 const SwitchPrefillCapacityObserve = "prefill-capacity-observe"
 
 // SwitchPrefillBusyMinutes is the replay switch for V_P's first source,
@@ -137,9 +140,17 @@ func (a *SaturationAnalyzer) stashPrefillBound(rm domain.ReplicaMetrics, tokens 
 const prefillBoundsStaleAfter = time.Minute
 
 // evictPrefillObservationLocked sweeps the observation's keys with no cycle
-// for prefill.Retention and the stashed bounds no cycle took, and returns
-// how many of each. Callers hold a.mu; the observer's lock is its own.
-func (a *SaturationAnalyzer) evictPrefillObservationLocked(now time.Time) (keys, bounds int) {
+// for prefill.Retention, the stashed bounds no cycle took, and the stashed
+// estimates older than variantTimeout, and returns how many of each.
+// Callers hold a.mu; the observer's lock is its own.
+//
+// An estimate is swept on the variant timeout, not on
+// prefillBoundsStaleAfter: the sweep runs before each cycle's Analyze, so at
+// an interval over a minute every variant's estimate from the cycle before
+// would be evicted, and logged, every cycle. A stale one is never read
+// anyway (the slo analyzer refuses an estimate not stamped with its own
+// cycle); the sweep only keeps the map from outliving its variants.
+func (a *SaturationAnalyzer) evictPrefillObservationLocked(now time.Time, variantTimeout time.Duration) (keys, bounds, estimates int) {
 	keys = a.prefillObserver.Sweep(now)
 	for k, sb := range a.prefillBounds {
 		if now.Sub(sb.at) > prefillBoundsStaleAfter {
@@ -147,7 +158,50 @@ func (a *SaturationAnalyzer) evictPrefillObservationLocked(now time.Time) (keys,
 			bounds++
 		}
 	}
-	return keys, bounds
+	for k, se := range a.prefillEstimates {
+		if now.Sub(se.at) > variantTimeout {
+			delete(a.prefillEstimates, k)
+			estimates++
+		}
+	}
+	return keys, bounds, estimates
+}
+
+// stashedEstimate is a prefill variant's latest estimate (prefill.Estimate),
+// with the analyzer's clock at the write: the slo analyzer reads it only in
+// the cycle that wrote it (docs/proposals/slo-tiers.md, "Where P1's figures
+// come from").
+type stashedEstimate struct {
+	est prefill.Estimate
+	at  time.Time
+}
+
+// stashPrefillEstimate keeps est as the variant's latest estimate, stamped
+// with now. It takes a.mu for the write only: the observer's lock is not
+// held here, so the order a.mu then the observer's lock is never reversed.
+func (a *SaturationAnalyzer) stashPrefillEstimate(namespace, modelID, variant string, est prefill.Estimate, now time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.prefillEstimates[prefillBoundStashKey(namespace, modelID, variant)] = stashedEstimate{est: est, at: now}
+}
+
+// PrefillEstimate is a prefill variant's latest stashed estimate, when it was
+// stashed on the analyzer's clock, and whether there is one: the handle the
+// slo analyzer reads P1's figures through (slo.PrefillEstimates), so it
+// never rebuilds the observer's key. The estimate's maps are copies. It
+// takes a.mu and nothing else; it reads, and stamps nothing.
+func (a *SaturationAnalyzer) PrefillEstimate(namespace, modelID, variant string) (prefill.Estimate, time.Time, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	se, ok := a.prefillEstimates[prefillBoundStashKey(namespace, modelID, variant)]
+	if !ok {
+		return prefill.Estimate{}, time.Time{}, false
+	}
+	est := se.est
+	est.Refused = maps.Clone(est.Refused)
+	est.FByPods = maps.Clone(est.FByPods)
+	est.FSamplesByPods = maps.Clone(est.FSamplesByPods)
+	return est, se.at, true
 }
 
 // takePrefillBounds returns and clears the bounds stashed for the cycle's
@@ -209,11 +263,13 @@ func (c *cycle) observePrefill() {
 		} else {
 			queueMin = nil
 		}
+		now := a.now()
 		est := a.prefillObserver.Observe(prefill.Cycle{
 			Key: key, Engine: engine, Disaggregated: true, Rows: rows[variant],
 			QueueMin: queueMin, KVFull: kvFullPods, DownstreamSaturated: c.decodeSaturated,
-			Bound: bounds[variant], Settle: view, ALineOnly: !a.prefillAQuadratic, Now: a.now(),
+			Bound: bounds[variant], Settle: view, ALineOnly: !a.prefillAQuadratic, Now: now,
 		})
+		a.stashPrefillEstimate(c.input.Namespace, c.input.ModelID, variant, est, now)
 		c.logger.V(perReplicaLogLevel).Info("prefill-capacity-observed",
 			"modelID", c.input.ModelID, "namespace", c.input.Namespace, "variant", variant, "key", key,
 			"engine", string(engine), "pods", len(rows[variant]),
@@ -232,6 +288,8 @@ func (c *cycle) observePrefill() {
 			"busyMinutes", est.VPBusyMinutes, "busyMinutesOn", a.prefillBusyMinutes,
 			"queueMinPods", queueMinPods, "kvFullPods", len(kvFullPods),
 			"f", est.F, "fRefused", string(est.FRefused), "fSamples", est.FSamples,
+			"fPods", est.FPodsLast, "fAtPods", est.FByPods[est.FPodsLast],
+			"fSamplesAtPods", est.FSamplesByPods[est.FPodsLast],
 			"downstreamSaturated", c.decodeSaturated,
 			"admitted", est.Admitted, "refused", est.Refused)
 	}

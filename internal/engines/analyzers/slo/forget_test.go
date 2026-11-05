@@ -202,7 +202,7 @@ func TestForget_ReportsEachForgottenKey(t *testing.T) {
 func TestForget_EveryFieldIsClassified(t *testing.T) {
 	forgotten := []string{"lines", "seen", "args", "accelerators"}
 	kept := []string{"transients", "ownSettle", "ownSettled", "paths"}
-	plumbing := []string{"router", "store", "now", "mu", "rec", "settle"}
+	plumbing := []string{"router", "store", "now", "mu", "rec", "settle", "prefillEstimates"}
 	plain := func(k reflect.Kind) bool {
 		switch k {
 		case reflect.Bool, reflect.String,
