@@ -124,6 +124,9 @@ type Analyzer struct {
 	// itlForgetReachesLine is SwitchITLForgetReachesTheLine (forget.go): on
 	// from the constructor; a replay turns it off (SetSwitchesForReplay).
 	itlForgetReachesLine bool
+	// itlOneSidedAtCap is SwitchITLOneSidedAtCap (issue #467, one_sided.go):
+	// on from the constructor; a replay turns it off (SetSwitchesForReplay).
+	itlOneSidedAtCap bool
 	// settleInterval is the controller's optimize interval
 	// (WithOptimizationInterval), zero until set: what the line's own trace
 	// judges an absence by (settle.Tolerance), as the saturation analyzer's.
@@ -182,6 +185,7 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		itlRestartUnderName:  true,
 		itlIdleOnEvidence:    true,
 		itlForgetReachesLine: true,
+		itlOneSidedAtCap:     true,
 	}
 }
 
@@ -297,6 +301,10 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 				// A held slope reads pinned or pinned-default on the metric
 				// like a fit made this cycle; these say it is an old one.
 				"lineSlopeHeld", d.line.SlopeHeld, "lineSlopeAge", d.line.SlopeAge(now),
+				// Priced one-sided at the cap (SwitchITLOneSidedAtCap): no
+				// learned B, and the line through the least ITL past kSat met
+				// the target at a lower fill than the fit through the default B.
+				"linePinnedAtLeastITL", d.line.PinnedAtLeastITL,
 				"considered", d.line.Considered, "held", d.line.Held, "kept", d.line.Offered,
 				"belowBand", d.line.BelowBand,
 				"aboveBand", d.line.AboveBand, "noK", d.line.NoK, "noITL", d.line.NoITL,
@@ -435,6 +443,10 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	// When each replica's settle began: the engine's settle tracker
 	// (settle.go).
 	a.settleAdmission(&adm, input.Namespace, input.ModelID)
+	// Readings at the cap sit above kSat, where a pinned fit through the
+	// default B prices under the truth: priced one-sided until B is learned
+	// (one_sided.go).
+	a.oneSided(&adm, tpotTarget)
 	// The fill is clamped to the band the line is fitted over.
 	band := whatif.FillBand{Lo: adm.MinK, Hi: adm.MaxK}
 	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, adm, now)

@@ -1430,6 +1430,7 @@ lineBorrowed
 lineBorrowedFrom
 lineHeld
 lineKey
+linePinnedAtLeastITL
 lineShapeG
 lineSlopeAge
 lineSlopeHeld
@@ -2181,6 +2182,7 @@ saturatedThroughput
 saturatedThroughputBucket
 saturation
 saturation-holds-role
+saturation-itl-one-sided-at-cap
 saturation-only
 saturation-token-based
 saturation.Analyze
@@ -2323,6 +2325,7 @@ slo-itl-forget-reaches-the-line
 slo-itl-idle-needs-evidence
 slo-itl-keeps-the-settle-through-a-missing-row
 slo-itl-ols
+slo-itl-one-sided-at-cap
 slo-itl-pinned
 slo-itl-reads-the-finite-pod-mean
 slo-itl-reads-the-settle-tracker

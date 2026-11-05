@@ -2686,6 +2686,140 @@ killed):
 | the summary omits `pinnedAtLeastITL` | the probe |
 | the negative control's knob ignored | the bias table and the probe |
 
+#### 4b-3's follow-up: the saturation and slo lines at the cap (#467)
+
+Built on main after #471 (602054e98). Two switches, on by the constructors:
+`saturation-itl-one-sided-at-cap` (`D/itl_one_sided.go`) and
+`slo-itl-one-sided-at-cap` (`slo/one_sided.go`). Each turns on the shared
+rule in I (`itl.Admission.OneSidedAboveKSat`) for its own line; no code is
+copied.
+
+**Where each line is priced.** The throughput line prices at kSat, and 4b-3
+compared the two lines there. The saturation line derives mu at its pricing
+k (`pricingK`, 0.68 with the default thresholds), and the slo line at the
+fill where it meets the TPOT target (`PriceTPOT`). I gained two fields, so
+the rule judges each line where it is priced:
+
+- `Admission.OneSidedAt`: the fill to compare at, and to keep the held A at.
+  The saturation analyzer sets its pricing k.
+- `Admission.OneSidedTarget`: a target ITL. Each line is judged at the fill
+  where it meets it, clamped to the band (`pricedFill`), and the lower fill
+  wins. The slo analyzer sets its TPOT target.
+
+The default-B error is larger at 0.68 than at kSat, since the term is
+`(B0 - B)(1 - k/k_cap)`. When an admission names its price, the chosen line
+is returned through the default B, at the A that prices there what the line
+through the least ITL did. That line is often flat (A 0 on readings at one
+ITL), and a flat line is refused by `PriceTPOT`, `ValidModel` and line
+sharing. The held A is that same A, so a hold prices the same. The
+throughput line passes neither field and is unchanged: its goldens and its
+13 at-cap known-truth cases hold.
+
+**Bias, saturation line at k 0.68** (`TestITLOneSided_TheBiasTableAtThePricingK`,
+three replicas at a cap of 64 at k_cap ± 0.01, 24 cycles, through `Analyze`;
+noise: 2 %, autocorrelated, 20 seeds):
+
+| A | B | k_cap | off (the default B) | derived term | on | on, 2 % noise: mean [least, most] |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0.05 | 10 ms | 0.97 | -2.72 % | -2.72 % | +32.65 % | +31.49 % [+29.69, +33.19] |
+| 0.05 | 30 ms | 0.97 | -11.22 % | -11.21 % | +22.45 % | +21.32 % [+19.64, +22.95] |
+| 0.01 | 20 ms | 0.97 | -15.64 % | -15.62 % | +10.72 % | +9.61 % [+8.08, +11.17] |
+| 0.01 | 30 ms | 0.97 | -19.52 % | -19.50 % | +7.81 % | +6.70 % [+5.21, +8.24] |
+
+Off equals the derived term to 0.05 points at every point of the grid (the
+test holds it to 0.1); I's own table (`TestOneSidedAt_ThePricingKIsAtOrAboveTheTruth`)
+adds k_cap 0.92. On is never under the truth, with or without noise. It is
+far over: the line through the least ITL is flat, or nearly so, and read at
+0.68 it prices the cap's ITL. That over-orders (more replicas) until B is
+learned, which a full fit in the band ends.
+
+**Bias, slo line at the target** (`TestOneSided_TheBiasTableAtTheTarget`,
+the target the true line meets at k 0.5):
+
+| A | B | k_cap | fill off | fill on | 2 % noise, 20 seeds |
+| --- | --- | --- | --- | --- | --- |
+| 0.05 | 10 ms | 0.97 | 0.5358 | infeasible | infeasible on 20 of 20 |
+| 0.05 | 30 ms | 0.97 | 0.6557 | infeasible | infeasible on 20 of 20 |
+| 0.01 | 20 ms | 0.97 | 0.7779 | infeasible | infeasible on 20 of 20 |
+| 0.01 | 30 ms | 0.97 | 0.8000 | infeasible | infeasible on 20 of 20 |
+
+Off meets the target at a higher fill than the truth's 0.5 on every point:
+too few replicas. On, the line through the least ITL lies at the cap's ITL,
+above every target the true line meets inside the band, so no fill in the
+band is one-sided, and the variant reads `infeasible` (the analyzer
+abstains, never caps). That is the honest answer on readings at the cap
+alone: they say nothing about the fill the target is met at, only that it
+is under the cap's. With readings in the band too, the fit through the
+default B is the higher line and prices as before.
+
+**Tests.** I: the two tables above, on six points; noise within ε; the held
+A keeps the price; Refit prices the line Observe did; and a window where the
+two lines cross between 0.68 and kSat is priced by the higher line at 0.68
+(`TestOneSidedAt_TheLinesAreComparedAtThePricingK`). D and slo, each through
+the analyzer and with the switch off as the control: a learned B ends the
+rule and a forget brings it back (D: `ForgetVariant`, which drops the
+capacity record too, so the test files it again as the engine does; slo:
+`ForgetVariant`); the hold keeps the price and ends with it (D: last fit at
+34m, held to 1h34m, silent from 1h34m15s, at 1 h `BucketRetention`; slo: the
+same at 1 h `slopeHoldFor`, the held line infeasible as the live one was).
+`itl-fit` logs `pinnedAtLeastITL` (`TestITLOneSided_TheFitLineSaysSo`); the
+slo `slo-variant` line logs `linePinnedAtLeastITL`.
+
+**The what-if gap, closed.** `itl.Refit` took no admission, so a band
+refitted a one-sided line through the default B alone, under the line the
+controller priced. It now takes one, and uses only its one-sided fields.
+`whatif.Refit.OneSided` carries it (`band.go`), and `learnreplay` passes the
+saturation analyzer's (`SaturationAnalyzer.ITLOneSided`) for a pinned line
+through the default B (`state.go`; `VariantState.OneSided`, which
+`cmd/whatif` hands to `BootstrapLines`). On an at-cap window the band
+prices the controller's line, 0.03967 s at k 0.68 to a 0.02 % spread,
+against 0.02961 s, under the truth's 0.03680 s, without it
+(`TestBootstrapPricesTheOneSidedLineTheControllerDid`). On e1 at cycle 60,
+replayed (`StateAt`), the line priced 0.07441 s at k 0.68; its band is
+[0.06463, 0.07441] s with the admission and [0.06348, 0.06518] s without,
+wholly under the line. On e1-tuned at cycle 60: 0.08677 s, band [0.06661,
+0.08677] s against [0.06606, 0.06808] s.
+
+**Goldens.** The saturation switch alone, against all off, moves e1 and
+e1-tuned, the two cluster recordings whose decode replica sits at its
+stated cap with no B learned: `lines.csv`, `variant-capacities.csv` (104
+and 191 rows: the line, A 0.0856 to 0.1006 and 0.0889 to 0.1188 through the
+default B) and `results.csv` (77 and 142 rows: the demand the floor prices
+from mu, which falls from 6.38 to 5.51 and from 6.17 to 4.72 req/s). On
+e1-tuned demand rises on 101 rows, by up to 29.9 %, and falls on 41, by at
+most 0.2 %. On e1 it rises on 33 rows, by up to 20.8 %, and falls on 44, by
+at most 4.4 %. On the rows checked, those falls come with the lower derived
+mu and nothing else in the variant's row moving, so they reach the demand
+through a term that reads mu; they are not traced further here. The
+per-replica capacity moves on no row. The slo switch
+moves nothing: no committed recording runs the slo analyzer on a replica at
+a stated cap. It is held by its unit tests (`heldBy`).
+
+**Mutants** (each alone; all killed):
+
+| mutant | what fails |
+| --- | --- |
+| the rule never raises | every new test, 4b-3's two in I and the band test |
+| one-sided with a learned B | `TestITLOneSided_ALearnedBEndsItAndAForgetBringsItBack`, the slo twin, the crossing test |
+| the held A not adjusted | the I tables, both bias tables, the held tests |
+| the chosen line kept flat (not through the default B) | the I tables, the held-slope test, the D learn/forget test |
+| compared at kSat, not where the line is priced | `TestOneSidedAt_TheLinesAreComparedAtThePricingK` |
+| the held A kept at kSat | the crossing test, the I table, every D test |
+| the higher fill wins at a target | the I target table, Refit, every slo test |
+| the saturation switch ignored | every D test |
+| the saturation line judged at kSat | the D learn/forget and hold tests |
+| the slo switch ignored | every slo test |
+| the slo target not passed | the slo hold test |
+| Refit ignores the admission | the Refit test, the band test, `TestRefitFindsAOneSidedLine` |
+| the band drops the admission | the band test |
+| StateAt passes no admission; passes it for a learned B; keeps none for the bands | `TestRefitFindsAOneSidedLine` |
+
+**Not in this PR: the throughput line's rollout guard.** Still true after
+4b-3: the saturation line empties a variant's rows while its scale target
+rolls out (`rec.InRollout()`, `D/analyze.go`), and the throughput line has
+no such guard. Filed as its own issue (text in the PR's report), as the
+round-1 review planned.
+
 #### 5b as built
 
 Built on main 0fec87b18 (5a merged). Change B only, behind

@@ -108,10 +108,13 @@ type Reading struct {
 	// (Admission.AboveBandFallback): the band gave no line, the key held no
 	// slope it may hold, and A was fitted from the readings above the band.
 	AboveBandFit bool
-	// PinnedAtLeastITL is set when Model is the pinned fit's line through
-	// the least ITL of the window's readings at a k of at least DefaultKSat,
-	// not through the default baseline (Admission.OneSidedAboveKSat): it
-	// priced the higher ITL at DefaultKSat.
+	// PinnedAtLeastITL is set when Model was priced one-sided
+	// (Admission.OneSidedAboveKSat): by the pinned fit's line through the
+	// least ITL of the window's readings at a k of at least DefaultKSat, not
+	// the fit through the default baseline, which priced fewer replicas.
+	// Model is that line, priced at DefaultKSat; or, for an admission that
+	// names where it is priced (OneSidedAt, OneSidedTarget), the line
+	// through the default baseline that prices the same there.
 	PinnedAtLeastITL bool
 	// AboveBandHeld is the above-band window's size after pruning; zero
 	// without the fallback.
@@ -424,19 +427,42 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 	}
 	m, heldA := c.model, c.model.A
 	if adm.OneSidedAboveKSat && !r.BaselineLearned {
-		if lo, ok := atLeastITLLine(c.read); ok && lo.ITLAt(DefaultKSat) > m.ITLAt(DefaultKSat) {
-			// The hold pairs its A with the baseline (above), so the A held
-			// is the one that prices the chosen line's ITL at DefaultKSat
-			// through it: a held line prices what this one did.
-			m, r.PinnedAtLeastITL = lo, true
-			heldA = (m.ITLAt(DefaultKSat) - baseline) / DefaultKSat
-		}
+		m, heldA, r.PinnedAtLeastITL = oneSidedLine(c, baseline, adm)
 	}
 	t.mu.Lock()
 	t.slopes[key] = heldSlope{a: heldA, fittedAt: now, args: adm.Args}
 	t.mu.Unlock()
 	r.Model, r.Tier = m, TierPinnedB
 	return r
+}
+
+// oneSidedLine is the pinned fit c, through baseline, set against the line
+// through the least ITL of its readings at or past DefaultKSat
+// (atLeastITLLine): the one of the two that prices more replicas where adm
+// prices (Admission.OneSidedAt, OneSidedTarget) is the line, and raised says
+// it was the latter (Admission.OneSidedAboveKSat). heldA is the A a later
+// hold holds: the hold pairs its A with the baseline, so it is the one that
+// prices, through it, what the chosen line priced (Admission.keptA). Observe
+// and Refit both take it, so a refit of the same readings prices the line
+// the tracker did.
+//
+// An admission that names where its line is priced (OneSidedAt, or
+// OneSidedTarget) gets the chosen line as the held one: through baseline,
+// at the A that prices there what the line through the least ITL priced.
+// The price is the same, and the line is one every reader of a pinned fit
+// takes: A above zero (the line through the least ITL is flat on one reading,
+// and whatif.PriceTPOT and itl.ValidModel refuse a flat line), B the pin.
+func oneSidedLine(c fitChoice, baseline float64, adm Admission) (m Model, heldA float64, raised bool) {
+	m, heldA = c.model, c.model.A
+	lo, ok := atLeastITLLine(c.read)
+	if !ok || !adm.pricesHigher(lo, m) {
+		return m, heldA, false
+	}
+	heldA = adm.keptA(lo, baseline)
+	if adm.namesItsPrice() {
+		return Model{A: heldA, B: baseline}, heldA, true
+	}
+	return lo, heldA, true
 }
 
 // atLeastITLLine is the line pinned at the least ITL among obs's readings at
@@ -533,6 +559,11 @@ type Refitted struct {
 	Hold bool
 	// Read is the readings the line was fitted from.
 	Read []Observation
+	// PinnedAtLeastITL is set when the pinned fit was priced one-sided
+	// (oneSidedLine; Reading.PinnedAtLeastITL): Model prices what the line
+	// through the least ITL of Read's readings at or past DefaultKSat
+	// priced.
+	PinnedAtLeastITL bool
 }
 
 // Refit reruns Observe's choice of fit (chooseFit) on readings a key's
@@ -543,12 +574,25 @@ type Refitted struct {
 // them: DefaultMinSamples of them, spread DefaultMinKSpread. Nothing is
 // remembered: the what-if planner bands a line by refitting resamples of
 // its readings (internal/signals/whatif, BootstrapLines).
-func Refit(obs, steady []Observation, baseline float64, minSettled int) Refitted {
+//
+// oneSided, when its OneSidedAboveKSat is set, prices the pinned fit
+// one-sided as Observe does under that admission while the key has no
+// learned B: the caller passes it for such a key only, with baseline
+// DefaultBaselineSec. Only the one-sided fields are read (OneSidedAt,
+// OneSidedTarget, and MinK and MaxK with a target). The zero Admission is
+// the pinned fit alone. Without it a refit of a line Observe priced
+// one-sided pins the default B alone, and prices under the line the
+// controller priced (issue #467).
+func Refit(obs, steady []Observation, baseline float64, minSettled int, oneSided Admission) Refitted {
 	if minSettled <= 0 {
 		minSettled = DefaultMinSettledSamples
 	}
 	c := chooseFit(obs, steady, ready(steady, DefaultMinSamples, DefaultMinKSpread), baseline, minSettled)
-	return Refitted{Model: c.model, Tier: c.tier, Hold: c.hold, Read: c.read}
+	out := Refitted{Model: c.model, Tier: c.tier, Hold: c.hold, Read: c.read}
+	if oneSided.OneSidedAboveKSat && c.tier == TierPinnedB {
+		out.Model, _, out.PinnedAtLeastITL = oneSidedLine(c, baseline, oneSided)
+	}
+	return out
 }
 
 // RefitAboveBand reruns the above-band fallback (aboveBandLine) on the

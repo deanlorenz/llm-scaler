@@ -95,6 +95,15 @@ type VariantState struct {
 	// and MinSettled the steady gate's MinSettledSamples: what a refit takes.
 	Baseline   float64
 	MinSettled int
+	// OneSided is how the line was priced one-sided
+	// (itl.Admission.OneSidedAboveKSat, issue #467), the zero Admission for
+	// a line that was not: the line through the least ITL of its readings at
+	// the sequence cap, B unlearned and Baseline itl.DefaultBaselineSec. A
+	// refit takes it (whatif.Refit.OneSided) to price the line the
+	// controller priced. oneSided is how the analyzer would price one,
+	// which refit tries.
+	OneSided itl.Admission
+	oneSided itl.Admission
 	// CapacityTokens is C, the replica's whole KV capacity
 	// (whatif.CapacityTokens).
 	CapacityTokens float64
@@ -375,8 +384,10 @@ func (r *replayer) stateOf(in domain.AnalyzerInput, cycle int, now time.Time, sh
 	}
 	learning := st.Policy != nil && st.Policy.EnableBatchCapLearning
 	minSettled := st.Policy.ITLSteadiness().MinSettledSamples
+	oneSided := r.sat.ITLOneSided(st.Policy)
 	for _, vc := range res.VariantCapacities {
-		vs := VariantState{Variant: vc.VariantName, Role: vc.Role, Replicas: vc.ReplicaCount, MinSettled: minSettled}
+		vs := VariantState{Variant: vc.VariantName, Role: vc.Role, Replicas: vc.ReplicaCount, MinSettled: minSettled,
+			oneSided: oneSided}
 		if sr := vc.ServiceRate; sr != nil && sr.HasLine {
 			vs.Line = itl.Model{A: sr.LineSlope, B: sr.LineIntercept}
 		}
@@ -435,13 +446,24 @@ func sameLine(a, b itl.Model) bool {
 // and, when that does not give the line back, the above-band fallback, which
 // marks the line TierAboveBand. A held or borrowed line was fitted from no
 // readings of the variant's own here.
+//
+// A pinned line through the default B is a key with no learned B, which the
+// analyzer prices one-sided at the cap (issue #467): its refit takes the
+// analyzer's one-sided admission, and keeps it for the bands (OneSided), so
+// a resample prices as the controller would, whether or not this cycle's
+// line was raised. A learned B equal to the default to the last bit would
+// be read the same way; the tracker rejects none, and none was ever seen.
 func (vs *VariantState) refit() {
 	if vs.Tier != whatif.TierOLS && vs.Tier != whatif.TierPinnedB {
 		return
 	}
 	vs.Baseline = vs.Line.B
-	if got := itl.Refit(vs.Readings.All, vs.Readings.Steady, vs.Baseline, vs.MinSettled); got.Tier != "" && sameLine(got.Model, vs.Line) {
-		vs.Tier, vs.LineReadings, vs.Refitted = got.Tier, got.Read, true
+	var adm itl.Admission
+	if vs.Tier == whatif.TierPinnedB && vs.oneSided.OneSidedAboveKSat && vs.Line.B == itl.DefaultBaselineSec {
+		adm = vs.oneSided
+	}
+	if got := itl.Refit(vs.Readings.All, vs.Readings.Steady, vs.Baseline, vs.MinSettled, adm); got.Tier != "" && sameLine(got.Model, vs.Line) {
+		vs.Tier, vs.LineReadings, vs.Refitted, vs.OneSided = got.Tier, got.Read, true, adm
 		return
 	}
 	if got := itl.RefitAboveBand(vs.Readings.Above, vs.Readings.AboveSteady, vs.MinSettled); got.Tier != "" && sameLine(got.Model, vs.Line) {

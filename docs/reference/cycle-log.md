@@ -433,6 +433,21 @@ it needs one, and votes on scale-down. A capped replica that
 preempts more than `capMaxPreemptionRate` is not read at its cap: it stays in
 `aboveBand`, and only the fallback may use it.
 
+The saturation and slo lines price a variant at its cap one-sided too, until
+B is learned. The saturation line prices where it derives mu (k 0.68 with the
+default thresholds), and the line through the default B was further under
+the truth there than at 0.85: in simulation, 3 to 20 % under on a true B of
+10 to 30 ms, which made the derived mu too high and ordered too few replicas.
+It now prices 7 to 33 % over (with 2 % noise, at least 5 % over in
+simulation): more replicas than needed, never fewer, until B is learned.
+`itl-fit` logs `pinnedAtLeastITL`. The slo line prices the fill where its ITL
+meets the TPOT target, and a line under the truth met it at too high a fill.
+One-sided, it meets it at or under the truth's fill. When the replicas at the
+cap read above the target, as they do when the target lies inside the band,
+no fill meets it, and the variant reads `infeasible` (the analyzer abstains)
+rather than a fill it cannot reach. `slo-variant` logs
+`linePinnedAtLeastITL`.
+
 | `cause` | Meaning |
 |---|---|
 | `no-healthy-rows` | no row of the variant was healthy this cycle, so nothing was read. Every count is 0 |

@@ -743,6 +743,33 @@ readings are left, the key's last `A` holds (`itl-fit` logs `slopeHeld`), and a
 key with no `A` yet gets no line. `itl-window` reports the marked readings as
 `settling`.
 
+#### One-sided at the cap (issue #467)
+
+A replica at its stated cap reads above `itl.DefaultKSat`. While the key has
+no learned B the pinned fit pins `DefaultBaselineSec`, and through such
+readings it prices under the true line by `(B0 - B)(1 - k/k_cap)` at a fill
+`k`. Under `SwitchITLOneSidedAtCap` (`saturation-itl-one-sided-at-cap`,
+`itl_one_sided.go`) the admission sets `itl.Admission.OneSidedAboveKSat`, as
+the throughput line does, with `OneSidedAt` the line's pricing k
+(`pricingK`). The tracker then compares the fit through the default B with
+the line through the least ITL past kSat (`atLeastITLLine`) at that k, and
+when the latter is higher returns the line through the default B that
+prices the same there (`oneSidedLine`): A above zero, B the pin, so
+`DeriveMuAtCap`, `ValidModel` and line sharing read it as any pinned fit.
+The held A is that line's A, so a hold prices the same. `itl-fit` logs
+`pinnedAtLeastITL`.
+
+The slo line sets the same flag under its own switch
+(`slo-itl-one-sided-at-cap`, `slo/one_sided.go`) with
+`itl.Admission.OneSidedTarget`, the TPOT target: each line is judged at the
+fill where it meets the target (`pricedFill`, `PriceTPOT`'s clamp), and the
+lower fill wins.
+
+The what-if bands rerun the same choice: `itl.Refit` takes the admission's
+one-sided fields, `whatif.Refit.OneSided` carries them, and
+`learnreplay.VariantState.refit` passes the analyzer's
+(`SaturationAnalyzer.ITLOneSided`) for a pinned line through the default B.
+
 #### When a replica's settle starts (learner PR 4a)
 
 The settle is read from the engine's settle tracker (`internal/signals/settle`,

@@ -56,6 +56,14 @@ type Refit struct {
 	Baseline float64
 	// MinSettled is the steady gate's MinSettledSamples, 0 for the default.
 	MinSettled int
+	// OneSided, with OneSidedAboveKSat set, prices a resample's pinned fit
+	// one-sided as the tracker priced the line (issue #467): set for a line
+	// the tracker priced with no learned B under that admission, Baseline
+	// then itl.DefaultBaselineSec. Such a line is through Baseline already
+	// (itl.Reading.PinnedAtLeastITL), so a resample on which the tracker
+	// would hold the slope holds its A, as for any other. The zero value is
+	// the pinned fit alone, as before.
+	OneSided itl.Admission
 }
 
 // Resample is one bootstrap line: the line fitted from one resample, the
@@ -257,7 +265,7 @@ func refit(all, steady []itl.Observation, fit Refit) (Resample, bool) {
 			tier = TierAboveBand
 		}
 	} else {
-		got = itl.Refit(all, steady, fit.Baseline, fit.MinSettled)
+		got = itl.Refit(all, steady, fit.Baseline, fit.MinSettled, fit.OneSided)
 		tier = got.Tier
 		if got.Hold {
 			got.Model, tier = itl.Model{A: fit.Line.A, B: fit.Baseline}, TierHeld

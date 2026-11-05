@@ -423,6 +423,10 @@ type SaturationAnalyzer struct {
 	// prefillBusyMinutes is SwitchPrefillBusyMinutes (P1's busy minutes): on
 	// from the constructor; a replay turns it off (SetSwitchesForReplay).
 	prefillBusyMinutes bool
+	// itlOneSidedAtCap is SwitchITLOneSidedAtCap (issue #467,
+	// itl_one_sided.go): on from the constructor; a replay turns it off
+	// (SetSwitchesForReplay).
+	itlOneSidedAtCap bool
 }
 
 // Evicted is what one sweep of the analyzer's learned state removed, counted
@@ -625,6 +629,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		k2Pending:              make(map[string]*k2PendingReadings),
 		prefillObserve:         true,
 		prefillBusyMinutes:     true,
+		itlOneSidedAtCap:       true,
 		prefillObserver:        prefill.NewObserver(),
 		prefillBounds:          make(map[string]stashedBound),
 	}

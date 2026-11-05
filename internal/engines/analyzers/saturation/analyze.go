@@ -549,6 +549,10 @@ func (c *cycle) fitLines() {
 		// When each replica's settle began: the engine's settle tracker
 		// (itl_settle.go).
 		c.a.itlSettleAdmission(&adm, c.input.Namespace, c.input.ModelID)
+		// Readings at the cap sit above kSat, where a pinned fit through the
+		// default B prices under the truth: priced one-sided at the line's
+		// pricing k until B is learned (itl_one_sided.go).
+		c.a.itlOneSided(&adm, pricingK(c.cfg))
 		// An aggregated variant priced by shape (issue #275,
 		// itl_aggregated_shape.go): the shape now against the window's,
 		// before the window takes this cycle's readings, and the steps a

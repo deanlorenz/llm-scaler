@@ -96,9 +96,9 @@ func (a *Analyzer) SlopeHoldFor() time.Duration { return a.slopeHoldFor }
 // SwitchITLReadsSettle, SwitchITLWaitsAfterRestart,
 // SwitchITLKeepsSettleThroughMissingRow, SwitchITLReadsFinitePodMean,
 // SwitchITLRestartUnderName, SwitchITLIdleOnEvidence and
-// SwitchITLForgetReachesTheLine; a name it does not know is an error, and
-// sets nothing. Never called on a
-// production path; a test holds that.
+// SwitchITLForgetReachesTheLine and SwitchITLOneSidedAtCap; a name it does
+// not know is an error, and sets nothing. Never called on a production
+// path; a test holds that.
 func (a *Analyzer) SetSwitchesForReplay(switches map[string]bool) error {
 	rest := maps.Clone(switches)
 	fields := a.switchFields()
@@ -131,6 +131,10 @@ func (a *Analyzer) switchFields() map[string]*bool {
 		// Issue #431: the forget-learned-state annotation reaches the line
 		// (forget.go).
 		SwitchITLForgetReachesTheLine: &a.itlForgetReachesLine,
+
+		// Issue #467: the line priced one-sided at the sequence cap while B
+		// is unlearned (one_sided.go).
+		SwitchITLOneSidedAtCap: &a.itlOneSidedAtCap,
 	}
 }
 

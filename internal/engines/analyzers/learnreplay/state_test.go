@@ -172,6 +172,60 @@ func TestRefitFindsAnAboveBandLine(t *testing.T) {
 	}
 }
 
+// A pinned line the tracker priced one-sided at the sequence cap (issue
+// #467) is given back by the refit through the default B with the
+// analyzer's one-sided admission, which the state carries for the bands
+// (OneSided), not by the pinned fit at the line's own B. Without the
+// admission (the switch off) it is not refitted.
+func TestRefitFindsAOneSidedLine(t *testing.T) {
+	t0 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	all := make([]itl.Observation, 0, 36)
+	for c := range 12 {
+		for _, k := range []float64{0.96, 0.97, 0.98} {
+			all = append(all, itl.Observation{K: k, ITLSec: 0.030 + 0.01*k, Timestamp: t0.Add(time.Duration(c) * 15 * time.Second)})
+		}
+	}
+	adm := itl.Admission{OneSidedAboveKSat: true, OneSidedAt: 0.68}
+	line := itl.Refit(all, nil, itl.DefaultBaselineSec, 0, adm)
+	if !line.PinnedAtLeastITL {
+		t.Fatal("the one-sided refit priced nothing one-sided; the case tests nothing")
+	}
+	vs := VariantState{Tier: whatif.TierPinnedB, Line: line.Model, Readings: itl.KeyReadings{All: all}, oneSided: adm}
+	vs.refit()
+	if !vs.Refitted || vs.Baseline != itl.DefaultBaselineSec || vs.OneSided != adm || len(vs.LineReadings) != len(all) {
+		t.Fatalf("%+v, want it refitted one-sided through the default B on all %d readings", vs, len(all))
+	}
+	off := VariantState{Tier: whatif.TierPinnedB, Line: line.Model, Readings: itl.KeyReadings{All: all}}
+	off.refit()
+	if off.Refitted || off.OneSided.OneSidedAboveKSat {
+		t.Errorf("negative control: without the admission %+v was refitted", off)
+	}
+	// A line through the default B the rule did not raise this cycle still
+	// carries the admission: a resample may raise it, as the controller's
+	// next cycle would.
+	inBand := make([]itl.Observation, 0, 12)
+	for c := range 12 {
+		k := 0.30 + 0.01*float64(c%3)
+		inBand = append(inBand, itl.Observation{K: k, ITLSec: 0.006 + 0.05*k, Timestamp: t0.Add(time.Duration(c) * 15 * time.Second)})
+	}
+	plain := itl.Refit(inBand, nil, itl.DefaultBaselineSec, 0, adm)
+	if plain.PinnedAtLeastITL || plain.Tier != itl.TierPinnedB {
+		t.Fatalf("premise: %+v, want a pinned fit the rule did not raise", plain)
+	}
+	un := VariantState{Tier: whatif.TierPinnedB, Line: plain.Model, Readings: itl.KeyReadings{All: inBand}, oneSided: adm}
+	un.refit()
+	if !un.Refitted || un.OneSided != adm {
+		t.Errorf("%+v, want it refitted carrying the one-sided admission", un)
+	}
+	// A learned B is not priced one-sided, and its line carries none.
+	learned := itl.Refit(inBand, nil, 0.010, 0, itl.Admission{})
+	lb := VariantState{Tier: whatif.TierPinnedB, Line: learned.Model, Readings: itl.KeyReadings{All: inBand}, oneSided: adm}
+	lb.refit()
+	if !lb.Refitted || lb.OneSided.OneSidedAboveKSat {
+		t.Errorf("a learned B: %+v, want it refitted with no one-sided admission", lb)
+	}
+}
+
 // The measured shape weights each cycle with traffic by its request rate,
 // and every cycle alike when none read a rate.
 func TestShapeOfWeightsByRequestRate(t *testing.T) {

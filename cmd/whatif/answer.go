@@ -209,7 +209,7 @@ func (f *answerFlags) decodeVariants(st *learnreplay.State) ([]pricedVariant, er
 		}
 		if vs.Refitted {
 			pv.lines = whatif.BootstrapLines(vs.Readings, whatif.Refit{Tier: vs.Tier, Line: vs.Line,
-				Baseline: vs.Baseline, MinSettled: vs.MinSettled}, f.resampling())
+				Baseline: vs.Baseline, MinSettled: vs.MinSettled, OneSided: vs.OneSided}, f.resampling())
 		}
 		out = append(out, pv)
 	}

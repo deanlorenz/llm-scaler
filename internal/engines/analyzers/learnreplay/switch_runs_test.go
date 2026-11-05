@@ -144,6 +144,30 @@ var replaySwitches = map[string][]string{
 	// moves no golden: no committed recording carries a queue minimum, and
 	// the observation only logs. Its unit tests hold it (heldBy).
 	saturation.SwitchPrefillBusyMinutes: nil,
+
+	// Issue #467, on main after #471 (602054e98): the saturation line priced
+	// one-sided at the sequence cap while B is unlearned, as 4b-3 priced the
+	// throughput line (itl.Admission.OneSidedAboveKSat, at the line's pricing
+	// k). Measured alone against all off, it moves e1 and e1-tuned, the two
+	// cluster recordings whose decode replica sits at its stated cap above
+	// the band with no B learned: model-02's variant-01 line through the
+	// default 6 ms is raised to the line through the least ITL past kSat,
+	// priced at k 0.68 through the default B (A 0.0856 -> 0.1006 on e1,
+	// 0.0889 -> 0.1188 on e1-tuned; ITL at the pricing k 0.0642 -> 0.0744 s
+	// and 0.0665 -> 0.0868 s), so the derived mu falls (6.38 -> 5.51 and
+	// 6.17 -> 4.72 req/s). lines.csv and variant-capacities.csv carry the
+	// line and the rate (104 and 191 rows); results.csv the demand the floor
+	// prices from mu (77 and 142 rows). Nothing else moves.
+	saturation.SwitchITLOneSidedAtCap: {
+		"e1-tuned/lines.csv", "e1-tuned/results.csv", "e1-tuned/variant-capacities.csv",
+		"e1/lines.csv", "e1/results.csv", "e1/variant-capacities.csv",
+	},
+
+	// Issue #467: the slo line priced one-sided at the sequence cap while B
+	// is unlearned, at the fill where it meets the TPOT target. It moves no
+	// golden: no committed recording runs the slo analyzer on a replica at
+	// a stated cap. Its unit tests hold it (heldBy).
+	slo.SwitchITLOneSidedAtCap: nil,
 }
 
 // learner4b2Seams is learner PR 4b-2's switches, earlier seams now (merged
@@ -571,6 +595,14 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestStartConfirm_ARestartDropsTheRun"},
 		{"../saturation", "TestStartConfirm_ThroughAnalyze"},
 	},
+	// Issue #467's slo switch: each runs it on and off through the line's
+	// pricing (priceVariant) and asserts both (off, the line through the
+	// default B, which meets the target above the truth's fill).
+	slo.SwitchITLOneSidedAtCap: {
+		{"../slo", "TestOneSided_TheBiasTableAtTheTarget"},
+		{"../slo", "TestOneSided_TheHeldSlopeKeepsThePriceAndEndsWithTheHold"},
+		{"../slo", "TestOneSided_TheSwitchPicksTheLine"},
+	},
 }
 
 // Every switch the saturation and slo hooks accept has a row: this PR's, or
@@ -652,6 +684,14 @@ var switchBase = map[string]string{
 	"engine/variant-capacities.csv":     "bded174c24f569874299866fb541e7f4ac4cc72294adbaf8e626f1e9ea06712f",
 	"mu-paths/results.csv":              "83fca27f185344e2784706b0b6ae2e3ea8fe0ae70ecabe332862f04f4f4e951c",
 	"mu-paths/variant-capacities.csv":   "dd5b3186f6fe513520ba6e0309d88520e668d60f84003326f57bd7dee0ca0275",
+
+	// Issue #467's saturation switch, as main holds them at 602054e98.
+	"e1/lines.csv":                    "d2691a9743301a74e2fdff1b301d2e7f5349edf987604ecadc52a8bddc44fd58",
+	"e1/results.csv":                  "67b1a3af97f5951c65a8c8797a122428e85ad7aae624be4c33171b230651c2e4",
+	"e1/variant-capacities.csv":       "5fc3ce5024a4e49d5712e20741a24d09dfe82d8270d8528f129294f618db13b8",
+	"e1-tuned/lines.csv":              "eadedb4b3076f0c9ce1d998f6719004c26bf790155fe7bd5c390a85a959f507e",
+	"e1-tuned/results.csv":            "9658cb3c3e302386715bfaac80ee245581eea3ec1bf6b528906a0756d1ef93fa",
+	"e1-tuned/variant-capacities.csv": "919fd2193f111f1edc49b20a0db348a98355ecab7be221af5a35925a0d1ac3e4",
 }
 
 // The slow tests of this package run in parallel with each other (each
