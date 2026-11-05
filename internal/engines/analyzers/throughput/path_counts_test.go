@@ -8,12 +8,15 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 )
 
 // Each per-path counter counts its own path: above-band fits on a fleet
 // started above the band, full fits on a spread fleet,
 // pinned fits on a narrow one, a held slope once the narrow fleet falls
-// below the band, and the settling readings of a replica that joins. The
+// below the band, the settling readings of a replica that joins, and a
+// replica at its stated sequence cap above the band. The
 // parent's line counts nothing: the replay's required paths fail on it
 // (learnreplay's TestGoldens_TheThroughputFloorCheckFails).
 func TestPathCounts_EachPathCountsItsOwn(t *testing.T) {
@@ -50,9 +53,11 @@ func TestPathCounts_EachPathCountsItsOwn(t *testing.T) {
 		for r.now().Before(lineStart.Add(45 * time.Minute)) {
 			r.step(idle)
 		}
+		r.step([]domain.ReplicaMetrics{capLineRow("pod-a", 0.88)})
 		return a.PathCounts()
 	}
-	on := run(NewThroughputAnalyzer())
+	store := paramsStore(capacity.EngineParams{Engine: inferenceengine.EngineVLLM, MaxNumSeqs: 64, MaxNumSeqsSet: true})
+	on := run(NewThroughputAnalyzer().WithCapacityStore(store))
 	t.Logf("on the tracker: %v", on)
 	for _, p := range PathNames() {
 		assert.Positive(t, on[p], "%s never ran", p)
@@ -62,5 +67,5 @@ func TestPathCounts_EachPathCountsItsOwn(t *testing.T) {
 	for _, p := range PathNames() {
 		assert.Zero(t, parent[p], "the parent's line counted %s", p)
 	}
-	require.ElementsMatch(t, PathNames(), []string{PathITLOLS, PathITLPinned, PathITLHeld, PathITLSettling, PathITLAboveBand})
+	require.ElementsMatch(t, PathNames(), []string{PathITLOLS, PathITLPinned, PathITLHeld, PathITLSettling, PathITLAboveBand, PathITLAtCap})
 }
