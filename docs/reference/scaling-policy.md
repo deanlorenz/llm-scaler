@@ -1981,6 +1981,23 @@ One thing about turning it on **can** change scaling: a tier that lists
    `wva_model_scaling_blocked{model_name="<model>", reason="no-composite-signal"}`
    is absent and the log has no `no listed analyzer can size this model` line.
 
+**On a P/D model, say whether flow control is on.** A `slo.ttft` target also
+prices each prefill variant in shadow
+([reading the TTFT prediction](prometheus.md#reading-the-ttft-prediction)):
+nothing is sized from it, and with no decode variant to read it prices prefill
+alone. It needs to know the EPP's `flowControl` feature gate, and a scrape gap
+looks the same as a gate that is off, so declare it:
+
+```yaml
+slo:
+  ttft: {target: 3s, percentile: 90}
+  flowControl: disabled        # enabled or disabled, as the EPP is deployed
+```
+
+Any other value drops the tier entry, as a bad duration does. Unset, the state
+is read from the router's flow-control series, and an off read that way is
+flagged `FlowControlInferredOff`.
+
 **See the result**
 
 - Is it met? `wva_slo_observed_seconds` against `wva_slo_target_seconds`, per
