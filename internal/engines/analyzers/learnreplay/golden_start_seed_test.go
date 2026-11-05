@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -60,11 +61,7 @@ func TestGoldens_StartSeedRestartsRestoreBothStartKeys(t *testing.T) {
 					continue
 				}
 				restored++
-				var figures []float64
-				for _, v := range ev.Data.State.StartSeconds {
-					figures = append(figures, v)
-				}
-				slices.Sort(figures)
+				figures := slices.Sorted(maps.Values(ev.Data.State.StartSeconds))
 				require.Len(t, figures, 2, "both start keys")
 				assert.InDelta(t, 21, figures[0], 1, "the fast variant")
 				assert.InDelta(t, 241.5, figures[1], 0.5, "the slow variant")
