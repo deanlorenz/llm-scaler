@@ -1,8 +1,9 @@
 # What-if capacity: end-to-end TTFT
 
 **Status:** proposal, 2026-11-02. The model is built as a library (P3,
-2026-11-04: [as built](#as-built-p3)), UNVALIDATED and on no switch; nothing
-calls it yet. The companion to
+2026-11-04: [as built](#as-built-p3)), UNVALIDATED and on no switch; in the
+tree only the what-if CLI calls it
+([TTFT, as built](slo-capacity-planner.md#ttft-as-built)). The companion to
 [what-if capacity](slo-capacity-planner.md), which owns the questions, the
 decode model, the CLI and the PR plan. This page owns the TTFT model: what it
 is made of, the router's flow-control queue, how the parts combine into a
@@ -453,8 +454,9 @@ in all its repeats ([S1 decisions](slo-tiers.md#s1-decisions)):
 ## As built (P3)
 
 `internal/signals/whatif`, files `ttft.go`, `ttft_queue.go`, `ttft_result.go`
-and `ttft_prefill.go`. Library only: no switch, no caller in the controller,
-no CLI wiring (that follows D3), no golden moves.
+and `ttft_prefill.go`. A library: no switch, no caller in the controller, no
+golden moves. The CLI wiring came later:
+[TTFT, as built](slo-capacity-planner.md#ttft-as-built).
 
 **Built before its validation.** The plan has P3 depend on P2, the
 prefill-stress recordings kept as goldens. Those runs were blocked on cluster

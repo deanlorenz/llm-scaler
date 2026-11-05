@@ -1,0 +1,9 @@
+decode          refused: NoLine (no ITL line learned by cycle 105)
+shape           IL 10770 OL 16 (measured, cycles 83-102)
+prefill knee    8.14 r/s    N_p x V_P / (f x prompt); UNVALIDATED; V_P ASSUMED
+TTFT p90        refused: Saturated (1000 r/s at or above the prefill knee 8.137756614884937 r/s)
+ttft inputs     V_P 130000 tok/s ASSUMED; a 11.58 ms learned; f 1 (one pod); N_p 1 (recording); prompt 15975 tokens (measured, cycles 83-102); decode engine TTFT 73.9 ms at 16608 tokens, measured
+assumed         V_P 130000 tok/s (--assume-vp); prompt cv 2 (no computed-prompt histogram); flow control off (no series); Poisson arrivals
+flags: UnvalidatedTTFT; AssumedVP; AssumedPromptSpread
+estimate from no readings of the line's own of a 105-cycle recording, not a guarantee; see basis (-o json)
+TTFT is UNVALIDATED until the staircase run (M2): it reads low at light load, measured up to about 34% under the router's p90, and is not a bound; V_P ASSUMED

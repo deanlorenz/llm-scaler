@@ -60,6 +60,35 @@ cannot read; `whatifsource.IsInputError`); 1 anything else (a failed
 Prometheus query, `whatifsource.ErrQueryFailed`, or a `generate` that fails
 inside the analyzers).
 
+## Asking for TTFT
+
+The answer commands price a P/D fleet's TTFT when a TTFT flag is given:
+
+```
+whatif replicas-to-slo --recording run.jsonl --ttft-percentile 90 [--assume-vp TOKENS] [--prefill N]
+whatif slo-to-rate     --recording run.jsonl --tpot 4ms --ttft 200ms@p95 [--assume-vp TOKENS] [--prefill N]
+```
+
+`--prometheus` takes the same flags, and gives the same answer.
+
+- **Treat every TTFT figure as unvalidated.** Each prints `UNVALIDATED`. It has
+  read low at light load, up to about 34% under the router's p90, and it is not
+  a bound. Do not size from it yet.
+- **Read the `assumed` row first.** It names each input the recording did not
+  give. `V_P ASSUMED` means `--assume-vp` supplied `V_P`.
+- **Give `--assume-vp` when `NoPrefillCapacity` is refused.** The recording's
+  pods never queued long enough for `V_P` to be learned. A learned `V_P` wins
+  over the flag, and the output says the flag was not used.
+- **`NoFixedLatency` has no flag.** The window needs low-load minutes at more
+  than one prompt length, for `a` to be learned.
+- **`Saturated` means the rate is at or above the knee.** It is a refusal, exit
+  `3`, not a figure.
+- **Aggregated fleets and per-bucket answers are refused:** the planner's M1.
+
+Exit codes are `0`, `3` for a refusal, `2` for a usage error and `1` for an
+internal one. The inputs, the rows and the JSON are in
+[TTFT, as built](../proposals/slo-capacity-planner.md#ttft-as-built).
+
 ## Load on Prometheus
 
 A capture turns every query the controller asks into one range query over

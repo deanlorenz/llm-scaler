@@ -1,0 +1,3 @@
+decode          refused: NoLine (no ITL line learned by cycle 105)
+shape           IL 10770 OL 16 (measured, cycles 83-102)
+estimate from no readings of the line's own of a 105-cycle recording, not a guarantee; see basis (-o json)

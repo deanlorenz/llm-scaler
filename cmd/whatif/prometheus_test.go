@@ -615,7 +615,7 @@ func TestPrometheus_ExitCodes(t *testing.T) {
 		{"usage: a bad URL", q2(sweepWindow("ftp://prom")), 2, "not an http or https URL"},
 		{"usage: a token over http", q2(sweepWindow(srv.URL), "--bearer-token-file", recording), 2, "https Prometheus only"},
 		{"usage: a negative --batch-cap", q2(sweepWindow(srv.URL), "--batch-cap", "-1"), 2, "--batch-cap -1"},
-		{"usage: TTFT is not modelled", q2(sweepWindow(srv.URL), "--prefill", "1"), 2, "not supported"},
+		{"refused: TTFT with no prefill pod", q2(sweepWindow(srv.URL), "--prefill", "1"), 3, "NoPrefillReplicas"},
 		{"input: nothing attributed", q2([]string{"--prometheus", srv.URL, "--namespace", sweepNS, "--role-of", "decode=app=nothing",
 			"--from", from, "--to", to}), 2, "no Pod the role map attributes"},
 		{"input: a window too large", q2([]string{"--prometheus", srv.URL, "--namespace", sweepNS, "--role-of", "decode=app=m-dec",
