@@ -66,6 +66,14 @@ type State struct {
 	// input to whatif.TPOTRatioFromWindows. Empty in a recording made before
 	// the recorder carried it.
 	TPOTWindows []whatif.TPOTWindow
+	// Prefill is each prefill variant at the cycle, by name, as a TTFT
+	// question reads it (state_ttft.go).
+	Prefill []PrefillState
+	// FlowControlSeries says the router's flow-control series exist for the
+	// model at the cycle: the scheduler queue, a pool joined to the model, or
+	// its wait histogram. False is no series, which a scrape gap reads as
+	// too.
+	FlowControlSeries bool
 }
 
 // VariantState is one variant's learned state at the cycle: everything the
@@ -120,6 +128,9 @@ type VariantState struct {
 	// ReadingsFrom and ReadingsTo are the first and the last cycle of the
 	// LineReadings, 0 with none.
 	ReadingsFrom, ReadingsTo int
+	// DecodeTTFT is what the variant's rows say of a TTFT's decode side; the
+	// zero value on a variant that is not decode (state_ttft.go).
+	DecodeTTFT DecodeTTFTState
 }
 
 // MeasuredShape is the shape a variant served over the cycles it had
@@ -175,6 +186,7 @@ func StateAt(ctx context.Context, recording []byte, opts Options, q StateQuery) 
 		firstAt  time.Time
 		windows  []whatif.TPOTWindow
 		shapes   = map[string][]shapeSample{}
+		ttft     = newTTFTSamples()
 		cycleAt  = map[time.Time]int{}
 	)
 	opts.stop = func(r *replayer, ev learnrec.RawEvent) bool {
@@ -203,8 +215,10 @@ func StateAt(ctx context.Context, recording []byte, opts Options, q StateQuery) 
 			windows = append(windows, w)
 		}
 		noteShapes(shapes, in.ReplicaMetrics, n)
+		ttft.note(in, n)
 		if n == cycle {
 			st = r.stateOf(in, n, ev.Now, shapes)
+			r.fillTTFT(st, in, ttft)
 			return true
 		}
 		return false
