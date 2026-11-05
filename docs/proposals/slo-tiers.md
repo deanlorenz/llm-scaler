@@ -544,6 +544,23 @@ Two PRs, under [the learner rules](analyzer-learner.md):
 | S1 (2b) | Price each prefill variant of a P/D model against the TTFT target in shadow: the TTFT predicted at the current rate, and the rate per replica at which the bounded TTFT meets it. Aggregated variants wait for the what-if M1. Published as `wva_slo_*` series and in the cycle log; no replica count changes. Switch `slo-ttft-price`. Inputs and outputs: [S1 decisions](#s1-decisions) | `slo-published.csv` moves with the switch on | the what-if P3 (PR #471); a golden with router TTFT and the [recorder fields](analyzer-learner.md#29-recorder-fields-for-ttft-and-capture), which the prefill-stress recording provides |
 | S2 (2c) | Enforce, once S1's shadow predictions pass their gate | moves | S1; Q1 (the measured `V_P` and prompt spread); M2, the what-if staircase run itself with its bursty bucket, not the per-bucket PR that precedes it in that plan |
 
+**What S1 calls.** P3 is built, and is UNVALIDATED until P2
+([as built](slo-capacity-planner-ttft.md#as-built-p3)). What S1 passes and
+calls is set by [the S1 decisions](#s1-decisions); what P3 itself requires of
+any caller:
+
+- **Fleet size.** Price at the variant's actual `N_p`, with `f` held at that
+  count. The rate per replica is `RateForTTFT` divided by `N_p`.
+- **Imbalance.** P3 refuses `NoImbalance` for more than one pod with no
+  `f`, and never assumes `f` = 1 there. The `f` S1 passes, learned or
+  assumed and flagged `AssumedImbalance`, is
+  [decision 1](#1-the-imbalance-f).
+- **Decode role.** With flow control on, the decode role must be passed:
+  without it the decode onset cannot be placed, and P3 answers flagged
+  `DecodeOnsetUnchecked`, possibly above that onset (S1 does not price
+  then: `no-decode-side`). With flow control off and no decode role, the
+  answer is flagged `DecodeSideOmitted`.
+
 `ols-sweep-slo` gives S1 router TTFT, `AvgTTFT`, `AvgServiceTime` and the
 arrival rate: enough to fit `a` and check a low-load mean, not to fit `V_P` (no
 queue), the router queue (flow control off) or a tail (no histograms).
