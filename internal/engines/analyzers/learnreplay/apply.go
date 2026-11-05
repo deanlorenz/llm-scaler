@@ -155,6 +155,9 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 		if r.slo == nil {
 			return errNoSLO
 		}
+		// The engine's cycle starts here, and the settle tracker counts it
+		// (settleReplay.beginCycle).
+		r.settle.beginCycle(ev.Now)
 		r.slo.BeginCycle()
 	case slo.KindNoteVariantsPresent:
 		if r.slo == nil {
@@ -212,6 +215,7 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 		if err := ev.DecodeData(&d); err != nil {
 			return err
 		}
+		r.settleUncounted(ev)
 		r.settle.observe(d, ev.Now)
 		r.rec.Record(settle.KindObserve, ev.Now, d)
 	case settle.KindHold:
@@ -219,6 +223,7 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 		if err := ev.DecodeData(&d); err != nil {
 			return err
 		}
+		r.settleUncounted(ev)
 		r.settle.hold(d, ev.Now)
 		r.rec.Record(settle.KindHold, ev.Now, d)
 
@@ -317,10 +322,28 @@ func (r *replayer) checkStore(ev learnrec.RawEvent, input domain.AnalyzerInput, 
 	return nil
 }
 
-// mismatch reports a divergence at ev. Every kind fails the replay except an
-// evict count outside Fidelity, which is reported only (2.4).
+// settleNoCycles is the Mismatch.What of a recording whose settle events
+// the replay cannot retain by, having no slo analyzer to count cycles with
+// (settle.go): reported once, at the first such event, and never fatal,
+// since nothing replayed has diverged yet; a model parked whole would.
+const settleNoCycles = "settle-no-cycles"
+
+// settleUncounted reports, once, a settle event in a replay with no slo
+// analyzer (settleNoCycles).
+func (r *replayer) settleUncounted(ev learnrec.RawEvent) {
+	if r.slo != nil || r.settle.uncounted {
+		return
+	}
+	r.settle.uncounted = true
+	r.mismatch(ev, settleNoCycles, "the recording has settle events and no slo analyzer, whose cycles the replay counts: it forgets no parked model's settle record, where the engine and Generate do")
+}
+
+// mismatch reports a divergence at ev. Every kind fails the replay except
+// two, which are reported only: an evict count outside Fidelity (2.4), and
+// settleNoCycles in any mode, which marks a replay that cannot retain, not
+// a divergence.
 func (r *replayer) mismatch(ev learnrec.RawEvent, what, detail string) {
-	fatal := what != "evict" || r.opts.Mode == Fidelity
+	fatal := what != settleNoCycles && (what != "evict" || r.opts.Mode == Fidelity)
 	r.rep.Mismatches = append(r.rep.Mismatches, Mismatch{Seq: ev.Seq, Kind: ev.Kind, What: what, Detail: detail, Fatal: fatal})
 }
 

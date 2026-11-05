@@ -278,9 +278,15 @@ func TestGenerate_RefusesABrokenCapture(t *testing.T) {
 // parked.
 func parkCapture(t *testing.T, steps, allParked int) []byte {
 	t.Helper()
+	return parkCaptureFrom(t, defaultStart(), steps, allParked)
+}
+
+// parkCaptureFrom is parkCapture under start.
+func parkCaptureFrom(t *testing.T, start learnrec.Start, steps, allParked int) []byte {
+	t.Helper()
 	var buf bytes.Buffer
 	rec := learnrec.New(&buf, 0)
-	rec.Record(learnrec.KindStart, genAt, defaultStart())
+	rec.Record(learnrec.KindStart, genAt, start)
 	params := capacity.EngineParams{Engine: inferenceengine.EngineVLLM, MaxNumSeqs: 64, BlockSize: 16, TensorParallelSize: 1}
 	rec.Record(KindCaptureWindow, genAt, CaptureWindow{Namespace: "ns", From: genAt, Step: 15 * time.Second,
 		Roles: "role-of", Flags: []string{"rollouts not seen: every scale target filed as not rolling out"},
