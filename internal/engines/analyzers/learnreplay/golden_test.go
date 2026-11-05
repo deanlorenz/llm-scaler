@@ -44,13 +44,14 @@ func TestGoldens_EveryCommittedGoldenReproduces(t *testing.T) {
 			assert.Positive(t, c.Rows[o], "%s compared no row", o)
 		}
 	}
-	// The cluster goldens ran under a policy that lists only saturation: slo
+	// The cluster goldens ran under a policy that does not list slo: slo
 	// was built and never analyzed in each, and no other fixture has an
 	// analyzer it never analyzed.
 	assert.Equal(t, map[string][]string{"e1": {analyzerSLO}, "e1-tuned": {analyzerSLO},
 		olsFixture: {analyzerSLO}, "pd-restart": {analyzerSLO},
 		ttftThreePodsFixture: {analyzerSLO}, ttftSaturatedFixture: {analyzerSLO},
-		ttftOpenLongFixture: {analyzerSLO}, ttftOpenShortFixture: {analyzerSLO}}, c.NotRun)
+		ttftOpenLongFixture: {analyzerSLO}, ttftOpenShortFixture: {analyzerSLO},
+		throughputSweepFixture: {analyzerSLO}, throughputSweepRestartFixture: {analyzerSLO}}, c.NotRun)
 	t.Logf("%d fixtures, rows compared per file: %v; built and never analyzed: %v", c.Fixtures, c.Rows, c.NotRun)
 }
 

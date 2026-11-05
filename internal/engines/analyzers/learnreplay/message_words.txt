@@ -2544,6 +2544,7 @@ throughput-demand-floor
 throughput-demand-floor-total
 throughput-itl-above-band
 throughput-itl-admits-at-sequence-cap
+throughput-itl-at-cap
 throughput-itl-held
 throughput-itl-idle-needs-evidence
 throughput-itl-keeps-the-settle-through-a-missing-row

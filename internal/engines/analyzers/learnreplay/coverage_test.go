@@ -420,7 +420,8 @@ func ttftInput() domain.AnalyzerInput {
 
 // r1Goldens is the goldens recorded with the R1 fields: the TTFT track's
 // prefill-stress runs (P2).
-var r1Goldens = []string{ttftThreePodsFixture, ttftSaturatedFixture, ttftOpenLongFixture, ttftOpenShortFixture}
+var r1Goldens = []string{ttftThreePodsFixture, ttftSaturatedFixture, ttftOpenLongFixture, ttftOpenShortFixture,
+	throughputSweepFixture, throughputSweepRestartFixture}
 
 // ttftFieldNames are the R1 field names as a recording writes them.
 var ttftFieldNames = []string{"QueueLengthKnown", "AvgServiceTimeKnown", "AvgTTFTKnown", "PromptTokensBuckets",
