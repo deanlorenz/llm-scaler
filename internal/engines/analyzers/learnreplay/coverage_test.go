@@ -597,6 +597,7 @@ func TestCoverage_PreR1GoldensRecordTheSameBytes(t *testing.T) {
 	require.NotEmpty(t, m.Goldens)
 	inputs, r1Inputs := 0, 0
 	dropped := map[string]bool{}
+	r1Held := map[string]bool{}
 	for _, g := range m.Goldens {
 		gz, err := os.ReadFile(filepath.Join(goldenDir, filepath.FromSlash(g.Recording)))
 		require.NoError(t, err, g.Name)
@@ -647,6 +648,12 @@ func TestCoverage_PreR1GoldensRecordTheSameBytes(t *testing.T) {
 				// Recorded with R1: its fields are present, and the re-encoding
 				// above must still write them back byte for byte.
 				r1Inputs++
+				for _, name := range ttftFieldNames {
+					if strings.Contains(string(input), `"`+name+`":`) {
+						r1Held[g.Name] = true
+						break
+					}
+				}
 				continue
 			}
 			for _, name := range ttftFieldNames {
@@ -659,6 +666,11 @@ func TestCoverage_PreR1GoldensRecordTheSameBytes(t *testing.T) {
 	require.Greater(t, inputs, 100, "the walk read %d inputs", inputs)
 	require.Greater(t, inputs-r1Inputs, 100, "the walk read %d inputs recorded before R1", inputs-r1Inputs)
 	require.Positive(t, r1Inputs, "no input of the goldens recorded with R1")
+	// Each listed golden must hold an R1 field, so the list exempts only
+	// goldens that need it.
+	for _, name := range r1Goldens {
+		require.True(t, r1Held[name], "%s is listed in r1Goldens and holds no R1 field", name)
+	}
 	for _, name := range ttftFieldNames {
 		require.False(t, dropped[name], "R1 field %s was written as a zero", name)
 	}

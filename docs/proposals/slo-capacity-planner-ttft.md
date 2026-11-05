@@ -642,7 +642,7 @@ publishes in shadow only.
 P2 commits the four prefill-stress runs as learner goldens and prices P3 on
 them. **P3 does not pass.** At the prompt spread the runs sent, it
 under-predicts the router's p90 and p95 TTFT at 11 of 14 light-load points,
-by 23% to 51%, and by about 90% at the one saturated level it prices. These are findings, not
+by 19% to 49%, and by about 90% at the one saturated level it prices. These are findings, not
 tuned away; P3 is unchanged.
 
 ### The goldens
@@ -738,8 +738,8 @@ true quantile lies.
 
 1. **P3 under-predicts at light load, beyond the mark.** At the spread the
    runs sent, 11 of the 14 light-load points are more than 10% under, 4 of
-   them below even the router bucket's lower bound. The ratio is 0.49 to
-   0.77. **The cause is a term P3 leaves out.** The router's TTFT is close to
+   them below even the router bucket's lower bound. The ratio is 0.512 to
+   0.805. **The cause is a term P3 leaves out.** The router's TTFT is close to
    the two engines' TTFTs added: the prefill engine's (`a` + `I/V_P` + its
    own overhead) and then the decode engine's (the KV pull and the first
    step: 12 ms at 1k, 127 ms at 30k, 159 ms at 37k).
@@ -790,7 +790,7 @@ true quantile lies.
 - **Price the decode engine's part on a P/D fleet without a decode line.**
   The measured decode `AvgTTFT` (or `AvgKVTransferTime` plus a first step)
   is the missing term. Until then, `DecodeSideOmitted` under-promises by
-  23% to 51% here, and S2's no-act list already holds it out. S1 should
+  19% to 49% here, and S2's no-act list already holds it out. S1 should
   publish it flagged as it does.
 - **`a` under load.** The engine's own overhead grows from milliseconds to
   about 250 ms under a queue on these pods; P3's constant `a` misses it.

@@ -19,8 +19,11 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/prefill"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
@@ -36,6 +39,11 @@ import (
 // misses the mark is a finding, frozen in the table below with its verdict,
 // and the tests fail when a figure moves from it, so a change to P1, P3 or
 // the replay that moves one says so.
+//
+// GREEN IS NOT A PASS. These tests pass while P3 under-predicts exactly as
+// recorded: most frozen verdicts are UNDER. A fix to P3 makes them fail, and
+// must rewrite ttftFrozen and the verdict counts in
+// TestTTFTValidation_AgainstTheRouter, and say in its PR which rows moved.
 
 // The four prefill-stress goldens.
 const (
@@ -50,7 +58,9 @@ const (
 // intercept 7.95 ms plus run 4's least overhead 2.91 ms. No golden replays
 // the two runs pooled, and P1 refuses a on run 3 alone (NoShortPrompts: its
 // shortest prompts are 8k) and on run 2 (TooFewLowLoadMinutes), so those
-// runs' levels are priced at this a.
+// runs' levels are priced at this a. TestTTFTValidation_PooledAIsP1s holds
+// it to P1's own fit of the two goldens' rows pooled, so it cannot drift
+// from what P1 computes.
 const pr475A = 0.00795 + 0.00291
 
 // knownPromptCV is the spread the load generator sent: n words drawn
@@ -330,7 +340,9 @@ type ttftCase struct {
 	verdict        string
 }
 
-// ttftFrozen is the frozen table: P3 (main 602054e98) against the router at
+// ttftFrozen is the frozen table. Green is not a pass: the rows record P3
+// under-predicting, and a fix to P3 must rewrite them and the counts below.
+// It is P3 (main 602054e98) against the router at
 // p90 and p95, at the spread the load generator sent (cv 0.058) and at S1's
 // assumed 2. V_P is run 2's busy minutes on main, 134,775 tok/s, for every
 // level; a is P1's own on run 4 (the curve's, 11.58 ms) and the runs 3 and 4
@@ -376,6 +388,72 @@ var ttftFrozen = []ttftCase{
 	{"ttft-saturated", "37k-x64", knownPromptCV, 0.95, 29.46470588235294, 3.2221987735019786, "", "UNDER, beyond the bucket"},
 	{"ttft-saturated", "37k-x64", s1PromptCV, 0.9, 28.929411764705883, 11.389771258409523, "", "UNDER, beyond the bucket"},
 	{"ttft-saturated", "37k-x64", s1PromptCV, 0.95, 29.46470588235294, 14.899197259718216, "", "UNDER, beyond the bucket"},
+}
+
+// TestTTFTValidation_PooledAIsP1s holds pr475A to P1: the prefill rows of
+// runs 3 and 4, from their goldens, fed to one observer through one settle
+// tracker, run 4 moved to start five minutes after run 3 ends so both stay
+// inside Retention (TestQuadratic_Runs3And4PooledGiveA's replayRuns does the
+// same from a CSV of these rows). P1's a there is the curve's intercept plus
+// the least overhead.
+func TestTTFTValidation_PooledAIsP1s(t *testing.T) {
+	tr := settle.NewTracker()
+	tr.SetInterval(15 * time.Second)
+	o := prefill.NewObserver()
+	var est prefill.Estimate
+	var shift time.Duration
+	var last time.Time
+	for _, f := range []string{ttftOpenLongFixture, ttftOpenShortFixture} {
+		gz, err := os.ReadFile(filepath.Join(goldenDir, f, RecordingName))
+		require.NoError(t, err)
+		raw, err := gunzip(gz)
+		require.NoError(t, err)
+		rec, err := learnrec.Read(raw)
+		require.NoError(t, err)
+		first := true
+		for _, ev := range rec.Events {
+			if ev.Kind != saturation.KindAnalyze {
+				continue
+			}
+			var d saturation.AnalyzeEvent
+			require.NoError(t, ev.DecodeData(&d))
+			in, err := decodeInput(d.Input)
+			require.NoError(t, err)
+			roles := map[string]string{}
+			for _, vs := range in.VariantStates {
+				roles[vs.VariantName] = vs.Role
+			}
+			var rows []domain.ReplicaMetrics
+			for _, rm := range in.ReplicaMetrics {
+				if domain.CanonicalRole(roles[rm.VariantName]) == domain.RolePrefill {
+					rm.PodName, rm.VariantName = "prefill-"+f, "p"
+					rows = append(rows, rm)
+				}
+			}
+			if len(rows) == 0 {
+				continue
+			}
+			if first && !last.IsZero() {
+				shift = last.Add(5 * time.Minute).Sub(ev.Now)
+			}
+			first = false
+			now := ev.Now.Add(shift)
+			for i := range rows {
+				rows[i].ReadySince = rows[i].ReadySince.Add(shift)
+			}
+			tr.Observe("ns/m", settlerow.Of(rows, map[string]string{"p": domain.RolePrefill}), now)
+			est = o.Observe(prefill.Cycle{
+				Key: "k", Engine: inferenceengine.EngineVLLM, Disaggregated: true, Rows: rows,
+				Settle: &prefill.Settle{View: tr, Model: "ns/m"}, Now: now,
+			})
+			last = now
+		}
+	}
+	require.Empty(t, est.ARefused)
+	require.Equal(t, prefill.AModelQuadratic, est.AModel)
+	t.Logf("runs 3+4 pooled: a %.5f = intercept %.5f + overhead %.5f, %d minutes in %d clusters",
+		est.A, est.AIntercept, est.AOverhead, est.ASamples, est.AClusters)
+	assert.InDelta(t, pr475A, est.A, 0.00001, "pr475A against P1's pooled fit")
 }
 
 // TestTTFTValidation_P1OnTheGoldens holds what main's P1 learns from each

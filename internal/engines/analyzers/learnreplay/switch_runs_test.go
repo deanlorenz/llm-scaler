@@ -302,7 +302,7 @@ var earlierSeams = withSeams(learner4b2Seams, withSeams(learner4b1Seams, withSea
 	// #276's spread of output lengths in the KV per request. It moved no
 	// golden until P2's ttft-three-pods, the first whose recorded output
 	// histogram spreads (250 tokens out, three decode pods): there the
-	// decode demand moves by a few parts in a million on about 80 cycles.
+	// decode demand moves by a few parts in 100 million on about 80 cycles.
 	saturation.SwitchKVPerRequestOutputDispersion: {
 		"ttft-three-pods/composite-results.csv", "ttft-three-pods/composite-roles.csv",
 		"ttft-three-pods/results.csv", "ttft-three-pods/variant-capacities.csv",
