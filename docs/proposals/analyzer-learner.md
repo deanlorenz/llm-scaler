@@ -1027,8 +1027,10 @@ engine observes or holds every model it reconciles once a cycle, and every
 cycle opens with `slo.BeginCycle`. A model with no observation or hold for
 a whole cycle was parked whole, and its record is forgotten before its next
 observation or hold applies, which is before anything reads it. Two
-BeginCycles under an interval apart are one cycle (the catch-up after
-failed cycles). A recording with no observation events, or no slo analyzer,
+BeginCycles under half an interval apart are one cycle (the catch-up after
+failed cycles, which comes on one clock reading). Not a whole interval:
+real cycles come an interval apart, and a wall clock stepped back a few
+milliseconds would merge two of them. A recording with no observation events, or no slo analyzer,
 forgets nothing. It moves no golden: no committed recording parks a model
 whole (the acceptance and engine runs' model-02 leaves for good, and is
 never observed again), so it has no switch.

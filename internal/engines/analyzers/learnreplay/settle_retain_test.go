@@ -1,6 +1,7 @@
 package learnreplay
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 )
 
@@ -178,13 +180,13 @@ func TestSettleReplay_RetainsWhatTheEngineKept(t *testing.T) {
 // says so, once, and does not fail for it. One with an slo analyzer does
 // not.
 func TestReplay_SettleEventsWithoutSLOAreReported(t *testing.T) {
-	count := func(rep *Report) int {
+	count := func(rep *Report, first string) int {
 		n := 0
 		for _, m := range rep.Mismatches {
 			if m.What == settleNoCycles {
 				n++
 				assert.False(t, m.Fatal)
-				assert.Equal(t, settle.KindObserve, m.Kind)
+				assert.Equal(t, first, m.Kind, "reported at the first settle event")
 			}
 		}
 		return n
@@ -193,12 +195,26 @@ func TestReplay_SettleEventsWithoutSLOAreReported(t *testing.T) {
 	require.NoError(t, err)
 	rep, err := Replay(context.Background(), gen.Recording, Options{Mode: Fidelity})
 	require.NoError(t, err)
-	assert.Equal(t, 1, count(rep))
+	assert.Equal(t, 1, count(rep, settle.KindObserve))
+	assert.Empty(t, rep.Failed())
+
+	// The first settle event a hold: reported there, once, as at an
+	// observation.
+	var buf bytes.Buffer
+	rec := learnrec.New(&buf, 0)
+	rec.Record(learnrec.KindStart, genAt, defaultStart())
+	ev := settle.ObserveEvent{Namespace: "ns", ModelID: "m", Interval: 15 * time.Second}
+	rec.Record(settle.KindHold, genAt, ev)
+	rec.Record(settle.KindObserve, genAt.Add(15*time.Second), ev)
+	require.NoError(t, rec.Err())
+	rep, err = Replay(context.Background(), buf.Bytes(), Options{Mode: Fidelity})
+	require.NoError(t, err)
+	assert.Equal(t, 1, count(rep, settle.KindHold))
 	assert.Empty(t, rep.Failed())
 
 	gen, err = Replay(context.Background(), parkCaptureFrom(t, fullStart(), 3, -1), Options{Mode: Generate})
 	require.NoError(t, err)
 	rep, err = Replay(context.Background(), gen.Recording, Options{Mode: Fidelity})
 	require.NoError(t, err)
-	assert.Zero(t, count(rep))
+	assert.Zero(t, count(rep, settle.KindObserve))
 }

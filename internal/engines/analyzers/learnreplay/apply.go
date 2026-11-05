@@ -335,14 +335,15 @@ func (r *replayer) settleUncounted(ev learnrec.RawEvent) {
 		return
 	}
 	r.settle.uncounted = true
-	r.rep.Mismatches = append(r.rep.Mismatches, Mismatch{Seq: ev.Seq, Kind: ev.Kind, What: settleNoCycles,
-		Detail: "the recording has settle events and no slo analyzer, whose cycles the replay counts: it forgets no parked model's settle record, where the engine and Generate do"})
+	r.mismatch(ev, settleNoCycles, "the recording has settle events and no slo analyzer, whose cycles the replay counts: it forgets no parked model's settle record, where the engine and Generate do")
 }
 
-// mismatch reports a divergence at ev. Every kind fails the replay except an
-// evict count outside Fidelity, which is reported only (2.4).
+// mismatch reports a divergence at ev. Every kind fails the replay except
+// two, which are reported only: an evict count outside Fidelity (2.4), and
+// settleNoCycles in any mode, which marks a replay that cannot retain, not
+// a divergence.
 func (r *replayer) mismatch(ev learnrec.RawEvent, what, detail string) {
-	fatal := what != "evict" || r.opts.Mode == Fidelity
+	fatal := what != settleNoCycles && (what != "evict" || r.opts.Mode == Fidelity)
 	r.rep.Mismatches = append(r.rep.Mismatches, Mismatch{Seq: ev.Seq, Kind: ev.Kind, What: what, Detail: detail, Fatal: fatal})
 }
 
