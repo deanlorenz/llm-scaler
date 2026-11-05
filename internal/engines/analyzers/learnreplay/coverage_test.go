@@ -416,6 +416,10 @@ func ttftInput() domain.AnalyzerInput {
 	}
 }
 
+// r1Goldens is the goldens recorded with the R1 fields: the TTFT track's
+// prefill-stress runs (P2).
+var r1Goldens = []string{ttftThreePodsFixture, ttftSaturatedFixture, ttftOpenLongFixture, ttftOpenShortFixture}
+
 // ttftFieldNames are the R1 field names as a recording writes them.
 var ttftFieldNames = []string{"QueueLengthKnown", "AvgServiceTimeKnown", "AvgTTFTKnown", "PromptTokensBuckets",
 	"OutputTokensBuckets", "TTFTBuckets", "AvgQueueTime", "AvgQueueTimeKnown", "QueueTimeBuckets", "AvgPrefillTime",
@@ -585,12 +589,13 @@ func requireSameUpToOlderZeros(t *testing.T, recorded, again []byte, dropped map
 // R1 field. That is what a replay of it records, so the new fields stay
 // absent from it and move no output. Byte for byte, except a golden recorded
 // by a build older than a field added before R1, which a re-encoding writes
-// as its zero (olderZeros); those keys are logged.
+// as its zero (olderZeros); those keys are logged. The goldens recorded with
+// R1 (r1Goldens) are written again byte for byte too, with their R1 fields.
 func TestCoverage_PreR1GoldensRecordTheSameBytes(t *testing.T) {
 	m, err := ReadManifest(goldenDir)
 	require.NoError(t, err)
 	require.NotEmpty(t, m.Goldens)
-	inputs := 0
+	inputs, r1Inputs := 0, 0
 	dropped := map[string]bool{}
 	for _, g := range m.Goldens {
 		gz, err := os.ReadFile(filepath.Join(goldenDir, filepath.FromSlash(g.Recording)))
@@ -637,15 +642,23 @@ func TestCoverage_PreR1GoldensRecordTheSameBytes(t *testing.T) {
 			again, err := learnrec.Marshal(learnrec.InputOf(in))
 			require.NoError(t, err)
 			requireSameUpToOlderZeros(t, input, again, dropped, "%s seq %d: the input", g.Name, ev.Seq)
+			inputs++
+			if slices.Contains(r1Goldens, g.Name) {
+				// Recorded with R1: its fields are present, and the re-encoding
+				// above must still write them back byte for byte.
+				r1Inputs++
+				continue
+			}
 			for _, name := range ttftFieldNames {
 				require.NotContains(t, string(input), `"`+name+`":`, "%s seq %d: a golden recorded before R1 holds %s", g.Name, ev.Seq, name)
 				require.NotContains(t, string(again), `"`+name+`":`, "%s seq %d: a zero %s was written", g.Name, ev.Seq, name)
 			}
-			inputs++
 		}
 	}
 	// An empty walk passes every check above.
 	require.Greater(t, inputs, 100, "the walk read %d inputs", inputs)
+	require.Greater(t, inputs-r1Inputs, 100, "the walk read %d inputs recorded before R1", inputs-r1Inputs)
+	require.Positive(t, r1Inputs, "no input of the goldens recorded with R1")
 	for _, name := range ttftFieldNames {
 		require.False(t, dropped[name], "R1 field %s was written as a zero", name)
 	}

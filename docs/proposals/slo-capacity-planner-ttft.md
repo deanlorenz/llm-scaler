@@ -641,8 +641,8 @@ publishes in shadow only.
 
 P2 commits the four prefill-stress runs as learner goldens and prices P3 on
 them. **P3 does not pass.** At the prompt spread the runs sent, it
-under-predicts the router's p90 and p95 TTFT at 12 of 14 light-load points,
-by 25% to 65%, and by about 90% at the one saturated level it prices. These are findings, not
+under-predicts the router's p90 and p95 TTFT at 11 of 14 light-load points,
+by 23% to 51%, and by about 90% at the one saturated level it prices. These are findings, not
 tuned away; P3 is unchanged.
 
 ### The goldens
@@ -670,16 +670,22 @@ None needed trimming: the largest is a quarter of the 4 MiB limit.
 | Run | `V_P` | `a` | `f` |
 | --- | --- | --- | --- |
 | 2 | **134,775 tok/s**, busy minutes, 28 | refused, `TooFewLowLoadMinutes` | `OnePod` |
-| 3 | refused, `NoPrefillCapacity` | refused, `NonPositiveIntercept` | `OnePod` |
-| 4 | refused, `NoPrefillCapacity` | **3.74 ms** | `OnePod` |
+| 3 | refused, `NoPrefillCapacity` | refused, `NoShortPrompts` (shortest prompts 8k) | `OnePod` |
+| 4 | refused, `NoPrefillCapacity` | **11.58 ms**, the curve | `OnePod` |
 | 1 | 115,621 tok/s, peak under a queue (lower bound) | refused, `NoPromptSpread` | **1.00**, 45 minutes |
 
 No run alone gives P3 a fleet it can price: each lacks `V_P` or `a`. The
 validation therefore takes **`V_P` from run 2** for every level, and **`a`
-from run 4** (main's 3.74 ms) for run 4's levels. Main refuses `a` on runs 3
-and 2, so their levels take **`a` = 10.86 ms from PR #475** (the curved
-fit's 7.95 ms intercept over runs 3 and 4 pooled, plus run 4's least
-overhead 2.91 ms). That figure is an input taken from #475, not from main.
+from run 4** (P1's curve, 11.58 ms) for run 4's levels. P1 refuses `a` on
+runs 3 and 2, so their levels take **`a` = 10.86 ms**, the curve over runs 3
+and 4 pooled (its 7.95 ms intercept plus run 4's least overhead 2.91 ms,
+`TestQuadratic_Runs3And4PooledGiveA`): no golden replays the two runs
+together, so the figure is taken from that test.
+
+Before #475 (the curved `a`) merged, run 4's `a` was the line's 3.74 ms and
+run 3's refusal `NonPositiveIntercept`. The rows priced at run 4's `a` moved
+with it, by its 7.84 ms: 12 of 14 light-load points were under, 7 beyond the
+bucket; now 11, 4 beyond the bucket. No other row moved.
 
 ### How it is priced
 
@@ -709,15 +715,15 @@ than the router's window, so only its last three levels are compared.
 
 ### The result table
 
-Predicted against the router's TTFT, in seconds. `a` is main's on run 4 and
-#475's on runs 3 and 2.
+Predicted against the router's TTFT, in seconds. `a` is run 4's own on run 4
+and the pooled curve's on runs 3 and 2.
 
 | Run | Level | Rate r/s | Router p90 | P3 p90, cv 0.058 | | P3 p90, cv 2 | | Router p95 | P3 p95, cv 0.058 | | P3 p95, cv 2 | |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 4 | 1k | 7.74 | 0.047 | 0.016 | **UNDER**\* | 0.043 | pass | 0.049 | 0.020 | **UNDER**\* | 0.066 | over\* |
-| 4 | 2k | 5.35 | 0.048 | 0.028 | **UNDER** | 0.083 | over\* | 0.049 | 0.037 | **UNDER** | 0.127 | over\* |
-| 4 | 4k | 3.09 | 0.092 | 0.051 | **UNDER** | 0.164 | over\* | 0.096 | 0.070 | **UNDER** | 0.251 | over\* |
-| 4 | 16k | 0.48 | 0.316 | 0.176 | **UNDER**\* | 0.563 | over\* | 0.358 | 0.240 | **UNDER** | 0.884 | over\* |
+| 4 | 1k | 7.74 | 0.047 | 0.024 | **UNDER** | 0.051 | pass | 0.049 | 0.028 | **UNDER** | 0.074 | over\* |
+| 4 | 2k | 5.35 | 0.048 | 0.036 | **UNDER** | 0.091 | over\* | 0.049 | 0.045 | pass | 0.135 | over\* |
+| 4 | 4k | 3.09 | 0.092 | 0.059 | **UNDER** | 0.172 | over\* | 0.096 | 0.077 | **UNDER** | 0.259 | over\* |
+| 4 | 16k | 0.48 | 0.316 | 0.184 | **UNDER** | 0.571 | over\* | 0.358 | 0.248 | **UNDER** | 0.892 | over\* |
 | 3 | 8k | 1.75 | 0.098 | 0.126 | over\* | 0.332 | over\* | 0.110 | 0.142 | over | 0.504 | over\* |
 | 3 | 30k | 0.20 | 0.570 | 0.330 | **UNDER**\* | 1.017 | over\* | 0.585 | 0.347 | **UNDER**\* | 1.603 | over\* |
 | 3 | 37k | 0.19 | 0.795 | 0.413 | **UNDER**\* | 1.300 | over\* | 0.915 | 0.547 | **UNDER**\* | 2.043 | over\* |
@@ -731,9 +737,9 @@ true quantile lies.
 ### Findings
 
 1. **P3 under-predicts at light load, beyond the mark.** At the spread the
-   runs sent, 12 of the 14 light-load points are more than 10% under, 7 of
-   them below even the router bucket's lower bound. The ratio is 0.35 to
-   0.75. **The cause is a term P3 leaves out.** The router's TTFT is close to
+   runs sent, 11 of the 14 light-load points are more than 10% under, 4 of
+   them below even the router bucket's lower bound. The ratio is 0.49 to
+   0.77. **The cause is a term P3 leaves out.** The router's TTFT is close to
    the two engines' TTFTs added: the prefill engine's (`a` + `I/V_P` + its
    own overhead) and then the decode engine's (the KV pull and the first
    step: 12 ms at 1k, 127 ms at 30k, 159 ms at 37k).
@@ -784,7 +790,7 @@ true quantile lies.
 - **Price the decode engine's part on a P/D fleet without a decode line.**
   The measured decode `AvgTTFT` (or `AvgKVTransferTime` plus a first step)
   is the missing term. Until then, `DecodeSideOmitted` under-promises by
-  25% to 65% here, and S2's no-act list already holds it out. S1 should
+  23% to 51% here, and S2's no-act list already holds it out. S1 should
   publish it flagged as it does.
 - **`a` under load.** The engine's own overhead grows from milliseconds to
   about 250 ms under a queue on these pods; P3's constant `a` misses it.
@@ -794,8 +800,8 @@ true quantile lies.
 - **The decode side and the union bound** need a run that fits a decode ITL
   line (decode KV above 0.1).
 - **PR #477** (per-pod-count `f`) changes nothing here: every compared level
-  is one pod. **PR #475** changes `a` on runs 3 and 2 from refused to the
-  10.86 ms used above.
+  is one pod. P1 still refuses `a` on runs 3 and 2 alone, so their levels
+  rest on the pooled figure.
 
 ## Open questions
 
