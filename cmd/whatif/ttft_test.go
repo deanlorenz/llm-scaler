@@ -371,6 +371,10 @@ func TestTTFT_AggregatedIsRefused(t *testing.T) {
 	assert.Equal(t, whatif.NoPrefillReplicas, fleets[0].refused.Reason)
 	assert.Contains(t, fleets[0].refused.Detail, "aggregated TTFT is not built")
 
+	// --variant left the aggregated variant out of what is priced.
+	assert.Contains(t, noPrefillRole(st).Detail, "aggregated TTFT is not built")
+	assert.Contains(t, noPrefillRole(&learnreplay.State{Namespace: "ns", ModelID: "m", Cycle: 3}).Detail, "no prefill variant at cycle 3")
+
 	mixed := learnedState()
 	mixed.Variants = st.Variants
 	fleets, err = f.ttftFleets(mixed, ttftQuestion{q: 0.9}, []pricedVariant{{state: st.Variants[0]}})
