@@ -166,8 +166,10 @@ func TestWorkedExampleFromTheRecording(t *testing.T) {
 
 // The JSON output's schema is pinned: every key path the wire types can
 // write, with its JSON type, is in testdata/schema-v<schemaVersion>.txt. A
-// change to the wire types fails here until the schema version is bumped
-// and the list rewritten (-update writes the list for the current version).
+// change to the wire types fails here until the list is rewritten (-update
+// writes it for the current version). Removing, renaming or retyping a key, or
+// changing its meaning, also bumps the version; a key absent unless a new
+// flag asks for it does not.
 func TestJSONSchemaIsPinned(t *testing.T) {
 	var paths []string
 	schemaPaths(reflect.TypeFor[wireOutput](), "", &paths)
@@ -185,7 +187,7 @@ func TestJSONSchemaIsPinned(t *testing.T) {
 		t.Fatalf("%v: a schema version with no pinned key list", err)
 	}
 	if w := strings.ReplaceAll(string(want), "\r\n", "\n"); got != w {
-		t.Errorf("the JSON schema moved without a new schemaVersion (now %d)\ngot:\n%s\nwant:\n%s", schemaVersion, got, w)
+		t.Errorf("the JSON schema moved from its pinned list (schemaVersion %d): bump it unless every change is a key only a new flag asks for\ngot:\n%s\nwant:\n%s", schemaVersion, got, w)
 	}
 	if len(paths) < 40 {
 		t.Fatalf("walked only %d key paths: %v", len(paths), paths)

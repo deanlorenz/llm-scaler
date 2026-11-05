@@ -12,8 +12,10 @@ import (
 // The -o json wire format. The library carries no json tags
 // (internal/signals/whatif); these types are the one place the planner's
 // answers are given names on the wire, and schemaVersion says which names.
-// A change to any field here is a change of schema: bump schemaVersion and
-// the pinned key list in testdata/schema-v<N>.txt (TestJSONSchemaIsPinned).
+// Removing, renaming or retyping a key, or changing its meaning, bumps
+// schemaVersion; a key absent unless a new flag asks for it does not. Either
+// way the pinned key list in testdata/schema-v<N>.txt changes
+// (TestJSONSchemaIsPinned).
 
 // schemaVersion is the version of the JSON output's schema.
 const schemaVersion = 1
@@ -104,13 +106,13 @@ type wireTTFT struct {
 	Replicas      int      `json:"replicas,omitempty"`
 	ReplicasFrom  string   `json:"replicasFrom,omitempty"`
 	// VP is V_P, tokens/s, as learned or assumed (VPSource); VPOrigin is P1's
-	// source, and VPPromptTokens the prompt it was read at. AssumeVPNotUsed
-	// is an --assume-vp a learned V_P left unused.
+	// source, and VPPromptTokens the prompt it was read at. VPLearned is P1's
+	// figure an --assume-vp stands in place of.
 	VP                  float64  `json:"vp,omitempty"`
 	VPSource            string   `json:"vpSource,omitempty"`
 	VPOrigin            string   `json:"vpOrigin,omitempty"`
 	VPPromptTokens      float64  `json:"vpPromptTokens,omitempty"`
-	AssumeVPNotUsed     *float64 `json:"assumeVPNotUsed,omitempty"`
+	VPLearned           *float64 `json:"vpLearned,omitempty"`
 	FixedLatencySeconds float64  `json:"fixedLatencySeconds,omitempty"`
 	FixedLatencySource  string   `json:"fixedLatencySource,omitempty"`
 	Imbalance           float64  `json:"imbalance,omitempty"`
@@ -149,7 +151,9 @@ type wireInputs struct {
 	ReplicasFrom   string       `json:"replicasFrom"`
 	Headroom       *float64     `json:"headroom,omitempty"`
 	Rate           *float64     `json:"rate,omitempty"`
-	TPOT           *wireTPOT    `json:"tpot,omitempty"`
+	// RateSource says what set Rate where a flag did not: the prefill knee.
+	RateSource string    `json:"rateSource,omitempty"`
+	TPOT       *wireTPOT `json:"tpot,omitempty"`
 }
 
 // wireShape is the traffic shape a variant was priced at: each length
@@ -208,7 +212,8 @@ type wireResults struct {
 	MeanTPOT       *wireResult `json:"meanTPOT,omitempty"`
 	PercentileTPOT *wireResult `json:"percentileTPOT,omitempty"`
 	Rate           *wireResult `json:"rate,omitempty"`
-	TTFT           *wireResult `json:"ttft,omitempty"`
+	// TTFT is the one result with parts, so it has a type of its own.
+	TTFT *wireTTFTResult `json:"ttft,omitempty"`
 }
 
 // wireResult is an answer or a refusal, never both.
@@ -224,13 +229,27 @@ type wireAnswer struct {
 	Band  *wireInterval `json:"band,omitempty"`
 	Basis wireBasis     `json:"basis"`
 	Flags []string      `json:"flags"`
-	// TTFT is what a priced TTFT is made of; absent on any other answer.
-	TTFT *wireTTFTAnswer `json:"ttft,omitempty"`
 }
 
-// wireTTFTAnswer is whatif.TTFT on the wire, beside the value: the figures
-// beside the union bound, and its parts' means, in seconds.
+// wireTTFTResult is a priced TTFT or a refusal, never both.
+type wireTTFTResult struct {
+	Answer  *wireTTFTAnswer `json:"answer,omitempty"`
+	Refused *wireRefusal    `json:"refused,omitempty"`
+}
+
+// wireTTFTAnswer is whatif.TTFT on the wire: the value, its flags, and in
+// Parts what it is made of.
 type wireTTFTAnswer struct {
+	Value float64       `json:"value"`
+	Unit  string        `json:"unit"`
+	Basis wireBasis     `json:"basis"`
+	Flags []string      `json:"flags"`
+	Parts wireTTFTParts `json:"parts"`
+}
+
+// wireTTFTParts is the figures beside the union bound, and its parts' means,
+// in seconds.
+type wireTTFTParts struct {
 	Independent           float64 `json:"independent"`
 	Pooled                float64 `json:"pooled"`
 	DecodeShare           float64 `json:"decodeShare"`
@@ -308,10 +327,19 @@ func toWire(r whatif.Result, unit string) *wireResult {
 			a.Flags = append(a.Flags, string(f))
 		}
 		return &wireResult{Answer: a}
+	case whatif.Unanswerable:
+		return &wireResult{Refused: &wireRefusal{Reason: string(v.Reason), Detail: v.Detail}}
+	}
+	return nil
+}
+
+// toWireTTFT is a priced TTFT or a refusal on the wire.
+func toWireTTFT(r whatif.Result) *wireTTFTResult {
+	switch v := r.(type) {
 	case whatif.TTFT:
-		a := &wireAnswer{Value: v.Seconds, Unit: unit, Flags: []string{}, Basis: wireBasis{
+		a := &wireTTFTAnswer{Value: v.Seconds, Unit: unitSeconds, Flags: []string{}, Basis: wireBasis{
 			Floor: v.Floor, KneeRate: v.PrefillKnee, BoundBy: []string{}, Tier: v.Tier,
-		}, TTFT: &wireTTFTAnswer{
+		}, Parts: wireTTFTParts{
 			Independent: v.Independent, Pooled: v.Pooled, DecodeShare: v.DecodeShare,
 			EngineWait: v.Parts.EngineWait, OwnPrefill: v.Parts.OwnPrefill, DecodeWait: v.Parts.DecodeWait,
 			FirstStep: v.Parts.FirstStep, DecodeEngine: v.Parts.DecodeEngine,
@@ -320,14 +348,14 @@ func toWire(r whatif.Result, unit string) *wireResult {
 			PrefillKnee: v.PrefillKnee, DecodeKnee: v.DecodeKnee,
 		}}
 		if v.Onsets != (whatif.Onsets{}) {
-			a.TTFT.Onsets = &wireOnsets{Prefill: v.Onsets.Prefill, Decode: v.Onsets.Decode}
+			a.Parts.Onsets = &wireOnsets{Prefill: v.Onsets.Prefill, Decode: v.Onsets.Decode}
 		}
 		for _, f := range v.Flags {
 			a.Flags = append(a.Flags, string(f))
 		}
-		return &wireResult{Answer: a}
+		return &wireTTFTResult{Answer: a}
 	case whatif.Unanswerable:
-		return &wireResult{Refused: &wireRefusal{Reason: string(v.Reason), Detail: v.Detail}}
+		return &wireTTFTResult{Refused: &wireRefusal{Reason: string(v.Reason), Detail: v.Detail}}
 	}
 	return nil
 }
@@ -362,10 +390,13 @@ func (w *wireOutput) addTTFTNote(fleets []*pricedFleet) {
 	}
 }
 
+// sourcePrefillKnee names the prefill knee as what set an operating rate.
+const sourcePrefillKnee = "headroom x prefill knee"
+
 // wire is the fleet's prefill role.
 func (o operatingTTFT) wire() wireRole {
 	return wireRole{Role: rolePrefill, Variant: o.fleet.variant, TTFT: &o.fleet.in, Results: wireResults{
-		Knee: toWire(o.knee, unitRate), TTFT: toWire(o.ttft, unitSeconds)}}
+		Knee: toWire(o.knee, unitRate), TTFT: toWireTTFT(o.ttft)}}
 }
 
 // inputsOf is the wire's account of what a variant was priced from.

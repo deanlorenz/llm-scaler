@@ -28,12 +28,12 @@ type replicasAnswer struct {
 // "Question 2: from replicas to an SLO") for decode: the knee the replicas
 // saturate at, the operating rate below it, and the TPOT held there.
 func runReplicasToSLO(ctx context.Context, args []string, out, warn io.Writer) error {
-	return asJSONError("replicas-to-slo", args, out, replicasToSLO(ctx, args, out, warn))
+	return asJSONError(replicasQuestion, args, out, replicasToSLO(ctx, args, out, warn))
 }
 
 func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) error {
-	fs := newAnswerFlags("replicas-to-slo", args, out)
-	f := answerFlags{question: "replicas-to-slo", warn: warn}
+	fs := newAnswerFlags(replicasQuestion, args, out)
+	f := answerFlags{question: replicasQuestion, warn: warn}
 	f.register(fs)
 	rate := fs.Float64("rate", 0, "the operating rate, requests per second over the fleet, in place of headroom x knee")
 	pct := fs.String("tpot-percentile", "", "report the TPOT at this per-request percentile too, in percent (90)")
@@ -56,6 +56,10 @@ func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) erro
 			return usagef("--tpot-percentile %q: %v", *pct, err)
 		}
 	}
+	ttft, err := f.replicasTTFT()
+	if err != nil {
+		return err
+	}
 	st, err := f.readState(ctx)
 	if err != nil {
 		return err
@@ -64,10 +68,7 @@ func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) erro
 	if err != nil {
 		return err
 	}
-	ttft, err := f.replicasTTFT(st)
-	if err != nil {
-		return err
-	}
+	ttft.policyPercentile(st)
 	var fleets []*pricedFleet
 	if ttft != nil {
 		if fleets, err = f.ttftFleets(st, *ttft, variants); err != nil {
@@ -132,6 +133,9 @@ func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) erro
 		}
 		slo.Rate = pv.qualify(slo.Rate)
 		slo.MeanTPOT = pv.qualify(pv.band(slo.MeanTPOT, on(func(s whatif.DecodeSLO) whatif.Result { return s.MeanTPOT })))
+		if at != nil {
+			slo.Rate, slo.MeanTPOT = at.onDecode(slo.Rate), at.onDecode(slo.MeanTPOT)
+		}
 		if slo.PercentileTPOT != nil {
 			p := pv.band(slo.PercentileTPOT, on(func(s whatif.DecodeSLO) whatif.Result { return s.PercentileTPOT }))
 			if a, ok := p.(whatif.Answer); ok {
@@ -139,6 +143,9 @@ func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) erro
 				p = a
 			}
 			slo.PercentileTPOT = pv.qualify(p)
+			if at != nil {
+				slo.PercentileTPOT = at.onDecode(slo.PercentileTPOT)
+			}
 		}
 		answers = append(answers, replicasAnswer{pv: pv, slo: slo, ratio: ratio, query: query, ttft: at, headroom: h})
 		results = append(results, slo.KneeRate, slo.Rate, slo.MeanTPOT, slo.PercentileTPOT)
@@ -157,7 +164,7 @@ func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) erro
 	code := whatif.ExitCode(results...)
 
 	if f.output == outputJSON {
-		w := newWireOutput("replicas-to-slo", &f, st, variants, code)
+		w := newWireOutput(replicasQuestion, &f, st, variants, code)
 		w.addTTFTNote(fleets)
 		for _, a := range answers {
 			in := inputsOf(&f, a.pv)
@@ -166,6 +173,9 @@ func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) erro
 			} else {
 				h := a.headroom
 				in.Headroom = &h
+			}
+			if a.ttft != nil && a.ttft.prefillBinds {
+				in.Rate, in.RateSource = &a.ttft.rate, sourcePrefillKnee
 			}
 			if query.PercentileTarget != nil {
 				in.TPOT = tpotInputs(st, 0, q, a.ratio)
@@ -256,14 +266,17 @@ func writeReplicasText(out io.Writer, f *answerFlags, st *learnreplay.State, var
 					of = "prefill knee"
 				}
 				why = fmt.Sprintf("%s x %s (%s)", num(a.headroom), of, src)
+				if a.ttft != nil && a.ttft.prefillBinds {
+					why += "; " + a.ttft.fleet.verdict()
+				}
 			}
 			row(&b, "operating rate", rateText(r.Value), "", why)
 		case whatif.Unanswerable:
 			fmt.Fprintf(&b, "%-16s%s\n", "operating rate", refusedText(r))
 		}
-		tpotRow(&b, "mean TPOT", a.slo.MeanTPOT, lineText(a.pv))
+		tpotRow(&b, "mean TPOT", a.slo.MeanTPOT, lineText(a.pv)+a.ttft.decodeNote())
 		if a.slo.PercentileTPOT != nil {
-			tpotRow(&b, "TPOT p"+strings.TrimPrefix(pct, "p"), a.slo.PercentileTPOT, "per request; "+f.ratioNote(st, a.ratio))
+			tpotRow(&b, "TPOT p"+strings.TrimPrefix(pct, "p"), a.slo.PercentileTPOT, "per request; "+f.ratioNote(st, a.ratio)+a.ttft.decodeNote())
 		}
 		if a.ttft != nil {
 			a.ttft.writeRows(&b)

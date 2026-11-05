@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -38,7 +39,38 @@ const (
 	// recorded reads them.
 	upstreamQueueThreshold = 5.0
 	upstreamKVThreshold    = 0.8
+	// routingBoundShare is the f / N_p at which one pod takes the work and
+	// more pods would mostly sit idle behind the router (S1, decision 1).
+	// Not measured.
+	routingBoundShare = 0.8
+	// maxPromptCV is the most spread S1 passes, and where the peak table
+	// below ends.
+	maxPromptCV = 3.0
 )
+
+// promptCVPeaks is S1's table, from p50 to p93: the cv at which a mean-one
+// gamma's quantile peaks on [0, 3], to 0.01. From p94 it is still rising at
+// 3. Below p50 the figure is a median, under the mean at any cv.
+var promptCVPeaks = [...]float64{
+	0, 0.04, 0.08, 0.11, 0.15, 0.19, 0.23, 0.26, 0.30, 0.34,
+	0.38, 0.42, 0.46, 0.50, 0.54, 0.58, 0.62, 0.66, 0.70, 0.74,
+	0.79, 0.83, 0.87, 0.92, 0.97, 1.02, 1.07, 1.12, 1.18, 1.24,
+	1.30, 1.36, 1.43, 1.50, 1.58, 1.66, 1.75, 1.85, 1.96, 2.08,
+	2.22, 2.38, 2.56, 2.78,
+}
+
+// promptCVPeak is the cv that prices the longest prompt at percentile q, read
+// at the whole percent below it, the lower peak, which flags sooner.
+func promptCVPeak(q float64) float64 {
+	i := int(math.Floor(100*q+1e-9)) - 50
+	switch {
+	case i < 0:
+		return 0
+	case i >= len(promptCVPeaks):
+		return maxPromptCV
+	}
+	return promptCVPeaks[i]
+}
 
 // The words the JSON and the text name a source or a role by.
 const (
@@ -47,12 +79,31 @@ const (
 	rolePrefill      = "prefill"
 )
 
-// assumedPoisson is S1's flag for Poisson arrivals: P3 has none for it.
-const assumedPoisson whatif.Flag = "AssumedPoissonArrivals"
+// The flags S1 raises beside P3's, under S1's names.
+const (
+	// assumedPoisson is Poisson arrivals: P3 has no flag for them.
+	assumedPoisson whatif.Flag = "AssumedPoissonArrivals"
+	// promptSpreadAbovePeak is a cv above promptCVPeak for the percentile: the
+	// prompt's own tail shrinks as cv rises from there, so a larger cv can
+	// price a shorter floor and a higher rate.
+	promptSpreadAbovePeak whatif.Flag = "PromptSpreadAbovePeak"
+	// routingBound is one pod taking at least routingBoundShare of the work,
+	// sustained: more pods would mostly sit idle behind the router. Priced at
+	// that f.
+	routingBound whatif.Flag = "RoutingBound"
+	// imbalanceNotSustained is an f at routingBoundShare of the pods that has
+	// not held over the whole window: chance alone can read that at two pods.
+	// Priced at it, the side that asks for more replicas.
+	imbalanceNotSustained whatif.Flag = "ImbalanceNotSustained"
+)
 
-// ttftNote is what every TTFT answer ends with.
-const ttftNote = "TTFT is UNVALIDATED until the staircase run (M2): it reads low at light load, " +
-	"measured up to about 34% under the router's p90, and is not a bound"
+// The closing note's measured halves. The figures are the frozen P2 table's
+// (TestTTFTFrozen_TheNotesFigures, learnreplay).
+const (
+	ttftNoteOpen     = "TTFT is UNVALIDATED until the staircase run (M2) and is not a bound: "
+	ttftNoteAssumed  = "at the assumed prompt cv %s it read 1.1x to 4.1x the router's percentile on the P2 recordings; at the sent spread (cv 0.06) up to 34%% under it."
+	ttftNoteMeasured = "at the sent spread (cv 0.06) it read up to 34% under the router's percentile on the P2 recordings."
+)
 
 // ttftQuestion is the TTFT a command was asked for.
 type ttftQuestion struct {
@@ -67,7 +118,8 @@ func (t ttftQuestion) label() string {
 	if t.q == 0 {
 		return "mean TTFT"
 	}
-	return "TTFT p" + strconv.FormatFloat(100*t.q, 'f', -1, 64)
+	// To a millionth of a percent: 0.57 * 100 is 56.99999999999999.
+	return "TTFT p" + strconv.FormatFloat(math.Round(1e8*t.q)/1e6, 'f', -1, 64)
 }
 
 // checkTTFT validates the TTFT flags both questions share. It changes no
@@ -80,6 +132,8 @@ func (f *answerFlags) checkTTFT() error {
 		return usagef("--assume-vp %g, want a finite throughput above 0, in prompt tokens per second", f.assumeVP)
 	case f.prefill < 0:
 		return usagef("--prefill %d, want 0 (the recorded count) or more", f.prefill)
+	case f.ttftFlagged() && f.set["headroom"] && f.question == replicasQuestion && !(f.headroom > 0 && f.headroom < 1):
+		return usagef("--headroom %g, want a fraction of the knee in (0, 1): at the knee no TTFT exists", f.headroom)
 	case f.ttftFlagged() && f.set["headroom"] && !(f.headroom > 0 && f.headroom <= 1):
 		return usagef("--headroom %g, want a fraction of the knee in (0, 1]", f.headroom)
 	}
@@ -88,31 +142,40 @@ func (f *answerFlags) checkTTFT() error {
 
 // ttftFlagged reports whether any flag asks about TTFT.
 func (f *answerFlags) ttftFlagged() bool {
-	return slices.ContainsFunc([]string{"ttft", "ttft-percentile", "assume-vp", rolePrefill, "prefill-variant"},
+	return slices.ContainsFunc([]string{"ttft", "ttft-percentile", "assume-vp", "prefill", "prefill-variant"},
 		func(name string) bool { return f.set[name] })
 }
 
-// replicasTTFT reads question 2's TTFT flags: nil when none asks about TTFT.
-// With no --ttft-percentile the percentile is the policy's, else 90.
-func (f *answerFlags) replicasTTFT(st *learnreplay.State) (*ttftQuestion, error) {
+// replicasTTFT reads question 2's TTFT flags, before any replay, so that a
+// bad flag is refused at once: nil when none asks about TTFT, and q 0 with no
+// --ttft-percentile, for policyPercentile to fill.
+func (f *answerFlags) replicasTTFT() (*ttftQuestion, error) {
 	if !f.ttftFlagged() {
 		return nil, nil
 	}
 	if f.ttft != "" {
 		return nil, usagef("--ttft is a target, for slo-to-rate; replicas-to-slo takes --ttft-percentile")
 	}
-	if f.ttftPercentile != "" {
-		q, err := parseTTFTPercent("--ttft-percentile", f.ttftPercentile)
-		if err != nil {
-			return nil, err
-		}
-		return &ttftQuestion{q: q}, nil
+	if f.ttftPercentile == "" {
+		return &ttftQuestion{}, nil
+	}
+	q, err := parseTTFTPercent("--ttft-percentile", f.ttftPercentile)
+	if err != nil {
+		return nil, err
+	}
+	return &ttftQuestion{q: q}, nil
+}
+
+// policyPercentile sets a percentile not asked for to the policy's, else 90.
+func (t *ttftQuestion) policyPercentile(st *learnreplay.State) {
+	if t == nil || t.q != 0 {
+		return
 	}
 	pct := config.DefaultTTFTPercentile
 	if st.Policy != nil && st.Policy.SLO != nil && st.Policy.SLO.TTFT != nil {
 		pct = st.Policy.SLO.TTFTPercentile()
 	}
-	return &ttftQuestion{q: float64(pct) / 100}, nil
+	t.q = float64(pct) / 100
 }
 
 // rateTTFT reads question 1's TTFT flags: --ttft, a mean or with @p and a
@@ -172,10 +235,13 @@ type pricedFleet struct {
 	// an input with no source.
 	refused *whatif.Unanswerable
 	fleet   whatif.TTFTFleet
-	// variant names the prefill variant.
+	// variant names the prefill variant, and q is the percentile asked.
 	variant string
+	q       float64
 	// assumedVP is a V_P --assume-vp supplied.
 	assumedVP bool
+	// flags are the fleet's own, beside P3's.
+	flags []whatif.Flag
 	// inputsText is where the fleet's inputs came from, for the human
 	// output; in the same for the JSON. in.Assumed names each assumed input.
 	inputsText string
@@ -226,9 +292,20 @@ func (f *answerFlags) ttftFleets(st *learnreplay.State, q ttftQuestion, variants
 	if len(variants) == 0 {
 		return []*pricedFleet{f.fleetFor(st, ps, q, nil)}, nil
 	}
+	decodes := 0
+	for _, vs := range st.Variants {
+		if domain.CanonicalRole(vs.Role) != domain.RolePrefill {
+			decodes++
+		}
+	}
 	fleets := make([]*pricedFleet, len(variants))
 	for i := range variants {
-		fleets[i] = f.fleetFor(st, ps, q, &variants[i])
+		pf := f.fleetFor(st, ps, q, &variants[i])
+		if pf.refused == nil && decodes > 1 {
+			// As S1 prices decode: the model's whole rate.
+			pf.assume("the whole rate on decode variant %s (the model has %d)", variants[i].state.Variant, decodes)
+		}
+		fleets[i] = pf
 	}
 	return fleets, nil
 }
@@ -253,7 +330,8 @@ func aggregatedRefusal(variant string) *whatif.Unanswerable {
 
 // fleetFor reads one fleet, and every input's source, from the state.
 func (f *answerFlags) fleetFor(st *learnreplay.State, ps *learnreplay.PrefillState, q ttftQuestion, pv *pricedVariant) *pricedFleet {
-	pf := &pricedFleet{pv: pv, in: wireTTFT{Percentile: q.q, TargetSeconds: q.seconds, Assumed: []string{}}}
+	pf := &pricedFleet{pv: pv, q: q.q, flags: []whatif.Flag{assumedPoisson},
+		in: wireTTFT{Percentile: q.q, TargetSeconds: q.seconds, Assumed: []string{}}}
 	if pv != nil {
 		pf.in.DecodeVariant = pv.state.Variant
 		if domain.CanonicalRole(pv.state.Role) == domain.RoleBoth {
@@ -277,8 +355,32 @@ func (f *answerFlags) fleetFor(st *learnreplay.State, ps *learnreplay.PrefillSta
 	pf.flowControl(st)
 	pf.assume("Poisson arrivals")
 	pf.in.ArrivalsSource = shapeAssumed
+	if f.prefillVariant != "" && len(st.Prefill) > 1 {
+		pf.assume("the whole rate on prefill variant %s (--prefill-variant; the model has %d)", ps.Variant, len(st.Prefill))
+	}
+	pf.raiseFlags(ps)
 	pf.describe()
 	return pf
+}
+
+// raiseFlags adds S1's flags on the spread and the imbalance. The routing
+// flags read f at the recorded count, where the window was read.
+func (pf *pricedFleet) raiseFlags(ps *learnreplay.PrefillState) {
+	p := pf.fleet.Prefill
+	if pf.q > 0 && p.PromptCV > promptCVPeak(pf.q) {
+		pf.flags = append(pf.flags, promptSpreadAbovePeak)
+	}
+	if p.Replicas != ps.Pods {
+		return
+	}
+	pods := float64(p.Replicas)
+	switch {
+	case p.Replicas < 2 || p.Imbalance/pods < routingBoundShare:
+	case !p.ImbalanceAssumed, ps.RawShareFull && ps.RawShareLeast/pods >= routingBoundShare:
+		pf.flags = append(pf.flags, routingBound)
+	default:
+		pf.flags = append(pf.flags, imbalanceNotSustained)
+	}
 }
 
 // assume names one assumed input.
@@ -286,24 +388,26 @@ func (pf *pricedFleet) assume(format string, args ...any) {
 	pf.in.Assumed = append(pf.in.Assumed, fmt.Sprintf(format, args...))
 }
 
-// prefillInputs is V_P, a, f and N_p. V_P is P1's, read through the replay,
-// else --assume-vp, else NoPrefillCapacity: it is never defaulted. a has no
-// assumption to fall back on: with none, NoFixedLatency.
+// prefillInputs is V_P, a, f and N_p. V_P is --assume-vp, as every --assume-*
+// flag overrides the recording, with P1's figure printed beside it; else P1's,
+// read through the replay; else NoPrefillCapacity: it is never defaulted. a
+// has no assumption to fall back on: with none, NoFixedLatency.
 func (f *answerFlags) prefillInputs(pf *pricedFleet, ps *learnreplay.PrefillState, cycle int) (whatif.Prefill, *whatif.Unanswerable) {
 	est := ps.Estimate
 	learned := ps.EstimateRead && est.VP > 0 && est.VPRefused == ""
 	switch {
-	case learned:
-		pf.in.VPSource, pf.in.VPOrigin = sourceLearned, string(est.VPSource)
-		if f.set["assume-vp"] {
-			pf.in.AssumeVPNotUsed = &f.assumeVP
-		}
 	case f.set["assume-vp"]:
+		if learned {
+			vp := est.VP
+			pf.in.VPLearned = &vp
+		}
 		est.VP, est.VPRefused, est.VPLowerBound, est.VPAboveSlopeBound = f.assumeVP, "", false, false
 		est.VPPromptTokens = 0
 		pf.assumedVP = true
 		pf.in.VPSource = shapeAssumed
 		pf.assume("V_P %s tok/s (--assume-vp)", num(f.assumeVP))
+	case learned:
+		pf.in.VPSource, pf.in.VPOrigin = sourceLearned, string(est.VPSource)
 	default:
 		why := fmt.Sprintf("no P1 estimate of %s at cycle %d", ps.Variant, cycle)
 		if ps.EstimateRead {
@@ -370,10 +474,7 @@ func (f *answerFlags) prefillShape(pf *pricedFleet, ps *learnreplay.PrefillState
 	pv := pf.pv
 	switch {
 	case f.set["assume-input-tokens"]:
-		p.PromptTokens = f.inputTokens
-		if pv != nil {
-			p.PromptTokens = pv.shape.ILeff
-		}
+		p.PromptTokens = pf.effectivePrompt(f.inputTokens)
 		pf.in.PromptSource = shapeAssumed
 		pf.assume("prompt %s tokens (--assume-input-tokens)", num(round(p.PromptTokens)))
 	case ps.PromptTokens > 0:
@@ -392,6 +493,15 @@ func (f *answerFlags) prefillShape(pf *pricedFleet, ps *learnreplay.PrefillState
 	if pv != nil && pv.state.DecodeTTFT.TransferSeconds > 0 && ps.PromptTokens > 0 {
 		p.TransferSecondsPerToken = pv.state.DecodeTTFT.TransferSeconds / ps.PromptTokens
 	}
+}
+
+// effectivePrompt is an assumed prompt less the prefix hits of the decode
+// variant's shape; with none, the prompt as given.
+func (pf *pricedFleet) effectivePrompt(il float64) float64 {
+	if pf.pv == nil {
+		return il
+	}
+	return pf.pv.shape.ILeff
 }
 
 // decodeSide is decode's part of the TTFT: the decode variant's line when
@@ -441,8 +551,10 @@ func (pf *pricedFleet) flowControl(st *learnreplay.State) {
 func (pf *pricedFleet) describe() {
 	p := pf.fleet.Prefill
 	var b strings.Builder
-	fmt.Fprintf(&b, "V_P %s tok/s ", num(round(p.VP)))
+	fmt.Fprintf(&b, "V_P %s ", num(round(p.VP)))
 	switch {
+	case pf.assumedVP && pf.in.VPLearned != nil:
+		fmt.Fprintf(&b, "ASSUMED, learned %s", num(round(*pf.in.VPLearned)))
 	case pf.assumedVP:
 		b.WriteString("ASSUMED")
 	case p.VPPromptTokens > 0:
@@ -450,10 +562,7 @@ func (pf *pricedFleet) describe() {
 	default:
 		fmt.Fprintf(&b, "learned (%s)", pf.in.VPOrigin)
 	}
-	if pf.in.AssumeVPNotUsed != nil {
-		fmt.Fprintf(&b, ", --assume-vp %s not used", num(*pf.in.AssumeVPNotUsed))
-	}
-	fmt.Fprintf(&b, "; a %.2f ms learned; f %s (%s); N_p %d (%s)", 1000*p.FixedLatency, num(pf.in.Imbalance), pf.in.ImbalanceSource,
+	fmt.Fprintf(&b, "; a %.2f ms learned; f %.4g (%s); N_p %d (%s)", 1000*p.FixedLatency, pf.in.Imbalance, pf.in.ImbalanceSource,
 		p.Replicas, pf.in.ReplicasFrom)
 	fmt.Fprintf(&b, "; prompt %s tokens (%s", num(round(p.PromptTokens)), pf.in.PromptSource)
 	if pf.in.PromptFromCycle > 0 {
@@ -479,12 +588,17 @@ func (pf *pricedFleet) verdict() string {
 	return "UNVALIDATED"
 }
 
-// footerNote is the fleets' closing note.
+// footerNote is the fleets' closing note. The direction turns on the spread:
+// a measured cv (the collector's Q1) has only the sent spread's row to go by.
 func footerNote(fleets []*pricedFleet) string {
-	if slices.ContainsFunc(fleets, func(pf *pricedFleet) bool { return pf.assumedVP }) {
-		return ttftNote + "; V_P ASSUMED"
+	note := ttftNoteOpen + fmt.Sprintf(ttftNoteAssumed, num(assumedPromptCV))
+	if slices.ContainsFunc(fleets, func(pf *pricedFleet) bool { return pf.refused == nil && !pf.fleet.Prefill.PromptCVAssumed }) {
+		note = ttftNoteOpen + ttftNoteMeasured
 	}
-	return ttftNote
+	if slices.ContainsFunc(fleets, func(pf *pricedFleet) bool { return pf.assumedVP }) {
+		note += " V_P ASSUMED."
+	}
+	return note
 }
 
 // priced is the fleet's Result from price, or the refusal of an input with no
@@ -497,17 +611,24 @@ func (pf *pricedFleet) priced(price func(whatif.TTFTFleet) whatif.Result) whatif
 }
 
 // qualify adds what the fleet says of an answer: the decode variant's flags
-// where its line priced it, an assumed shape in any case, and Poisson
-// arrivals.
+// where its line priced it, an assumed shape in any case, and the fleet's own.
 func (pf *pricedFleet) qualify(r whatif.Result) whatif.Result {
-	if pf.pv != nil && pf.fleet.Decode != nil {
-		r = pf.pv.qualify(r)
+	add := slices.Clone(pf.flags)
+	if pf.pv != nil {
+		if pf.fleet.Decode != nil {
+			r = pf.pv.qualify(r)
+			add = append(add, pf.pv.flags...)
+		}
+		if pf.pv.assumed() {
+			add = append(add, whatif.AssumedShape)
+		}
 	}
-	add := []whatif.Flag{assumedPoisson}
-	if pf.pv != nil && pf.pv.assumed() {
-		add = append(add, whatif.AssumedShape)
-	}
-	with := func(flags []whatif.Flag) []whatif.Flag {
+	return withFlags(r, add)
+}
+
+// withFlags is r with each of add it does not carry; a refusal has none.
+func withFlags(r whatif.Result, add []whatif.Flag) whatif.Result {
+	merged := func(flags []whatif.Flag) []whatif.Flag {
 		flags = slices.Clone(flags)
 		for _, fl := range add {
 			if !slices.Contains(flags, fl) {
@@ -518,10 +639,10 @@ func (pf *pricedFleet) qualify(r whatif.Result) whatif.Result {
 	}
 	switch v := r.(type) {
 	case whatif.Answer:
-		v.Flags = with(v.Flags)
+		v.Flags = merged(v.Flags)
 		return v
 	case whatif.TTFT:
-		v.Flags = with(v.Flags)
+		v.Flags = merged(v.Flags)
 		return v
 	}
 	return r
@@ -565,7 +686,7 @@ func (pf *pricedFleet) atOperatingPoint(q ttftQuestion, query whatif.ReplicasQue
 		lowest := pk.Value
 		dk, decoded := decodeKnee.(whatif.Answer)
 		o.prefillBinds = !decoded || pk.Value < dk.Value
-		pf.in.RateSource = "headroom x prefill knee"
+		pf.in.RateSource = sourcePrefillKnee
 		if !o.prefillBinds {
 			lowest = dk.Value
 			pf.in.RateSource = "headroom x decode knee"
@@ -583,6 +704,25 @@ func (pf *pricedFleet) atOperatingPoint(q ttftQuestion, query whatif.ReplicasQue
 // results is the Results the exit code reads.
 func (o operatingTTFT) results() []whatif.Result { return []whatif.Result{o.knee, o.ttft} }
 
+// onDecode is a decode figure read at the operating rate. A rate the prefill
+// knee set rests on V_P, so a figure read at it carries the flags the knee
+// does: it is no more validated than that rate.
+func (o operatingTTFT) onDecode(r whatif.Result) whatif.Result {
+	if k, ok := o.knee.(whatif.Answer); ok && o.prefillBinds {
+		return withFlags(r, k.Flags)
+	}
+	return r
+}
+
+// decodeNote is what a decode row read at the operating rate adds to its
+// basis: nothing unless the prefill knee set that rate.
+func (o *operatingTTFT) decodeNote() string {
+	if o == nil || !o.prefillBinds {
+		return ""
+	}
+	return "; at the prefill knee's rate; " + o.fleet.verdict()
+}
+
 // fleetRate is question 1's fleet row: the smaller of the roles' rates and
 // the operating point of the lower knee. decode is nil when no TPOT was
 // asked. A role's refusal is the fleet's.
@@ -599,7 +739,7 @@ func fleetRate(q ttftQuestion, headroom float64, decode, ttft whatif.Result) wha
 		by   whatif.Bound
 	}
 	bounds := []bound{{headroom * t.Basis.TTFT.KneeRate, whatif.BoundOperatingPoint},
-		{t.Value, whatif.Bound("prefill " + q.label())}}
+		{t.Value, whatif.Bound(q.label() + ", end to end")}}
 	flags := slices.Clone(t.Flags)
 	if d, ok := decode.(whatif.Answer); ok {
 		bounds = append(bounds, bound{d.Value, whatif.Bound("decode " + boundText(d.Basis.BoundBy))})
@@ -648,11 +788,25 @@ func (pf *pricedFleet) writeInputs(b *strings.Builder, inputsLabel, assumedLabel
 	}
 }
 
+// kneeBasis spells the prefill knee: N_p x V_P x (1 - margin) / (f x prompt),
+// V_P at the prompt asked, read back from the knee, so it is the V_P priced
+// (rescaled along P1's curve, where it was) and not the one learned.
+func (pf *pricedFleet) kneeBasis(knee float64) string {
+	p := pf.fleet.Prefill
+	vp := knee * pf.in.Imbalance * p.PromptTokens / float64(p.Replicas) / (1 - p.VPMargin)
+	margin := ""
+	if p.VPMargin > 0 {
+		margin = fmt.Sprintf(" x (1 - %s margin)", num(p.VPMargin))
+	}
+	return fmt.Sprintf("N_p %d x V_P %s%s / (f %.4g x %s tokens); %s", p.Replicas, num(round(vp)), margin,
+		pf.in.Imbalance, num(round(p.PromptTokens)), pf.verdict())
+}
+
 // writeRows prints question 2's TTFT rows.
 func (o operatingTTFT) writeRows(b *strings.Builder) {
 	pf := o.fleet
 	if k, ok := o.knee.(whatif.Answer); ok {
-		row(b, "prefill knee", rateText(k.Value), "", "N_p x V_P / (f x prompt); "+pf.verdict())
+		row(b, "prefill knee", rateText(k.Value), "", pf.kneeBasis(k.Value))
 	}
 	switch v := o.ttft.(type) {
 	case whatif.TTFT:

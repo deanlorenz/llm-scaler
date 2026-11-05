@@ -25,12 +25,12 @@ type rateAnswer struct {
 // "Question 1: from an SLO to a rate") for decode: the largest rate the
 // replicas carry at the TPOT target, capped at the operating point.
 func runSLOToRate(ctx context.Context, args []string, out, warn io.Writer) error {
-	return asJSONError("slo-to-rate", args, out, sloToRate(ctx, args, out, warn))
+	return asJSONError(rateQuestion, args, out, sloToRate(ctx, args, out, warn))
 }
 
 func sloToRate(ctx context.Context, args []string, out, warn io.Writer) error {
-	fs := newAnswerFlags("slo-to-rate", args, out)
-	f := answerFlags{question: "slo-to-rate", warn: warn}
+	fs := newAnswerFlags(rateQuestion, args, out)
+	f := answerFlags{question: rateQuestion, warn: warn}
 	f.register(fs)
 	tpot := fs.String("tpot", "", "the TPOT target: a mean (4ms) or a per-request percentile (4ms@p90) (required, unless --ttft is given)")
 	if ok, err := parse(fs, args); !ok {
@@ -91,9 +91,9 @@ func sloToRate(ctx context.Context, args []string, out, warn io.Writer) error {
 		if asksTPOT {
 			res := withRatioRefusal(whatif.RateForTPOT(pv.decode, query), ratioRefused)
 			res = pv.band(res, func(d whatif.Decode) whatif.Result { return whatif.RateForTPOT(d, query) })
-			if a, ok := res.(whatif.Answer); ok {
-				a.Flags = append(a.Flags, ratioFlags...)
-				res = a
+			if ans, ok := res.(whatif.Answer); ok {
+				ans.Flags = append(ans.Flags, ratioFlags...)
+				res = ans
 			}
 			a.result = pv.qualify(res)
 			results = append(results, a.result)
@@ -121,7 +121,7 @@ func sloToRate(ctx context.Context, args []string, out, warn io.Writer) error {
 	code := whatif.ExitCode(results...)
 
 	if f.output == outputJSON {
-		w := newWireOutput("slo-to-rate", &f, st, variants, code)
+		w := newWireOutput(rateQuestion, &f, st, variants, code)
 		w.addTTFTNote(fleets)
 		for _, a := range answers {
 			in := inputsOf(&f, a.pv)

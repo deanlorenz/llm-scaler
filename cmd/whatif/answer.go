@@ -25,6 +25,12 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/whatifsource"
 )
 
+// The questions, as their commands name them.
+const (
+	replicasQuestion = "replicas-to-slo"
+	rateQuestion     = "slo-to-rate"
+)
+
 // The output formats -o takes.
 const (
 	outputText = "text"
@@ -83,7 +89,7 @@ func (f *answerFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.output, "output", outputText, "output: text or json (the same as -o)")
 	fs.StringVar(&f.ttft, "ttft", "", "the TTFT target of slo-to-rate, end to end: a mean (200ms) or a percentile (200ms@p95)")
 	fs.StringVar(&f.ttftPercentile, "ttft-percentile", "", "the TTFT percentile, in percent (90); on replicas-to-slo, default the policy's, else 90")
-	fs.Float64Var(&f.assumeVP, "assume-vp", 0, "V_P, a prefill pod's prompt tokens per second, used only where the recording has no learned one (flagged)")
+	fs.Float64Var(&f.assumeVP, "assume-vp", 0, "V_P, a prefill pod's prompt tokens per second, in place of the learned one (flagged)")
 	fs.IntVar(&f.prefill, "prefill", 0, "prefill replicas to price; 0 takes the recorded count")
 	fs.StringVar(&f.prefillVariant, "prefill-variant", "", "the prefill variant to price, when the model has several")
 	fs.StringVar(&f.inputBucket, "input-bucket", "", "not supported: per-bucket answers are the planner's M1")

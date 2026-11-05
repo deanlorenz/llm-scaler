@@ -71,14 +71,20 @@ whatif slo-to-rate     --recording run.jsonl --tpot 4ms --ttft 200ms@p95 [--assu
 
 `--prometheus` takes the same flags, and gives the same answer.
 
-- **Treat every TTFT figure as unvalidated.** Each prints `UNVALIDATED`. It has
-  read low at light load, up to about 34% under the router's p90, and it is not
-  a bound. Do not size from it yet.
+- **Treat every TTFT figure as unvalidated.** Each prints `UNVALIDATED`, and it
+  is not a bound. At the assumed prompt `cv` 2, which is what the CLI prints
+  today, it read 1.1x to 4.1x the router's percentile on the P2 recordings; at
+  the spread the load generator sent (`cv` 0.06) up to 34% under it. Do not
+  size from it yet.
 - **Read the `assumed` row first.** It names each input the recording did not
   give. `V_P ASSUMED` means `--assume-vp` supplied `V_P`.
-- **Give `--assume-vp` when `NoPrefillCapacity` is refused.** The recording's
-  pods never queued long enough for `V_P` to be learned. A learned `V_P` wins
-  over the flag, and the output says the flag was not used.
+- **`--assume-vp` overrides,** as every `--assume-*` flag does. Give it when
+  `NoPrefillCapacity` is refused, because the pods never queued long enough for
+  `V_P` to be learned, or to ask what another `V_P` would do. A learned figure
+  is printed beside it: `V_P 130000 ASSUMED, learned 115621`.
+- **A decode row can rest on `V_P` too.** Where the prefill knee is the lower,
+  it sets the operating rate, and the rate and TPOT rows say so and carry the
+  verdict.
 - **`NoFixedLatency` has no flag.** The window needs low-load minutes at more
   than one prompt length, for `a` to be learned.
 - **`Saturated` means the rate is at or above the knee.** It is a refusal, exit

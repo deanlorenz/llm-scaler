@@ -55,7 +55,9 @@
         "ranks": 1,
         "replicas": 1,
         "replicasFrom": "recording",
-        "headroom": 0.85
+        "headroom": 0.85,
+        "rate": 6.917093122652196,
+        "rateSource": "headroom x prefill knee"
       },
       "results": {
         "knee": {
@@ -155,7 +157,7 @@
               "FlowControlInferredOff",
               "AssumedPoissonArrivals"
             ],
-            "ttft": {
+            "parts": {
               "independent": 4.752942320485787,
               "pooled": 4.608934125978665,
               "decodeShare": 0,
@@ -178,5 +180,5 @@
     }
   ],
   "exitCode": 3,
-  "note": "estimate from no readings of the line's own of a 105-cycle recording, not a guarantee; see basis (-o json); TTFT is UNVALIDATED until the staircase run (M2): it reads low at light load, measured up to about 34% under the router's p90, and is not a bound; V_P ASSUMED"
+  "note": "estimate from no readings of the line's own of a 105-cycle recording, not a guarantee; see basis (-o json); TTFT is UNVALIDATED until the staircase run (M2) and is not a bound: at the assumed prompt cv 2 it read 1.1x to 4.1x the router's percentile on the P2 recordings; at the sent spread (cv 0.06) up to 34% under it. V_P ASSUMED."
 }

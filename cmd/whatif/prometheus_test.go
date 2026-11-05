@@ -87,23 +87,7 @@ func sweepServerFor(t *testing.T, engine inferenceengine.Engine) *promtest.Serve
 	t.Helper()
 	srv := promtest.New()
 	t.Cleanup(srv.Close)
-	reg := source.NewSourceRegistry()
-	require.NoError(t, reg.Register("prometheus", source.NewNoOpSource()))
-	registration.RegisterSaturationQueries(reg)
-	registration.RegisterQueueingModelQueries(reg)
-	registration.RegisterSLOQueries(reg)
-	registration.RegisterFlowControlPoolQueries(reg)
-	registration.RegisterAlwaysOnQueries(reg)
-	q := func(name string) string {
-		name = registration.EngineQuery(engine, name)
-		params := map[string]string{source.ParamNamespace: sweepNS}
-		if qt := reg.Get("prometheus").QueryList().Get(name); qt != nil && len(qt.Params) == 0 {
-			params = nil
-		}
-		s, err := reg.Get("prometheus").QueryList().Build(name, params)
-		require.NoError(t, err, name)
-		return s
-	}
+	q := sweepQueries(t, engine)
 	for j := range sweepPods {
 		labels := map[string]string{"model_name": "m", "pod": fmt.Sprintf("m-dec-7c9d-%d", j),
 			"instance": fmt.Sprintf("10.0.0.%d:8000", j+1), "namespace": sweepNS}
@@ -164,6 +148,29 @@ func sweepServerFor(t *testing.T, engine inferenceengine.Engine) *promtest.Serve
 		sweepKSM(srv, labels["pod"], j == sweepPods-1)
 	}
 	return srv
+}
+
+// sweepQueries is each registered query's text on the engine, as a capture
+// issues it.
+func sweepQueries(t *testing.T, engine inferenceengine.Engine) func(string) string {
+	t.Helper()
+	reg := source.NewSourceRegistry()
+	require.NoError(t, reg.Register("prometheus", source.NewNoOpSource()))
+	registration.RegisterSaturationQueries(reg)
+	registration.RegisterQueueingModelQueries(reg)
+	registration.RegisterSLOQueries(reg)
+	registration.RegisterFlowControlPoolQueries(reg)
+	registration.RegisterAlwaysOnQueries(reg)
+	return func(name string) string {
+		name = registration.EngineQuery(engine, name)
+		params := map[string]string{source.ParamNamespace: sweepNS}
+		if qt := reg.Get("prometheus").QueryList().Get(name); qt != nil && len(qt.Params) == 0 {
+			params = nil
+		}
+		s, err := reg.Get("prometheus").QueryList().Build(name, params)
+		require.NoError(t, err, name)
+		return s
+	}
 }
 
 // sweepKSM is kube-state-metrics' account of one of the sweep's Pods: a
