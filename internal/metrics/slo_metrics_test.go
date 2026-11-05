@@ -62,8 +62,9 @@ var _ = Describe("PublishSLO", func() {
 			PublishSLO(snap, t0)
 		}
 		value := func(name string) []float64 {
-			var out []float64
-			for _, m := range family(name) {
+			metrics := family(name)
+			out := make([]float64, 0, len(metrics))
+			for _, m := range metrics {
 				out = append(out, m.GetGauge().GetValue())
 			}
 			return out
@@ -90,7 +91,7 @@ var _ = Describe("PublishSLO", func() {
 			Expect(family(constants.WVASLOTTFTFlag)).To(HaveLen(len(constants.SLOTTFTFlags)))
 			Expect(family(constants.WVASLOTTFTReason)).To(HaveLen(len(constants.SLOTTFTReasons)))
 			Expect(family(constants.WVASLOTTFTVPSource)).To(HaveLen(len(constants.SLOTTFTVPSources)))
-			var flags []string
+			flags := make([]string, 0, len(constants.SLOTTFTFlags))
 			for _, m := range family(constants.WVASLOTTFTFlag) {
 				flags = append(flags, label(m, constants.LabelFlag))
 			}

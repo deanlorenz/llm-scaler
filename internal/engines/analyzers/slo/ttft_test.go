@@ -347,12 +347,12 @@ func TestReadPromptSpread(t *testing.T) {
 	r := rand.New(rand.NewPCG(1, 2))
 	bounds := []float64{100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000}
 	for range 200 {
-		var xs []float64
+		xs := make([]float64, 0, 400)
 		for range 400 {
 			xs = append(xs, 100+r.Float64()*r.Float64()*40000)
 		}
 		var sum, sq float64
-		var b []domain.LengthBucket
+		b := make([]domain.LengthBucket, 0, len(bounds)+1)
 		for _, x := range xs {
 			sum += x
 			sq += x * x
@@ -580,7 +580,7 @@ func TestTTFT_FlowControlThroughAnalyze(t *testing.T) {
 
 // decodeRows are n Ready decode replicas, ITL on line at fill k.
 func decodeRows(variant string, n int) []domain.ReplicaMetrics {
-	var out []domain.ReplicaMetrics
+	out := make([]domain.ReplicaMetrics, 0, n)
 	for i := range n {
 		out = append(out, row(variant, fmt.Sprintf("%s-%d", variant, i), 0.3))
 	}

@@ -37,7 +37,7 @@ func ttftPublished(t *testing.T, b []byte) []metrics.SLOTTFTReading {
 	r := csv.NewReader(bytes.NewReader(b))
 	rows, err := r.ReadAll()
 	require.NoError(t, err)
-	var out []metrics.SLOTTFTReading
+	out := make([]metrics.SLOTTFTReading, 0, len(rows))
 	for _, row := range rows[1:] {
 		var raw struct {
 			TTFT []struct {

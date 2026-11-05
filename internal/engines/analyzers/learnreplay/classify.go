@@ -300,16 +300,16 @@ var vocabulary = withWords(ttftWords(), withWords(enginerec.Words(), setOf(
 
 // withWords adds words to a set and returns it: the composite's own words
 // (enginerec.Words), read from the code that writes them.
-// ttftWords is what the slo analyzer's TTFT readings hold.
-func ttftWords() []string {
-	return slices.Concat(constants.SLOTTFTReasons, constants.SLOTTFTVPSources, constants.SLOTTFTFlags)
-}
-
 func withWords(words []string, set map[string]bool) map[string]bool {
 	for _, w := range words {
 		set[w] = true
 	}
 	return set
+}
+
+// ttftWords is what the slo analyzer's TTFT readings hold.
+func ttftWords() []string {
+	return slices.Concat(constants.SLOTTFTReasons, constants.SLOTTFTVPSources, constants.SLOTTFTFlags)
 }
 
 func setOf(names ...string) map[string]bool {
