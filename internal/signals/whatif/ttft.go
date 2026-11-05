@@ -93,8 +93,10 @@ const MaxVPShapeRatio = 1.2
 // the knee: 5%, ten times the 0.5% by which run 2's pod under a queue served
 // away from its busy-minute V_P at the prompt it was learned on
 // (docs/proposals/slo-capacity-planner-ttft.md, "As built (P3 after P2)").
-// A stated margin, not a measured one: a change of prompt length is the
-// curve's to price, not the margin's.
+// A stated margin, not a measured one, and it covers only that noise, at
+// the prompt length V_P was learned at. It does not cover an error in the
+// curve's rescale or in pricing a mix of prompt lengths at its mean (an even
+// 8k/52k mix is 32% under its prefill time, "Where it is most wrong").
 const DefaultVPMargin = 0.05
 
 // MaxVPMargin bounds VPMargin at 1 - MarginRampFull, so the margin is whole
@@ -182,7 +184,10 @@ type TTFTFleet struct {
 // the request reaching the decode pod to its first token, the KV pull
 // included. S1 learns it per decode variant from the R1 field
 // domain.ReplicaMetrics.AvgTTFT on the variant's Ready decode rows
-// (docs/proposals/slo-tiers.md, decision 3).
+// (docs/proposals/slo-tiers.md, decision 3). It is held at the prompt
+// scaling below and at the rate it was measured at: RateForTTFT extrapolates
+// to other rates with it frozen. Seconds and PromptTokens are one pair, from
+// the same cycle.
 type DecodeTTFT struct {
 	// Seconds is the mean, in seconds; 0 is unmeasured.
 	Seconds float64
@@ -190,7 +195,10 @@ type DecodeTTFT struct {
 	// pull grows with the prompt and there is a fixed part besides, so the
 	// term is priced at Seconds * max(1, I/PromptTokens): scaled up for a
 	// longer prompt (the fixed part makes that high), held for a shorter one
-	// (the pull makes that high). Required when Seconds is above 0.
+	// (the pull makes that high). Required when Seconds is above 0. It is
+	// E[I_eff], the computed prompt, while the KV pull moves the whole
+	// prompt, prefix hits included: with prefix hits the ratio I/PromptTokens
+	// tracks the pull only as far as the hit rate holds.
 	PromptTokens float64
 }
 
@@ -269,11 +277,14 @@ func (pl prefillPlan) atRate(rate float64) prefillPlan {
 //	V_P(I)/V_P(I_vp) = (s0/B + b + c*I_vp) / (s0/B + b + c*I).
 //
 // With a curve, s0/B unknown, the ratio is taken at s0/B = 0,
-// s(I_vp)/s(I) with s(I) = b + c*I. For I above I_vp that is below the true
-// ratio whatever s0/B is, so V_P is rescaled down by it, flagged
-// VPScaledToPrompt: never above the truth. For I below I_vp it is above the
-// true ratio (it over-reads the gain), so V_P is held at the learned figure,
-// which the true V_P is at or above. Without a curve, or with I_vp unknown,
+// s(I_vp)/s(I) with s(I) = b + c*I, and V_P is rescaled down by it for I
+// above I_vp, flagged VPScaledToPrompt. That reads at or below the true V_P
+// only if P1's low-load b and c are the busy step's per-token cost, which
+// is not measured: on run 2 at 37k it read 1.5% above what the pod served
+// (TestVPRescaleOnRun2At37k), and the margin covers that only from rho 0.6
+// (MarginRampFull). So VPScaledToPrompt is on S2's no-act list. For I below
+// I_vp the ratio would over-read the gain, so V_P is held at the learned
+// figure. Without a curve, or with I_vp unknown,
 // V_P is held, and a mean prompt more than MaxVPShapeRatio from I_vp either
 // way, or an unknown I_vp, is flagged VPShapeMoved. An assumed V_P is the
 // caller's for the prompt asked, and is neither rescaled nor flagged.

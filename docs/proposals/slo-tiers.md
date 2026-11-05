@@ -778,8 +778,12 @@ Why:
   is known, `PrefillFromEstimate` passes `b` and `c`, and P3 prices
   `V_P(I) = V_P(I_vp)·s(I_vp)/s(I)`, `s(I) = b + c·I`, for a longer prompt,
   flagged `VPScaledToPrompt`. It holds `V_P` for a shorter one, which is the
-  safe side. `VPScaledToPrompt` is not on S2's no-act list: the rescale is
-  at or under the true `V_P` whatever a step's fixed cost is. The 1.2x rule
+  safe side. The rescale reads at or under the true `V_P` only if P1's
+  low-load `b` and `c` are the busy step's per-token cost, which is not
+  measured. On run 2's 37k level it read 1.5% above what the pod served, and
+  the margin covers that only from `ρ` 0.6. So `VPScaledToPrompt` is on
+  S2's no-act list until a second measured point confirms the rescale. The
+  1.2x rule
   is now P3's own fallback for when there is no curve: P3 raises
   `VPShapeMoved` itself (`whatif.MaxVPShapeRatio`), and S1 no longer
   computes it. S1 passes `VPPromptTokens` and the curve through
@@ -834,8 +838,14 @@ rows with `AvgTTFTKnown`, taken as the mean over the rows weighted by
 (the prefill variant's `E[I_eff]` in the same cycle) is
 `DecodeTTFT.PromptTokens`. It is learned per decode variant in the SLO
 analyzer, as `decodeTTFT map[string]decodeTTFTWindow` keyed
-`namespace|model|variant` under its `mu`: the last 5 cycles' means, of
-which S1 passes the largest. It is forgotten and evicted with the
+`namespace|model|variant` under its `mu`: the last 5 cycles' means, each
+kept with its cycle's prompt, of which S1 passes the largest as a pair
+(`Seconds` and `PromptTokens` from the same cycle, never the largest of
+each). `PromptTokens` is `E[I_eff]`, the computed prompt, while the KV pull
+moves the whole prompt, prefix hits included, so the term's scaling by
+`I/I_D` tracks the pull only while the hit rate holds. The figure is held
+at the rate it was measured at: `RateForTTFT` extrapolates to other rates
+with it frozen. It is forgotten and evicted with the
 variant's lines. `AvgTTFT` is a scaling query, collected every cycle, so
 production has it. With no row carrying it, S1 passes 0, and P3 flags
 `DecodeTTFTUnmeasured`, which is on S2's no-act list. On P/D the decode
@@ -1011,7 +1021,7 @@ by name.
 
 | Metric | Labels beyond those | Meaning |
 | --- | --- | --- |
-| `wva_slo_predicted_ttft_seconds` | — | `TTFTAt` at the variant's current rate, at the objective's percentile. Present when priced and when `decode-bound` or `routing-bound`; absent when `TTFTAt` refuses (the target is then unmet, `wva_slo_ttft_unmet`) |
+| `wva_slo_predicted_ttft_seconds` | — | `TTFTAt` at the variant's current rate, at the objective's percentile. Present when priced and when `decode-bound` or `routing-bound`; absent when `TTFTAt` refuses (the target is then unmet, `wva_slo_ttft_unmet`). On P2's goldens it reads low at light load, up to about 34% under the router's p90: not a bound |
 | `wva_slo_ttft_unmet` | — | `1` when the current rate misses the target: the prediction is above it, or `TTFTAt` refused at or over the prefill knee or the decode onset, or the current rate is above the prefill flow-control onset; `0` when met; absent when not priced |
 | `wva_slo_ttft_replica_requests_per_second` | — | `RateForTTFT` ÷ `N_p` at the current count. Absent unless the reason is `priced` |
 | `wva_slo_ttft_vp_source` | `vp_source` | `1` for where `V_P` came from (`busy-minutes`, `peak-under-queue`, `back-pressure-bound`, `none`), `0` for the others. Present whenever the variant is evaluated |
@@ -1126,8 +1136,9 @@ asserted.
     `no-decode-side`, `no-estimate`, and every refusal;
   - `DecodeSideOmitted`, and `DecodeTTFTUnmeasured`;
   - `AssumedPromptSpread` or `PromptSpreadClamped`, so Q1 is a hard gate;
-  - `VPShapeMoved` or `VPAboveSlopeBound` (not `VPScaledToPrompt`, which
-    reads at or under the true `V_P`);
+  - `VPShapeMoved`, `VPAboveSlopeBound` or `VPScaledToPrompt` (the rescale
+    read 1.5% above the served `V_P` on run 2 at 37k; lifted when a second
+    measured point confirms it);
   - `TransferOmitted`, raised only when no transfer time was measured;
   - `AssumedPoissonArrivals`, until the staircase's bursty bucket passes;
   - `AboveFlowControlOnset` on the rate answer, where the per-pod model is
@@ -1178,7 +1189,9 @@ Before S1 leaves shadow, replayed with `slo-ttft-price` on, they must show:
    staircase keeps its rate-domain mark (a predicted rate at the target more
    than 10% above the measured one fails, more than 25% below fails); the
    two have the same direction, since an under-predicted TTFT is an
-   over-predicted rate.
+   over-predicted rate. **It currently fails:** on P2's goldens 9 of 14
+   light-load points at the sent spread are more than 10% under
+   ([P3 after P2](slo-capacity-planner-ttft.md#as-built-p3-after-p2)).
 5. **The mean residual.** The sum of the parts' means against the router's
    mean TTFT leaves a residual of at most **10 ms**. Source: none measured.
    The router's clock starts at the EPP's request headers, so the residual is

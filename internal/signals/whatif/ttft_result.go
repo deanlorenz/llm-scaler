@@ -47,7 +47,9 @@ const (
 	// UnvalidatedTTFT is on every TTFT figure. The model is built against
 	// closed-form queueing values and synthetic fleets only; the prefill-
 	// stress recording (P2) and the staircase run (M2) have not scored it,
-	// so no TTFT figure has been checked against a measured one.
+	// so no TTFT figure has been checked against a measured one. On P2's
+	// goldens it reads low at light load, up to about 34% under the router's
+	// p90: not a bound.
 	UnvalidatedTTFT Flag = "UnvalidatedTTFT"
 	// AssumedVP is V_P supplied by the caller (--assume-vp) rather than
 	// learned.

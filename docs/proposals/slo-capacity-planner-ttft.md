@@ -392,8 +392,9 @@ that is itself wrong (the exponential tail, Poisson arrivals, an omitted
 | `T_xfer` omitted (not collected) | Over-promises |
 | `V_P` from a lower bound | Under-promises |
 | A mix of prompt lengths priced at its mean on a convex prefill curve ([a limit of P3](#prefill-capacity)) | Over-promises: an even 8k/52k mix at a `V_P` read at 30k is priced 32% under its prefill time. The rescale ([after P2](#as-built-p3-after-p2)) moves `V_P` to the mean, not the mix, and `VPShapeMoved`, comparing means, does not flag it |
-| `V_P` rescaled along the curve with no fixed cost per step, `s(I_vp)/s(I)` | Under-promises for a longer prompt, at or below the true ratio whatever the step's fixed cost; held (not raised) for a shorter one |
-| The decode engine's TTFT added at its mean to every percentile | Over-promises at the tail by decode's own spread; on the P2 runs its p90 is 1.1–1.8 times its mean, read from coarse buckets |
+| `V_P` rescaled along the curve with no fixed cost per step, `s(I_vp)/s(I)` | Under-promises for a longer prompt only if P1's low-load `b` and `c` are the busy step's per-token cost, which is not measured: on run 2 at 37k it read 1.5% above the served `V_P` (over-promises), covered by the margin only from `ρ` 0.6. No-act (`VPScaledToPrompt`) until a second point confirms it. Held (not raised) for a shorter prompt |
+| The decode engine's TTFT added at its mean to every percentile | Over-promises at the tail by `(r − 1)·D`, `r` decode's p90 over its mean, 1.1–1.8 on the P2 runs (coarse buckets): up to about 20% of the router's p90 at `r` 1.8 (37k: about 127 ms of 0.795 s, 16%; 1k: about 10 ms of 0.047 s, 21%). At each level's own measured `r` it is less: 37k `r` 1.48, about 76 ms (10%); 1k `r` 1.54, about 7 ms (14%) |
+| The decode engine's TTFT held at the rate it was measured at | Either way: `RateForTTFT` extrapolates to other rates with `D` frozen, and decode's own queue at a higher rate is not in it |
 | `V_P` from the peak under a queue: a max over up to 358 overlapping 3-minute windows' minimums of a one-minute `rate()` | Over-promises, by about the noise of a one-minute rate |
 | `f` de-biased for Poisson arrivals, on a real imbalance | Over-promises: the busiest pod's share holds little chance excess, but the equal pods' excess is subtracted anyway. Four pods at 2:1:1:1 (`f` 1.6) read about 1.50 at 100 requests a pod (6% low) and about 1.57 at 1500 |
 | `f` from computed-token shares with variable prompts | Under-promises: a pod's token count varies about `√(1+Cs²)` times its request count, and only the request count's excess is subtracted. Four equal pods with `Cs²` = 1 read about 1.03 at 100 requests a pod |
@@ -670,8 +671,12 @@ and 159 ms at 37k.
   it high, so the term scales up for a longer prompt. For a shorter prompt
   it is held: the pull grows with the prompt, so a held term is also high.
   It is added at its mean to every percentile, which is the one part that
-  under-states the tail (decode's own p90 is 1.1–1.9 times its mean on
-  these runs).
+  under-states the tail, by `(r − 1)·D` with `r` decode's p90 over its mean
+  (1.1–1.8 on these runs): up to about 20% of the router's p90. `D` is also
+  held at the rate it was measured at, so `RateForTTFT` extrapolates with it
+  frozen. `Seconds` and `PromptTokens` travel as a pair from one cycle, and
+  `I_D` is `E[I_eff]` while the pull moves the whole prompt, prefix hits
+  included.
 - **The transfer is in it.** The decode engine's TTFT includes the KV pull,
   so `TransferSecondsPerToken` is not priced beside it, and `TransferOmitted`
   is not raised.
@@ -695,18 +700,21 @@ saturated.
   `V_P(I)/V_P(I_vp) = (h + s(I_vp))/(h + s(I))`, with `s(I) = b + c·I` and
   `h = s0/B ≥ 0` unknown. P3 takes `h = 0`:
   `V_P(I) = V_P(I_vp)·s(I_vp)/s(I)`. For `I > I_vp` that is at or below the
-  true ratio for any `h`, so `V_P` is rescaled down and flagged
-  `VPScaledToPrompt`. For `I < I_vp` it would over-read the gain, so `V_P`
+  true ratio for any `h` **only if P1's low-load `b` and `c` are the busy
+  step's per-token cost**, which is not measured; `V_P` is rescaled down and
+  flagged `VPScaledToPrompt`, which is on S2's no-act list until a second
+  measured point confirms it. For `I < I_vp` it would over-read the gain, so `V_P`
   is held at the learned figure, which the true one is at or above.
   `TestVPRescaleNeverAboveTheStepModel` checks both over `h` from 0 to
-  1e-5 s a token.
+  1e-5 s a token, inside the step model only.
 - **Its inputs** are P1's, through `PrefillFromEstimate`:
   `Estimate.VPPromptTokens` (`I_vp`) and, with `AModel` quadratic,
   `ASlope` and `ACurve` (`b`, `c`), into `Prefill.VPPromptTokens`,
   `CurveSlope` and `CurveCurvature`. On run 2 with the curve of runs 3 and
   4 pooled, the rescale reads 117,645 tok/s at 37k, 1.5% above the 115,953
-  served (`TestVPRescaleOnRun2At37k`). With the margin below, it is 3.6%
-  under.
+  served (`TestVPRescaleOnRun2At37k` holds the sign): an over-read the step
+  model says cannot happen. With the margin below it is 3.6% under, but the
+  margin is whole only from `ρ` 0.6, so below that the over-read stands.
 - **Fallback, with no curve** (the line, a refused fit, or no
   `VPPromptTokens`): `V_P` is held, and flagged `VPShapeMoved` when the mean
   prompt is more than `MaxVPShapeRatio` (1.2x) from `I_vp` either way, or
@@ -725,8 +733,11 @@ is 9.1% short at `ρ` 0.5, 10% at 0.55, 14% at 0.7 and 25% at 0.85.
   side, and S1 and S2 read the answer. The margin `m` = `DefaultVPMargin`,
   5%, is set by `PrefillFromEstimate`. It is ten times the 0.5% by which
   run 2's pod under a queue served away from busy-minute `V_P` at the prompt
-  it was learned on. A change of prompt length is the rescale's job, not
-  the margin's.
+  it was learned on. **It covers that measurement noise only, at the prompt
+  length `V_P` was learned at.** It does not cover an error in the rescale
+  or in pricing a prompt mix at its mean: an even 8k/52k mix is 32% under
+  its prefill time ([where it is most wrong](#where-it-is-most-wrong)),
+  six times the margin.
 - **Where:** none below `MarginRampStart` (`ρ₀` 0.5, the worst pod's
   utilization at the unmargined `V_P`), all of it from `MarginRampFull`
   (0.6), and linear between, so TTFT has no jump in the rate. The ramp

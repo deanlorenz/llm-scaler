@@ -116,7 +116,10 @@ func curveFleet(prompt float64) TTFTFleet {
 
 // V_P is rescaled along the curve to a longer prompt, V_P * s(I_vp)/s(I)
 // with s(I) = b + c*I, and held for a shorter one; the knee says which V_P
-// was priced.
+// was priced. A wiring check: it re-types the formula, so it shows the
+// rescale is applied where it should be and with the flag, not that the
+// formula is right (TestVPRescaleNeverAboveTheStepModel and
+// TestVPRescaleOnRun2At37k test that).
 func TestVPRescaledAlongTheCurve(t *testing.T) {
 	s := func(i float64) float64 { return 7.1815e-7 + 2.0280e-10*i }
 	for _, c := range []struct {
@@ -165,16 +168,20 @@ func TestVPRescaleNeverAboveTheStepModel(t *testing.T) {
 // Run 2's 37k level (P2, PR #482): the pod served 115,953 tok/s at a mean
 // prompt of 36,965 tokens, 14% under the busy-minute V_P of 134,775 read at
 // 31,816. Rescaled along the pooled curve, V_P reads 1.5% above what it
-// served (the rescale assumes no fixed cost per step), and with the margin
-// 3.6% under it.
+// served: an over-read, on the unsafe side, which the step model says cannot
+// happen (P1's low-load b and c are not exactly the busy step's cost). With
+// the margin it is 3.6% under. The test holds the sign and the size, so a
+// change that moves either says so.
 func TestVPRescaleOnRun2At37k(t *testing.T) {
 	fl := curveFleet(36965)
 	fl.Prefill.VPPromptTokens = 31816.49
 	scaled := mustAnswer(t, PrefillKnee(fl.Prefill)).Value * 36965
-	relNear(t, "V_P at 37k", scaled, 115953, 0.02)
+	if over := scaled/115953 - 1; !(over > 0.010 && over < 0.020) {
+		t.Errorf("rescaled V_P %g against the served 115,953: %+.4f, want the measured over-read of +1.0%% to +2.0%%", scaled, over)
+	}
 	fl.Prefill.VPMargin = DefaultVPMargin
-	if m := mustAnswer(t, PrefillKnee(fl.Prefill)).Value * 36965; !(m < 115953) {
-		t.Errorf("margined V_P %g not under the served 115,953", m)
+	if m := mustAnswer(t, PrefillKnee(fl.Prefill)).Value*36965/115953 - 1; !(m > -0.040 && m < -0.030) {
+		t.Errorf("margined V_P against the served 115,953: %+.4f, want -3.0%% to -4.0%%", m)
 	}
 	t.Logf("run 2, 37k: V_P rescaled %.0f tok/s against 115,953 served (ratio %.4f)", scaled, scaled/115953)
 	// Its rate, 3.137 r/s, is past that knee: refused, which S1 reads as
@@ -242,6 +249,14 @@ func TestVPMargin(t *testing.T) {
 			b, c := mustTTFT(t, ttftAt(t, margined, rho*knee, q)), mustTTFT(t, ttftAt(t, slow, rho*knee, q))
 			relNear(t, "whole margin", b.Seconds, c.Seconds, 1e-12)
 			relNear(t, "applied", b.VPMarginApplied, m, 1e-12)
+		}
+	}
+	// The floor has no queue, so it is at the unmargined V_P even where the
+	// whole margin is taken.
+	for _, q := range []float64{0, 0.9} {
+		b, a := mustTTFT(t, ttftAt(t, margined, 0.8*knee, q)), mustTTFT(t, ttftAt(t, base, 0, q))
+		if b.VPMarginApplied != m || b.Floor != a.Floor {
+			t.Errorf("q %g at rho 0.8: floor %g (margin %g), want the unmargined %g", q, b.Floor, b.VPMarginApplied, a.Floor)
 		}
 	}
 	mid := mustTTFT(t, ttftAt(t, margined, 0.55*knee, 0.9))
