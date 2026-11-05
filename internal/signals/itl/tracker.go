@@ -116,6 +116,12 @@ type Reading struct {
 	// names where it is priced (OneSidedAt, OneSidedTarget), the line
 	// through the default baseline that prices the same there.
 	PinnedAtLeastITL bool
+	// PinnedAtBPrior is set in its place when the admission states a prior
+	// (Admission.BPrior): Model priced what the line through the least
+	// at-cap ITL with intercept BPrior priced (priorLine), higher than the
+	// fit through the default baseline. Model is the line through the
+	// default baseline that prices the same where the line is priced.
+	PinnedAtBPrior bool
 	// AboveBandHeld is the above-band window's size after pruning; zero
 	// without the fallback.
 	AboveBandHeld int
@@ -427,7 +433,10 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 	}
 	m, heldA := c.model, c.model.A
 	if adm.OneSidedAboveKSat && !r.BaselineLearned {
-		m, heldA, r.PinnedAtLeastITL = oneSidedLine(c, baseline, adm)
+		var raised bool
+		m, heldA, raised = oneSidedLine(c, baseline, adm)
+		r.PinnedAtBPrior = raised && adm.BPrior > 0
+		r.PinnedAtLeastITL = raised && !(adm.BPrior > 0)
 	}
 	t.mu.Lock()
 	t.slopes[key] = heldSlope{a: heldA, fittedAt: now, args: adm.Args}
@@ -452,9 +461,18 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 // The price is the same, and the line is one every reader of a pinned fit
 // takes: A above zero (the line through the least ITL is flat on one reading,
 // and whatif.PriceTPOT and itl.ValidModel refuse a flat line), B the pin.
+//
+// With Admission.BPrior the line set against the fit is priorLine's, not
+// atLeastITLLine's.
 func oneSidedLine(c fitChoice, baseline float64, adm Admission) (m Model, heldA float64, raised bool) {
 	m, heldA = c.model, c.model.A
-	lo, ok := atLeastITLLine(c.read)
+	var lo Model
+	var ok bool
+	if adm.BPrior > 0 {
+		lo, ok = priorLine(c.read, adm.BPrior)
+	} else {
+		lo, ok = atLeastITLLine(c.read)
+	}
 	if !ok || !adm.pricesHigher(lo, m) {
 		return m, heldA, false
 	}
@@ -502,6 +520,27 @@ func atLeastITLLine(obs []Observation) (Model, bool) {
 		return Model{}, false
 	}
 	return fitAboveBand(past, aboveBandB(past))
+}
+
+// priorLine is the line with intercept bPrior through the reading with the
+// least ITL among obs's readings at a k of at least DefaultKSat, its slope
+// floored at 0 (Admission.BPrior). ok is false when there is no such
+// reading with a finite positive ITL.
+func priorLine(obs []Observation, bPrior float64) (Model, bool) {
+	var least Observation
+	found := false
+	for _, o := range obs {
+		if !atOrPastKSat(o.K) || math.IsInf(o.K, 0) || !(o.ITLSec > 0) || math.IsInf(o.ITLSec, 0) {
+			continue
+		}
+		if !found || o.ITLSec < least.ITLSec {
+			least, found = o, true
+		}
+	}
+	if !found {
+		return Model{}, false
+	}
+	return Model{A: max(0, (least.ITLSec-bPrior)/least.K), B: bPrior}, true
 }
 
 // atOrPastKSat reports whether a reading at fill k lies at or past
@@ -562,8 +601,9 @@ type Refitted struct {
 	// PinnedAtLeastITL is set when the pinned fit was priced one-sided
 	// (oneSidedLine; Reading.PinnedAtLeastITL): Model prices what the line
 	// through the least ITL of Read's readings at or past DefaultKSat
-	// priced.
-	PinnedAtLeastITL bool
+	// priced. PinnedAtBPrior is the same with a prior (Admission.BPrior;
+	// Reading.PinnedAtBPrior).
+	PinnedAtLeastITL, PinnedAtBPrior bool
 }
 
 // Refit reruns Observe's choice of fit (chooseFit) on readings a key's
@@ -578,7 +618,7 @@ type Refitted struct {
 // oneSided, when its OneSidedAboveKSat is set, prices the pinned fit
 // one-sided as Observe does under that admission while the key has no
 // learned B: the caller passes it for such a key only, with baseline
-// DefaultBaselineSec. Only the one-sided fields are read (OneSidedAt,
+// DefaultBaselineSec. Only the one-sided fields are read (OneSidedAt, BPrior,
 // OneSidedTarget, and MinK and MaxK with a target). The zero Admission is
 // the pinned fit alone. Without it a refit of a line Observe priced
 // one-sided pins the default B alone, and prices under the line the
@@ -590,7 +630,10 @@ func Refit(obs, steady []Observation, baseline float64, minSettled int, oneSided
 	c := chooseFit(obs, steady, ready(steady, DefaultMinSamples, DefaultMinKSpread), baseline, minSettled)
 	out := Refitted{Model: c.model, Tier: c.tier, Hold: c.hold, Read: c.read}
 	if oneSided.OneSidedAboveKSat && c.tier == TierPinnedB {
-		out.Model, _, out.PinnedAtLeastITL = oneSidedLine(c, baseline, oneSided)
+		var raised bool
+		out.Model, _, raised = oneSidedLine(c, baseline, oneSided)
+		out.PinnedAtBPrior = raised && oneSided.BPrior > 0
+		out.PinnedAtLeastITL = raised && !(oneSided.BPrior > 0)
 	}
 	return out
 }

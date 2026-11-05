@@ -2694,122 +2694,157 @@ Built on main after #471 (602054e98). Two switches, on by the constructors:
 rule in I (`itl.Admission.OneSidedAboveKSat`) for its own line; no code is
 copied.
 
-**Where each line is priced.** The throughput line prices at kSat, and 4b-3
-compared the two lines there. The saturation line derives mu at its pricing
-k (`pricingK`, 0.68 with the default thresholds), and the slo line at the
-fill where it meets the TPOT target (`PriceTPOT`). I gained two fields, so
-the rule judges each line where it is priced:
+**The rule: B bounded by a prior.** While B is unlearned and the window
+holds readings at k >= kSat, a second line is formed: intercept a stated
+upper prior on B, `BPrior`, through the reading with the least ITL among
+those, its slope solved through it, `A = max(0, (ITL_r - BPrior)/k_r)`
+(`itl.priorLine`). The line is priced on the higher of it and the fit
+through the default B, where the line is priced. Every reading is at least
+`B + A k`, so at a fill k under `k_r` the prior's line is over the truth by
+at least `(BPrior - B)(1 - k/k_r)`: it never prices under the truth while
+the true B is at most the prior, and it over-prices by the prior's error.
+A true B above the prior is under-priced, by at most `(B - BPrior)(1 -
+k/k_r)`.
 
-- `Admission.OneSidedAt`: the fill to compare at, and to keep the held A at.
-  The saturation analyzer sets its pricing k.
-- `Admission.OneSidedTarget`: a target ITL. Each line is judged at the fill
-  where it meets it, clamped to the band (`pricedFill`), and the lower fill
-  wins. The slo analyzer sets its TPOT target.
+A first build, reviewed and replaced, used 4b-3's line through the least
+ITL. That bound needs no prior, but at the cap the line is nearly flat at
+the cap's ITL. Read at the saturation line's pricing k it over-priced by 8
+to 33 % on the grid, and the slo line abstained on every point. The prior
+trades that provable bound for one that holds while `B <= BPrior`.
 
-The default-B error is larger at 0.68 than at kSat, since the term is
-`(B0 - B)(1 - k/k_cap)`. When an admission names its price, the chosen line
-is returned through the default B, at the A that prices there what the line
-through the least ITL did. That line is often flat (A 0 on readings at one
-ITL), and a flat line is refused by `PriceTPOT`, `ValidModel` and line
-sharing. The held A is that same A, so a hold prices the same. The
-throughput line passes neither field and is unchanged: its goldens and its
-13 at-cap known-truth cases hold.
+**The prior.** `itl.BPrior`: the largest learned B across the analyzer's
+keys (the saturation analyzer also reads its published lines, less those
+through the default B), else `itl.DefaultBPrior`, 30 ms. That is the top of
+the grid the rule was measured on, so the grid's worst case is priced
+exactly. The ITL policy (`analyzerTuning.itlBand`, `steadyGate`) has no
+natural place for an intercept, so the prior is a constant, not a knob.
+
+**Where each line is priced.** I gained `Admission.OneSidedAt` (the fill to
+compare at and keep the held A at; saturation sets its pricing k, 0.68 by
+default) and `Admission.OneSidedTarget` (a target ITL: each line is judged
+at the fill where it meets it, clamped to the band, and the lower fill
+wins; slo sets its TPOT target), with `Admission.BPrior`. When an admission
+names its price, the chosen line is returned through the default B at the A
+that prices there what the prior's line did, so `PriceTPOT`, `ValidModel`
+and line sharing read it as any pinned fit, and the held A is that A. The
+throughput line sets none of the three and is unchanged.
+
+**Flag.** `itl.Reading.PinnedAtBPrior` (and `Refitted.PinnedAtBPrior`);
+`itl-fit` logs `pinnedAtBPrior`, `slo-variant` logs `linePinnedAtBPrior`.
 
 **Bias, saturation line at k 0.68** (`TestITLOneSided_TheBiasTableAtThePricingK`,
 three replicas at a cap of 64 at k_cap ± 0.01, 24 cycles, through `Analyze`;
-noise: 2 %, autocorrelated, 20 seeds):
+noise 2 %, autocorrelated, 20 seeds). "Bound" is the prior's line worked by
+hand from the least reading; "on" equals it to 1e-6 on every row:
 
-| A | B | k_cap | off (the default B) | derived term | on | on, 2 % noise: mean [least, most] |
-| --- | --- | --- | --- | --- | --- | --- |
-| 0.05 | 10 ms | 0.97 | -2.72 % | -2.72 % | +32.65 % | +31.49 % [+29.69, +33.19] |
-| 0.05 | 30 ms | 0.97 | -11.22 % | -11.21 % | +22.45 % | +21.32 % [+19.64, +22.95] |
-| 0.01 | 20 ms | 0.97 | -15.64 % | -15.62 % | +10.72 % | +9.61 % [+8.08, +11.17] |
-| 0.01 | 30 ms | 0.97 | -19.52 % | -19.50 % | +7.81 % | +6.70 % [+5.21, +8.24] |
+| prior | A | B | k_cap | off (the default B) | derived term | on | bound | on, 2 % noise: mean [least, most] |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 30 ms | 0.05 | 10 ms | 0.97 | -2.72 % | -2.72 % | +13.26 % | +13.26 % | +10.44 % [+8.14, +12.03] |
+| 30 ms | 0.05 | 30 ms | 0.97 | -11.22 % | -11.21 % | +0.00 % | +0.00 % | -2.94 % [-5.03, -1.14] |
+| 30 ms | 0.01 | 20 ms | 0.97 | -15.64 % | -15.62 % | +11.94 % | +11.94 % | +11.94 % [+11.94, +11.94] |
+| 30 ms | 0.01 | 30 ms | 0.97 | -19.52 % | -19.50 % | +0.00 % | +0.00 % | -2.64 % [-4.42, -1.00] |
+| 30 ms | 0.01 | **40 ms** | 0.97 | -21.75 % | -21.72 % | **-6.23 %** | -6.23 % | -8.99 % [-10.74, -7.22] |
+| 20 ms (learned) | 0.05 | 10 ms | 0.97 | -2.72 % | -2.72 % | +6.63 % | +6.63 % | +3.71 % [+1.34, +5.40] |
+| 20 ms (learned) | 0.01 | 20 ms | 0.97 | -15.64 % | -15.62 % | +0.00 % | +0.00 % | -2.71 % [-4.54, -1.03] |
+| 20 ms (learned) | 0.01 | **30 ms** | 0.97 | -19.52 % | -19.50 % | **-7.93 %** | -7.93 % | -10.76 % [-12.55, -8.93] |
 
-Off equals the derived term to 0.05 points at every point of the grid (the
-test holds it to 0.1); I's own table (`TestOneSidedAt_ThePricingKIsAtOrAboveTheTruth`)
-adds k_cap 0.92. On is never under the truth, with or without noise. It is
-far over: the line through the least ITL is flat, or nearly so, and read at
-0.68 it prices the cap's ITL. That over-orders (more replicas) until B is
-learned, which a full fit in the band ends.
+Without noise: no under-price anywhere B is at most the prior; the worst
+over-price on the grid is +13.26 % (A 0.05, B 10 ms), against +32.65 % with
+the least-ITL line. At A 0.01, B 20 ms the least at-cap ITL (29.6 ms) is
+under the 30 ms prior, the slope floors at 0, and the price is the prior
+itself: +11.94 %, bounded. A B above the prior is under-priced by the bound,
+and by far less than the default B alone (-6.23 % against -21.75 %).
+
+With noise, where B equals the prior the margin is zero, and the line,
+pinned through the least of the noisy readings, sits under the truth by
+about the noise: the mean is 2.6 to 2.9 % under, the worst of 20 seeds 5.0
+%. The test holds the mean to known truth's 5 % and the worst seed to twice
+that. This is weaker than "never under with noise": a prior set exactly at
+the true B leaves no room for the gauge.
 
 **Bias, slo line at the target** (`TestOneSided_TheBiasTableAtTheTarget`,
-the target the true line meets at k 0.5):
+the target the true line meets at k 0.5; noise 2 %, 20 seeds):
 
-| A | B | k_cap | fill off | fill on | 2 % noise, 20 seeds |
-| --- | --- | --- | --- | --- | --- |
-| 0.05 | 10 ms | 0.97 | 0.5358 | infeasible | infeasible on 20 of 20 |
-| 0.05 | 30 ms | 0.97 | 0.6557 | infeasible | infeasible on 20 of 20 |
-| 0.01 | 20 ms | 0.97 | 0.7779 | infeasible | infeasible on 20 of 20 |
-| 0.01 | 30 ms | 0.97 | 0.8000 | infeasible | infeasible on 20 of 20 |
+| prior | A | B | k_cap | fill off | fill on | the prior's line | on, 2 % noise: [least, most] |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 30 ms | 0.05 | 10 ms | 0.97 | 0.5358 | 0.1714 | 0.1714 | [0.1762, 0.1934] |
+| 30 ms | 0.05 | 30 ms | 0.97 | 0.6557 | 0.5000 | 0.5000 | [0.5109, 0.5523] |
+| 30 ms | 0.01 | 20 ms | 0.97 | 0.7779 | infeasible | infeasible | infeasible on 20 of 20 |
+| 30 ms | 0.01 | 30 ms | 0.97 | 0.8000 | 0.5000 | 0.5000 | [0.5287, 0.6573] |
+| 30 ms | 0.01 | **40 ms** | 0.97 | 0.8000 | **0.7347** | 0.7347 | [0.7600, 0.8000] |
+| 20 ms (learned) | 0.05 | 10 ms | 0.97 | 0.5358 | 0.3789 | 0.3789 | [0.3867, 0.4148] |
+| 20 ms (learned) | 0.01 | 20 ms | 0.97 | 0.7779 | 0.5000 | 0.5000 | [0.5212, 0.6091] |
 
-Off meets the target at a higher fill than the truth's 0.5 on every point:
-too few replicas. On, the line through the least ITL lies at the cap's ITL,
-above every target the true line meets inside the band, so no fill in the
-band is one-sided, and the variant reads `infeasible` (the analyzer
-abstains, never caps). That is the honest answer on readings at the cap
-alone: they say nothing about the fill the target is met at, only that it
-is under the cap's. With readings in the band too, the fit through the
-default B is the higher line and prices as before.
+Off meets the target above the truth's fill (0.5) on every point: too few
+replicas. On, the fill is exactly the prior's line's: at or under 0.5 for
+every B at or under the prior, without noise. The slo line now prices where
+the first build abstained, and abstains on one point only, A 0.01 B 20 ms,
+where the target (25 ms) is under the 30 ms prior, so even the prior's line
+is past it across the band. The rule abstains there rather than price a
+fill it cannot back. A B above the prior meets the target above the truth's
+fill, by the bound: 0.7347 against 0.8 off. With noise and B equal to the
+prior, the fill is up to 0.657 against 0.5: the same zero margin as above,
+in fill.
 
-**Tests.** I: the two tables above, on six points; noise within ε; the held
-A keeps the price; Refit prices the line Observe did; and a window where the
-two lines cross between 0.68 and kSat is priced by the higher line at 0.68
-(`TestOneSidedAt_TheLinesAreComparedAtThePricingK`). D and slo, each through
-the analyzer and with the switch off as the control: a learned B ends the
-rule and a forget brings it back (D: `ForgetVariant`, which drops the
-capacity record too, so the test files it again as the engine does; slo:
-`ForgetVariant`); the hold keeps the price and ends with it (D: last fit at
-34m, held to 1h34m, silent from 1h34m15s, at 1 h `BucketRetention`; slo: the
-same at 1 h `slopeHoldFor`, the held line infeasible as the live one was).
-`itl-fit` logs `pinnedAtLeastITL` (`TestITLOneSided_TheFitLineSaysSo`); the
-slo `slo-variant` line logs `linePinnedAtLeastITL`.
+**Tests.** I (`one_sided_at_test.go`): the saturation table at the 30 ms
+prior on six points, off equal to the derived term and on equal to the
+bound; a B above the prior; noise within ε; the slo target table, feasible
+exactly where the prior's line is; the held A; the two lines compared at the
+pricing k where they cross before kSat; `priorLine` through the least
+reading, floored, past kSat only; `BPrior` the largest learned B; and Refit
+prices the line Observe did. D and slo, each through the analyzer with the
+switch off as the control: the tables above; a learned B ends the rule and a
+forget brings it back (at a learned prior of 30 ms over a true B of 20 ms, so
+a raise after learning would show); the hold keeps the price and ends with it
+(last fit at 34m, held to 1h34m, silent from 1h34m15s at a 1 h hold, on both
+lines); `itl-fit` logs `pinnedAtBPrior`.
 
-**The what-if gap, closed.** `itl.Refit` took no admission, so a band
-refitted a one-sided line through the default B alone, under the line the
-controller priced. It now takes one, and uses only its one-sided fields.
-`whatif.Refit.OneSided` carries it (`band.go`), and `learnreplay` passes the
-saturation analyzer's (`SaturationAnalyzer.ITLOneSided`) for a pinned line
-through the default B (`state.go`; `VariantState.OneSided`, which
-`cmd/whatif` hands to `BootstrapLines`). On an at-cap window the band
-prices the controller's line, 0.03967 s at k 0.68 to a 0.02 % spread,
-against 0.02961 s, under the truth's 0.03680 s, without it
-(`TestBootstrapPricesTheOneSidedLineTheControllerDid`). On e1 at cycle 60,
-replayed (`StateAt`), the line priced 0.07441 s at k 0.68; its band is
-[0.06463, 0.07441] s with the admission and [0.06348, 0.06518] s without,
-wholly under the line. On e1-tuned at cycle 60: 0.08677 s, band [0.06661,
-0.08677] s against [0.06606, 0.06808] s.
+**The what-if gap, closed.** `itl.Refit` takes an `itl.Admission`, of which
+it reads the one-sided fields, `BPrior` included. `whatif.Refit.OneSided`
+carries it (`band.go`), and `learnreplay` passes the saturation analyzer's
+(`SaturationAnalyzer.ITLOneSided`) for a pinned line through the default B
+(`state.go`; `VariantState.OneSided`, which `cmd/whatif` hands to
+`BootstrapLines`). On an at-cap window (A 0.05, B 10 ms) the band prices the
+controller's line, 0.04983 s at k 0.68, against 0.04280 s, under the
+truth's 0.04400 s, without it
+(`TestBootstrapPricesTheOneSidedLineTheControllerDid`). Replayed
+(`StateAt`) at cycle 60: e1's line 0.06542 s has band [0.06463, 0.06542]
+with the admission, [0.06348, 0.06518] without; e1-tuned's 0.07479 s has
+[0.06661, 0.07479] against [0.06606, 0.06808].
 
 **Goldens.** The saturation switch alone, against all off, moves e1 and
-e1-tuned, the two cluster recordings whose decode replica sits at its
-stated cap with no B learned: `lines.csv`, `variant-capacities.csv` (104
-and 191 rows: the line, A 0.0856 to 0.1006 and 0.0889 to 0.1188 through the
-default B) and `results.csv` (77 and 142 rows: the demand the floor prices
-from mu, which falls from 6.38 to 5.51 and from 6.17 to 4.72 req/s). On
-e1-tuned demand rises on 101 rows, by up to 29.9 %, and falls on 41, by at
-most 0.2 %. On e1 it rises on 33 rows, by up to 20.8 %, and falls on 44, by
-at most 4.4 %. On the rows checked, those falls come with the lower derived
-mu and nothing else in the variant's row moving, so they reach the demand
-through a term that reads mu; they are not traced further here. The
-per-replica capacity moves on no row. The slo switch
+e1-tuned: `lines.csv` and `variant-capacities.csv` (92 and 60 rows: the
+line, first moved row A 0.0856 to 0.0874 and 0.0889 to 0.1012 through the
+default B), and `results.csv` (70 and 32 rows: the demand the floor prices
+from mu, which falls from 6.38 to 6.26 and from 6.17 to 5.48 req/s on those
+rows). Demand rises on 33 rows of e1 (by up to 4.55 %) and falls on 37 (by
+at most 0.04 %); on e1-tuned it rises on 1 row (11.93 %) and falls on 31 (by
+at most 0.08 %). The per-replica capacity moves on no row. The slo switch
 moves nothing: no committed recording runs the slo analyzer on a replica at
 a stated cap. It is held by its unit tests (`heldBy`).
 
-**Mutants** (each alone; all killed):
+**Mutants** (each alone; all 25 killed):
 
 | mutant | what fails |
 | --- | --- |
-| the rule never raises | every new test, 4b-3's two in I and the band test |
-| one-sided with a learned B | `TestITLOneSided_ALearnedBEndsItAndAForgetBringsItBack`, the slo twin, the crossing test |
+| the rule never raises | the I tables, every D and slo test, the band test |
+| one-sided with a learned B | `TestITLOneSided_ALearnedBEndsItAndAForgetBringsItBack`, `TestOneSided_ALearnedBEndsItAndAForgetBringsItBack` |
 | the held A not adjusted | the I tables, both bias tables, the held tests |
-| the chosen line kept flat (not through the default B) | the I tables, the held-slope test, the D learn/forget test |
-| compared at kSat, not where the line is priced | `TestOneSidedAt_TheLinesAreComparedAtThePricingK` |
-| the held A kept at kSat | the crossing test, the I table, every D test |
-| the higher fill wins at a target | the I target table, Refit, every slo test |
-| the saturation switch ignored | every D test |
-| the saturation line judged at kSat | the D learn/forget and hold tests |
-| the slo switch ignored | every slo test |
-| the slo target not passed | the slo hold test |
+| the chosen line returned as itself, not through the default B | the I tables, the held-slope test, the D tests |
+| the prior ignored (the least-ITL line) | the I tables, every D and slo bias test, the band test |
+| the prior line's slope not floored | `TestBPrior_ThePriorLineIsThroughTheLeastReading`, the bias tables |
+| the prior line through the most ITL | the I tables, the bias tables |
+| the prior line reads readings under kSat | `TestBPrior_ThePriorLineIsThroughTheLeastReading` |
+| `BPrior` takes the least learned B | `TestBPrior_IsTheLargestLearnedB` |
+| the constant prior not 30 ms | the bias tables |
+| saturation ignores learned Bs | `TestITLOneSided_TheBiasTableAtThePricingK` (learned rows) |
+| slo ignores learned Bs | `TestOneSided_TheBiasTableAtTheTarget` (learned rows) |
+| `PinnedAtBPrior` never set | the I tables, `TestITLOneSided_TheFitLineSaysSo`, the slo tests, the band test |
+| compared at kSat, not where the line is priced | `TestBPrior_TheLinesAreComparedAtThePricingK` |
+| the held A kept at kSat | the crossing test, the I table, the D tests |
+| the higher fill wins at a target | the I target table, Refit, the slo tests |
+| the saturation switch ignored; priced at kSat | the D tests |
+| the slo switch ignored; target not passed | the slo tests |
 | Refit ignores the admission | the Refit test, the band test, `TestRefitFindsAOneSidedLine` |
 | the band drops the admission | the band test |
 | StateAt passes no admission; passes it for a learned B; keeps none for the bands | `TestRefitFindsAOneSidedLine` |
@@ -2817,8 +2852,7 @@ a stated cap. It is held by its unit tests (`heldBy`).
 **Not in this PR: the throughput line's rollout guard.** Still true after
 4b-3: the saturation line empties a variant's rows while its scale target
 rolls out (`rec.InRollout()`, `D/analyze.go`), and the throughput line has
-no such guard. Filed as its own issue (text in the PR's report), as the
-round-1 review planned.
+no such guard. Left for an issue of its own, as the round-1 review planned.
 
 #### 5b as built
 

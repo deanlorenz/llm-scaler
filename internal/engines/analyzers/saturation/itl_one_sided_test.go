@@ -92,7 +92,7 @@ func lineOf(t *testing.T, r *restartRig, rows []domain.ReplicaMetrics) (itl.Mode
 }
 
 // The itl-fit line says when the line was priced one-sided
-// (pinnedAtLeastITL), and not once B is learned or with the switch off, so
+// (pinnedAtBPrior), and not once B is learned or with the switch off, so
 // an operator can tell it from the default pin, which shows the same B.
 func TestITLOneSided_TheFitLineSaysSo(t *testing.T) {
 	l := capTruth{0.01, 0.030, 0.97}
@@ -103,8 +103,8 @@ func TestITLOneSided_TheFitLineSaysSo(t *testing.T) {
 		r.cycleCtx(ctx, atCapRows(l, [3]float64{}), decodeVariants("v"))
 		fits := logs.FilterMessage("itl-fit").All()
 		require.NotEmpty(t, fits)
-		v, ok := fits[len(fits)-1].ContextMap()["pinnedAtLeastITL"].(bool)
-		require.True(t, ok, "itl-fit carries no pinnedAtLeastITL")
+		v, ok := fits[len(fits)-1].ContextMap()["pinnedAtBPrior"].(bool)
+		require.True(t, ok, "itl-fit carries no pinnedAtBPrior")
 		return v
 	}
 	require.True(t, said(nil), "on: the line priced one-sided and the log says not")
@@ -122,46 +122,97 @@ func lineAfter(t *testing.T, r *restartRig, n int, rows func(c int) []domain.Rep
 }
 
 // oneSidedErr is the error, in percent, of the line priced on truth l at
-// the pricing k after 24 cycles, the readings scaled by noise per cycle.
-func oneSidedErr(t *testing.T, switches map[string]bool, l capTruth, noise func(c int) [3]float64) float64 {
+// the pricing k after 24 cycles, the readings scaled by noise per cycle;
+// prime, when set, edits the rig before its first cycle.
+func oneSidedErr(t *testing.T, switches map[string]bool, prime func(*restartRig), l capTruth,
+	noise func(c int) [3]float64) float64 {
 	t.Helper()
 	r := oneSidedRig(t, switches)
+	if prime != nil {
+		prime(r)
+	}
 	m := lineAfter(t, r, 24, func(c int) []domain.ReplicaMetrics { return atCapRows(l, noise(c)) })
 	require.False(t, m.IsZero(), "%s: no line", l)
 	truth := l.itl(oneSidedK)
 	return 100 * (m.ITLAt(oneSidedK) - truth) / truth
 }
 
-// The bias table at the saturation line's pricing k: each truth of the grid,
-// a variant whose three replicas sit at their stated cap, no B learned. Off
-// (the switch off, the negative control) the line through the default B is
-// under the truth by the derived term (B0 - B)(1 - k/kbar), which the
-// pricing k (0.68) makes larger than at kSat; on, at or above it without
-// noise, and with 2 % autocorrelated noise within known truth's 5 % on the
-// worst of 20 seeds.
-func TestITLOneSided_TheBiasTableAtThePricingK(t *testing.T) {
+// priorBound is the price, in percent over the truth, the prior's line gives
+// at the pricing k on readings without noise: BPrior plus the least reading's
+// excess over it, scaled from its fill k_r to the pricing k (floored at 0),
+// against the truth. The least reading is the replica at k_cap - 0.01.
+func priorBound(l capTruth, bPrior float64) float64 {
+	kr := l.kCap - 0.01
+	p := bPrior + max(0, l.itl(kr)-bPrior)*oneSidedK/kr
+	return 100 * (p - l.itl(oneSidedK)) / l.itl(oneSidedK)
+}
+
+// learnedPrior primes a rig with a sibling key's learned B: the largest
+// learned B is the prior (itl.BPrior), not itl.DefaultBPrior.
+func learnedPrior(b float64) func(*restartRig) {
+	return func(r *restartRig) { r.a.itlTracker.SetBaseline("test-ns|test-model|sibling|H200|1", b) }
+}
+
+// biasRow measures one truth three ways, prints its row, and returns on
+// without noise, and the mean and the least of the noisy seeds.
+func biasRow(t *testing.T, l capTruth, prime func(*restartRig), bPrior float64) (on, mean, least float64) {
+	t.Helper()
 	const seeds = 20
 	clean := func(int) [3]float64 { return [3]float64{} }
-	t.Log("| A | B | k_cap | off | derived | on | on, 2 % noise: mean [least, most] |")
+	off := oneSidedErr(t, map[string]bool{SwitchITLOneSidedAtCap: false}, prime, l, clean)
+	on = oneSidedErr(t, nil, prime, l, clean)
+	want := 100 * (itl.DefaultBaselineSec - l.b) * (1 - oneSidedK/l.kCap) / l.itl(oneSidedK)
+	var sum, lo, hi = 0.0, math.Inf(1), math.Inf(-1)
+	for seed := uint64(1); seed <= seeds; seed++ {
+		rnd := learnertest.Rand(seed)
+		n := [3][]float64{learnertest.ARNoise(rnd, 24, 0.02, 0.5), learnertest.ARNoise(rnd, 24, 0.02, 0.5),
+			learnertest.ARNoise(rnd, 24, 0.02, 0.5)}
+		e := oneSidedErr(t, nil, prime, l, func(c int) [3]float64 { return [3]float64{n[0][c], n[1][c], n[2][c]} })
+		sum += e
+		lo, hi = min(lo, e), max(hi, e)
+	}
+	t.Logf("| %.0f ms | %.2f | %.0f ms | %.2f | %+.2f %% | %+.2f %% | %+.2f %% | %+.2f %% | %+.2f %% [%+.2f, %+.2f] |",
+		1000*bPrior, l.a, 1000*l.b, l.kCap, off, want, on, priorBound(l, bPrior), sum/seeds, lo, hi)
+	require.InDelta(t, want, off, 0.1, "negative control, %s: off is not the derived term", l)
+	require.Negative(t, off, "negative control, %s: off did not price under the truth", l)
+	require.InDelta(t, priorBound(l, bPrior), on, 1e-6, "%s: on is not the prior's bound", l)
+	return on, sum / seeds, lo
+}
+
+// The bias table at the saturation line's pricing k (0.68): each truth of
+// the grid, a variant whose three replicas sit at their stated cap, no B
+// learned on its key, priced at the prior itl.DefaultBPrior (30 ms), and at
+// a learned prior (a sibling's B of 20 ms). Off (the switch off, the
+// negative control) the line through the default B is under the truth by
+// the derived term (B0 - B)(1 - k/kbar). On, the price is exactly the
+// prior's line (priorBound): never under the truth while B is at most the
+// prior, without noise; over by the prior's error, at most +13.26 % on the
+// grid. With 2 % autocorrelated noise the line is pinned through the least
+// of the noisy readings, which sits under the true line by about the noise:
+// where B is the prior the margin is zero, and the mean is 2.6 to 2.9 %
+// under the truth, the worst of 20 seeds 5.0 %. The mean is held to known
+// truth's 5 %, the worst seed to twice that. A
+// true B above the prior (40 ms at the 30 ms prior, 30 ms at the learned
+// 20 ms) is under by the bound, (B - BPrior)(1 - k/k_r).
+func TestITLOneSided_TheBiasTableAtThePricingK(t *testing.T) {
+	t.Log("| prior | A | B | k_cap | off | derived | on | bound | on, 2 % noise: mean [least, most] |")
 	for _, l := range capTruths {
-		off := oneSidedErr(t, map[string]bool{SwitchITLOneSidedAtCap: false}, l, clean)
-		on := oneSidedErr(t, nil, l, clean)
-		want := 100 * (itl.DefaultBaselineSec - l.b) * (1 - oneSidedK/l.kCap) / l.itl(oneSidedK)
-		var sum, lo, hi = 0.0, math.Inf(1), math.Inf(-1)
-		for seed := uint64(1); seed <= seeds; seed++ {
-			rnd := learnertest.Rand(seed)
-			n := [3][]float64{learnertest.ARNoise(rnd, 24, 0.02, 0.5), learnertest.ARNoise(rnd, 24, 0.02, 0.5),
-				learnertest.ARNoise(rnd, 24, 0.02, 0.5)}
-			e := oneSidedErr(t, nil, l, func(c int) [3]float64 { return [3]float64{n[0][c], n[1][c], n[2][c]} })
-			sum += e
-			lo, hi = min(lo, e), max(hi, e)
-		}
-		t.Logf("| %.2f | %.0f ms | %.2f | %+.2f %% | %+.2f %% | %+.2f %% | %+.2f %% [%+.2f, %+.2f] |",
-			l.a, 1000*l.b, l.kCap, off, want, on, sum/seeds, lo, hi)
-		require.InDelta(t, want, off, 0.1, "negative control, %s: off is not the derived term", l)
-		require.Negative(t, off, "negative control, %s: off did not price under the truth", l)
+		on, mean, lo := biasRow(t, l, nil, itl.DefaultBPrior)
 		require.GreaterOrEqual(t, on, -1e-9, "%s: on priced under the truth without noise", l)
-		require.GreaterOrEqual(t, lo, 100*(1/1.05-1), "%s: the worst noisy seed is past epsilon", l)
+		require.LessOrEqual(t, on, 13.3, "%s: on over-priced past the grid's worst", l)
+		require.GreaterOrEqual(t, mean, 100*(1/1.05-1), "%s: the noisy mean is past epsilon", l)
+		require.GreaterOrEqual(t, lo, 100*(1/1.10-1), "%s: the worst noisy seed is past twice epsilon", l)
+	}
+	above := capTruth{0.01, 0.040, 0.97}
+	on, _, _ := biasRow(t, above, nil, itl.DefaultBPrior)
+	require.Negative(t, on, "B above the prior: not under the truth")
+	for _, l := range []capTruth{{0.05, 0.010, 0.97}, {0.01, 0.020, 0.97}, {0.01, 0.030, 0.97}} {
+		on, _, _ := biasRow(t, l, learnedPrior(0.020), 0.020)
+		if l.b <= 0.020 {
+			require.GreaterOrEqual(t, on, -1e-9, "learned prior, %s: on priced under the truth", l)
+		} else {
+			require.Negative(t, on, "learned prior, %s: B above the prior is not under", l)
+		}
 	}
 }
 
@@ -170,9 +221,13 @@ func TestITLOneSided_TheBiasTableAtThePricingK(t *testing.T) {
 // stepping through the band teach B by a full fit, the pinned fit through it
 // prices the same capped readings; once the variant is forgotten
 // (ForgetVariant), B is unlearned again and the one-sided price comes back.
+//
+// The truth's B (20 ms) is under the prior, a sibling's learned 30 ms, so
+// the prior's line is above the truth and a raise after B is learned shows.
 func TestITLOneSided_ALearnedBEndsItAndAForgetBringsItBack(t *testing.T) {
-	l := capTruth{0.01, 0.030, 0.97}
+	l := capTruth{0.05, 0.020, 0.97}
 	r := oneSidedRig(t, nil)
+	learnedPrior(0.030)(r)
 	key := r.a.itlWindowKey("test-ns", "test-model", "v", "H200", 1)
 	capOnly := func(int) []domain.ReplicaMetrics { return atCapRows(l, [3]float64{}) }
 	oneSided := func(m itl.Model) bool { return m.B == itl.DefaultBaselineSec && m.ITLAt(oneSidedK) >= l.itl(oneSidedK) }

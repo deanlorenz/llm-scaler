@@ -96,64 +96,116 @@ func (r *settleRig) cycleAt(rows []domain.ReplicaMetrics, target float64) itl.Re
 	return d.line
 }
 
-// The bias table at the slo line's price, the fill where it meets the TPOT
-// target, against the truth's (0.5). Off (the negative control) the line
-// through the default B meets the target at a higher fill than the truth,
-// every point of the grid: too few replicas. On, no fill above the truth's
-// is ever priced, without noise or with 2 % autocorrelated noise on any of
-// 20 seeds. On readings at the cap alone that is no fill at all: the line
-// through the least ITL lies at the cap's ITL, above every target the true
-// line meets inside the band, so no fill in the band is one-sided, and the
-// line is infeasible (the analyzer abstains, never caps). A NaN fill below
-// is that.
-func TestOneSided_TheBiasTableAtTheTarget(t *testing.T) {
+// priorFill is the fill, in the default band, where the prior's line meets
+// l's target, on readings without noise: the line with intercept bPrior
+// through the least reading (k_cap - 0.01), its slope floored at 0; NaN where
+// it meets it nowhere in the band (the analyzer abstains), which is where the
+// prior's error over B is larger than the target's headroom over B.
+func priorFill(l sloCapTruth, bPrior float64) float64 {
+	kr := l.kCap - 0.01
+	m := itl.Model{A: max(0, (l.itl(kr)-bPrior)/kr), B: bPrior}
+	p := whatif.PriceTPOT(whatif.DefaultBand(), m, l.target())
+	if !p.OK || !p.Feasible {
+		return math.NaN()
+	}
+	return p.Fill
+}
+
+// sloRow measures one truth on and off, with and without noise, prints its
+// row and holds it: off above the truth's fill (the negative control); on
+// exactly the prior's line's fill, at or under the truth's while B is at most
+// the prior; infeasible exactly where the prior's line is.
+func sloRow(t *testing.T, l sloCapTruth, prime func(*settleRig), bPrior float64) (on float64) {
+	t.Helper()
 	const seeds = 20
-	t.Log("| A | B | k_cap | fill off | fill on | fill on, 2 % noise: [least, most], infeasible seeds | truth |")
+	rig := func(switches map[string]bool) *settleRig {
+		r := capRig(t, switches)
+		if prime != nil {
+			prime(r)
+		}
+		return r
+	}
+	rowsOf := func(n [3][]float64) func(c int) []domain.ReplicaMetrics {
+		return func(c int) []domain.ReplicaMetrics {
+			if n[0] == nil {
+				return capRows(l, [3]float64{})
+			}
+			return capRows(l, [3]float64{n[0][c], n[1][c], n[2][c]})
+		}
+	}
+	_, off := pricedAtTarget(rig(map[string]bool{SwitchITLOneSidedAtCap: false}), l, 24, rowsOf([3][]float64{}))
+	read, on := pricedAtTarget(rig(nil), l, 24, rowsOf([3][]float64{}))
+	lo, hi, infeasible := math.Inf(1), math.Inf(-1), 0
+	for seed := uint64(1); seed <= seeds; seed++ {
+		rnd := learnertest.Rand(seed)
+		n := [3][]float64{learnertest.ARNoise(rnd, 24, 0.02, 0.5), learnertest.ARNoise(rnd, 24, 0.02, 0.5),
+			learnertest.ARNoise(rnd, 24, 0.02, 0.5)}
+		_, f := pricedAtTarget(rig(nil), l, 24, rowsOf(n))
+		if math.IsNaN(f) {
+			infeasible++
+			continue
+		}
+		lo, hi = min(lo, f), max(hi, f)
+	}
+	want := priorFill(l, bPrior)
+	t.Logf("| %.0f ms | %.2f | %.0f ms | %.2f | %.4f | %.4f | %.4f | [%.4f, %.4f], infeasible %d of %d | %.2f |",
+		1000*bPrior, l.a, 1000*l.b, l.kCap, off, on, want, lo, hi, infeasible, seeds, sloTruthFill)
+	require.Greater(t, off, sloTruthFill, "negative control, %s: off did not price above the truth's fill", l)
+	require.True(t, read.PinnedAtBPrior, "%s: on, not priced at the prior", l)
+	if math.IsNaN(want) {
+		require.True(t, math.IsNaN(on), "%s: on priced %.4f where the prior's line meets the target nowhere", l, on)
+		return on
+	}
+	require.InDelta(t, want, on, 1e-9, "%s: on is not the prior's line's fill", l)
+	return on
+}
+
+// The bias table at the slo line's price, the fill where it meets the TPOT
+// target, against the truth's (0.5), at the prior itl.DefaultBPrior (30 ms)
+// and at a learned prior (a sibling's B of 20 ms). Off (the negative
+// control) the line through the default B meets the target at a higher
+// fill than the truth, every point of the grid: too few replicas. On, the
+// fill is exactly the prior's line's: at or under the truth's while B is at
+// most the prior, so never too few replicas, without noise; the target is met
+// inside the band wherever the prior's line meets it, and the analyzer
+// abstains (infeasible) only where even that line is past the target at the
+// band's bottom. A true B above the prior (40 ms) meets it above the truth's
+// fill: too few replicas, by the prior's bound. Noise moves the fill by the
+// noise on the least reading: logged, not held.
+func TestOneSided_TheBiasTableAtTheTarget(t *testing.T) {
+	t.Log("| prior | A | B | k_cap | fill off | fill on | prior's line | on, 2 % noise: [least, most] | truth |")
+	feasible := 0
 	for _, l := range sloCapTruths {
-		rowsOf := func(n [3][]float64) func(c int) []domain.ReplicaMetrics {
-			return func(c int) []domain.ReplicaMetrics {
-				if n[0] == nil {
-					return capRows(l, [3]float64{})
-				}
-				return capRows(l, [3]float64{n[0][c], n[1][c], n[2][c]})
-			}
+		on := sloRow(t, l, nil, itl.DefaultBPrior)
+		if !math.IsNaN(on) {
+			feasible++
+			require.LessOrEqual(t, on, sloTruthFill+1e-9, "%s: on priced a higher fill than the truth", l)
 		}
-		_, off := pricedAtTarget(capRig(t, map[string]bool{SwitchITLOneSidedAtCap: false}), l, 24, rowsOf([3][]float64{}))
-		read, on := pricedAtTarget(capRig(t, nil), l, 24, rowsOf([3][]float64{}))
-		lo, hi, infeasible := math.Inf(1), math.Inf(-1), 0
-		for seed := uint64(1); seed <= seeds; seed++ {
-			rnd := learnertest.Rand(seed)
-			n := [3][]float64{learnertest.ARNoise(rnd, 24, 0.02, 0.5), learnertest.ARNoise(rnd, 24, 0.02, 0.5),
-				learnertest.ARNoise(rnd, 24, 0.02, 0.5)}
-			rd, f := pricedAtTarget(capRig(t, nil), l, 24, rowsOf(n))
-			require.True(t, rd.PinnedAtLeastITL, "%s seed %d: not priced one-sided", l, seed)
-			if math.IsNaN(f) {
-				infeasible++
-				continue
-			}
-			lo, hi = min(lo, f), max(hi, f)
-		}
-		t.Logf("| %.2f | %.0f ms | %.2f | %.4f | %.4f | [%.4f, %.4f], %d of %d | %.2f |",
-			l.a, 1000*l.b, l.kCap, off, on, lo, hi, infeasible, seeds, sloTruthFill)
-		require.Greater(t, off, sloTruthFill, "negative control, %s: off did not price above the truth's fill", l)
-		require.True(t, read.PinnedAtLeastITL, "%s: on, not priced one-sided", l)
-		// The target lies under the cap's ITL, so the one-sided line meets it
-		// nowhere in the band: infeasible, on every seed.
-		require.True(t, math.IsNaN(on), "%s: on priced the fill %.4f, want infeasible", l, on)
-		require.Equal(t, seeds, infeasible, "%s: a noisy seed priced the fill %.4f", l, hi)
+	}
+	require.Positive(t, feasible, "premise: no point of the grid priced a fill")
+	above := sloRow(t, sloCapTruth{0.01, 0.040, 0.97}, nil, itl.DefaultBPrior)
+	require.False(t, math.IsNaN(above) || above <= sloTruthFill, "B above the prior: %.4f, want a fill above the truth's", above)
+	learned := func(r *settleRig) { r.a.lines.SetBaseline("ns|m|sibling|H100|1", 0.020) }
+	for _, l := range []sloCapTruth{{0.05, 0.010, 0.97}, {0.01, 0.020, 0.97}} {
+		on := sloRow(t, l, learned, 0.020)
+		require.False(t, on > sloTruthFill+1e-9, "learned prior, %s: on priced a higher fill than the truth", l)
 	}
 }
 
 // The rule lasts while the key has no learned B: one-sided while unlearned;
 // off once a full fit in the band learns B; back once the line is forgotten
 // (ForgetVariant).
+//
+// The truth's B (20 ms) is under the prior, a sibling's learned 30 ms, so
+// the prior's line is above the truth and a raise after B is learned shows.
 func TestOneSided_ALearnedBEndsItAndAForgetBringsItBack(t *testing.T) {
-	l := sloCapTruth{0.01, 0.030, 0.97}
+	l := sloCapTruth{0.05, 0.020, 0.97}
 	r := capRig(t, nil)
+	r.a.lines.SetBaseline("ns|m|sibling|H100|1", 0.030)
 	capOnly := func(int) []domain.ReplicaMetrics { return capRows(l, [3]float64{}) }
 	read, _ := pricedAtTarget(r, l, 12, capOnly)
 	require.False(t, read.BaselineLearned)
-	require.True(t, read.PinnedAtLeastITL, "unlearned: not priced one-sided")
+	require.True(t, read.PinnedAtBPrior, "unlearned: not priced one-sided")
 
 	pricedAtTarget(r, l, 64, func(c int) []domain.ReplicaMetrics {
 		k := 0.25
@@ -167,20 +219,21 @@ func TestOneSided_ALearnedBEndsItAndAForgetBringsItBack(t *testing.T) {
 	read, _ = pricedAtTarget(r, l, 140, capOnly)
 	require.True(t, read.BaselineLearned, "premise: the band's full fit learned B")
 	require.Positive(t, read.Capped)
-	require.False(t, read.PinnedAtLeastITL, "learned: still priced one-sided")
+	require.False(t, read.PinnedAtBPrior, "learned: still priced one-sided")
+	require.InDelta(t, l.itl(0.5), read.Model.ITLAt(0.5), 1e-9, "learned: not the true line")
 
 	require.Positive(t, r.a.ForgetVariant(context.Background(), "ns", "m", "agg"))
 	read, _ = pricedAtTarget(r, l, 24, capOnly)
 	require.False(t, read.BaselineLearned)
-	require.True(t, read.PinnedAtLeastITL, "forgotten: the one-sided price did not come back")
+	require.True(t, read.PinnedAtBPrior, "forgotten: the one-sided price did not come back")
 }
 
 // A held slope keeps the one-sided price, and ends with the hold: once the
-// capped replicas leave, the line holds the last line fitted, and so stays
-// infeasible at the target (the one-sided price: the cap's ITL is past it),
-// until the slope is older than slopeHoldFor (1 h here); then it is silent.
-// Off (the negative control), the held line meets the target inside the
-// band, above the truth's fill.
+// capped replicas leave, the line holds the last line fitted, which met the
+// target at the prior's line's fill (here B is the prior, so the truth's,
+// 0.5), until the slope is older than slopeHoldFor (1 h here); then it is
+// silent. Off (the negative control), the held line meets the target above
+// the truth's fill.
 func TestOneSided_TheHeldSlopeKeepsThePriceAndEndsWithTheHold(t *testing.T) {
 	l := sloCapTruth{0.01, 0.030, 0.97}
 	feasible := func(m itl.Model) (float64, bool) {
@@ -219,7 +272,8 @@ func TestOneSided_TheHeldSlopeKeepsThePriceAndEndsWithTheHold(t *testing.T) {
 	o := run(nil)
 	t.Logf("last fit %s, held to %s (feasible %v), silent from %s", o.lastFit, o.lastHeld, o.heldFeasible, o.firstSilent)
 	require.NotZero(t, o.lastHeld, "premise: the slope was held")
-	require.False(t, o.heldFeasible, "the held line met the target at %.4f: it did not keep the one-sided price", o.heldFill)
+	require.True(t, o.heldFeasible, "premise: the held line meets the target in the band")
+	require.InDelta(t, priorFill(l, itl.DefaultBPrior), o.heldFill, 1e-9, "the held line does not keep the prior's fill")
 	require.NotZero(t, o.firstSilent, "the hold never ended")
 	require.Equal(t, settleCycle, o.firstSilent-o.lastHeld)
 	require.True(t, o.lastHeld-o.lastFit <= time.Hour && o.firstSilent-o.lastFit > time.Hour,
@@ -239,7 +293,7 @@ func TestOneSided_TheSwitchPicksTheLine(t *testing.T) {
 	capOnly := func(int) []domain.ReplicaMetrics { return capRows(l, [3]float64{}) }
 	on, _ := pricedAtTarget(capRig(t, nil), l, 12, capOnly)
 	off, _ := pricedAtTarget(capRig(t, map[string]bool{SwitchITLOneSidedAtCap: false}), l, 12, capOnly)
-	require.True(t, on.PinnedAtLeastITL)
-	require.False(t, off.PinnedAtLeastITL)
+	require.True(t, on.PinnedAtBPrior)
+	require.False(t, off.PinnedAtBPrior)
 	require.Equal(t, itl.DefaultBaselineSec, off.Model.B)
 }

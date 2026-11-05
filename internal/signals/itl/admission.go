@@ -123,6 +123,20 @@ type Admission struct {
 	// line, and the held A is the one whose line meets the target at the
 	// chosen line's fill. OneSidedAt is not read.
 	OneSidedTarget float64
+	// BPrior, above zero, is the stated upper prior on B the one-sided rule
+	// pins instead of the least ITL (issue #467): the line set against the
+	// fit through DefaultBaselineSec is pinned through the least ITL among
+	// the readings at k >= DefaultKSat, at that reading's fill k_r, with its
+	// intercept BPrior and its slope solved through the reading, A =
+	// max(0, (ITL_least - BPrior) / k_r) (priorLine). Every reading is at
+	// least B + A k, so at a fill k under k_r the line is over the truth by
+	// at least (BPrior - B)(1 - k/k_r): it never prices under the truth while
+	// the true B is at most BPrior, and it over-prices by the prior's error,
+	// not by a line flattened to the cap's ITL. A true B above BPrior is
+	// under-priced by at most (B - BPrior)(1 - k/k_r). Zero keeps the line
+	// through the least ITL (atLeastITLLine), the throughput line's. The
+	// saturation and slo analyzers set it (Reading.PinnedAtBPrior).
+	BPrior float64
 	// AboveBandWaitsAfterRestart stamps the above-band window's readings
 	// with the restart's wait too (WaitsAfterRestart), as learner PR 4b-2
 	// first built it, before its review exempted them (aboveBandSettling).

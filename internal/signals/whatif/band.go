@@ -60,7 +60,7 @@ type Refit struct {
 	// one-sided as the tracker priced the line (issue #467): set for a line
 	// the tracker priced with no learned B under that admission, Baseline
 	// then itl.DefaultBaselineSec. Such a line is through Baseline already
-	// (itl.Reading.PinnedAtLeastITL), so a resample on which the tracker
+	// (itl.Reading.PinnedAtBPrior), so a resample on which the tracker
 	// would hold the slope holds its A, as for any other. The zero value is
 	// the pinned fit alone, as before.
 	OneSided itl.Admission

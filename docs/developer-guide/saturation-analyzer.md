@@ -751,15 +751,23 @@ readings it prices under the true line by `(B0 - B)(1 - k/k_cap)` at a fill
 `k`. Under `SwitchITLOneSidedAtCap` (`saturation-itl-one-sided-at-cap`,
 `itl_one_sided.go`) the admission sets `itl.Admission.OneSidedAboveKSat`, as
 the throughput line does, with `OneSidedAt` the line's pricing k
-(`pricingK`). The tracker then compares the fit through the default B with
-the line through the least ITL past kSat (`atLeastITLLine`) at that k, and
-when the latter is higher returns the line through the default B that
-prices the same there (`oneSidedLine`): A above zero, B the pin, so
-`DeriveMuAtCap`, `ValidModel` and line sharing read it as any pinned fit.
-The held A is that line's A, so a hold prices the same. `itl-fit` logs
-`pinnedAtLeastITL`.
+(`pricingK`) and `BPrior` the prior on B (`itlBPrior`: the largest B learned
+on any tracker key or published line, else `itl.DefaultBPrior`, 30 ms). The
+tracker then sets the fit through the default B against the line with
+intercept `BPrior` through the least at-cap ITL (`priorLine`: `A = max(0,
+(ITL_r - BPrior)/k_r)`), compares them at that k, and when the latter is
+higher returns the line through the default B that prices the same there
+(`oneSidedLine`): A above zero, B the pin, so `DeriveMuAtCap`, `ValidModel`
+and line sharing read it as any pinned fit. The held A is that line's A, so a
+hold prices the same. `itl-fit` logs `pinnedAtBPrior`.
 
-The slo line sets the same flag under its own switch
+Every reading is at least `B + A k`, so the prior's line is over the truth at
+`k` under `k_r` by at least `(BPrior - B)(1 - k/k_r)`: never under while
+`B <= BPrior`, and under by at most `(B - BPrior)(1 - k/k_r)` when B is
+higher. The throughput line sets no prior and keeps 4b-3's line through the
+least ITL (`atLeastITLLine`).
+
+The slo line sets the same flag and prior under its own switch
 (`slo-itl-one-sided-at-cap`, `slo/one_sided.go`) with
 `itl.Admission.OneSidedTarget`, the TPOT target: each line is judged at the
 fill where it meets the target (`pricedFill`, `PriceTPOT`'s clamp), and the

@@ -12,22 +12,36 @@ import "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 // whenever the true B' is above the 6 ms default, so the TPOT target is met
 // at a higher fill than the replica reaches, and too few replicas are
 // ordered. On, while B is unlearned and the window holds readings at k >=
-// kSat, the pinned fit is set against the line pinned at the least ITL of
-// those readings (itl.Admission.OneSidedAboveKSat), each priced at the fill
-// where it meets the TPOT target (itl.Admission.OneSidedTarget), and the one
-// with the lower fill is the line. A held slope keeps the A whose line meets
-// the target at that fill. A learned B ends it. Off, as before, the fit
-// through the default B is the line.
+// kSat, the pinned fit is set against the line through the least of those
+// readings' ITL with its intercept a stated upper prior on B
+// (itl.Admission.BPrior: bPrior), each priced at the fill where it meets the
+// TPOT target (itl.Admission.OneSidedTarget), and the one with the lower
+// fill is the line. It still abstains (infeasible) where even that line
+// meets the target nowhere in the band. A held slope keeps the A whose line
+// meets the target at that fill. A learned B ends it. Off, as before, the
+// fit through the default B is the line.
 const SwitchITLOneSidedAtCap = "slo-itl-one-sided-at-cap"
 
 // oneSided sets on adm the one-sided price at the cap, under
-// SwitchITLOneSidedAtCap, at the TPOT target in seconds: 0 with none, where
-// the line is fitted and not priced, and the rule judges at itl.DefaultKSat.
+// SwitchITLOneSidedAtCap, at the TPOT target in seconds (0 with none, where
+// the line is fitted and not priced, and the rule judges at
+// itl.DefaultKSat), pinned at the analyzer's prior on B (bPrior).
 func (a *Analyzer) oneSided(adm *itl.Admission, tpotTarget float64) {
 	a.mu.Lock()
 	on := a.itlOneSidedAtCap
 	a.mu.Unlock()
 	if on {
-		adm.OneSidedAboveKSat, adm.OneSidedTarget = true, tpotTarget
+		adm.OneSidedAboveKSat, adm.OneSidedTarget, adm.BPrior = true, tpotTarget, a.bPrior()
 	}
+}
+
+// bPrior is the prior on B the one-sided rule pins (itl.BPrior): the largest
+// B learned on any key of the line's tracker, else itl.DefaultBPrior.
+func (a *Analyzer) bPrior() float64 {
+	bs := a.lines.Baselines()
+	learned := make([]float64, 0, len(bs))
+	for _, b := range bs {
+		learned = append(learned, b)
+	}
+	return itl.BPrior(learned...)
 }

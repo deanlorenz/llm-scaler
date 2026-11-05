@@ -146,25 +146,27 @@ var replaySwitches = map[string][]string{
 	saturation.SwitchPrefillBusyMinutes: nil,
 
 	// Issue #467, on main after #471 (602054e98): the saturation line priced
-	// one-sided at the sequence cap while B is unlearned, as 4b-3 priced the
-	// throughput line (itl.Admission.OneSidedAboveKSat, at the line's pricing
-	// k). Measured alone against all off, it moves e1 and e1-tuned, the two
-	// cluster recordings whose decode replica sits at its stated cap above
-	// the band with no B learned: model-02's variant-01 line through the
-	// default 6 ms is raised to the line through the least ITL past kSat,
-	// priced at k 0.68 through the default B (A 0.0856 -> 0.1006 on e1,
-	// 0.0889 -> 0.1188 on e1-tuned; ITL at the pricing k 0.0642 -> 0.0744 s
-	// and 0.0665 -> 0.0868 s), so the derived mu falls (6.38 -> 5.51 and
-	// 6.17 -> 4.72 req/s). lines.csv and variant-capacities.csv carry the
-	// line and the rate (104 and 191 rows); results.csv the demand the floor
-	// prices from mu (77 and 142 rows). Nothing else moves.
+	// one-sided at the sequence cap while B is unlearned
+	// (itl.Admission.OneSidedAboveKSat, at the line's pricing k), against the
+	// line through the least at-cap ITL with intercept the prior on B
+	// (itl.Admission.BPrior, 30 ms with none learned). Measured alone against
+	// all off, it moves e1 and e1-tuned, the two cluster recordings whose
+	// decode replica sits at its stated cap above the band with no B learned:
+	// model-02's variant-01 line through the default 6 ms is raised where the
+	// prior's line is higher at k 0.68 (first moved row: A 0.0856 -> 0.0874
+	// on e1, 0.0889 -> 0.1012 on e1-tuned; ITL at the pricing k 0.0642 ->
+	// 0.0654 s and 0.0665 -> 0.0748 s), so the derived mu falls (6.38 -> 6.26
+	// and 6.17 -> 5.48 req/s). lines.csv and variant-capacities.csv carry the
+	// line and the rate (92 and 60 rows); results.csv the demand the floor
+	// prices from mu (70 and 32 rows). Nothing else moves.
 	saturation.SwitchITLOneSidedAtCap: {
 		"e1-tuned/lines.csv", "e1-tuned/results.csv", "e1-tuned/variant-capacities.csv",
 		"e1/lines.csv", "e1/results.csv", "e1/variant-capacities.csv",
 	},
 
 	// Issue #467: the slo line priced one-sided at the sequence cap while B
-	// is unlearned, at the fill where it meets the TPOT target. It moves no
+	// is unlearned, at the fill where it meets the TPOT target, against the
+	// line at the prior on B. It moves no
 	// golden: no committed recording runs the slo analyzer on a replica at
 	// a stated cap. Its unit tests hold it (heldBy).
 	slo.SwitchITLOneSidedAtCap: nil,

@@ -182,12 +182,12 @@ func TestRefitFindsAOneSidedLine(t *testing.T) {
 	all := make([]itl.Observation, 0, 36)
 	for c := range 12 {
 		for _, k := range []float64{0.96, 0.97, 0.98} {
-			all = append(all, itl.Observation{K: k, ITLSec: 0.030 + 0.01*k, Timestamp: t0.Add(time.Duration(c) * 15 * time.Second)})
+			all = append(all, itl.Observation{K: k, ITLSec: 0.020 + 0.01*k, Timestamp: t0.Add(time.Duration(c) * 15 * time.Second)})
 		}
 	}
-	adm := itl.Admission{OneSidedAboveKSat: true, OneSidedAt: 0.68}
+	adm := itl.Admission{OneSidedAboveKSat: true, OneSidedAt: 0.68, BPrior: itl.DefaultBPrior}
 	line := itl.Refit(all, nil, itl.DefaultBaselineSec, 0, adm)
-	if !line.PinnedAtLeastITL {
+	if !line.PinnedAtBPrior {
 		t.Fatal("the one-sided refit priced nothing one-sided; the case tests nothing")
 	}
 	vs := VariantState{Tier: whatif.TierPinnedB, Line: line.Model, Readings: itl.KeyReadings{All: all}, oneSided: adm}
@@ -209,7 +209,7 @@ func TestRefitFindsAOneSidedLine(t *testing.T) {
 		inBand = append(inBand, itl.Observation{K: k, ITLSec: 0.006 + 0.05*k, Timestamp: t0.Add(time.Duration(c) * 15 * time.Second)})
 	}
 	plain := itl.Refit(inBand, nil, itl.DefaultBaselineSec, 0, adm)
-	if plain.PinnedAtLeastITL || plain.Tier != itl.TierPinnedB {
+	if plain.PinnedAtBPrior || plain.Tier != itl.TierPinnedB {
 		t.Fatalf("premise: %+v, want a pinned fit the rule did not raise", plain)
 	}
 	un := VariantState{Tier: whatif.TierPinnedB, Line: plain.Model, Readings: itl.KeyReadings{All: inBand}, oneSided: adm}

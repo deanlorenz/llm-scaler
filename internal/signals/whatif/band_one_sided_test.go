@@ -11,16 +11,17 @@ import (
 
 // Issue #467: a band on a line the controller priced one-sided at the
 // sequence cap. The tracker, with no learned B, prices the variant from the
-// line through the least ITL of its readings at the cap (through the
-// default B, at its pricing k: itl.Admission.OneSidedAt); a refit of the
+// line through the least ITL of its readings at the cap with intercept the
+// prior on B (itl.Admission.BPrior; returned through the default B, at its
+// pricing k: itl.Admission.OneSidedAt); a refit of the
 // same readings without the admission pins the default B alone and prices
 // under it. Given the admission (Refit.OneSided), every resample prices the
 // controller's line, to the spread a resample of three fills gives
 // (0.01 %); without it, the band lies under the truth.
 func TestBootstrapPricesTheOneSidedLineTheControllerDid(t *testing.T) {
 	const kPrice = 0.68
-	truth := itl.Model{A: 0.01, B: 0.030}
-	adm := itl.Admission{MaxNumSeqs: 64, OneSidedAboveKSat: true, OneSidedAt: kPrice}
+	truth := itl.Model{A: 0.05, B: 0.010}
+	adm := itl.Admission{MaxNumSeqs: 64, OneSidedAboveKSat: true, OneSidedAt: kPrice, BPrior: itl.DefaultBPrior}
 	tr := itl.NewTracker()
 	start := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
 	var line itl.Reading
@@ -33,7 +34,7 @@ func TestBootstrapPricesTheOneSidedLineTheControllerDid(t *testing.T) {
 		}
 		line = tr.Observe("k", "v", rows, adm, start.Add(time.Duration(c)*15*time.Second))
 	}
-	if !line.PinnedAtLeastITL || line.Tier != itl.TierPinnedB {
+	if !line.PinnedAtBPrior || line.Tier != itl.TierPinnedB {
 		t.Fatalf("premise: the controller's line %+v is not one-sided", line)
 	}
 	rs := tr.Readings("k")
