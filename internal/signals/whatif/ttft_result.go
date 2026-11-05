@@ -47,7 +47,9 @@ const (
 	// UnvalidatedTTFT is on every TTFT figure. The model is built against
 	// closed-form queueing values and synthetic fleets only; the prefill-
 	// stress recording (P2) and the staircase run (M2) have not scored it,
-	// so no TTFT figure has been checked against a measured one.
+	// so no TTFT figure has been checked against a measured one. On P2's
+	// goldens it reads low at light load, up to about 34% under the router's
+	// p90: not a bound.
 	UnvalidatedTTFT Flag = "UnvalidatedTTFT"
 	// AssumedVP is V_P supplied by the caller (--assume-vp) rather than
 	// learned.
@@ -70,10 +72,32 @@ const (
 	// nixl_xfer_time_seconds is not collected, so T_xfer is left out, and
 	// the answer over-promises by it.
 	TransferOmitted Flag = "TransferOmitted"
-	// DecodeSideOmitted is a TTFT priced on the prefill side alone, with no
-	// decode role given: neither the decode admission wait nor decode's first
-	// step is in it.
+	// DecodeSideOmitted is a TTFT priced with no decode line and no measured
+	// decode-engine TTFT: neither the decode admission wait nor any part of
+	// decode's TTFT is in it. It is raised with DecodeTTFTUnmeasured, and the
+	// two always coincide; both are kept, DecodeSideOmitted for what the
+	// answer leaves out and DecodeTTFTUnmeasured for why.
 	DecodeSideOmitted Flag = "DecodeSideOmitted"
+	// DecodeEngineMeasured is a TTFT priced with no decode line, decode's part
+	// taken from the decode engine's measured TTFT (TTFTFleet.DecodeTTFT) in
+	// place of the decode admission wait, T_xfer and ITL(k_d). Informational,
+	// not a hold: the term's known biases (its spread, its rate) are stated on
+	// the TTFT page and gated with UnvalidatedTTFT.
+	DecodeEngineMeasured Flag = "DecodeEngineMeasured"
+	// DecodeTTFTUnmeasured is a TTFT priced with no decode line and no
+	// measured decode-engine TTFT: decode's part, the KV pull and its first
+	// token, is left out, and the answer over-promises by it (by 25% to 65%
+	// on the P2 recordings). No caller acts on it.
+	DecodeTTFTUnmeasured Flag = "DecodeTTFTUnmeasured"
+	// VPScaledToPrompt is a V_P read at one mean prompt and rescaled along
+	// P1's curve to a longer one (Prefill.shapedVP): V_P * s(I_vp)/s(I),
+	// s(I) = b + c*I.
+	VPScaledToPrompt Flag = "VPScaledToPrompt"
+	// VPShapeMoved is a V_P read at a mean prompt more than MaxVPShapeRatio
+	// from the one asked, either way, or at one not known, with no curve to
+	// rescale it by: the V_P is held, and on a longer prompt it reads high
+	// and over-promises. No caller acts on it.
+	VPShapeMoved Flag = "VPShapeMoved"
 	// FlowControlInferredOff is flow control taken as off because none of its
 	// series exist (a scrape gap looks the same).
 	FlowControlInferredOff Flag = "FlowControlInferredOff"
@@ -142,7 +166,10 @@ type TTFT struct {
 	Pooled float64
 	// Floor is the lowest TTFT any number of replicas reaches at this
 	// percentile: a + I_q * (1/V_P + T_xfer per token) + ITL(band.Lo), the
-	// last term only with a decode side.
+	// last term only with a decode side (the decode engine's measured TTFT
+	// with none). V_P is the unmargined one, rescaled to the prompt: there
+	// is no queue at no load.
+
 	Floor float64
 	// DecodeShare is beta, the share 1 - q of the tail given to the decode
 	// admission wait by the optimised split; 0 for the mean.
@@ -151,9 +178,13 @@ type TTFT struct {
 	// TTFT.
 	Parts TTFTParts
 	// PrefillUtilization is rho_w, the worst prefill pod's utilization,
-	// f * rate * E[I_eff] / (N_p * V_P); it is also the probability a request
-	// waits on that pod.
+	// f * rate * E[I_eff] / (N_p * V_P), at V_P rescaled to the prompt and
+	// less the margin applied; it is also the probability a request waits
+	// on that pod.
 	PrefillUtilization float64
+	// VPMarginApplied is the share of V_P taken off at this rate: 0 below
+	// MarginRampStart, Prefill.VPMargin from MarginRampFull.
+	VPMarginApplied float64
 	// WaitScale is 1/r and WaitOffset s, in seconds: the worst pod's wait
 	// tail is rho_w * exp(-r (t - s)) from s on, and rho_w before it
 	// (engineWait: s is 0 except under the Lundberg bound, at cv < 1). The
@@ -194,8 +225,12 @@ type TTFTParts struct {
 	// DecodeWait is W_decode, the admission chain's mean wait.
 	DecodeWait float64
 	// FirstStep is ITL(k_d), decode's first step at its closed-form fill,
-	// read at the band's bottom below it.
+	// read at the band's bottom below it; 0 with no decode line.
 	FirstStep float64
+	// DecodeEngine is the decode engine's measured TTFT at the prompt
+	// (TTFTFleet.DecodeTTFT), in place of T_xfer and FirstStep with no
+	// decode line; 0 with one, or unmeasured.
+	DecodeEngine float64
 }
 
 // Onsets are the rates, in requests per second over the fleet, at which EPP

@@ -194,9 +194,11 @@ only, and `own_prefill` stays linear. That is consistent for a request at
 the prompt length `V_P` was measured at: a busy pod's steps cost what that
 length costs, so `V_P` there already includes the attention cost. A `V_P`
 measured on shorter prompts reads high on long ones and over-promises.
-S1's `VPShapeMoved` rule catches that: it flags a `V_P` whose prompt length
-differs from the current mean by more than 1.2x either way
-([S1 decisions, 2](slo-tiers.md#2-v_p-in-production)).
+With P1's curve, P3 now rescales `V_P` to the prompt asked, and without one it
+flags a `V_P` whose prompt length
+differs from the current mean by more than 1.2x either way (`VPShapeMoved`,
+[S1 decisions, 2](slo-tiers.md#2-v_p-in-production); [after
+P2](#as-built-p3-after-p2)).
 
 **A limit of P3: a mix of lengths.** On a convex curve, a mix of prompt
 lengths costs more than its mean length does (Jensen's inequality). P3
@@ -389,7 +391,10 @@ that is itself wrong (the exponential tail, Poisson arrivals, an omitted
 | Proxy hop before the EPP | Over-promises by that hop |
 | `T_xfer` omitted (not collected) | Over-promises |
 | `V_P` from a lower bound | Under-promises |
-| A mix of prompt lengths priced at its mean on a convex prefill curve ([a limit of P3](#prefill-capacity)) | Over-promises: an even 8k/52k mix at a `V_P` read at 30k is priced 32% under its prefill time, and `VPShapeMoved`, comparing means, does not flag it |
+| A mix of prompt lengths priced at its mean on a convex prefill curve ([a limit of P3](#prefill-capacity)) | Over-promises: an even 8k/52k mix at a `V_P` read at 30k is priced 32% under its prefill time. The rescale ([after P2](#as-built-p3-after-p2)) moves `V_P` to the mean, not the mix, and `VPShapeMoved`, comparing means, does not flag it |
+| `V_P` rescaled along the curve with no fixed cost per step, `s(I_vp)/s(I)` | Under-promises for a longer prompt only if P1's low-load `b` and `c` are the busy step's per-token cost, which is not measured: on run 2 at 37k it read 1.5% above the served `V_P` (over-promises), covered by the margin only from `ρ` 0.6. No-act (`VPScaledToPrompt`) until a second point confirms it. Held (not raised) for a shorter prompt |
+| The decode engine's TTFT added at its mean to every percentile | Over-promises at the tail by `(r − 1)·D`, `r` decode's p90 over its mean, 1.1–1.8 on the P2 runs (coarse buckets): up to about 20% of the router's p90 at `r` 1.8 (37k: about 127 ms of 0.795 s, 16%; 1k: about 10 ms of 0.047 s, 21%). At each level's own measured `r` it is less: 37k `r` 1.48, about 76 ms (10%); 1k `r` 1.54, about 7 ms (14%) |
+| The decode engine's TTFT held at the rate it was measured at | Either way: `RateForTTFT` extrapolates to other rates with `D` frozen, and decode's own queue at a higher rate is not in it |
 | `V_P` from the peak under a queue: a max over up to 358 overlapping 3-minute windows' minimums of a one-minute `rate()` | Over-promises, by about the noise of a one-minute rate |
 | `f` de-biased for Poisson arrivals, on a real imbalance | Over-promises: the busiest pod's share holds little chance excess, but the equal pods' excess is subtracted anyway. Four pods at 2:1:1:1 (`f` 1.6) read about 1.50 at 100 requests a pod (6% low) and about 1.57 at 1500 |
 | `f` from computed-token shares with variable prompts | Under-promises: a pod's token count varies about `√(1+Cs²)` times its request count, and only the request count's excess is subtracted. Four equal pods with `Cs²` = 1 read about 1.03 at 100 requests a pod |
@@ -464,15 +469,18 @@ been compared with a measured TTFT.
 | --- | --- |
 | `TTFTAt(fleet, rate, q)` | Question 2's TTFT at a rate, at percentile `q`, or the mean for `q` = 0. Returns a `TTFT`: the union bound (`Seconds`), the independent figure, the pooled optimistic figure, the floor, the decode share `β`, the parts' means, `ρ_w`, `θ`, both knees and the onsets |
 | `RateForTTFT(fleet, target)` | Question 1: the largest rate whose TTFT meets the target. An `Answer` whose `Basis.TTFT` carries the lower knee, the TTFT floor and the prefill side's own rate (`PrefillOnlyRate`); `BoundBy` says what set the rate. The TPOT fields of `Basis` (`KneeRate`, `Floor`, `Uncapped`) stay 0 |
-| `PrefillKnee(prefill)` | `N_p·V_P/(f·E[I_eff])`, in `Basis.TTFT.KneeRate` |
+| `PrefillKnee(prefill)` | `N_p·V_P(I)·(1 − m)/(f·E[I_eff])`, in `Basis.TTFT.KneeRate`: `V_P` rescaled to the prompt and less the margin ([after P2](#as-built-p3-after-p2)) |
 | `FlowControlOnsets(fleet)` | Each stage's onset; zero with flow control off |
-| `PrefillFromEstimate(est)` | Maps P1's `prefill.Estimate` to `V_P`, `a` and `f`, and carries P1's refusals |
+| `PrefillFromEstimate(est)` | Maps P1's `prefill.Estimate` to `V_P`, `a`, `f`, the prompt `V_P` was read at and, with the curve, its `b` and `c`; sets the margin `DefaultVPMargin`; carries P1's refusals |
 
-A `TTFTFleet` is a `Prefill`, an optional `*Decode` and a `FlowControl`.
-With no decode role, the prefill side is priced alone and flagged
-`DecodeSideOmitted`. This is the shape S1 needs to price one prefill variant
-in shadow; the rate per replica is the answer over `N_p`, priced at the
-actual `N_p` with `f` held. With flow control on and no decode role, the
+A `TTFTFleet` is a `Prefill`, an optional `*Decode`, a `DecodeTTFT` and a
+`FlowControl`. With no decode line, `W_decode` is not priced, and decode's
+part is the decode engine's measured TTFT, `DecodeTTFT`, flagged
+`DecodeEngineMeasured` ([after P2](#as-built-p3-after-p2)); unmeasured, it
+is left out and flagged `DecodeSideOmitted` and `DecodeTTFTUnmeasured`.
+ This is the shape S1
+needs to price one prefill variant in shadow; the rate per replica is the
+answer over `N_p`, priced at the actual `N_p` with `f` held. With flow control on and no decode role, the
 decode onset cannot be placed: the answer is flagged `DecodeOnsetUnchecked`,
 not refused, and may stand above the onset. The operating-point cap is not
 applied: as on the decode side, the caller applies it to the smaller of the
@@ -491,6 +499,10 @@ roles' rates.
     TTFT_q = min over β of  Q_{1−(1−q−β)}(block 1) + Q_{1−β}(W_decode) + ITL(k_d)
     mean  = ρ_w·θ + a + E[I]·(1/V_P + κ/BW) + E[W_decode] + ITL(k_d)
     floor = a + I_q·(1/V_P + κ/BW) + ITL(band.lo)
+
+    with no decode line (after P2):  W_decode = 0, κ/BW = 0 when D is measured, and
+    ITL(k_d) → D·max(1, E[I]/I_D)      D the decode engine's mean TTFT, measured at I_D
+    V_P → V_P(I)·(1 − m(ρ₀))           rescaled to the prompt, less the margin near the knee
 
 - **The wait tail errs only toward more replicas.** At cv 1 the two decays
   agree and the tail is exact (M/M/1). Above 1, the Cramér-Lundberg root is
@@ -549,7 +561,9 @@ roles' rates.
   `VPAboveSlopeBound`, `AssumedImbalance`, `AssumedPromptSpread`,
   `TransferOmitted`, `DecodeSideOmitted`, `FlowControlInferredOff`,
   `AboveFlowControlOnset`, `HeldByDecodeAdmission` and
-  `DecodeOnsetUnchecked`. When decode
+  `DecodeOnsetUnchecked`; after P2, `DecodeTTFTUnmeasured`,
+  `DecodeEngineMeasured`, `VPScaledToPrompt` and `VPShapeMoved`
+  ([after P2](#as-built-p3-after-p2)). When decode
   admission holds the TTFT rate below what the prefill side alone allows,
   the answer is bound by `TTFT` and then `decode admission`. The worked
   example's 11.10 r/s at p95 is such a case: decode takes `β` ≈ 0.03 of the
@@ -561,7 +575,7 @@ roles' rates.
   Pollaczek-Khinchine mean, Allen-Cunneen against an independent Erlang C,
   the Cramér-Lundberg root against its equation, and the incomplete gamma
   against its closed forms.
-- **Never below the truth.**
+- **Never below the reference.**
   - At cv 0 the wait's quantiles are compared with Erlang's exact M/D/1
     waiting-time distribution, summed in 1024-bit floats. The model is at
     or above it at every `ρ` from 0.1 to 0.95 and `q` of 0.9, 0.99 and 0.999.
@@ -614,8 +628,12 @@ roles' rates.
    (open question 4)?
 2. **The wait tail.** How far above per-pod `request_queue_time_seconds`
    (R1's histograms) does the tail rule sit, at the real prompt spread? It
-   is conservative against queueing theory. A real pod's chunked
-   prefill is not the M/G/1 server it assumes.
+   is at or above the references it is checked against (Erlang's exact
+   M/D/1 wait and a Lindley simulation of M/G/1, [the tests](#what-the-tests-check)),
+   which is not the same as conservative on a real pod: a real pod's chunked
+   prefill is not the M/G/1 server it assumes, and on P2's goldens the whole
+   prediction reads up to about 34% under the router's p90 at light load
+   ([after P2](#as-built-p3-after-p2)).
 3. **The gamma prompt.** Is a gamma with the measured cv a fair stand-in for
    the prompt histogram? P2 should compare the floor and the low-load
    quantiles.
@@ -637,6 +655,203 @@ roles' rates.
 Until P2 and the staircase pass, no TTFT figure drives a replica count. S1
 publishes in shadow only.
 
+## As built (P3 after P2)
+
+P2 (PR #482) priced P3 on the four prefill-stress goldens and found it under
+the router's TTFT at 12 of 14 light-load points, and at a tenth of it at
+run 2's 37k level. This change makes three model changes. Each errs toward
+more replicas, and none is fitted to those recordings.
+`UnvalidatedTTFT` stays on every figure.
+
+### 1. The decode engine's TTFT with no decode line
+
+On P/D the router's TTFT is the prefill engine's TTFT and then the decode
+engine's: the KV pull and decode's first token. P2's residual (the router's
+median less the two engines' mean TTFTs) is −7 to +15 ms at 6 of 7 levels.
+P3 with `Decode == nil` priced prefill alone and so left out 12 ms at 1k
+and 159 ms at 37k.
+
+- **With a decode line**, nothing changes: `T_xfer + W_decode + ITL(k_d)`.
+- **With no decode line**, decode's part is `TTFTFleet.DecodeTTFT`, the
+  decode engine's mean TTFT, priced at `D·max(1, E[I]/I_D)`. `I_D` is the
+  mean prompt it was measured at. Scaling a fixed cost by the prompt makes
+  it high, so the term scales up for a longer prompt. For a shorter prompt
+  it is held: the pull grows with the prompt, so a held term is also high.
+  It is added at its mean to every percentile, which is the one part that
+  under-states the tail, by `(r − 1)·D` with `r` decode's p90 over its mean
+  (1.1–1.8 on these runs): up to about 20% of the router's p90. `D` is also
+  held at the rate it was measured at, so `RateForTTFT` extrapolates with it
+  frozen. `Seconds` and `PromptTokens` travel as a pair from one cycle, and
+  `I_D` is `E[I_eff]` while the pull moves the whole prompt, prefix hits
+  included.
+- **The transfer is in it.** The decode engine's TTFT includes the KV pull,
+  so `TransferSecondsPerToken` is not priced beside it, and `TransferOmitted`
+  is not raised.
+- **Flags.** Measured, the answer is flagged `DecodeEngineMeasured`, which
+  is informational, not a hold; `DecodeSideOmitted` is not raised.
+  Unmeasured (`Seconds` 0), the term is left out and the answer flagged
+  `DecodeSideOmitted` and `DecodeTTFTUnmeasured`, which always coincide; no
+  caller acts on them. It is never a silent zero. A negative or non-finite
+  figure, a measured figure with a prompt under one token
+  (`MinDecodeTTFTPrompt`; `PromptTokens` is required when `Seconds` > 0), or
+  one whose term overflows at the prompt asked, is refused (`InvalidInput`).
+
+- **Where it is learned:** S1, per decode variant, from the R1 field
+  `domain.ReplicaMetrics.AvgTTFT` on the variant's Ready decode rows
+  ([S1 decisions, 3](slo-tiers.md#3-what-s1-passes-to-ttftat-and-rateforttft)).
+  `AvgTTFT` is a scaling query, collected every cycle (not record-only).
+
+### 2. `V_P` at the question's prompt
+
+At 37k the pod served 115,953 tok/s, 14% under the `V_P` of 134,775
+learned at 31.8k. P3 held `V_P` and read utilization 0.86 where the pod was
+saturated.
+
+- **The rescale.** A busy pod's step of `B` tokens of prompts of length `I`
+  costs about `s0 + (b + c·I)·B` ([prefill capacity](#prefill-capacity)), so
+  `V_P(I)/V_P(I_vp) = (h + s(I_vp))/(h + s(I))`, with `s(I) = b + c·I` and
+  `h = s0/B ≥ 0` unknown. P3 takes `h = 0`:
+  `V_P(I) = V_P(I_vp)·s(I_vp)/s(I)`. For `I > I_vp` that is at or below the
+  true ratio for any `h` **only if P1's low-load `b` and `c` are the busy
+  step's per-token cost**, which is not measured; `V_P` is rescaled down and
+  flagged `VPScaledToPrompt`, which is on S2's no-act list until a second
+  measured point confirms it. For `I < I_vp` it would over-read the gain, so `V_P`
+  is held at the learned figure, which the true one is at or above.
+  `TestVPRescaleNeverAboveTheStepModel` checks both over `h` from 0 to
+  1e-5 s a token, inside the step model only.
+- **Its inputs** are P1's, through `PrefillFromEstimate`:
+  `Estimate.VPPromptTokens` (`I_vp`) and, with `AModel` quadratic,
+  `ASlope` and `ACurve` (`b`, `c`), into `Prefill.VPPromptTokens`,
+  `CurveSlope` and `CurveCurvature`. On run 2 with the curve of runs 3 and
+  4 pooled, the rescale reads 117,645 tok/s at 37k, 1.5% above the 115,953
+  served (`TestVPRescaleOnRun2At37k` holds the sign): an over-read the step
+  model says cannot happen. With the margin below it is 3.6% under, but the
+  margin is whole only from `ρ` 0.6, so below that the over-read stands.
+- **Fallback, with no curve** (the line, a refused fit, or no
+  `VPPromptTokens`): `V_P` is held, and flagged `VPShapeMoved` when the mean
+  prompt is more than `MaxVPShapeRatio` (1.2x) from `I_vp` either way, or
+  `I_vp` is unknown. This is S1's rule, moved into P3 so that every caller
+  gets it. An assumed `V_P` is neither rescaled nor flagged.
+
+### 3. A margin on `V_P` near the knee
+
+The wait grows as `ρ/(1 − ρ)`, so near the knee a small error in `V_P` is a
+large error in TTFT. On the M/M/1 sojourn, a `V_P` read `(1 + e)` high puts
+TTFT at `(1 − ρ)/((1 + e)(1 − ρ) + e·ρ)` of the truth. At `e` = 5% that
+is 9.1% short at `ρ` 0.5, 10% at 0.55, 14% at 0.7 and 25% at 0.85.
+
+- **Chosen: a margin on `V_P`, not a reported sensitivity.** A sensitivity
+  figure beside the answer would leave the answer itself on the unsafe
+  side, and S1 and S2 read the answer. The margin `m` = `DefaultVPMargin`,
+  5%, is set by `PrefillFromEstimate`. It is ten times the 0.5% by which
+  run 2's pod under a queue served away from busy-minute `V_P` at the prompt
+  it was learned on. **It covers that measurement noise only, at the prompt
+  length `V_P` was learned at.** It does not cover an error in the rescale
+  or in pricing a prompt mix at its mean: an even 8k/52k mix is 32% under
+  its prefill time ([where it is most wrong](#where-it-is-most-wrong)),
+  six times the margin.
+- **Where:** none below `MarginRampStart` (`ρ₀` 0.5, the worst pod's
+  utilization at the unmargined `V_P`), all of it from `MarginRampFull`
+  (0.6), and linear between, so TTFT has no jump in the rate. The ramp
+  straddles 0.55, where a 5% error crosses the S1 mark's 10%
+  (`TestVPMarginRampIsWhereTTFTTurnsSensitive`). Below it the error is
+  within the mark on its own, and no replica is spent on it.
+- **The knee** is `(1 − m)` of the unmargined one. `VPMargin` is at most
+  `MaxVPMargin` = 1 − `MarginRampFull`, so the margin is whole before the
+  margined pod saturates. `TTFT.VPMarginApplied` reports the share taken at
+  the rate. The floor is at the unmargined `V_P`, since there is no queue
+  at no load.
+
+### The validation table after the change
+
+`TestTTFTValidation_AgainstTheRouter` on PR #482, priced as P2 prices it
+(`V_P` from run 2, `a` from run 4 or #475, flow control off, no decode
+line), plus three inputs:
+
+- the decode engine's mean `AvgTTFT` over the level, at the level's prompt;
+- the curve: run 4's own fit (main's P1 fits a quadratic on run 4), and
+  #475's pooled `b` 7.1815e-7, `c` 2.0280e-10 for runs 3 and 2, where main
+  fits none;
+- `V_P`'s prompt: run 2's `VPPromptTokens`, 31,816.
+
+The mark is S1's: more than 10% under fails (UNDER), more than 25% over fails
+(over). \* is beyond the bucket.
+
+| Run | Level | Router p90 | p90, cv 0.058 | | p90, cv 2 | | Router p95 | p95, cv 0.058 | | p95, cv 2 | |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 4 | 1k | 0.047 | 0.032 | **UNDER** | 0.052 | pass | 0.049 | 0.036 | **UNDER** | 0.068 | over\* |
+| 4 | 2k | 0.048 | 0.045 | pass | 0.088 | over\* | 0.049 | 0.055 | pass | 0.123 | over\* |
+| 4 | 4k | 0.092 | 0.070 | **UNDER** | 0.160 | over\* | 0.096 | 0.090 | pass | 0.231 | over\* |
+| 4 | 16k | 0.316 | 0.213 | **UNDER** | 0.523 | over\* | 0.358 | 0.282 | **UNDER** | 0.785 | over\* |
+| 3 | 8k | 0.098 | 0.146 | over\* | 0.308 | over\* | 0.110 | 0.161 | over | 0.453 | over\* |
+| 3 | 30k | 0.570 | 0.380 | **UNDER** | 0.923 | over\* | 0.585 | 0.393 | **UNDER** | 1.396 | over\* |
+| 3 | 37k | 0.795 | 0.523 | **UNDER**\* | 1.373 | over\* | 0.915 | 0.714 | **UNDER**\* | 2.088 | over\* |
+| 2 | 30k, 32 in flight | 7.80 | refused, `Saturated` | | refused | | 7.90 | refused | | refused | |
+| 2 | 30k, 96 in flight | 29.0 | refused, `Saturated` | | refused | | 29.5 | refused | | refused | |
+| 2 | 37k, 64 in flight | 28.9 | refused, `Saturated` | | refused | | 29.5 | refused | | refused | |
+
+At the sent spread (cv 0.058), the light-load points under the mark fall
+from 12 of 14 in P2's table (main at 602054e98) and 11 on main today (run
+4's `a` is 11.58 ms since #475, not 3.74) to 9, and those beyond the bucket
+from 7 and 4 to 2. The ratios
+of the points still under rise from 0.35–0.75 to 0.66–0.79, and the three
+that now pass read 0.94 to 1.11. Run 2's 37k level, priced at 2.6 s
+against 28.9 s, is now refused `Saturated`: the rescaled, margined knee is
+below its rate, and S1 reads that as unmet, the right side. At cv 2 nothing
+moves from over to under. The 8k level moves further over (1.29x to 1.50x),
+because the decode term is added where `V_P` was already high for an 8k
+prompt.
+
+### What still fails, and why it is not tuned away
+
+Nine light-load points remain under at the sent spread, and the change does
+not close them. Two reasons, both outside what these three changes model:
+
+1. **The router's p90 is not the sum of the two engines' means.** The
+   engines' own TTFT histograms put decode's p90 at 1.1–1.8 times its mean
+   and prefill's at 1.2–2.2 on these runs, read from coarse buckets. The
+   model adds decode's part at its mean, and its
+   prefill part (`a + I/V_P` at cv 0.058) has almost no spread. Adding the
+   two engines' p90s reads 0.039 against the router's 0.047 at 1k, and
+   0.710 against 0.795 at 37k: closer, still under. Pricing decode's spread
+   needs its histogram (the R1 field `TTFTBuckets` on decode rows), not a
+   constant.
+2. **The prefill engine's overhead at light load is larger than `a`.** P2
+   measured 3 to 83 ms beyond queue and service time on the prefill engine,
+   growing with the prompt (P2's check 6). P3's `a` is a constant 3.7 to
+   10.9 ms. At 30k and 37k that gap, about 40 to 70 ms, is most of what is
+   left.
+
+Both would add a term fitted from these same recordings, which this change
+does not do. They are open items for S1's recorder-backed inputs (decode's
+TTFT histogram) and for P1 (an overhead that grows with the prompt).
+
+### What the follow-up to #482 changes
+
+After #482 merges, a follow-up updates `ttft_validation_test.go` and the
+"As built (P2)" text:
+
+1. `p1Line` gains `vpPromptTokens`, `aModel`, `aSlope` and `aCurve`, and
+   `estimate()` maps them to `VPPromptTokens`, `AModel`, `ASlope` and
+   `ACurve`.
+2. Constants `pr475B = 7.1815e-07` and `pr475C = 2.0280e-10` (#475's pooled
+   curve, `TestQuadratic_Runs3And4PooledGiveA`). `ttftPrefill` takes the
+   fixture's own curve where its P1 fits a quadratic (run 4), else these.
+3. `ttftFleetAt` takes the level's decode-engine TTFT and passes
+   `DecodeTTFT{Seconds: o.decodeTTFT, PromptTokens: o.prompt}`.
+4. The 40 rows of `ttftFrozen` are replaced by the figures in the table
+   above, and the counts become 9 (under), 2 (under beyond the bucket),
+   13 (cv 2 over, unchanged) and 0 (run 2 under beyond the bucket; all six
+   of its rows are refused).
+5. `WhatTheRunsShow`'s bound on P3's light-load tail past 0.3 s rises from
+   0.01 to 0.02. The 37k level reads 0.0186 with the decode term in the
+   fleet (it was 0.0082). The direction check is unchanged.
+6. Independently of this change, `P1OnTheGoldens` already fails on main
+   since #475 merged: run 3's `a` refusal is `NoShortPrompts`, not
+   `NonPositiveIntercept`, and run 4's `a` is 11.58 ms, not 3.74 ms. #482
+   must take these whatever happens to this change. Run 4's levels are then
+   priced at 11.58 ms.
+
 ## Open questions
 
 1. **Is the per-pod model right above the prefill onset?** *Recommend:* keep it,
@@ -649,8 +864,10 @@ publishes in shadow only.
    `T_xfer` leaves "omitted".
 4. **Does `V_P` vary with prompt length?** It does: run 3's low-load medians
    cost about 60% more per token from 30k to 37k than from 8k to 30k. `a`
-   takes the curve (above), and S1 flags a `V_P` learned at another mean
-   length (`VPShapeMoved`). A mix of lengths at one mean is under-priced
+   takes the curve (above), and P3 rescales `V_P` along it to the prompt
+   asked, or, with no curve, flags a `V_P` learned at another mean
+   length (`VPShapeMoved`; [after P2](#as-built-p3-after-p2)). A mix of
+   lengths at one mean is under-priced
    ([a limit of P3](#prefill-capacity)), and no flag sees it. *Recommend:*
    key `V_P` by input bucket; add a term to `own_prefill` only if bucket B
    misses by more than 15%.
