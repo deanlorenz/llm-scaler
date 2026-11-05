@@ -47,10 +47,14 @@ import (
 // (retain). Only that model's own Analyze reads its record, after its
 // observation, so forgetting it then is what forgetting it at the cycle
 // that dropped it was. A cycle that follows failed ones begins twice
-// (beginSLOCycle's catch-up); two BeginCycles less than an interval apart
-// are one cycle (beginCycle). A recording with
-// no observation, or no BeginCycle, forgets nothing: its engine either had
-// no retain or no slo analyzer to count cycles by.
+// (beginSLOCycle's catch-up), both on one clock reading; two BeginCycles
+// under half an interval apart are one cycle (beginCycle). A recording
+// with no observation forgets nothing: its engine had no retain. The
+// engine always builds the slo analyzer (engine.go registers it as a
+// built-in), so a recording with settle events and no slo analyzer was
+// not made by it: with no BeginCycle to count cycles by, its replay
+// forgets nothing, where Generate retains, and the replay says so (a
+// mismatch, settleNoCycles).
 //
 // The replay counts the tracker's verdicts per reason (2.5), so a golden set
 // that never reaches one says so.
@@ -104,6 +108,9 @@ type settleReplay struct {
 	// optimize interval, as its observations last recorded it.
 	begunAt  time.Time
 	interval time.Duration
+	// uncounted is set once a settle event has been applied in a replay
+	// with no slo analyzer, whose cycles it cannot count.
+	uncounted bool
 }
 
 func newSettleReplay() *settleReplay {
@@ -114,12 +121,15 @@ func newSettleReplay() *settleReplay {
 }
 
 // beginCycle notes the slo analyzer's BeginCycle at now, the start of an
-// engine cycle. One under an interval after the last is the same cycle's:
-// the engine counts a run of failed cycles as one more cycle by beginning
-// the next one twice, and starts each cycle an interval after the last
-// one ended.
+// engine cycle. One under half an interval after the cycle's first is the
+// same cycle's: the engine counts a run of failed cycles as one more cycle
+// by beginning the next one twice, on one clock reading, and starts each
+// cycle an interval after the last one ended. Half an interval, not a
+// whole one, because real cycles sit at the interval: a wall clock
+// stepped back a few milliseconds would merge two of them. A merged one
+// leaves begunAt at the cycle's first, so the window never slides.
 func (s *settleReplay) beginCycle(now time.Time) {
-	if s.cycles > 0 && now.Sub(s.begunAt) < s.interval {
+	if s.cycles > 0 && now.Sub(s.begunAt) < s.interval/2 {
 		return
 	}
 	s.cycles++

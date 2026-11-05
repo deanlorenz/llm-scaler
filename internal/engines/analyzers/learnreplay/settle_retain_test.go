@@ -48,9 +48,10 @@ func TestReplay_ForgetsTheSettleRecordOfAModelParkedWhole(t *testing.T) {
 // The replay forgets a model's record exactly where the engine's prune
 // did: a cycle that observed or held the model keeps it; a cycle that did
 // neither forgets it, and so does a cycle with no active variant; two
-// BeginCycles under an interval apart are one cycle (beginSLOCycle's
-// catch-up after failed cycles); a recording with no BeginCycle forgets
-// nothing.
+// BeginCycles under half an interval apart are one cycle (beginSLOCycle's
+// catch-up after failed cycles, both on one clock reading), and two a
+// little under an interval apart are two; a recording with no BeginCycle
+// forgets nothing.
 func TestSettleReplay_RetainsWhatTheEngineKept(t *testing.T) {
 	at := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
 	const step = 15 * time.Second
@@ -110,6 +111,45 @@ func TestSettleReplay_RetainsWhatTheEngineKept(t *testing.T) {
 		cycle(s, at.Add(time.Minute), true)
 		assert.Equal(t, at, firstSeen(s))
 	})
+	// Real cycles are an interval apart on a wall clock that can step back:
+	// 50 ms short of an interval is still the next cycle, so the model it
+	// did not observe is forgotten.
+	t.Run("a cycle a little under an interval later is a cycle", func(t *testing.T) {
+		s := newSettleReplay()
+		cycle(s, at, true)
+		short := step - 50*time.Millisecond
+		cycle(s, at.Add(short), false)
+		cycle(s, at.Add(short+step), true)
+		assert.Equal(t, at.Add(short+step), firstSeen(s))
+		assert.Equal(t, 3, s.cycles)
+	})
+	// A merged BeginCycle does not move the cycle's start, so a chain of
+	// them closer than the threshold cannot stretch one cycle: at 0, 5 and
+	// 10 s on a 15 s interval, 5 merges with 0, and 10, 10 s after the
+	// cycle began, is the next cycle. Measured from the merged 5 it would
+	// merge too. (At 0, 10 and 20 s nothing merges: each is over half an
+	// interval after the last.)
+	t.Run("a merged BeginCycle does not move the cycle's start", func(t *testing.T) {
+		s := newSettleReplay()
+		s.beginCycle(at)
+		s.beginCycle(at.Add(5 * time.Second))
+		assert.Equal(t, at, s.begunAt)
+		s.beginCycle(at.Add(10 * time.Second))
+		assert.Equal(t, 2, s.cycles)
+		assert.Equal(t, at.Add(10*time.Second), s.begunAt)
+
+		s = newSettleReplay()
+		for _, d := range []time.Duration{0, 10 * time.Second, 20 * time.Second} {
+			s.beginCycle(at.Add(d))
+		}
+		assert.Equal(t, 3, s.cycles)
+
+		// Half an interval to the nanosecond is the next cycle.
+		s = newSettleReplay()
+		s.beginCycle(at)
+		s.beginCycle(at.Add(step / 2))
+		assert.Equal(t, 2, s.cycles)
+	})
 	// Cycles are an interval apart, the interval the observations record:
 	// at 5 s a cycle without the model is a cycle, not the catch-up of the
 	// one before, as it would be at the 15 s default.
@@ -131,4 +171,34 @@ func TestSettleReplay_RetainsWhatTheEngineKept(t *testing.T) {
 		observe(s, at.Add(time.Minute))
 		assert.Equal(t, at, firstSeen(s))
 	})
+}
+
+// A recording with settle events and no slo analyzer has no BeginCycle to
+// count cycles by, so its replay retains nothing, where Generate does: it
+// says so, once, and does not fail for it. One with an slo analyzer does
+// not.
+func TestReplay_SettleEventsWithoutSLOAreReported(t *testing.T) {
+	count := func(rep *Report) int {
+		n := 0
+		for _, m := range rep.Mismatches {
+			if m.What == settleNoCycles {
+				n++
+				assert.False(t, m.Fatal)
+				assert.Equal(t, settle.KindObserve, m.Kind)
+			}
+		}
+		return n
+	}
+	gen, err := Replay(context.Background(), parkCapture(t, 3, -1), Options{Mode: Generate})
+	require.NoError(t, err)
+	rep, err := Replay(context.Background(), gen.Recording, Options{Mode: Fidelity})
+	require.NoError(t, err)
+	assert.Equal(t, 1, count(rep))
+	assert.Empty(t, rep.Failed())
+
+	gen, err = Replay(context.Background(), parkCaptureFrom(t, fullStart(), 3, -1), Options{Mode: Generate})
+	require.NoError(t, err)
+	rep, err = Replay(context.Background(), gen.Recording, Options{Mode: Fidelity})
+	require.NoError(t, err)
+	assert.Zero(t, count(rep))
 }
