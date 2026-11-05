@@ -1106,7 +1106,10 @@ failed reads and writes, and the log says why (logger `learned-state`):
   their first cycle, `aged`, `unusable` and `unattributable` count entries
   not restored, `startKeys` counts the start estimates read back, and
   `sightings` the replicas that may skip their wait if their Ready time has
-  not moved. Then, per variant on its first cycle, one of:
+  not moved. `Learned state: the snapshot is too old to keep its replica
+  sightings` means the controller was away longer than 2 minutes from the last
+  write, or a crash found an older document: every replica waits, as expected.
+  Then, per variant on its first cycle, one of:
   - `learned state restored`;
   - `learned state restored without the ITL baseline: the engine image
     changed, the arguments did not` -- a new release rolled out while the

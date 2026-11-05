@@ -1061,11 +1061,17 @@ capacity. Its batch cap falls back to `--max-num-seqs`. Writing the cap as a
 literal value lifts all three.
 
 With the snapshot on, a controller restart also keeps two things per replica.
-A running Pod's start is not counted into the start estimate again. A replica
+A running Pod's start is not counted into the start estimate again. And a replica
 whose Ready time has not moved does not wait out its settle again (k2 1 minute,
-the ITL line `steadyFor`), so its readings count from the first cycle. A replica
-that really restarted, was recreated, or is a warm-pool Pod
-still waits. With the snapshot off, every replica waits after a restart.
+the ITL line `steadyFor`), so its readings count from the first cycle, if the
+controller is back within 2 minutes of the snapshot's last write. Past that every
+replica waits, and the log says so.
+
+A replica with a new Ready time still waits, and so does a warm-pool Pod. Three
+things are not caught: an engine restart too fast to move the Pod's Ready
+condition, a rollout under the same Pod name with no new Ready time, and load that
+came back during the restart. With the snapshot off, every replica waits after a
+restart, and that is the way to turn this off: it has no setting of its own.
 
 The log line `Learned state: snapshot restored` says how many variants are
 pending their first cycle, and with `startKeys` and `sightings` how many start
