@@ -155,7 +155,7 @@ cycles of a fleet that is coping have none.
 | `lowerBound`, `growthCapped` | `lowerBound` is `true` when prefill's rate is a lower bound, learned while prefill queued behind a full decode (only with [`enablePrefillThroughputBound`](scaling-policy.md#enableprefillthroughputbound) on). `growthCapped` is `true` when the floor on that bound was cut to twice the ready prefill fleet |
 | `orderedBehindQueue`, `queueJustifiedReplicas` | whether a held floor still ordered behind a standing queue, and how many replicas the queue was worth when it did |
 | `muKey`, `muSource` | the learned key the role's `saturatedThroughput` was priced under, and where it came from: `measured`, `derived`, `served-siblings` (a measurement yielded to what its full siblings serve), `neighbour`, `borrowed-line` or `lower-bound`. On a role of several variants, the variant whose figure is nearest the role's. Empty on a cycle with none. The key's output-length bucket is the one the k2 window uses (see `P1-obs` below), so both are read from the same bucket. While the output length is in the middle of a large change (20% past a bucket boundary, for up to 2 minutes) the key keeps its old bucket, that window takes no new readings, and its figure counts as `neighbour`: the derived rate prices where there is one |
-| `startEstimateSeconds`, `startSource` | the replica start time `projectedBacklog` was projected over, and `measured`; `none` (and 0) when no start of the role has been measured, and the floor projects nothing |
+| `startEstimateSeconds`, `startSource` | the replica start time `projectedBacklog` was projected over, and where it came from: `measured`, or `seed` (the ScaledObject's `replicaStartSeconds`, for a role with no start measured); `none` (and 0) when neither is known, and the floor projects nothing |
 
 On a disaggregated fleet the per-role lines do not add up to the model's
 total, so a second line, `throughput-demand-floor-total`, gives it:
@@ -188,8 +188,29 @@ prices the backlog over this time, so a long start raises `projectedBacklog`.
 
 `replica-start-measured` is logged on a cycle where new replicas of the variant
 became Ready: `namespace`, `variant`, `observations` (replicas counted this
-cycle), `estimateSeconds` (the estimate now in force) and `source` (`measured`,
-or `seed` while the default is in force).
+cycle), `estimateSeconds` (the published estimate), `source` (`measured`, or
+`seed` while nothing is measured), and:
+
+- `pods`: how many different pods the estimate is from, at most 3.
+- `prior` and `priorSource`: what the estimate starts from. `priorSource` is
+  `seed` when the ScaledObject sets
+  [`replicaStartSeconds`](scaledobject-trigger.md), else `default` (70 s).
+- `sizedSeconds`: the start the floor and share pacing use.
+
+Until 3 pods are measured, `estimateSeconds` is a blend of the prior and the
+measured starts: `((3 - pods) * prior + pods * mean) / 3`. With a seed S it
+stays between S/2 and 2S. `sizedSeconds` is never shorter than a measured
+start, so the blend can only make the controller order more. From the third
+pod on, both are the measured estimate.
+
+`A variant's replicaStartSeconds is contradicted by its measured starts` is
+logged once per variant and seed, and again after a controller restart, while
+the mean of the measured starts is outside half to twice the seed:
+`replicaStartSeconds`, `measuredSeconds`, `pods`, `lowSeconds`, `highSeconds`,
+`publishedSeconds`, `sizedSeconds` and `podsNeeded` (3). Until three pods have
+started, the seed holds the estimate within those bounds, and sizing at no less
+than half the seed. For a variant with one replica that can take days. Correct
+or remove the seed on the ScaledObject.
 
 `replica-start-outlier-rejected` is logged when one replica's start is more
 than `factor` (3) times the estimate and is left out: `namespace`, `variant`,
@@ -217,9 +238,8 @@ If the variant really got slower and you do not want to wait for three slow
 starts, forget its learned state with the `llm-d.ai/forget-learned-state`
 annotation ([troubleshooting](troubleshooting.md#reset-one-variants-learned-state)).
 On the next cycle the starts of the pods running then are measured afresh.
-There is no other way to set the
-estimate today: the ScaledObject's
-[`replicaStartSeconds`](scaledobject-trigger.md) is read but not used yet.
+To give a new variant a better starting point than 70 s, set
+[`replicaStartSeconds`](scaledobject-trigger.md) on its ScaledObject.
 
 ### `learner-start`
 
@@ -278,6 +298,20 @@ while too few settled readings remain), `samples` (readings in the window),
 cycle). It logs when the line is set for the first time, when `source`
 changes, when A or B moves more than 5 % from the value last logged, or after
 10 minutes; there is no `pods` list.
+
+For `learner` `start` the key is the variant's start key, and `value` the
+published start estimate in seconds, with `previousValue`. `source` is
+`measured`. The line also carries:
+
+- `samples`: pods the estimate is from, and `needed` (3).
+- `sizedSeconds`: the start the floor uses.
+- `measuredSeconds`: the measured estimate alone.
+- `prior` and `priorSource`: as in `replica-start-measured`.
+- `restored`: `true` for an estimate restored from the snapshot that has
+  measured no start since.
+
+It logs when the estimate is set for the first time, when it moves more than
+5 % from the value last logged, or after 10 minutes. There is no `pods` list.
 
 ### `replica-capacity-summary`
 

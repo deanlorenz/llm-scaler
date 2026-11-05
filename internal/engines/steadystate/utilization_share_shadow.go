@@ -504,16 +504,21 @@ func formatHeadroom(x float64) string {
 func shareTimingSeries(tm allocation.ShareTimings, src allocation.ShareTimingSource) []metrics.UtilizationShareTiming {
 	derived := func(inputs ...string) string {
 		for _, in := range inputs {
-			if src[in] == "measured" {
-				return "measured"
+			if src[in] == allocation.ShareTimingMeasured {
+				return allocation.ShareTimingMeasured
 			}
 		}
 		for _, in := range inputs {
-			if src[in] == "scaledobject" || src[in] == "pod" {
+			if src[in] == allocation.ShareTimingFromScaledObject || src[in] == allocation.ShareTimingFromPod {
 				return src[in]
 			}
+			// A ScaledObject's replicaStartSeconds seed: an input read
+			// from the ScaledObject.
+			if src[in] == allocation.ShareTimingSeed {
+				return allocation.ShareTimingFromScaledObject
+			}
 		}
-		return "default"
+		return allocation.ShareTimingDefault
 	}
 	// policyOr: "policy" when the stabilization block set param, else derived.
 	policyOr := func(param string, inputs ...string) string {

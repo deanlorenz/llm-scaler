@@ -109,6 +109,7 @@ Configuration
 Conflict
 Consider
 Context
+Correct
 Cost-aware
 Could
 CrashLoopBackOff
@@ -117,8 +118,10 @@ CreateContainerError
 D
 DataParallelRanks
 Datastore
+DecodeEngineMeasured
 DecodeOnsetUnchecked
 DecodeSideOmitted
+DecodeTTFTUnmeasured
 Deleted
 Deployment
 Discarding
@@ -330,6 +333,7 @@ ScaleFromZeroMode
 ScaledObject
 Scaling
 ScalingPolicy
+Seconds
 Selected
 Set
 SetRecordedValue
@@ -380,6 +384,8 @@ VLLM_ALL2ALL_BACKEND
 VLLM_USE_V1
 VPAboveSlopeBound
 VPLowerBound
+VPScaledToPrompt
+VPShapeMoved
 V_P
 Variant
 VariantAutoscaling
@@ -643,6 +649,7 @@ but
 by
 byRole
 bytes
+c
 cache
 cacheKey.name
 cacheKey.namespace
@@ -758,6 +765,7 @@ contains
 contamination-heterogeneity
 context_length
 continues
+contradicted
 contributors
 control
 controller
@@ -784,6 +792,7 @@ current
 current-replicas
 currentNeedGPUs
 currentReplicas
+curve
 cv
 cycle
 cycles
@@ -1150,6 +1159,7 @@ hi
 hicache_size
 hierarchical
 high
+highSeconds
 highest
 highestGroup
 hint
@@ -1479,6 +1489,7 @@ lose
 lost
 low-confirmed
 lowHoldFor
+lowSeconds
 lower
 lower-bound
 lower-only
@@ -1532,6 +1543,7 @@ meanwhile
 measure
 measured
 measuredRate
+measuredSeconds
 measures
 medianErrPct
 medianSeconds
@@ -1794,6 +1806,7 @@ over-state
 over-stated
 overMax
 overQuotaGPUs
+overflows
 overlap
 override
 own
@@ -1885,6 +1898,7 @@ pod/
 podGPUs
 pod_name
 pods
+podsNeeded
 podsOmitted
 point
 pointer
@@ -1946,6 +1960,7 @@ pricedA
 prices
 prior
 prior-live
+priorSource
 priority
 priorityClassName
 priork2|
@@ -1967,6 +1982,7 @@ provided
 provider
 providersSkipped
 published
+publishedSeconds
 publishes
 python3
 q
@@ -2090,6 +2106,7 @@ replica-start-measured
 replica-start-outlier-rejected
 replicaDemand
 replicaKvTokens
+replicaStartSeconds
 replicas
 replicasByVariant
 replicasImplied
@@ -2334,6 +2351,7 @@ single-accelerator
 single-sample
 sit
 size
+sizedSeconds
 sizes
 skipped
 skippedWaits
@@ -2406,12 +2424,21 @@ stalled
 standard
 start
 start-above-bound
+start-blends-first-samples
 start-confirms-by-distinct-pod
+start-reads-replica-start-seed
+startAdmittedAt
+startCycles
 startEstimateSeconds
 startEstimates
+startForgotten
+startLogged
 startOutlierPods
 startOutliers
+startRestored
+startSamples
 startSeconds
+startSeedWarned
 startSeenPods
 startSource
 started
@@ -2673,6 +2700,7 @@ validated
 validation
 value
 valueFrom
+values
 variable
 variant
 variant-capacity-source

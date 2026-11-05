@@ -114,9 +114,18 @@ type LearnedState struct {
 	// by the tokens a step emits: entries in the other unit than the analyzer
 	// reads are not installed. Any other engine is not named: one step is one
 	// token, and its entries are installed either way.
-	ITLPerToken   map[string]bool      `json:"itlPerToken,omitempty"`
-	StartSeconds  map[string]float64   `json:"startSeconds,omitempty"`
-	VariantSeenAt map[string]time.Time `json:"variantSeenAt,omitempty"`
+	ITLPerToken  map[string]bool    `json:"itlPerToken,omitempty"`
+	StartSeconds map[string]float64 `json:"startSeconds,omitempty"`
+	// StartSamples is, keyed like StartSeconds, the distinct Pods a start
+	// estimate is from and their mean start, for an estimate from fewer
+	// than startConfirmPods (SwitchStartBlendsFirstSamples). An estimate it
+	// does not name has full authority, as every estimate of a document
+	// written before it does: an upgrade moves no fleet.
+	StartSamples map[string]StartSampleSnapshot `json:"startSamples,omitempty"`
+	// StartAdmittedAt is, keyed like StartSeconds, when each estimate last
+	// admitted a start; an estimate it does not name is as old as can be.
+	StartAdmittedAt map[string]time.Time `json:"startAdmittedAt,omitempty"`
+	VariantSeenAt   map[string]time.Time `json:"variantSeenAt,omitempty"`
 	// Accelerators is keyed namespace/variant: a per-variant entry like the
 	// rest, checked against the variant's configuration before it is used.
 	Accelerators map[string]AcceleratorSnapshot `json:"accelerators,omitempty"`
@@ -193,6 +202,14 @@ type SlopeSnapshot struct {
 	A        float64   `json:"a"`
 	FittedAt time.Time `json:"fittedAt"`
 	Args     string    `json:"args,omitempty"`
+}
+
+// StartSampleSnapshot is a start estimate's count of the distinct Pods it
+// is from and their mean start (startSample), while fewer than
+// startConfirmPods.
+type StartSampleSnapshot struct {
+	Pods        int     `json:"pods"`
+	MeanSeconds float64 `json:"meanSeconds"`
 }
 
 // AcceleratorSnapshot is the last accelerator that resolved for a variant.
@@ -605,6 +622,25 @@ func (a *SaturationAnalyzer) exportLearnedState() LearnedState {
 	for k, v := range a.startSeconds {
 		s.StartSeconds[k] = v
 	}
+	// Only beside an estimate, so a sample count never outlives it.
+	for k, v := range a.startSamples {
+		if _, ok := a.startSeconds[k]; !ok {
+			continue
+		}
+		if s.StartSamples == nil {
+			s.StartSamples = map[string]StartSampleSnapshot{}
+		}
+		s.StartSamples[k] = StartSampleSnapshot{Pods: v.pods, MeanSeconds: v.mean}
+	}
+	for k, v := range a.startAdmittedAt {
+		if _, ok := a.startSeconds[k]; !ok {
+			continue
+		}
+		if s.StartAdmittedAt == nil {
+			s.StartAdmittedAt = map[string]time.Time{}
+		}
+		s.StartAdmittedAt[k] = v
+	}
 	for k, v := range a.variantSeenAt {
 		s.VariantSeenAt[k] = v
 	}
@@ -727,7 +763,28 @@ func (a *SaturationAnalyzer) exportLearnedState() LearnedState {
 				mergeAbsent(s.ITLSlopes, p.state.ITLSlopes)
 			}
 		}
-		mergeAbsent(s.StartSeconds, p.state.StartSeconds)
+		// A pending start estimate goes out with its count and stamp, and
+		// only where the live state has no estimate of its own: a live one
+		// with no count has full authority, which a pending count must not
+		// take away.
+		for k, t := range p.state.StartSeconds {
+			if _, live := s.StartSeconds[k]; live {
+				continue
+			}
+			s.StartSeconds[k] = t
+			if v, ok := p.state.StartSamples[k]; ok {
+				if s.StartSamples == nil {
+					s.StartSamples = map[string]StartSampleSnapshot{}
+				}
+				s.StartSamples[k] = v
+			}
+			if v, ok := p.state.StartAdmittedAt[k]; ok {
+				if s.StartAdmittedAt == nil {
+					s.StartAdmittedAt = map[string]time.Time{}
+				}
+				s.StartAdmittedAt[k] = v
+			}
+		}
 		mergeAbsent(s.K2Args, p.state.K2Args)
 		mergeAbsent(s.ThroughputArgs, p.state.ThroughputArgs)
 		mergeAbsent(s.Accelerators, p.state.Accelerators)
@@ -845,6 +902,8 @@ func dropVariant(s *LearnedState, v string) {
 	maps.DeleteFunc(s.ITLBaselineStash, func(k string, _ float64) bool { return of(k) })
 	maps.DeleteFunc(s.ITLSlopes, func(k string, _ SlopeSnapshot) bool { return of(k) })
 	maps.DeleteFunc(s.StartSeconds, func(k string, _ float64) bool { return of(k) })
+	maps.DeleteFunc(s.StartSamples, func(k string, _ StartSampleSnapshot) bool { return of(k) })
+	maps.DeleteFunc(s.StartAdmittedAt, func(k string, _ time.Time) bool { return of(k) })
 	maps.DeleteFunc(s.K2Args, func(k, _ string) bool { return of(k) })
 	maps.DeleteFunc(s.ThroughputArgs, func(k, _ string) bool { return of(k) })
 	// Lower bounds stay: they are restored without a configuration to check
@@ -1011,6 +1070,18 @@ func (a *SaturationAnalyzer) restoreLearnedState(s LearnedState) RestoreReport {
 		}
 		if t, ok := s.StartSeconds[k]; ok {
 			p.state.StartSeconds[k] = t
+			if v, ok := s.StartSamples[k]; ok {
+				if p.state.StartSamples == nil {
+					p.state.StartSamples = map[string]StartSampleSnapshot{}
+				}
+				p.state.StartSamples[k] = v
+			}
+			if v, ok := s.StartAdmittedAt[k]; ok {
+				if p.state.StartAdmittedAt == nil {
+					p.state.StartAdmittedAt = map[string]time.Time{}
+				}
+				p.state.StartAdmittedAt[k] = v
+			}
 		}
 	}
 	// Lower bounds are installed now, with no configuration check: a bound
@@ -1410,6 +1481,7 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState, windowsUnder string, 
 		if t, ok := s.StartSeconds[k]; ok && finitePositive(t) {
 			if _, have := a.startSeconds[k]; !have {
 				a.startSeconds[k] = t
+				a.installStartLearnerLocked(k, s, now)
 			}
 		}
 	}

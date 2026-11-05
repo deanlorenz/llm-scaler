@@ -106,7 +106,46 @@ func TestShareGroupCarriesTheMeasuredStart(t *testing.T) {
 	if len(g.StartSeconds) != 2 {
 		t.Fatalf("StartSeconds %v, want A's and B's only", g.StartSeconds)
 	}
-	if d := ShareReplicaStart(g.StartSeconds); d != 10*time.Minute {
+	if d, _ := ShareReplicaStart(g.StartSeconds, g.StartSeeded); d != 10*time.Minute {
 		t.Fatalf("the group's replica start is %v, want A's 10m", d)
+	}
+}
+
+// The group carries which roles' starts are ScaledObject seeds
+// (AnalyzerResult.RoleStartSeeded), and the timings name the slowest one's
+// source: seed when the seed is the slowest start, measured when a measured
+// role is (learner PR 5c).
+func TestShareGroupCarriesASeededStart(t *testing.T) {
+	group := func(seededModel string) ShareGroup {
+		reqs := make([]ModelScalingRequest, 0, 2)
+		for m, s := range map[string]float64{"A": 600, "B": 120} {
+			r := shareReq(m, "ns", 1000, 1)
+			r.CompositeSignal.Result.RoleStartSeconds = map[string]float64{domain.RoleBoth: s}
+			if m == seededModel {
+				r.CompositeSignal.Result.RoleStartSeeded = map[string]bool{domain.RoleBoth: true}
+			}
+			reqs = append(reqs, r)
+		}
+		groups := BuildShareGroups(reqs, []*ResourceConstraints{{Pools: map[string]ResourcePool{"A100": {Limit: 10, Used: 3}}}},
+			ShareGroupOptions{ClusterIsQuota: true})
+		if len(groups) != 1 {
+			t.Fatalf("setup: groups %+v, want one", groups)
+		}
+		return groups[0]
+	}
+	source := func(g ShareGroup) string {
+		in := ShareTimingInputs{Cycle: time.Minute}
+		in.ReplicaStart, in.ReplicaStartSeeded = ShareReplicaStart(g.StartSeconds, g.StartSeeded)
+		_, src := DeriveShareTimings(in, nil)
+		return src["start"]
+	}
+	if got := source(group("A")); got != "seed" {
+		t.Errorf("the slowest role (A, 600 s) seeded: start source %q, want seed", got)
+	}
+	if got := source(group("B")); got != "measured" {
+		t.Errorf("a faster role (B) seeded: start source %q, want measured", got)
+	}
+	if got := source(group("")); got != "measured" {
+		t.Errorf("none seeded: start source %q, want measured", got)
 	}
 }

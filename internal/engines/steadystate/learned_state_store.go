@@ -608,6 +608,8 @@ func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 			delete(s.ITLBaseline, k)
 			delete(s.ITLSlopes, k)
 			delete(s.StartSeconds, k)
+			delete(s.StartSamples, k)
+			delete(s.StartAdmittedAt, k)
 			maps.DeleteFunc(s.ITLBaselineStash, func(sk string, _ float64) bool { return strings.HasPrefix(sk, k+"#") })
 		}})
 	}

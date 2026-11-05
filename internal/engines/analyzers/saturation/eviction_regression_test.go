@@ -189,7 +189,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 			key := a.itlWindowKey(ns, model, variant, accel, 1)
 			rms := []domain.ReplicaMetrics{readyPod("pod-a", 70)}
 
-			a.noteReplicaStart(key, ns, variant, rms, logr.Discard())
+			a.noteReplicaStartFor(startNote{key: key, namespace: ns, variant: variant}, rms, logr.Discard())
 			Expect(a.startSeenPods).To(HaveLen(1))
 			var firstStamp time.Time
 			for _, ts := range a.startSeenPods {
@@ -200,7 +200,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 			// A later cycle, same Pod, still Ready and already counted.
 			later := base.Add(2 * capacity.HistoryEvictionTimeout)
 			a.now = func() time.Time { return later }
-			a.noteReplicaStart(key, ns, variant, rms, logr.Discard())
+			a.noteReplicaStartFor(startNote{key: key, namespace: ns, variant: variant}, rms, logr.Discard())
 
 			Expect(a.startSeenPods).To(HaveLen(1))
 			for _, ts := range a.startSeenPods {
@@ -221,7 +221,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 			a.now = func() time.Time { return base }
 			key := a.itlWindowKey(ns, model, variant, accel, 1)
 
-			a.noteReplicaStart(key, ns, variant,
+			a.noteReplicaStartFor(startNote{key: key, namespace: ns, variant: variant},
 				[]domain.ReplicaMetrics{readyPod("pod-a", 70)}, logr.Discard())
 			settled := a.startSeconds[key]
 			Expect(settled).To(BeNumerically(">", 0))
@@ -242,7 +242,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 			for i := 1; i <= 10; i++ {
 				a.now = func() time.Time { return base.Add(time.Duration(i) * step) }
 				a.EvictStaleHistory()
-				a.noteReplicaStart(key, ns, variant,
+				a.noteReplicaStartFor(startNote{key: key, namespace: ns, variant: variant},
 					[]domain.ReplicaMetrics{readyPod("pod-a", 2700)}, logr.Discard())
 			}
 			Expect(base.Add(10*step).Sub(base)).To(BeNumerically(">",
@@ -261,12 +261,12 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 			a.now = func() time.Time { return base }
 			key := a.itlWindowKey(ns, model, variant, accel, 1)
 
-			a.noteReplicaStart(key, ns, variant,
+			a.noteReplicaStartFor(startNote{key: key, namespace: ns, variant: variant},
 				[]domain.ReplicaMetrics{readyPod("pod-a", 70)}, logr.Discard())
 			Expect(a.startSeenPods).NotTo(BeEmpty())
 
 			// A cycle in which the variant reports a different Pod entirely.
-			a.noteReplicaStart(key, ns, variant,
+			a.noteReplicaStartFor(startNote{key: key, namespace: ns, variant: variant},
 				[]domain.ReplicaMetrics{readyPod("pod-b", 72)}, logr.Discard())
 			for seen := range a.startSeenPods {
 				Expect(seen).NotTo(ContainSubstring("pod-a"),

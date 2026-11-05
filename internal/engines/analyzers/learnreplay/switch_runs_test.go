@@ -155,6 +155,37 @@ var replaySwitches = map[string][]string{
 	// logs, and no output reads a (P3's adapter reads it, and no golden
 	// runs P3). Its unit tests hold it (heldBy).
 	saturation.SwitchPrefillAQuadratic: nil,
+
+	// Learner PR 5c, on main after 5b (602054e98): the replicaStartSeconds
+	// seed is the prior (SwitchStartReadsSeed), and the first starts blend
+	// with it (SwitchStartBlendsFirstSamples). Measured, each alone against
+	// all off:
+	//
+	//   - SwitchStartReadsSeed moves nothing: no committed recording seeds a
+	//     variant (StartSeedSet is absent from every recorded state). Its
+	//     unit tests hold it (heldBy).
+	//   - SwitchStartBlendsFirstSamples moves the twelve outputs below, every
+	//     figure up, none down. RoleStartSeconds (share pacing, the slowest
+	//     variant as sized) rises where a key holds fewer than three Pods:
+	//     sized at max(blend, mean, estimate), so 63 -> 67.67 and 62 ->
+	//     67.33 (ols-sweep), 60 -> 66.67 (both ols-sweep-slo), 68 -> 69.33
+	//     (pd-restart, prefill), 231.6 -> 234 (e1-tuned: the mean of two
+	//     Pods over their EWMA). learned-state.csv gains a StartAdmittedAt
+	//     row per start key per export (23, 23, 48). No TotalDemand and no
+	//     variant capacity moves: the floor keeps the larger of its order at
+	//     5c's start and at 5b's, and none of these fleets projects a backlog
+	//     at a start the blend changed.
+	//
+	// Both on moves the blend's twelve and no more: no interaction.
+	saturation.SwitchStartReadsSeed: nil,
+	saturation.SwitchStartBlendsFirstSamples: {
+		"acceptance/learned-state.csv", "e1-tuned/results.csv", "engine/learned-state.csv",
+		"mu-paths/learned-state.csv",
+		"ols-sweep/composite-results.csv", "ols-sweep/results.csv",
+		"ols-sweep-slo/composite-results.csv", "ols-sweep-slo/results.csv",
+		"ols-sweep-slo-restart/composite-results.csv", "ols-sweep-slo-restart/results.csv",
+		"pd-restart/composite-results.csv", "pd-restart/results.csv",
+	},
 }
 
 // learner4b2Seams is learner PR 4b-2's switches, earlier seams now (merged
@@ -602,6 +633,16 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestStartConfirm_ARestartDropsTheRun"},
 		{"../saturation", "TestStartConfirm_ThroughAnalyze"},
 	},
+	// Learner PR 5c's seed as the prior: each runs the switch on and off
+	// and asserts both (the floor projects over the seed and share pacing
+	// reads it on; nothing is projected off).
+	saturation.SwitchStartReadsSeed: {
+		{"../saturation", "TestStartSeed_AnUnmeasuredSeededVariantIsSizedAtTheSeed"},
+		{"../saturation", "TestStartSeed_ThroughAnalyzeTheFloorProjectsOverTheSeed"},
+		{"../saturation", "TestStartBlend_OffTheFirstSampleIsTheEstimate"},
+		{"../saturation", "TestStartBlend_TheMeasuredLineNamesTheBlend"},
+		{"../saturation", "TestStartSeed_TheGaugeNamesTheSource"},
+	},
 }
 
 // Every switch the saturation and slo hooks accept has a row: this PR's, or
@@ -683,6 +724,21 @@ var switchBase = map[string]string{
 	"engine/variant-capacities.csv":     "bded174c24f569874299866fb541e7f4ac4cc72294adbaf8e626f1e9ea06712f",
 	"mu-paths/results.csv":              "83fca27f185344e2784706b0b6ae2e3ea8fe0ae70ecabe332862f04f4f4e951c",
 	"mu-paths/variant-capacities.csv":   "dd5b3186f6fe513520ba6e0309d88520e668d60f84003326f57bd7dee0ca0275",
+
+	// Learner PR 5c's outputs (SwitchStartBlendsFirstSamples), at main
+	// 602054e98, 5b merged.
+	"acceptance/learned-state.csv":                "da4251071addee288ecbe495759e2af257fa54b3511bbb93c5eddf4517ecc7a9",
+	"e1-tuned/results.csv":                        "9658cb3c3e302386715bfaac80ee245581eea3ec1bf6b528906a0756d1ef93fa",
+	"engine/learned-state.csv":                    "d823bbfe7f483ebca87d84224c0ae3faa5daef6546f14ffd5648937dc885dacf",
+	"mu-paths/learned-state.csv":                  "97ca32de070b4879ac59a3171a6a9387d91e08cc42c7a267e82f2576e35fa621",
+	"ols-sweep/composite-results.csv":             "d8a462aaa27a4c08077f8974172dd140d11a5ed2d675b932c632659d752db432",
+	"ols-sweep/results.csv":                       "06edf09352f73434d7a519884cccd872f8a68152d83b7b926b78c937052482a5",
+	"ols-sweep-slo/composite-results.csv":         "e7fbf20c0e73f463cb6c772129a2b97ed5664dc77103abef83a9b550ba660ce1",
+	"ols-sweep-slo/results.csv":                   "5929aa0e195a10310472e0849337e1457f91814c1b8366efe542ea161986291c",
+	"ols-sweep-slo-restart/composite-results.csv": "4ee9847180ddc44dfdefe11699931a5b0a224fa51cab950ed39c29937c3f5b75",
+	"ols-sweep-slo-restart/results.csv":           "49a51c8b1bdbcbfd2401b05b383113727ec51384867dfa49c31e17349d60ae47",
+	"pd-restart/composite-results.csv":            "7cd3bf0237b97c5ec7ec2a26e4c096701275ca79d622ad064c1ce06e3734b3f2",
+	"pd-restart/results.csv":                      "1f7f9e64e4fa1cb7aa467e70358fd74778c45045f7f5460791bd5861e9234637",
 }
 
 // The slow tests of this package run in parallel with each other (each

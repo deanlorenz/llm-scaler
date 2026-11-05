@@ -294,12 +294,13 @@ func (e *wholeNodeEnv) waitReady(want map[string]int32, timeout time.Duration) {
 // register creates a model's ScaledObject on WVA's metric and waits until KEDA
 // wired it; it goes in cleanup. kind is the scale target's kind, "" for a
 // Deployment.
-func (e *wholeNodeEnv) register(so, target, modelID string, minR, maxR int32, kind string) {
+func (e *wholeNodeEnv) register(so, target, modelID string, minR, maxR int32, kind string,
+	extra ...fixtures.ScaledObjectOption) {
 	GinkgoHelper()
-	opts := []fixtures.ScaledObjectOption{
+	opts := append([]fixtures.ScaledObjectOption{
 		fixtures.WithWVATriggerMetadata(modelID, "10.0"),
 		fixtures.WithScaledObjectScaleDownStabilizationWindow(wholeNodeWindow),
-	}
+	}, extra...)
 	if kind != "" {
 		opts = append(opts, fixtures.WithScaledObjectScaleTargetKind(kind))
 	}
@@ -633,6 +634,41 @@ func blockedReasons(pc *utils.PrometheusClient, ns, modelID string) ([]string, e
 
 // shareGauge reads one series of a utilization-share gauge for the group of
 // namespace ns, 0 with ok false when there is none.
+// startMeasuredLine is the fields of a replica-start-measured line the
+// whole-node specs read (docs/reference/cycle-log.md).
+type startMeasuredLine struct {
+	Variant      string  `json:"variant"`
+	Pods         int     `json:"pods"`
+	SizedSeconds float64 `json:"sizedSeconds"`
+}
+
+// lastStartMeasured is the last replica-start-measured line in logs for a
+// variant of model service ms in namespace ns, and whether there is one. The
+// controller logs JSON after a level and a message; each line is decoded
+// from its first brace.
+func lastStartMeasured(logs, ns, ms string) (startMeasuredLine, bool) {
+	var last startMeasuredLine
+	found := false
+	for _, ln := range strings.Split(logs, "\n") {
+		if !strings.Contains(ln, "replica-start-measured") {
+			continue
+		}
+		i := strings.Index(ln, "{")
+		if i < 0 {
+			continue
+		}
+		var m struct {
+			startMeasuredLine
+			Namespace string `json:"namespace"`
+		}
+		if json.Unmarshal([]byte(ln[i:]), &m) != nil || m.Namespace != ns || !strings.HasPrefix(m.Variant, ms+"-") {
+			continue
+		}
+		last, found = m.startMeasuredLine, true
+	}
+	return last, found
+}
+
 func shareGauge(pc *utils.PrometheusClient, query string) (float64, bool) {
 	v, _, err := pc.API().Query(ctx, query, time.Now())
 	if err != nil {
