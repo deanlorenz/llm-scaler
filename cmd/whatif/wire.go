@@ -58,8 +58,7 @@ type wireSource struct {
 
 // wireWindow is the window of Prometheus an answer was captured from.
 type wireWindow struct {
-	// Prometheus is the base URL with no userinfo, query or fragment
-	// (redactedURL).
+	// Prometheus is the URL's scheme and host alone (redactedURL).
 	Prometheus  string    `json:"prometheus"`
 	From        time.Time `json:"from"`
 	To          time.Time `json:"to"`
@@ -242,11 +241,11 @@ func newWireOutput(question string, f *answerFlags, st *learnreplay.State, varia
 	}
 	if o := f.captured; o != nil {
 		roles := "role-of"
-		if o.KubeStateMetrics {
+		if o.kubeStateMetrics {
 			roles = "kube-state-metrics"
 		}
-		w.Source.Window = &wireWindow{Prometheus: redactedURL(f.window.prometheus), From: o.From, To: o.To,
-			StepSeconds: o.Step.Seconds(), Roles: roles}
+		w.Source.Window = &wireWindow{Prometheus: redactedURL(f.window.prometheus), From: o.from, To: o.to,
+			StepSeconds: o.step.Seconds(), Roles: roles}
 	}
 	return w
 }
@@ -272,7 +271,7 @@ func inputsOf(f *answerFlags, pv pricedVariant) *wireInputs {
 	if pv.assumedOL {
 		in.Shape.OutputSource = shapeAssumed
 	}
-	if f.batchCap > 0 {
+	if f.pricedBatchCap() > 0 {
 		in.BatchCapSource = "--batch-cap"
 	}
 	if f.decode > 0 {

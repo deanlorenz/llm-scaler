@@ -115,11 +115,21 @@ func captureError(err error) error {
 	return fmt.Errorf("capture: %w", err)
 }
 
-// windowFlags is the flags registerWindow registers, by name: the answer
-// commands take them only with --prometheus.
-var windowFlags = []string{"prometheus", "bearer-token-file", "ca-file", "insecure-skip-verify", "timeout",
-	"kube-state-metrics", "role-of", "from", "to", "step", "policy", "engine", "engine-args", "gpus-per-replica",
-	"accelerator", "force"}
+// windowFlags is the flags registerWindow registers but --prometheus, by
+// name, read from the flag set it fills so that the two cannot disagree:
+// the answer commands take them only with --prometheus.
+func windowFlags() []string {
+	fs := flag.NewFlagSet("", flag.ContinueOnError)
+	var f captureFlags
+	f.registerWindow(fs)
+	var names []string
+	fs.VisitAll(func(fl *flag.Flag) {
+		if fl.Name != "prometheus" {
+			names = append(names, fl.Name)
+		}
+	})
+	return names
+}
 
 // registerWindow registers the flags that say which window to read from
 // Prometheus, and how: every capture flag but --namespace, --batch-cap and

@@ -766,21 +766,27 @@ whatif replicas-to-slo|slo-to-rate --prometheus URL --namespace NS
   generated in memory)`. The rest, the footer included, is the text
   `--recording` prints on the files.
 - **Secrets in the URL.** The URL is printed, in the source line and in
-  `source.window`, as its scheme, host and path alone: its userinfo (a
-  user and password), its query (`?token=...`) and its fragment are
-  dropped, not redacted value by value. In an error message (capture's
-  too, in text and in the `-o json` error object), each of them, and each
-  query value and password on its own, is replaced by `REDACTED`: the
-  HTTP client quotes a request's whole URL when it cannot send it.
+  `source.window`, as its scheme and host alone. Its userinfo (a user and
+  password), path (a gateway's `/t/TOKEN/`), query (`?token=...`) and
+  fragment are dropped, not redacted value by value, since any of them can
+  carry a secret. In an error message (capture's too, in text and in the
+  `-o json` error object), they are replaced by `REDACTED`, in one pass,
+  since the HTTP client quotes a request's whole URL when it cannot send it.
+  The userinfo, the whole query and each `key=value` pair are replaced at
+  any length. The path, the password and each query value on its own are
+  replaced only when at least 4 characters long, so that a short value
+  (`x=1`) does not rewrite every `1` in the message. Each is matched as
+  written and in both escapings of a space (`+` and `%20`). The
+  `--bearer-token-file` token is never printed: it travels in the
+  `Authorization` header, over https, to Prometheus' own host only.
 - **Exit codes** are capture's and the question's. `2`: a usage error, a
   window too large without `--force`, a role map that attributes no Pod, a
   model or cycle the window does not hold. `1`: a failed range query
   (`whatifsource.ErrQueryFailed`), or a replay that fails inside the
   analyzers. `3`: a role refused. With `-o json`, an error is one JSON error
   object, as in recording mode.
-- **The JSON** names the window in `source.window` (`prometheus`, the URL
-  without its userinfo, query or fragment, `from`, `to`, `stepSeconds` and
-  `roles`), and
+- **The JSON** names the window in `source.window` (`prometheus`, the URL's
+  scheme and host alone, `from`, `to`, `stepSeconds` and `roles`), and
   `source.recording` is empty. The field is new and optional, absent in
   recording mode, so `schemaVersion` stays `1`.
 
@@ -895,7 +901,7 @@ four results only `meanTPOT` is kept here):
 | --- | --- |
 | `schemaVersion` | The schema below; a change to any key is a new version. |
 | `question` | `replicas-to-slo` or `slo-to-rate`. |
-| `source` | The recording, the model, `firstCycle` (1), `lastCycle` (the cycle answered at) and `totalCycles` (the recording's), with their clocks. With `--prometheus`, `recording` is empty and `window` names the window: `prometheus` (the URL without its userinfo, query or fragment), `from`, `to`, `stepSeconds`, and `roles` (`kube-state-metrics` or `role-of`); absent in recording mode. Absent on an error object. |
+| `source` | The recording, the model, `firstCycle` (1), `lastCycle` (the cycle answered at) and `totalCycles` (the recording's), with their clocks. With `--prometheus`, `recording` is empty and `window` names the window: `prometheus` (the URL's scheme and host alone), `from`, `to`, `stepSeconds`, and `roles` (`kube-state-metrics` or `role-of`); absent in recording mode. Absent on an error object. |
 | `bands` | How the bands were drawn: block bootstrap, `blockCycles`, `resamples`, `seed`, the percentiles. Absent on an error object. |
 | `roles[]` | One per decode variant priced: `inputs` (what it was priced from) and `results`. |
 | `inputs.line` | The ITL line (`a` in seconds per unit of fill, `b` in seconds), its `tier`, the `readings` it was fitted from, their `observedFill` range and `fromCycle`-`toCycle`, and of the bootstrap's `resamples` how many (`tierChanges`) landed at another tier. |

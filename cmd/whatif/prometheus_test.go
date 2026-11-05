@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -230,18 +231,6 @@ func filesAnswer(t *testing.T, window, question []string) (string, int) {
 	return runCmd(t, slices.Concat(question[:1], []string{"--recording", recording, "--namespace", sweepNS}, question[1:])...)
 }
 
-// rolesDiff is how two JSON outputs' roles differ, "" when they do not.
-func rolesDiff(t *testing.T, a, b string) string {
-	t.Helper()
-	var x, y map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal([]byte(a), &x), a)
-	require.NoError(t, json.Unmarshal([]byte(b), &y), b)
-	if bytes.Equal(x["roles"], y["roles"]) {
-		return ""
-	}
-	return fmt.Sprintf("%s\n%s", x["roles"], y["roles"])
-}
-
 // withoutSourceLine is a --prometheus mode's text answer without the line
 // that names its window, which the files' answer does not have: the rest is
 // the answer. It fails the test when the line is not there.
@@ -338,37 +327,47 @@ func TestPrometheus_TheAnswerIsTheFilesAnswer(t *testing.T) {
 		})
 	}
 	// The capture's own flags reach the answer the same way on both paths.
+	// The capture's own flags reach the answer the same way on both paths.
+	// Each case is a base window and the flag under test, on one server:
+	// first the base alone must answer differently, or the identity would
+	// say nothing about the flag. --gpus-per-replica and --accelerator are
+	// not here: they key the capacity store's reuse, not the capacity a
+	// decode answer prices, so no answer can show them;
+	// TestPrometheus_CaptureFlagsReachTheCapture holds them instead.
 	t.Run("capture flags", func(t *testing.T) {
 		policy := sweepPolicy(t)
 		sglang := sweepServerFor(t, inferenceengine.EngineSGLang)
-		ksm := []string{"--prometheus", srv.URL, "--namespace", sweepNS, "--kube-state-metrics",
-			"--from", sweepFrom.Format(time.RFC3339), "--to", sweepFrom.Add((sweepSteps - 1) * sweepStep).Format(time.RFC3339),
-			"--batch-cap", "64"}
-		for _, w := range []struct {
-			name   string
-			window []string
+		noCap := slices.Clone(window[:len(window)-2])
+		require.Equal(t, "--batch-cap", window[len(window)-2])
+		for _, c := range []struct {
+			name       string
+			base, flag []string
 		}{
-			{"--policy", append(slices.Clone(window), "--policy", policy)},
-			{"--gpus-per-replica, --accelerator, --engine sglang", append(sweepWindow(sglang.URL),
-				"--gpus-per-replica", "2", "--accelerator", "H100", "--engine", "sglang")},
-			{"--engine-args", slices.Concat(window[:len(window)-2], []string{"--engine-args", "--max-num-seqs=32 --max-model-len=8192"})},
-			{"--kube-state-metrics", ksm},
+			{"--policy", window, []string{"--policy", policy}},
+			// On SGLang's series: without the flag the capture reads them
+			// as vLLM's, and finds none.
+			{"--engine sglang", sweepWindow(sglang.URL), []string{"--engine", "sglang"}},
+			// With no --batch-cap, which would set the same cap.
+			{"--engine-args", noCap, []string{"--engine-args", "--max-num-seqs=32 --max-model-len=8192"}},
+			// Beside --role-of, which maps the roles: kube-state-metrics
+			// adds readiness, and one Pod leaves Ready.
+			{"--kube-state-metrics", window, []string{"--kube-state-metrics"}},
 		} {
-			t.Run(w.name, func(t *testing.T) {
-				// The flag moves the answer, or the identity says nothing
-				// about it: the same question without it differs.
+			t.Run(c.name, func(t *testing.T) {
+				with := slices.Concat(c.base, c.flag)
 				q := []string{"replicas-to-slo", "-o", "json"}
-				with, _ := runCmd(t, slices.Concat(q[:1], w.window, q[1:])...)
-				without, _ := runCmd(t, slices.Concat(q[:1], window, q[1:])...)
-				require.NotEmpty(t, rolesDiff(t, with, without), "%s does not move the answer", w.name)
+				got, _ := runCmd(t, slices.Concat(q[:1], with, q[1:])...)
+				without, _ := runCmd(t, slices.Concat(q[:1], c.base, q[1:])...)
+				require.NotEqual(t, without, got, "%s does not move the answer", c.name)
 				for _, q := range [][]string{
 					{"slo-to-rate", "--tpot", "15ms", "-o", "json"},
 					{"replicas-to-slo", "-o", "json"},
 					{"replicas-to-slo"},
 				} {
-					files, fileCode := filesAnswer(t, w.window, q)
-					prom, promCode := runCmd(t, slices.Concat(q[:1], w.window, q[1:])...)
+					files, fileCode := filesAnswer(t, with, q)
+					prom, promCode := runCmd(t, slices.Concat(q[:1], with, q[1:])...)
 					require.Equal(t, fileCode, promCode, "exit codes differ\nfiles:\n%s\nprometheus:\n%s", files, prom)
+					require.Equal(t, 0, promCode, "%s", prom)
 					if !slices.Contains(q, outputJSON) {
 						assert.Equal(t, files, withoutSourceLine(t, prom), "the text differs")
 						continue
@@ -421,10 +420,15 @@ func TestPrometheus_TheIdentityCheckSeesADifference(t *testing.T) {
 // which can carry a secret.
 func TestPrometheus_TheSourceNamesTheWindow(t *testing.T) {
 	srv := sweepServer(t)
-	secret := strings.Replace(srv.URL, "http://", "http://reader:hunter2@", 1) + "/?token=s3cr3t&x=y#frag"
+	// The Prometheus served under a path holding a key, as a gateway's.
+	const keyPath = "/t/k3ypath"
+	prefixed := httptest.NewServer(http.StripPrefix(keyPath, srv.Config.Handler))
+	t.Cleanup(prefixed.Close)
+	secret := strings.Replace(prefixed.URL, "http://", "http://reader:hunter2@", 1) + keyPath + "/?token=s3cr3t&x=y#frag"
+	leaks := []string{"hunter2", "reader", "s3cr3t", "token", "frag", "k3ypath"}
 	out, code := runCmd(t, slices.Concat([]string{"replicas-to-slo"}, sweepWindow(secret), []string{"--step", "15s", "-o", "json"})...)
 	require.Equal(t, 0, code, out)
-	for _, leak := range []string{"hunter2", "reader", "s3cr3t", "token", "frag"} {
+	for _, leak := range leaks {
 		assert.NotContains(t, out, leak)
 	}
 	w := decodeOutput(t, out)
@@ -432,7 +436,7 @@ func TestPrometheus_TheSourceNamesTheWindow(t *testing.T) {
 	require.NotNil(t, w.Source.Window)
 	assert.Empty(t, w.Source.Recording)
 	win := w.Source.Window
-	assert.Equal(t, srv.URL+"/", win.Prometheus)
+	assert.Equal(t, prefixed.URL, win.Prometheus)
 	assert.True(t, win.From.Equal(sweepFrom), "from %s", win.From)
 	assert.True(t, win.To.Equal(sweepFrom.Add((sweepSteps-1)*sweepStep)), "to %s", win.To)
 	assert.Equal(t, 15.0, win.StepSeconds)
@@ -442,9 +446,11 @@ func TestPrometheus_TheSourceNamesTheWindow(t *testing.T) {
 	text, code := runCmd(t, slices.Concat([]string{"replicas-to-slo"}, sweepWindow(secret))...)
 	require.Equal(t, 0, code, text)
 	first, _, _ := strings.Cut(text, "\n")
-	assert.Equal(t, fmt.Sprintf("answered for %s/m from %s/, %s to %s every 15s (captured and generated in memory)", sweepNS, srv.URL,
+	assert.Equal(t, fmt.Sprintf("answered for %s/m from %s, %s to %s every 15s (captured and generated in memory)", sweepNS, prefixed.URL,
 		sweepFrom.Format(time.RFC3339), sweepFrom.Add((sweepSteps-1)*sweepStep).Format(time.RFC3339)), first)
-	assert.NotContains(t, text, "s3cr3t")
+	for _, leak := range leaks {
+		assert.NotContains(t, text, leak)
+	}
 
 	// A recording's source has no window, and its text no source line.
 	files, _ := filesAnswer(t, sweepWindow(srv.URL), []string{"replicas-to-slo", "-o", "json"})
@@ -468,7 +474,7 @@ func TestPrometheus_ErrorsNameNoSecret(t *testing.T) {
 	failing.Fail(queryOf(t, registration.QueryKvCacheUsage), "query processing would load too many samples")
 	token := filepath.Join(t.TempDir(), "token")
 	require.NoError(t, os.WriteFile(token, []byte("abc\n"), 0o600))
-	const secret = "/?token=s3cr3t%2F&k=pw%20d"
+	const secret = "/t/k3ypath/?token=s3cr3t%2F&k=pw%20d"
 	out := filepath.Join(t.TempDir(), "c.gz")
 	for _, c := range []struct {
 		name string
@@ -486,7 +492,7 @@ func TestPrometheus_ErrorsNameNoSecret(t *testing.T) {
 			_, err := runCLI(c.args...)
 			require.Error(t, err)
 			assert.Equal(t, c.code, exitCode(err), "%v", err)
-			for _, leak := range []string{"s3cr3t", "pw d", "pw%20d", "token=", "k="} {
+			for _, leak := range []string{"s3cr3t", "pw d", "pw%20d", "token=", "k=", "k3ypath"} {
 				assert.NotContains(t, err.Error(), leak)
 			}
 			if !strings.HasPrefix(c.name, "a failed query") {
@@ -502,9 +508,59 @@ func TestPrometheus_ErrorsNameNoSecret(t *testing.T) {
 			js, code := runCmd(t, append(slices.Clone(c.args), "-o", "json")...)
 			assert.Equal(t, c.code, code)
 			assert.NotContains(t, js, "s3cr3t")
+			assert.NotContains(t, js, "k3ypath")
 			w := decodeOutput(t, js)
 			require.NotNil(t, w.Error, js)
 			assert.Equal(t, err.Error(), w.Error.Message)
+		})
+	}
+}
+
+// --bearer-token-file over https: every request carries the token, and
+// nothing whatif prints, on stdout, stderr or in the error, in text or
+// JSON, holds it, whether the answer is reached or a query fails. That the
+// token goes to Prometheus' own host only, never on a redirect elsewhere,
+// is TestClient_TheBearerTokenStaysOnItsHost's and
+// TestBearer_SendsTheTokenOverHTTPSToItsHostOnly's.
+func TestPrometheus_TheBearerTokenIsNeverPrinted(t *testing.T) {
+	const token = "tok-9f8e7d6c5b4a"
+	srv := sweepServer(t)
+	failing := sweepServer(t)
+	failing.Fail(queryOf(t, registration.QueryKvCacheUsage), "query processing would load too many samples")
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(tokenFile, []byte(token+"\n"), 0o600))
+	for _, c := range []struct {
+		name string
+		prom *promtest.Server
+		code int
+	}{
+		{"answered", srv, 0},
+		{"a failed query", failing, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			secure := newAuthSeen(t, c.prom.Config.Handler.ServeHTTP)
+			window := slices.Concat(sweepWindow(secure.URL), []string{"--bearer-token-file", tokenFile, "--ca-file", caFile(t, secure.Server)})
+			for _, args := range [][]string{
+				slices.Concat([]string{"replicas-to-slo"}, window),
+				slices.Concat([]string{"slo-to-rate"}, window, []string{"--tpot", "15ms", "-o", "json"}),
+				slices.Concat([]string{"capture"}, window, []string{"-o", filepath.Join(t.TempDir(), "c.gz")}),
+			} {
+				var out, warn bytes.Buffer
+				err := run(context.Background(), args, &out, &warn)
+				code := 0
+				if err != nil {
+					code = exitCode(err)
+					assert.NotContains(t, err.Error(), token)
+				}
+				assert.Equal(t, c.code, code, "%v\n%s", err, out.String())
+				assert.NotContains(t, out.String(), token)
+				assert.NotContains(t, warn.String(), token)
+			}
+			seen := secure.headers()
+			require.NotEmpty(t, seen)
+			for _, h := range seen {
+				assert.Equal(t, "Bearer "+token, h, "a request without the token")
+			}
 		})
 	}
 }
@@ -597,6 +653,9 @@ func TestPrometheus_ExitCodes(t *testing.T) {
 			} else {
 				assert.Nil(t, w.Error, js)
 			}
+			if c.code == 3 {
+				assert.Contains(t, js, c.want, "the refusal is in the JSON")
+			}
 		})
 	}
 	// The window too large was refused before anything was asked.
@@ -620,11 +679,16 @@ func TestPrometheus_ForceReachesTheCapture(t *testing.T) {
 		require.True(t, ok)
 		require.NoError(t, err)
 		require.NoError(t, f.check(fs))
-		opts, err := f.window.options(f.question, f.warn)
+		opts, err := f.windowOptions()
 		require.NoError(t, err)
 		assert.Equal(t, force, opts.Force)
 		assert.Equal(t, 64, opts.BatchCap, "--batch-cap is the capture's")
-		assert.Zero(t, f.batchCap, "--batch-cap is not also a cap to price at")
+		assert.Zero(t, f.pricedBatchCap(), "--batch-cap is not also a cap to price at")
+		assert.Equal(t, int64(64), f.batchCap, "check changes no flag")
+		require.NoError(t, f.check(fs), "check again")
+		again, err := f.windowOptions()
+		require.NoError(t, err)
+		assert.Equal(t, 64, again.BatchCap, "checked twice, the same capture")
 		assert.Equal(t, defaultTimeout, f.window.timeout)
 	}
 }
@@ -647,7 +711,7 @@ func TestPrometheus_CaptureFlagsReachTheCapture(t *testing.T) {
 	require.True(t, ok)
 	require.NoError(t, err)
 	require.NoError(t, f.check(fs))
-	opts, err := f.window.options(f.question, f.warn)
+	opts, err := f.windowOptions()
 	require.NoError(t, err)
 	require.NotNil(t, opts.Policy)
 	assert.InDelta(t, 0.6, opts.Policy.ScaleUpThreshold, 0)
@@ -686,11 +750,30 @@ func TestPrometheus_HelpListsTheWindowFlags(t *testing.T) {
 	for _, cmd := range []string{"replicas-to-slo", "slo-to-rate"} {
 		text, code := runCmd(t, cmd, "-h")
 		require.Equal(t, 0, code)
-		for _, name := range windowFlags {
+		for _, name := range windowFlags() {
 			assert.Regexp(t, "(?m)^  -"+name+"( |$)", text, "%s help lists -%s", cmd, name)
 		}
 		assert.Contains(t, text, "-recording")
 	}
+	// windowFlags is every flag capture has but --prometheus, --namespace,
+	// --batch-cap and -o: a flag added to capture is refused without
+	// --prometheus.
+	text, code := runCmd(t, "capture", "-h")
+	require.Equal(t, 0, code)
+	var got []string
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "  -") {
+			name, _, _ := strings.Cut(strings.TrimPrefix(line, "  -"), " ")
+			if !slices.Contains([]string{"prometheus", "namespace", "batch-cap", "o"}, name) {
+				got = append(got, name)
+			}
+		}
+	}
+	want := windowFlags()
+	slices.Sort(want)
+	assert.Equal(t, want, got)
+	assert.NotContains(t, want, "prometheus")
+	assert.Len(t, want, 15)
 }
 
 // queryOf is a registered query's PromQL in the sweep's namespace.

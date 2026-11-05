@@ -50,9 +50,17 @@ type answerFlags struct {
 	// read, once it is. question names the command, and warn is where a
 	// capture's warnings go (stderr).
 	window   captureFlags
-	captured *whatifsource.Options
+	captured *capturedWindow
 	question string
 	warn     io.Writer
+}
+
+// capturedWindow is what the output says of the window a --prometheus
+// answer was captured from: no client, no credentials.
+type capturedWindow struct {
+	from, to         time.Time
+	step             time.Duration
+	kubeStateMetrics bool
 }
 
 func (f *answerFlags) register(fs *flag.FlagSet) {
@@ -113,10 +121,7 @@ func (f *answerFlags) check(fs *flag.FlagSet) error {
 
 // checkSource checks where the answer is read from: a recording, or a
 // window of Prometheus (--prometheus), never both. The window's flags are
-// capture's and are refused without --prometheus. With it, --batch-cap is
-// the engine's batch cap the window is captured with, as capture's is, not
-// a cap to price at: the answer is then the one capture, generate and
-// --recording give, flag for flag.
+// capture's and are refused without --prometheus. It changes no flag.
 func (f *answerFlags) checkSource() error {
 	switch {
 	case f.recording != "" && f.prometheus():
@@ -124,18 +129,34 @@ func (f *answerFlags) checkSource() error {
 	case f.recording == "" && !f.prometheus():
 		return usagef("--recording or --prometheus is required")
 	case f.prometheus():
-		if f.batchCap < 0 {
-			return usagef("--batch-cap %d, want 0 (the engine's default) or more", f.batchCap)
-		}
-		f.window.batchCap, f.batchCap = int(f.batchCap), 0
 		return nil
 	}
-	for _, name := range windowFlags {
+	for _, name := range windowFlags() {
 		if f.set[name] {
 			return usagef("--%s is for --prometheus, and the answer is read from --recording", name)
 		}
 	}
 	return nil
+}
+
+// pricedBatchCap is the batch cap per rank --batch-cap asks to price at, 0
+// for the one the analyzer priced at. With --prometheus it is always 0:
+// --batch-cap is then the engine's batch cap the window is captured with,
+// as capture's is (windowOptions), and the engine prices at it, so the
+// answer is the one capture, generate and --recording give, flag for flag.
+func (f *answerFlags) pricedBatchCap() int64 {
+	if f.prometheus() {
+		return 0
+	}
+	return f.batchCap
+}
+
+// windowOptions is the capture the --prometheus flags ask for, as capture
+// builds it from the same flags: --batch-cap is the engine's batch cap.
+func (f *answerFlags) windowOptions() (whatifsource.Options, error) {
+	w := f.window
+	w.batchCap = int(f.batchCap)
+	return w.options(f.question, f.warn)
 }
 
 func finite(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) }
@@ -217,11 +238,11 @@ func (f *answerFlags) windowRecording(ctx context.Context) ([]byte, error) {
 
 // captureAndGenerate is windowRecording before its errors are redacted.
 func (f *answerFlags) captureAndGenerate(ctx context.Context) ([]byte, error) {
-	opts, err := f.window.options(f.question, f.warn)
+	opts, err := f.windowOptions()
 	if err != nil {
 		return nil, err
 	}
-	f.captured = &opts
+	f.captured = &capturedWindow{from: opts.From, to: opts.To, step: opts.Step, kubeStateMetrics: opts.KubeStateMetrics}
 	var capture bytes.Buffer
 	if _, err := whatifsource.Capture(ctx, opts, &capture); err != nil {
 		return nil, captureError(err)
@@ -258,7 +279,7 @@ func (f *answerFlags) sourceLine(st *learnreplay.State) string {
 	}
 	return fmt.Sprintf("answered for %s/%s from %s, %s to %s every %s (captured and generated in memory)\n",
 		st.Namespace, st.ModelID, redactedURL(f.window.prometheus),
-		o.From.Format(time.RFC3339), o.To.Format(time.RFC3339), o.Step)
+		o.from.Format(time.RFC3339), o.to.Format(time.RFC3339), o.step)
 }
 
 // prometheus reports whether the flags ask to answer from Prometheus
@@ -313,8 +334,8 @@ func (f *answerFlags) decodeVariants(st *learnreplay.State) ([]pricedVariant, er
 			replicas = f.decode
 		}
 		pv.perRank = vs.BatchCap
-		if f.batchCap > 0 {
-			pv.perRank = f.batchCap
+		if c := f.pricedBatchCap(); c > 0 {
+			pv.perRank = c
 		}
 		perRank := pv.perRank
 		pv.decode = whatif.Decode{
