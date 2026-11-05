@@ -56,16 +56,16 @@ const (
 
 	// WVASLOPredictedTTFTSeconds is the TTFT the model predicts for a prefill
 	// variant at its current rate, at the objective's percentile. A shadow
-	// figure, not a bound: it reads low at light load, up to about 34% under
-	// the router's p90 on the prefill-stress recordings. Published with the
-	// reasons priced, decode-bound and routing-bound; absent otherwise, and
-	// absent when the model refuses the current rate.
+	// figure, not a bound: see SLOTTFTPredictionCaveat for which way it errs.
+	// Published with the reasons priced, decode-bound and routing-bound; absent
+	// otherwise, and absent when the model refuses the rate.
 	// Labels: namespace, model_name, variant_name, statistic.
 	WVASLOPredictedTTFTSeconds = "wva_slo_predicted_ttft_seconds"
 	// WVASLOTTFTUnmet is 1 when a prefill variant's current rate misses the
 	// TTFT target (the prediction is above it, or the model refused the rate
 	// at or over the prefill knee or the decode onset, or the rate is above
-	// the prefill flow-control onset), 0 when met, and absent when not priced.
+	// the prefill flow-control onset, or the target is below the floor), 0 when
+	// met, and absent when not priced.
 	// Labels: namespace, model_name, variant_name, statistic.
 	WVASLOTTFTUnmet = "wva_slo_ttft_unmet"
 	// WVASLOTTFTReplicaRequestsPerSecond is the request rate per replica at
@@ -81,6 +81,12 @@ const (
 	// and 0 for the others (SLOTTFTReasons).
 	// Labels: namespace, model_name, variant_name, statistic, reason.
 	WVASLOTTFTReason = "wva_slo_ttft_reason"
+	// WVASLOTTFTRefused is 1 for why the model refused a prefill variant's
+	// current rate and 0 for the other (SLOTTFTRefusedReasons): the rate is past
+	// what the fleet serves. wva_slo_ttft_reason is the answer at the target,
+	// and stays priced beside it.
+	// Labels: namespace, model_name, variant_name, statistic, reason.
+	WVASLOTTFTRefused = "wva_slo_ttft_refused"
 	// WVASLOTTFTFlag is 1 for each flag on a prefill variant's TTFT answer and
 	// 0 for the others (SLOTTFTFlags).
 	// Labels: namespace, model_name, variant_name, statistic, flag.
@@ -207,6 +213,17 @@ var SLOTTFTReasons = []string{
 	SLOTTFTReasonInputInvalid,
 }
 
+// SLOTTFTRefusedReasons is why the model refuses a current rate as past what the
+// fleet serves, in the order they are published.
+var SLOTTFTRefusedReasons = []string{SLOTTFTReasonSaturated, SLOTTFTReasonAboveDecodeOnset}
+
+// SLOTTFTPredictionCaveat is which way the TTFT prediction errs, on the
+// prefill-stress recordings' 14 light-load points, 7 each at p90 and p95. A
+// test holds its figures to the frozen validation table.
+const SLOTTFTPredictionCaveat = "Not a bound, and which way it errs depends on the prompt spread. At the " +
+	"assumed cv 2 (flag AssumedPromptSpread) it reads high: over the router at 13 of 14 points, worst " +
+	"3.15x at p90 and 4.13x at p95. At the spread actually sent it reads low: under at 9 of 14, worst 34% under."
+
 // SLOTTFTFlags is every flag the flag series zero-fills, in the order they are
 // published: the TTFT model's, the decode flags a TTFT answer can carry, and
 // the SLO analyzer's own. The names are whatif.Flag values, spelled here
@@ -220,6 +237,7 @@ var SLOTTFTFlags = []string{
 	"AboveFlowControlOnset", "HeldByDecodeAdmission", "DecodeOnsetUnchecked",
 	"BelowFittedBand", "KVBoundSlots",
 	"AssumedPoissonArrivals", "PromptSpreadClamped", "FlowControlMismatch",
+	"PromptSpreadAbovePeak", "ImbalanceNotSustained",
 }
 
 // SLOSources is every SLO source value, in the order they are published.

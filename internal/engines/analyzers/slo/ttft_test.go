@@ -21,6 +21,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/prefill"
@@ -101,7 +102,7 @@ func ttftInputsAt(pods int, f float64) ttftInputs {
 	if u != nil {
 		panic(u)
 	}
-	in := ttftInputs{est: ttftEstimate(), base: base, pods: pods, prompt: 2000, spread: promptSpread{cv: 1},
+	in := ttftInputs{est: ttftEstimate(), base: base, pods: pods, percent: 90, prompt: 2000, spread: promptSpread{cv: 1},
 		flow: whatif.FlowControl{State: whatif.FlowControlOff}}
 	if f > 0 {
 		in.est.FByPods = map[int]float64{pods: f}
@@ -155,7 +156,7 @@ func TestTTFTFleet_TheAssumedF(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			in := ttftInputsAt(c.pods, 0)
-			in.fRaw = c.raw
+			in.shares.largest = c.raw
 			fl, _ := ttftFleet(in, c.pods)
 			assert.Equal(t, c.want, fl.Prefill.Imbalance)
 			assert.Equal(t, c.pods > 1, fl.Prefill.ImbalanceAssumed, "one pod is exact, not assumed")
@@ -222,7 +223,7 @@ func TestRawShare(t *testing.T) {
 // and resets when the count changes.
 func TestNoteShare_TheWindow(t *testing.T) {
 	a := New(nil, nil)
-	note := func(pods int, share float64) float64 { return a.noteShare("k", pods, share, true, ttftNow) }
+	note := func(pods int, share float64) float64 { return a.noteShare("k", pods, share, true, ttftNow).largest }
 	assert.Equal(t, 1.9, note(3, 1.9))
 	for range 4 {
 		assert.Equal(t, 1.9, note(3, 1.2), "held for 5 cycles")
@@ -230,8 +231,21 @@ func TestNoteShare_TheWindow(t *testing.T) {
 	assert.Equal(t, 1.2, note(3, 1.2), "the sixth cycle has aged it out")
 	assert.Equal(t, 1.9, note(3, 1.9))
 	assert.Equal(t, 1.3, note(4, 1.3), "a change of the Ready count resets the window")
-	assert.Equal(t, 1.3, a.noteShare("k", 4, 0, false, ttftNow), "a cycle with no share leaves the window")
-	assert.Equal(t, 0.0, a.noteShare("k2", 4, 0, false, ttftNow), "no share yet")
+	assert.Equal(t, 1.3, a.noteShare("k", 4, 0, false, ttftNow).largest, "a cycle with no share leaves the window")
+	assert.Equal(t, shareWindow{}, a.noteShare("k2", 4, 0, false, ttftNow), "no share yet")
+
+	// Least, and full only at ttftWindowCycles readings.
+	var w shareWindow
+	for i := range ttftWindowCycles {
+		assert.False(t, w.full, "after %d", i)
+		w = a.noteShare("k3", 2, 1.7+float64(i)*0.01, true, ttftNow)
+	}
+	assert.True(t, w.full)
+	assert.Equal(t, 1.7, w.least)
+	assert.Equal(t, 1.74, w.largest)
+	w = a.noteShare("k3", 2, 1.1, true, ttftNow)
+	assert.True(t, w.full)
+	assert.Equal(t, 1.1, w.least)
 }
 
 // The cycle's rows reach f through Analyze: the raw share of three pods.
@@ -250,7 +264,7 @@ func TestTTFT_AnalyzeReadsTheRawShare(t *testing.T) {
 	}
 	i := slices.IndexFunc(lines, func(s string) bool { return bytes.Contains([]byte(s), []byte("slo-ttft-variant")) })
 	require.GreaterOrEqual(t, i, 0, "the cycle log's line")
-	for _, want := range []string{`"f"=2.25`, `"fSource"="assumed"`, `"fRaw"=2.25`, `"reason"="priced"`,
+	for _, want := range []string{`"f"=2.25`, `"fSource"="assumed"`, `"fRaw"=2.25`, `"fRawWindowFull"=true`, `"reason"="priced"`,
 		`"vpSource"="busy-minutes"`, `"cvSource"="assumed"`, `"decodeVariant"="none"`, `"flowControl"="no-series"`,
 		`"pods"=3`, `"ttftRefused"=""`} {
 		assert.Contains(t, lines[i], want)
@@ -290,6 +304,198 @@ func TestTTFT_RoutingBound(t *testing.T) {
 			assert.Equal(t, c.reason == constants.SLOTTFTReasonPriced, !math.IsNaN(p.perReplica))
 		})
 	}
+}
+
+// Finding T4: a raw share past 0.8 of the pods is not routing-bound until it
+// has held over the whole window. Until then the rate is priced at that high
+// f, the side that asks for more replicas, and flagged.
+func TestTTFT_RoutingBoundMustBeSustained(t *testing.T) {
+	window := func(largest, least float64, full bool) ttftInputs {
+		in := ttftInputsAt(2, 0)
+		in.shares = shareWindow{largest: largest, least: least, full: full}
+		return in
+	}
+	for _, c := range []struct {
+		name      string
+		in        ttftInputs
+		reason    string
+		transient bool
+	}{
+		{"one cycle's chance", window(1.9, 1.2, true), constants.SLOTTFTReasonPriced, true},
+		{"held, but not for the whole window", window(1.9, 1.7, false), constants.SLOTTFTReasonPriced, true},
+		{"just short of it at the least", window(1.9, 1.59, true), constants.SLOTTFTReasonPriced, true},
+		{"held at the share over the window", window(1.9, 1.6, true), constants.SLOTTFTReasonRoutingBound, false},
+		{"under the share", window(1.5, 1.2, true), constants.SLOTTFTReasonPriced, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p := priceTTFT(c.in, 1, ttftTarget)
+			require.Equal(t, c.reason, p.reason)
+			assert.Equal(t, c.transient, slices.Contains(p.flags, ImbalanceNotSustained))
+			assert.Equal(t, c.reason == constants.SLOTTFTReasonPriced, !math.IsNaN(p.perReplica))
+			if c.transient {
+				assert.Equal(t, c.in.shares.largest, p.f, "priced at the high f")
+			}
+		})
+	}
+}
+
+// Finding T1: the decode role takes the model's whole rate, whichever prefill
+// variant sent it. Two equal variants are priced as the fleet they are.
+func TestTTFT_TheDecodeSideTakesTheWholeRate(t *testing.T) {
+	flow := whatif.FlowControl{State: whatif.FlowControlOn, QueueThreshold: 5, KVThreshold: 0.8}
+	variant := ttftInputsAt(1, 0)
+	variant.otherPods = 1
+	variant.flow, variant.decode = flow, testDecode()
+	variant.decode.Replicas = 1
+	whole := ttftInputsAt(2, 1)
+	whole.flow, whole.decode = flow, variant.decode
+	fl, _ := ttftFleet(whole, 2)
+	on, ok := whatif.FlowControlOnsets(fl).(whatif.Onsets)
+	require.True(t, ok)
+	require.Positive(t, on.Decode)
+
+	got := priceTTFT(variant, 0.98*on.Decode, ttftTarget)
+	want, ok := whatif.TTFTAt(fl, 0.98*on.Decode, 0.9).(whatif.TTFT)
+	require.True(t, ok)
+	require.NotNil(t, got.at)
+	assert.InDelta(t, want.Seconds, got.at.Seconds, 1e-9, "near the onset the decode wait is the whole model's")
+	assert.Greater(t, got.at.Seconds, 3*priceTTFT(ttftInputsAt(1, 0), 1, ttftTarget).at.Seconds, "not one variant's share of it")
+
+	got = priceTTFT(variant, 1.2*on.Decode, ttftTarget)
+	assert.Equal(t, constants.SLOTTFTReasonAboveDecodeOnset, got.currentRefusal())
+	assert.True(t, got.unmet)
+	assert.True(t, math.IsNaN(got.published()))
+
+	// The per-replica rate is the whole rate's, over every prefill replica.
+	got = priceTTFT(variant, 1, ttftTarget)
+	rate, ok := whatif.RateForTTFT(fl, ttftTarget).(whatif.Answer)
+	require.True(t, ok)
+	require.NotNil(t, got.rate)
+	assert.InDelta(t, rate.Value, got.rate.Value, 1e-9)
+
+	// Priced with no decode side: the rate per replica is over them all, so
+	// it is what one pod of either variant carries.
+	alone := ttftInputsAt(1, 0)
+	alone.otherPods = 1
+	p := priceTTFT(alone, 1, ttftTarget)
+	require.Equal(t, constants.SLOTTFTReasonPriced, p.reason)
+	assert.InDelta(t, p.rate.Value/2, p.perReplica, 1e-9)
+
+	// No Ready pod of this variant is no prefill replicas, however many the
+	// other variant has.
+	gone := variant
+	gone.pods = 0
+	assert.Equal(t, constants.SLOTTFTReasonNoPrefillReplicas, priceTTFT(gone, 1, ttftTarget).reason)
+}
+
+// The same through Analyze: two equal prefill variants and one fitted decode
+// line read exactly as one variant of two pods.
+func TestTTFT_TheRateIsTheModelsWithADecodeSide(t *testing.T) {
+	run := func(rig func(i int) []domain.ReplicaMetrics, states []domain.VariantReplicaState, est prefill.Estimate, arrival float64) metrics.SLOTTFTReading {
+		r := newTTFTRig(est, rig(0))
+		r.a.store = capacity.NewStore()
+		r.a.store.Update("ns", "m", "dec", capacity.Record{EngineParams: &capacity.EngineParams{MaxNumSeqs: 64}}, ttftNow)
+		r.in.VariantStates = states
+		r.in.SchedulerQueue = &domain.SchedulerQueueMetrics{}
+		r.in.ArrivalRate = 1
+		for i := range 12 {
+			r.now = r.now.Add(time.Minute)
+			r.in.ReplicaMetrics = rig(i)
+			r.analyze(t)
+		}
+		r.in.ArrivalRate = arrival
+		_, got := r.analyze(t)
+		require.NotEmpty(t, got)
+		require.NotEqual(t, constants.SLOTTFTReasonNoDecodeSide, got[0].Reason, "the line must price")
+		return got[0]
+	}
+	state := func(v string) domain.VariantReplicaState {
+		return domain.VariantReplicaState{VariantName: v, Role: domain.RolePrefill, AcceleratorName: "H100", GPUsPerReplica: 1, CurrentReplicas: 1}
+	}
+	// A small KV, so the decode gate closes well before the prefill knee.
+	small := func(i int) []domain.ReplicaMetrics {
+		rows := cycleRows("dec", i)
+		for j := range rows {
+			rows[j].TotalKvCapacityTokens = 8000
+		}
+		return rows
+	}
+	two := func(i int) []domain.ReplicaMetrics {
+		return append(append(prefillRows("pre", 4000), prefillRows("pre2", 4000)...), small(i)...)
+	}
+	one := func(i int) []domain.ReplicaMetrics {
+		return append(prefillRows("pre", 4000, 4000), small(i)...)
+	}
+	est := ttftEstimate()
+	est.FByPods = map[int]float64{2: 1}
+	refused := 0
+	for _, arrival := range []float64{0.25, 0.5, 1, 2, 4, 8, 16, 32} {
+		split := run(two, []domain.VariantReplicaState{state("pre"), state("pre2"), decState}, est, arrival)
+		joined := run(one, []domain.VariantReplicaState{state("pre"), decState}, est, arrival)
+		assert.Equal(t, joined.Refused, split.Refused, "at %g r/s", arrival)
+		assert.Equal(t, joined.Unmet, split.Unmet, "at %g r/s", arrival)
+		assert.Equal(t, joined.Reason, split.Reason, "at %g r/s", arrival)
+		if math.IsNaN(joined.Predicted) {
+			assert.True(t, math.IsNaN(split.Predicted), "at %g r/s", arrival)
+		} else {
+			assert.InDelta(t, joined.Predicted, split.Predicted, 1e-9, "at %g r/s", arrival)
+		}
+		if split.Refused == constants.SLOTTFTReasonAboveDecodeOnset {
+			refused++
+		}
+		t.Logf("%g r/s: %s, refused %q, predicted %.3f s", arrival, split.Reason, split.Refused, split.Predicted)
+	}
+	assert.Positive(t, refused, "the sweep must cross the decode onset")
+}
+
+// Finding T2/T3: a cv above the peak for the percentile, assumed or measured,
+// is flagged, at every percentile.
+func TestTTFT_ASpreadAboveThePeakIsFlagged(t *testing.T) {
+	flagged := func(percent int, spread promptSpread) bool {
+		in := ttftInputsAt(1, 0)
+		in.percent, in.spread = percent, spread
+		_, own := ttftFleet(in, 1)
+		return slices.Contains(own, PromptSpreadAbovePeak)
+	}
+	assert.False(t, flagged(90, promptSpread{cv: 2.22}))
+	assert.True(t, flagged(90, promptSpread{cv: 2.23}), "under the old clamp's reach")
+	assert.False(t, flagged(90, promptSpread{cv: 2, assumed: true}), "the assumed 2 is under the peak at p90")
+	assert.True(t, flagged(85, promptSpread{cv: 2, assumed: true}), "and over it at p85")
+	assert.True(t, flagged(70, promptSpread{cv: 0.8}))
+	assert.True(t, flagged(50, promptSpread{cv: 0.1}))
+	assert.True(t, flagged(90, promptSpread{cv: 3, clamped: true}))
+	assert.False(t, flagged(94, promptSpread{cv: 3, clamped: true}), "still rising at the stop")
+	assert.False(t, flagged(99, promptSpread{cv: 3}))
+	got := newTTFTRig(ttftEstimate(), prefillRows("pre", 4000))
+	got.in.Config.(*config.ScalingPolicy).SLO.TTFT.Percentile = 85
+	assert.Contains(t, got.one(t).Flags, string(PromptSpreadAbovePeak))
+}
+
+// The table is the gamma's: the prompt's own quantile, as the model prices it
+// at no load, peaks where promptCVPeak says at each percentile.
+func TestTTFT_PromptCVPeakIsTheGammas(t *testing.T) {
+	floor := func(cv, q float64) float64 {
+		in := ttftInputsAt(1, 0)
+		in.base.FixedLatency = 1e-9
+		in.spread.cv = cv
+		fl, _ := ttftFleet(in, 1)
+		at, ok := whatif.TTFTAt(fl, 0, q).(whatif.TTFT)
+		require.True(t, ok)
+		return at.Floor
+	}
+	for percent := 50; percent <= 99; percent++ {
+		q := float64(percent) / 100
+		best, at := 0.0, 0.0
+		for cv := 0.0; cv <= 3.0001; cv += 0.02 {
+			if f := floor(cv, q); f > best {
+				best, at = f, cv
+			}
+		}
+		assert.InDelta(t, at, promptCVPeak(percent), 0.03, "p%d", percent)
+	}
+	assert.Equal(t, 2.22, promptCVPeak(90))
+	assert.Equal(t, maxMeasuredPromptCV, promptCVPeak(94))
+	assert.Equal(t, 0.0, promptCVPeak(40))
 }
 
 // Test 8: the prompt V_P was read at and the curve reach the model through
@@ -419,14 +625,14 @@ func TestTTFT_AMeasuredSpreadThroughAnalyze(t *testing.T) {
 	assert.NotContains(t, got.Flags, string(whatif.AssumedPromptSpread))
 }
 
-// Test 11: a larger cv never prices a shorter TTFT at the current rate over
-// [0, 3], from 0.05 of the knee, nor a higher rate at the target, on seeded
-// fleets with a target clear of the floor: over [0, 3] at p95 and p99, and over
-// [0, 2] at p90. At p90 past 2 the rate side does not hold where the rate at
-// the target is low, for the reason TestTTFT_TheP90FloorPeaksBelowCV3 pins.
+// Test 11, narrowed to what holds. From cv 0.3 up to the peak for the
+// percentile, a larger cv never prices a shorter TTFT at the current rate, from
+// 0.05 of the knee, nor a higher rate at the target, on seeded fleets. Past the
+// peak the rate side fails (TestTTFT_TheCVClaimsThatDoNotHold), and so does
+// the bottom of the range; PromptSpreadAbovePeak flags the first.
 func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
 	r := rand.New(rand.NewPCG(11, 13))
-	const draws = 300
+	const draws = 120
 	priced := 0
 	for range draws {
 		in := ttftInputsAt(1+r.IntN(4), 0)
@@ -434,16 +640,20 @@ func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
 		in.base.VP = 20000 + 120000*r.Float64()
 		in.base.VPPromptTokens = in.prompt
 		in.base.FixedLatency = 0.003 + 0.03*r.Float64()
-		in.fRaw = 1 + r.Float64()
+		in.shares.largest = 1 + r.Float64()
 		if r.IntN(2) == 0 {
 			in.decodeTTFT = whatif.DecodeTTFT{Seconds: 0.05 * r.Float64(), PromptTokens: in.prompt}
 		}
-		q := []float64{0.9, 0.95, 0.99}[r.IntN(3)]
+		percent := []int{90, 91, 92, 93, 95, 99}[r.IntN(6)]
+		q := float64(percent) / 100
 		fl, _ := ttftFleet(in, in.pods)
 		knee, ok := whatif.PrefillKnee(fl.Prefill).(whatif.Answer)
 		require.True(t, ok)
 		rate := knee.Value * (0.05 + 0.9*r.Float64())
-		cvs := []float64{0, 0.5, 1, 1.5, 2, 2.5, 3}
+		var cvs []float64
+		for cv := 0.3; cv <= promptCVPeak(percent)+1e-9; cv += 0.05 {
+			cvs = append(cvs, cv)
+		}
 		var floor float64
 		for _, cv := range cvs {
 			in.spread.cv = cv
@@ -452,7 +662,12 @@ func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
 			require.True(t, ok)
 			floor = max(floor, at.Floor)
 		}
-		target := whatif.TTFTTarget{Seconds: floor * (1.1 + 4*r.Float64()), Percentile: q}
+		// Half the draws sit just over the highest floor, where a fault shows.
+		margin := 1.001
+		if r.IntN(2) == 0 {
+			margin = 1.1 + 4*r.Float64()
+		}
+		target := whatif.TTFTTarget{Seconds: floor * margin, Percentile: q}
 		prevT, prevR := 0.0, math.Inf(1)
 		for _, cv := range cvs {
 			in.spread.cv = cv
@@ -463,23 +678,20 @@ func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
 			prevT = at.Seconds
 			ans, ok := whatif.RateForTTFT(fl, target).(whatif.Answer)
 			require.True(t, ok, "a target above every floor is answered")
-			if q == 0.9 && cv > 2 {
-				continue
-			}
 			require.LessOrEqual(t, ans.Value, prevR*(1+1e-9), "the rate rose as cv rose to %g: %+v", cv, fl.Prefill)
 			prevR = ans.Value
 			priced++
 		}
 	}
-	assert.Greater(t, priced, draws*4, "the rate side must be exercised")
+	assert.Greater(t, priced, draws*20, "the rate side must be exercised")
 }
 
 // The S1 decisions take TTFT as rising with cv over [0, 3] at p90. At the
-// floor, no queue, it does not: the gamma prompt's p90 peaks near cv 2.25 and
+// floor, no queue, it does not: the gamma prompt's p90 peaks at cv 2.22 and
 // falls 8% by cv 3 (the decision's scan started at 0.05 of the knee). So the
-// clamp at 3 is not the highest p90 at no load, and a target between the two
-// floors is refused at cv 2.25 and answered at cv 3. At p95 and p99 the floor
-// rises through 3. Pinned so a change to the clamp says so.
+// stop at 3 is not the highest p90 at no load, and a target between the two
+// floors is refused at cv 2.22 and answered at cv 3. At p95 and p99 the floor
+// rises through 3. Pinned so a change to the stop says so.
 func TestTTFT_TheP90FloorPeaksBelowCV3(t *testing.T) {
 	floor := func(cv, q float64) float64 {
 		in := ttftInputsAt(1, 0)
@@ -490,10 +702,52 @@ func TestTTFT_TheP90FloorPeaksBelowCV3(t *testing.T) {
 		require.True(t, ok)
 		return at.Floor
 	}
-	assert.InDelta(t, 2.768/3.0242, floor(3, 0.9)/floor(2.25, 0.9), 0.002, "8% lower at p90")
-	assert.Greater(t, floor(2, 0.9), floor(3, 0.9), "the assumed 2 reads above the clamp at p90")
-	assert.Greater(t, floor(3, 0.95), floor(2.25, 0.95), "p95 still rises")
-	assert.Greater(t, floor(3, 0.99), floor(2.25, 0.99), "p99 still rises")
+	assert.InDelta(t, 2.768/3.025, floor(3, 0.9)/floor(2.22, 0.9), 0.002, "8% lower at p90")
+	assert.Greater(t, floor(2, 0.9), floor(3, 0.9), "the assumed 2 reads above the stop at p90")
+	assert.Greater(t, floor(3, 0.95), floor(2.22, 0.95), "p95 still rises")
+	assert.Greater(t, floor(3, 0.99), floor(2.22, 0.99), "p99 still rises")
+}
+
+// What the property above leaves out, pinned as false.
+func TestTTFT_TheCVClaimsThatDoNotHold(t *testing.T) {
+	at := func(in ttftInputs, cv, rate, q float64) float64 {
+		in.spread.cv = cv
+		fl, _ := ttftFleet(in, in.pods)
+		r, ok := whatif.TTFTAt(fl, rate, q).(whatif.TTFT)
+		require.True(t, ok)
+		return r.Seconds
+	}
+	// At the bottom of the range: with the worst pod's utilization near 1 - q
+	// a little spread prices a shorter p90 than none.
+	in := ttftInputsAt(1, 0)
+	fl, _ := ttftFleet(in, 1)
+	knee, ok := whatif.PrefillKnee(fl.Prefill).(whatif.Answer)
+	require.True(t, ok)
+	rate := 0.11 * knee.Value
+	assert.Less(t, at(in, 0.15, rate, 0.9), 0.96*at(in, 0, rate, 0.9), "more than 4% shorter at cv 0.15")
+
+	// Past the peak: just over the highest floor, the rate at the target rises
+	// by multiples between the peak and the stop.
+	for _, percent := range []int{90, 92, 93} {
+		q := float64(percent) / 100
+		peak := promptCVPeak(percent)
+		in := ttftInputsAt(1, 0)
+		rateAt := func(cv float64, target whatif.TTFTTarget) float64 {
+			in.spread.cv = cv
+			fl, _ := ttftFleet(in, 1)
+			a, ok := whatif.RateForTTFT(fl, target).(whatif.Answer)
+			require.True(t, ok)
+			return a.Value
+		}
+		in.spread.cv = peak
+		fl, _ := ttftFleet(in, 1)
+		top, ok := whatif.TTFTAt(fl, 0, q).(whatif.TTFT)
+		require.True(t, ok)
+		target := whatif.TTFTTarget{Seconds: 1.001 * top.Floor, Percentile: q}
+		ratio := rateAt(3, target) / rateAt(peak, target)
+		t.Logf("p%d: rate at cv 3 / rate at the peak %.2f, 1.001x the floor", percent, ratio)
+		assert.Greater(t, ratio, 1.5, "p%d", percent)
+	}
 }
 
 // Test 12: the transfer term is the mean over the rows that carry it, per
@@ -572,10 +826,21 @@ func TestTTFT_FlowControlThroughAnalyze(t *testing.T) {
 	r.in.SchedulerQueue = nil
 	r.in.Config = cfg(config.SLOFlowControlEnabled)
 	assert.Equal(t, constants.SLOTTFTReasonNoDecodeSide, r.one(t).Reason, "on, with no decode side")
+}
 
-	r.in.Config = cfg("")
-	r.in.FlowControlPools = []domain.FlowControlPool{{}}
-	assert.Equal(t, constants.SLOTTFTReasonNoDecodeSide, r.one(t).Reason, "a pool's series is the router's series too")
+// FlowControlPools is filled only while a learner recording is on. The state
+// reads SchedulerQueue alone, so a run recorded and the same run unrecorded
+// price alike, which is what lets a replay stand for production.
+func TestTTFT_TheFlowControlStateDoesNotDependOnARecording(t *testing.T) {
+	for _, queue := range []*domain.SchedulerQueueMetrics{nil, {}} {
+		r := newTTFTRig(ttftEstimate(), prefillRows("pre", 4000))
+		r.in.SchedulerQueue = queue
+		unrecorded := r.one(t)
+		r.in.FlowControlPools = []domain.FlowControlPool{{}}
+		recorded := r.one(t)
+		assert.Equal(t, unrecorded.Reason, recorded.Reason)
+		assert.Equal(t, unrecorded.Flags, recorded.Flags)
+	}
 }
 
 // decodeRows are n Ready decode replicas, ITL on line at fill k.
@@ -779,6 +1044,7 @@ func TestTTFT_CurrentRateRefusals(t *testing.T) {
 	require.NotNil(t, p.atRefused)
 	assert.Equal(t, whatif.Saturated, p.atRefused.Reason)
 	assert.Equal(t, constants.SLOTTFTReasonSaturated, p.currentRefusal())
+	assert.Contains(t, constants.SLOTTFTRefusedReasons, p.currentRefusal())
 
 	// At or over the decode onset.
 	in = ttftInputsAt(1, 0)
@@ -924,7 +1190,7 @@ func TestTTFT_TheFlagListIsTheModels(t *testing.T) {
 		whatif.DecodeTTFTUnmeasured, whatif.DecodeEngineMeasured, whatif.VPScaledToPrompt, whatif.VPShapeMoved,
 		whatif.FlowControlInferredOff, whatif.AboveFlowControlOnset, whatif.HeldByDecodeAdmission,
 		whatif.DecodeOnsetUnchecked, whatif.BelowFittedBand, whatif.KVBoundSlots,
-		AssumedPoissonArrivals, PromptSpreadClamped, FlowControlMismatch}
+		AssumedPoissonArrivals, PromptSpreadClamped, FlowControlMismatch, PromptSpreadAbovePeak, ImbalanceNotSustained}
 	want := make([]string, len(flags))
 	for i, f := range flags {
 		want[i] = string(f)
@@ -1050,6 +1316,41 @@ func TestTTFT_TheRateIsTheVariantsShare(t *testing.T) {
 	assert.Equal(t, constants.SLOTTFTReasonSaturated, got[0].Refused)
 	assert.Equal(t, constants.SLOTTFTReasonPriced, got[0].Reason, "the reason is the answer at the target")
 	assert.True(t, math.IsNaN(got[0].Predicted))
+}
+
+// The unmet contract: a target below the floor is unmet with no prediction, at
+// any rate, the model's answer there or not.
+func TestTTFT_ATargetBelowTheFloorIsUnmetAtAnyRate(t *testing.T) {
+	for _, arrival := range []float64{0.01, 10, 500} {
+		r := newTTFTRig(ttftEstimate(), prefillRows("pre", 4000))
+		r.in.Config = policy(0, time.Millisecond)
+		r.in.ArrivalRate = arrival
+		got := r.one(t)
+		assert.Equal(t, constants.SLOTTFTReasonTargetBelowFloor, got.Reason)
+		assert.True(t, got.Unmet, "at %g r/s", arrival)
+		assert.True(t, math.IsNaN(got.Predicted), "at %g r/s", arrival)
+		if arrival == 500 {
+			assert.Equal(t, constants.SLOTTFTReasonSaturated, got.Refused, "past the knee too, with the rate refused")
+		}
+	}
+	// With the target exactly at the floor the prediction does not miss it,
+	// and the floor still does: no prompt spread, no load, so the two are equal.
+	in := ttftInputsAt(1, 0)
+	in.spread.cv = 0
+	fl, _ := ttftFleet(in, 1)
+	at, ok := whatif.TTFTAt(fl, 0, 0.9).(whatif.TTFT)
+	require.True(t, ok)
+	require.Equal(t, at.Floor, at.Seconds)
+	p := priceTTFT(in, 0, whatif.TTFTTarget{Seconds: at.Floor, Percentile: 0.9})
+	require.Equal(t, constants.SLOTTFTReasonTargetBelowFloor, p.reason)
+	assert.True(t, p.unmet)
+
+	// A refusal that is not about the rate is no refused rate.
+	none := ttftInputsAt(1, 0)
+	none.base.VP = 0
+	p = priceTTFT(none, 1, ttftTarget)
+	require.NotNil(t, p.atRefused)
+	assert.Empty(t, p.currentRefusal())
 }
 
 // With no arrival rate from the router, the generating replicas' rate stands

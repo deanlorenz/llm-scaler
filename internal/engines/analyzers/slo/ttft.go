@@ -28,9 +28,13 @@ import (
 // is unchanged, a prefill variant stays no-data, so no replica count moves.
 // Aggregated variants wait for the what-if M1.
 //
-// The prediction is not a bound. On the prefill-stress recordings it reads low
-// at light load, up to about 34% under the router's p90
-// (docs/proposals/slo-capacity-planner-ttft.md, "As built (P3 after P2)").
+// The prediction is not a bound, and which way it errs depends on the prompt
+// spread. On the prefill-stress recordings' light-load points, at p90 and p95
+// (docs/proposals/slo-capacity-planner-ttft.md, "As built (P3 after P2)"): at
+// the assumed cv 2 it reads high, over the router at 13 of 14, and at the
+// spread the load generator sent it reads low, under at 9 of 14.
+// constants.SLOTTFTPredictionCaveat has the worst of each, and a test holds it
+// to the frozen table.
 
 // SwitchTTFTPrice is the replay switch for the shadow TTFT pricing: on, each
 // prefill variant is priced against the TTFT target; off, as before, none is
@@ -95,8 +99,8 @@ type ttftPricing struct {
 	flags []whatif.Flag
 }
 
-// priceTTFT prices one variant at its current count and the current rate.
-// RateForTTFT sets the reason and the per-replica rate. TTFTAt is scored
+// priceTTFT prices one variant at its current count and the model's whole
+// rate (ttftInputs.otherPods says why whole). RateForTTFT sets the reason and the per-replica rate. TTFTAt is scored
 // against the router and says whether the target is met now: a refusal there
 // (at or over the prefill knee, at or over the decode onset) only blanks the
 // prediction, since the rate is past what the fleet serves at any TTFT, which
@@ -123,10 +127,10 @@ func priceTTFT(in ttftInputs, rate float64, target whatif.TTFTTarget) ttftPricin
 	var flags []whatif.Flag
 	switch {
 	case out.rate != nil:
-		out.reason = answeredReason(fl, *out.rate, in.pods)
+		out.reason = answeredReason(fl, *out.rate, in)
 		flags = out.rate.Flags
 		if out.reason == constants.SLOTTFTReasonPriced {
-			out.perReplica = out.rate.Value / float64(in.pods)
+			out.perReplica = out.rate.Value / float64(fl.Prefill.Replicas)
 		}
 		if out.at != nil {
 			out.predicted = out.at.Seconds
@@ -135,6 +139,11 @@ func priceTTFT(in ttftInputs, rate float64, target whatif.TTFTTarget) ttftPricin
 		out.reason = ttftReason(*out.rateRefused)
 		if out.at != nil {
 			flags = out.at.Flags
+		}
+		// No fleet meets the target, so it is missed at any rate, whatever
+		// the prediction reads there.
+		if out.rateRefused.Reason == whatif.TargetBelowFloor {
+			out.unmet = true
 		}
 	}
 	if out.rate != nil || out.at != nil {
@@ -145,12 +154,11 @@ func priceTTFT(in ttftInputs, rate float64, target whatif.TTFTTarget) ttftPricin
 
 // answeredReason is the reason of a rate the model gave: decode-bound when
 // decode sets it, routing-bound when one pod takes the work, priced otherwise.
-func answeredReason(fl whatif.TTFTFleet, rate whatif.Answer, pods int) string {
+func answeredReason(fl whatif.TTFTFleet, rate whatif.Answer, in ttftInputs) string {
 	if decodeBound(fl, rate) {
 		return constants.SLOTTFTReasonDecodeBound
 	}
-	// One pod has no router to blame, and f / N_p is 1 there by construction.
-	if pods > 1 && fl.Prefill.Imbalance/float64(pods) >= routingBoundShare {
+	if bound, _ := in.routing(); bound {
 		return constants.SLOTTFTReasonRoutingBound
 	}
 	return constants.SLOTTFTReasonPriced
@@ -265,9 +273,12 @@ func (a *Analyzer) priceTTFTVariants(logger logr.Logger, input domain.AnalyzerIn
 	}
 	target := whatif.TTFTTarget{Seconds: cfg.SLO.TTFT.Target.Seconds(), Percentile: float64(cfg.SLO.TTFTPercentile()) / 100}
 	statistic := "p" + strconv.Itoa(cfg.SLO.TTFTPercentile())
-	flow, mismatch := flowControlState(cfg.SLO, input.SchedulerQueue != nil || len(input.FlowControlPools) > 0)
+	// From SchedulerQueue alone, which is collected every cycle: FlowControlPools
+	// is filled only while a learner recording is on, and reading it would make
+	// the state depend on that.
+	flow, mismatch := flowControlState(cfg.SLO, input.SchedulerQueue != nil)
 	if mismatch {
-		logger.Info("slo.flowControl contradicts the router's flow-control series; priced as declared",
+		logger.V(logging.VERBOSE).Info("slo.flowControl contradicts the router's flow-control series; priced as declared",
 			"modelID", input.ModelID, "namespace", input.Namespace, "declared", string(cfg.SLO.FlowControl),
 			"seriesPresent", flow.State == whatif.FlowControlOff)
 	}
@@ -288,7 +299,7 @@ func (a *Analyzer) priceTTFTVariants(logger logr.Logger, input domain.AnalyzerIn
 		if s, ok := decodeEngineTTFT(decodeRows); ok && modelPrompt > 0 {
 			cycle = whatif.DecodeTTFT{Seconds: s, PromptTokens: modelPrompt}
 		}
-		measured = a.noteDecodeTTFT(prefillBoundKey(input.Namespace, input.ModelID, decodes[0]), cycle, now)
+		measured = a.noteDecodeTTFT(ttftWindowKey(input.Namespace, input.ModelID, decodes[0]), cycle, now)
 	}
 	arrival := input.ArrivalRate
 	if !(arrival > 0) || !whatif.Finite(arrival) {
@@ -308,35 +319,35 @@ func (a *Analyzer) priceTTFTVariants(logger logr.Logger, input domain.AnalyzerIn
 		share, shareOK := rawShare(rows, view, now)
 		prompt, _ := prefill.MeanEffectivePrompt(rows, a.sglang(input, []string{v}))
 		in := ttftInputs{
-			est: est, estimateAt: estimateAt, pods: pods, prompt: prompt, spread: readPromptSpread(rows, prompt),
-			fRaw:     a.noteShare(prefillBoundKey(input.Namespace, input.ModelID, v), pods, share, shareOK, now),
+			est: est, estimateAt: estimateAt, pods: pods, otherPods: readyPrefill - pods, percent: cfg.SLO.TTFTPercentile(),
+			prompt: prompt, spread: readPromptSpread(rows, prompt),
+			shares:   a.noteShare(ttftWindowKey(input.Namespace, input.ModelID, v), pods, share, shareOK, now),
 			transfer: transferPerToken(decodeRows, prompt), decode: decode, decodeVariant: decodeVariant,
 			decodeTTFT: measured, flow: flow, mismatch: mismatch,
 		}
-		var rate float64
-		if readyPrefill > 0 {
-			rate = arrival * float64(pods) / float64(readyPrefill)
-		}
-		p := gateOrPrice(&in, fresh, rate, target)
+		p := gateOrPrice(&in, fresh, arrival, target)
 		out = append(out, metrics.SLOTTFTReading{
 			Variant: v, Statistic: statistic, Predicted: p.published(), PerReplica: p.perReplica,
 			Unmet: p.unmet, VPSource: vpSource(est), Reason: p.reason, Refused: p.currentRefusal(),
 			Flags: publishedFlags(p.flags),
 		})
-		logTTFT(logger, input, v, in, p, rate, target)
+		logTTFT(logger, input, v, in, p, arrival, target)
 	}
 	return out
 }
 
-// currentRefusal is the model's refusal of the current rate, spelled as a
-// reason, where the rate at the target was answered: it is what stands behind
-// an absent prediction with unmet set. "" otherwise: with the rate refused too,
-// the reason says it.
+// currentRefusal is the model's refusal of the current rate because the rate
+// is past what the fleet serves, one of constants.SLOTTFTRefusedReasons, or ""
+// with no such refusal. It stands behind an absent prediction with unmet set;
+// the reason stays the answer at the target.
 func (p ttftPricing) currentRefusal() string {
-	if p.atRefused == nil || p.rate == nil {
+	if p.atRefused == nil {
 		return ""
 	}
-	return ttftReason(*p.atRefused)
+	if r := ttftReason(*p.atRefused); slices.Contains(constants.SLOTTFTRefusedReasons, r) {
+		return r
+	}
+	return ""
 }
 
 // published is the prediction as the series holds it: only with a reason that
@@ -385,8 +396,8 @@ func (a *Analyzer) sglang(input domain.AnalyzerInput, variants []string) bool {
 	return false
 }
 
-// prefillBoundKey is a variant's key in the TTFT windows: namespace|model|variant.
-func prefillBoundKey(namespace, modelID, variant string) string {
+// ttftWindowKey is a variant's key in the TTFT windows: namespace|model|variant.
+func ttftWindowKey(namespace, modelID, variant string) string {
 	return namespace + "|" + modelID + "|" + variant
 }
 
@@ -449,7 +460,8 @@ func logTTFT(logger logr.Logger, input domain.AnalyzerInput, variant string, in 
 		"onsetPrefill", onsetPrefill, "onsetDecode", onsetDecode, "flags", p.flags,
 		// The inputs.
 		"vp", in.est.VP, "vpSource", vpSource(in.est), "vpPromptTokens", in.est.VPPromptTokens,
-		"estimateAt", in.estimateAt, "a", in.est.A, "f", p.f, "fSource", fSource, "fRaw", in.fRaw,
+		"estimateAt", in.estimateAt, "a", in.est.A, "f", p.f, "fSource", fSource, "fRaw", in.shares.largest,
+		"fRawLeast", in.shares.least, "fRawWindowFull", in.shares.full, "otherPrefillPods", in.otherPods,
 		"prompt", in.prompt, "cv", in.spread.cv, "cvSource", cvSource, "transferPerToken", in.transfer,
 		"decodeVariant", in.decodeVariant, "decodeTTFT", in.decodeTTFT.Seconds,
 		"decodeTTFTPrompt", in.decodeTTFT.PromptTokens, "flowControl", flowControlName(in.flow.State),

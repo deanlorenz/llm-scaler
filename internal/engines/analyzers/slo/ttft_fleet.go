@@ -20,7 +20,8 @@ const (
 	// fFloor is the least f assumed on more than one pod. Not measured: it
 	// is the TTFT model's own synthetic multi-pod case, near P1's 2:1:1:1
 	// example (1.6). The prefill-stress run at three pods read a raw share of
-	// at most 1.33, so it held there.
+	// at most 1.33 over its loaded cycles, so it held there. At light load the
+	// raw share is chance: the same run read 3.00 at 0.06 r/s.
 	fFloor = 1.5
 	// ttftWindowCycles is how many cycles the raw share and the decode
 	// engine's TTFT are held over.
@@ -28,8 +29,9 @@ const (
 	// assumedPromptCV is the prompt spread with no histogram: not measured,
 	// the top of the spread taken as plausible.
 	assumedPromptCV = 2.0
-	// maxMeasuredPromptCV is the most spread passed: above it a larger cv
-	// stops pricing a longer p90 at low load.
+	// maxMeasuredPromptCV is the most spread passed. It is a stop, not the
+	// value that prices the longest TTFT: at no load that is promptCVPeak, 2.22
+	// at p90, and past 3 the p90 falls fast, to 1.96 times the mean by cv 4.
 	maxMeasuredPromptCV = 3.0
 	// flowControlQueueThreshold and flowControlKVThreshold are the EPP
 	// detector's upstream defaults, which this repository's install leaves
@@ -44,12 +46,46 @@ const (
 	// Poisson, which over-promises on bursty traffic.
 	AssumedPoissonArrivals whatif.Flag = "AssumedPoissonArrivals"
 	// PromptSpreadClamped is a measured prompt spread with mass past the
-	// histogram's last bound, or above maxMeasuredPromptCV: priced at that top.
+	// histogram's last bound, or above maxMeasuredPromptCV: priced at that stop.
 	PromptSpreadClamped whatif.Flag = "PromptSpreadClamped"
 	// FlowControlMismatch is a declared slo.flowControl the router's series
 	// contradict: priced as declared.
 	FlowControlMismatch whatif.Flag = "FlowControlMismatch"
+	// PromptSpreadAbovePeak is a cv, assumed or measured, above promptCVPeak
+	// for the objective's percentile: the prompt's own tail shrinks as cv
+	// rises from there, so a larger cv prices a shorter floor and can price a
+	// higher rate. On S2's no-act list.
+	PromptSpreadAbovePeak whatif.Flag = "PromptSpreadAbovePeak"
+	// ImbalanceNotSustained is an f at or above routingBoundShare of the pods
+	// that has not held over the whole window: chance alone can read that at
+	// two pods. Priced at it, the side that asks for more replicas, and not
+	// routing-bound.
+	ImbalanceNotSustained whatif.Flag = "ImbalanceNotSustained"
 )
+
+// promptCVPeaks is, from p50 to p93, the cv at which a mean-one gamma's quantile
+// peaks on [0, 3], to 0.01. From p94 it is still rising at 3. Below 0.5 the
+// figure is a median, under the mean at any cv, so its peak is cv 0.
+var promptCVPeaks = [...]float64{
+	0, 0.04, 0.08, 0.11, 0.15, 0.19, 0.23, 0.26, 0.30, 0.34,
+	0.38, 0.42, 0.46, 0.50, 0.54, 0.58, 0.62, 0.66, 0.70, 0.74,
+	0.79, 0.83, 0.87, 0.92, 0.97, 1.02, 1.07, 1.12, 1.18, 1.24,
+	1.30, 1.36, 1.43, 1.50, 1.58, 1.66, 1.75, 1.85, 1.96, 2.08,
+	2.22, 2.38, 2.56, 2.78,
+}
+
+// promptCVPeak is the cv that prices the longest prompt at the percentile, at
+// no load (TestTTFT_PromptCVPeakIsTheGammas).
+func promptCVPeak(percent int) float64 {
+	i := percent - 50
+	switch {
+	case i < 0:
+		return 0
+	case i >= len(promptCVPeaks):
+		return maxMeasuredPromptCV
+	}
+	return promptCVPeaks[i]
+}
 
 // Where f came from, on the log line.
 const (
@@ -75,8 +111,16 @@ type ttftInputs struct {
 	estimateAt time.Time
 	// pods is N_p, the variant's Ready replicas (prefill.Serving).
 	pods int
-	// fRaw is the largest raw share over the window; 0 with none.
-	fRaw float64
+	// otherPods is the Ready replicas of the model's other prefill variants.
+	// The decode role takes the model's whole rate, whichever prefill variant
+	// sent it, so a variant is priced at that rate, with its share of it
+	// expressed as the replicas that rate spreads over: pods + otherPods at
+	// this variant's V_P load each of its pods as its own share would.
+	otherPods int
+	// percent is the objective's percentile.
+	percent int
+	// shares is the raw share window.
+	shares shareWindow
 	// prompt is E[I_eff] and spread its coefficient of variation.
 	prompt float64
 	spread promptSpread
@@ -107,6 +151,8 @@ func (in ttftInputs) imbalance(pods int) (f float64, assumed bool, source string
 	return f, pods > 1, fSourceAssumed
 }
 
+// imbalanceNow is f at the current count, whether it is assumed, and where it
+// came from: P1's f at that count; none on one pod; otherwise the assumed f.
 func (in ttftInputs) imbalanceNow() (float64, bool, string) {
 	if f, ok := in.est.FByPods[in.pods]; ok {
 		return f, false, fSourceLearned
@@ -114,7 +160,23 @@ func (in ttftInputs) imbalanceNow() (float64, bool, string) {
 	if in.pods <= 1 {
 		return 0, false, fSourceOnePod
 	}
-	return min(float64(in.pods), max(fFloor, in.fRaw)), true, fSourceAssumed
+	return min(float64(in.pods), max(fFloor, in.shares.largest)), true, fSourceAssumed
+}
+
+// routing reads f at the current count against routingBoundShare of the pods:
+// bound when it holds, which a learned f has shown over its minutes and a raw
+// share must show over the whole window; transient when f reads there and has
+// not held. One pod has no router to blame: f / N_p is 1 by construction.
+func (in ttftInputs) routing() (bound, transient bool) {
+	f, _, source := in.imbalanceNow()
+	pods := float64(in.pods)
+	if in.pods < 2 || f/pods < routingBoundShare {
+		return false, false
+	}
+	if source == fSourceLearned || in.shares.full && in.shares.least/pods >= routingBoundShare {
+		return true, false
+	}
+	return false, true
 }
 
 // ttftFleet is the fleet the TTFT model prices at pods prefill replicas, and
@@ -122,8 +184,14 @@ func (in ttftInputs) imbalanceNow() (float64, bool, string) {
 // search calls it at each other count.
 func ttftFleet(in ttftInputs, pods int) (whatif.TTFTFleet, []whatif.Flag) {
 	p := in.base
-	p.Replicas = pods
 	p.Imbalance, p.ImbalanceAssumed, _ = in.imbalance(pods)
+	if pods > 0 {
+		p.Replicas = pods + in.otherPods
+	}
+	// One pod's exact f, with other variants' pods beside it in Replicas.
+	if p.Imbalance == 0 && p.Replicas > 1 {
+		p.Imbalance = 1
+	}
 	p.PromptTokens = in.prompt
 	p.PromptCV, p.PromptCVAssumed = in.spread.cv, in.spread.assumed
 	p.TransferSecondsPerToken = in.transfer
@@ -137,6 +205,12 @@ func ttftFleet(in ttftInputs, pods int) (whatif.TTFTFleet, []whatif.Flag) {
 	}
 	if in.mismatch {
 		flags = append(flags, FlowControlMismatch)
+	}
+	if in.spread.cv > promptCVPeak(in.percent) {
+		flags = append(flags, PromptSpreadAbovePeak)
+	}
+	if _, transient := in.routing(); transient && pods == in.pods {
+		flags = append(flags, ImbalanceNotSustained)
 	}
 	return fl, flags
 }
@@ -249,9 +323,17 @@ type imbalanceWindow struct {
 	seen   time.Time
 }
 
+// shareWindow is what f reads of an imbalance window.
+type shareWindow struct {
+	// largest and least are over the window; 0 with none.
+	largest, least float64
+	// full is a window of ttftWindowCycles readings.
+	full bool
+}
+
 // noteShare folds the cycle's raw share into the variant's window, reset when
-// the Ready count changes, and returns the window's largest; 0 with none.
-func (a *Analyzer) noteShare(key string, pods int, share float64, ok bool, now time.Time) float64 {
+// the Ready count changes, and returns what it holds.
+func (a *Analyzer) noteShare(key string, pods int, share float64, ok bool, now time.Time) shareWindow {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	w := a.imbalance[key]
@@ -266,11 +348,14 @@ func (a *Analyzer) noteShare(key string, pods int, share float64, ok bool, now t
 			w.shares = w.shares[1:]
 		}
 	}
-	var largest float64
-	for _, s := range w.shares {
-		largest = max(largest, s)
+	out := shareWindow{full: len(w.shares) == ttftWindowCycles}
+	for i, s := range w.shares {
+		out.largest = max(out.largest, s)
+		if i == 0 || s < out.least {
+			out.least = s
+		}
 	}
-	return largest
+	return out
 }
 
 // decodeTTFTWindow is a decode variant's measured TTFT over the last

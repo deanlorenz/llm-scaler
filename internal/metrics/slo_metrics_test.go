@@ -99,6 +99,37 @@ var _ = Describe("PublishSLO", func() {
 			Expect(oneHot(constants.WVASLOTTFTFlag, constants.LabelFlag)).To(ConsistOf("UnvalidatedTTFT", "AssumedPoissonArrivals"))
 			Expect(oneHot(constants.WVASLOTTFTReason, constants.LabelReason)).To(ConsistOf(constants.SLOTTFTReasonPriced))
 			Expect(oneHot(constants.WVASLOTTFTVPSource, constants.LabelVPSource)).To(ConsistOf("busy-minutes"))
+			Expect(family(constants.WVASLOTTFTRefused)).To(HaveLen(len(constants.SLOTTFTRefusedReasons)))
+			Expect(oneHot(constants.WVASLOTTFTRefused, constants.LabelReason)).To(BeEmpty())
+		})
+
+		It("names a refused rate, and keeps the reason", func() {
+			r := reading()
+			r.Predicted, r.Unmet, r.Refused = math.NaN(), true, constants.SLOTTFTReasonSaturated
+			publish(r)
+			Expect(oneHot(constants.WVASLOTTFTRefused, constants.LabelReason)).To(ConsistOf(constants.SLOTTFTReasonSaturated))
+			Expect(oneHot(constants.WVASLOTTFTReason, constants.LabelReason)).To(ConsistOf(constants.SLOTTFTReasonPriced))
+		})
+
+		It("is swept and deleted with the model", func() {
+			names := []string{constants.WVASLOPredictedTTFTSeconds, constants.WVASLOTTFTUnmet, constants.WVASLOTTFTReplicaRequestsPerSecond,
+				constants.WVASLOTTFTVPSource, constants.WVASLOTTFTReason, constants.WVASLOTTFTRefused, constants.WVASLOTTFTFlag}
+			gone := func() {
+				for _, name := range names {
+					Expect(family(name)).To(BeEmpty(), name)
+				}
+			}
+			publish(reading())
+			DeleteSLOModel("ns", "m")
+			gone()
+
+			publish(reading())
+			SweepSLO(t0.Add(sloStaleAfter - time.Second))
+			for _, name := range names {
+				Expect(family(name)).NotTo(BeEmpty(), name)
+			}
+			SweepSLO(t0.Add(sloStaleAfter + time.Second))
+			gone()
 		})
 
 		It("reads a refusal as a reason: no number, no unmet", func() {
@@ -132,7 +163,8 @@ var _ = Describe("PublishSLO", func() {
 			Expect(err).NotTo(HaveOccurred())
 			for _, mf := range mfs {
 				if mf.GetName() == constants.WVASLOPredictedTTFTSeconds {
-					Expect(mf.GetHelp()).To(And(ContainSubstring("Not a bound"), ContainSubstring("34%")))
+					Expect(mf.GetHelp()).To(ContainSubstring(constants.SLOTTFTPredictionCaveat))
+					Expect(constants.SLOTTFTPredictionCaveat).To(And(ContainSubstring("reads high"), ContainSubstring("reads low")))
 				}
 			}
 		})

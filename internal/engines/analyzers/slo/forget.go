@@ -25,19 +25,21 @@ import (
 //
 // What a forget takes, per field of the Analyzer: the line (lines), the
 // engine arguments it was learned under (args), its last-seen stamp (seen),
-// and the accelerator memo (accelerators), as the saturation analyzer drops
-// its lastAccelerator: a variant forgotten after a move to new hardware
-// would otherwise key its next line under the old card for any cycle whose
-// pods do not resolve one; and the TTFT windows (imbalance, decodeTTFT). What
-// it keeps: transients, the model's recent
-// fleet history, which is no learned state of the variant; ownSettled (and
-// ownSettle), when each replica was last seen, which the line reads its
-// settle from and the engine's tracker keeps alike; paths, the replay's
-// counters over every fit. The rest is configuration or plumbing (router,
-// store, now, mu, rec, settle, prefillEstimates: the last is a handle to the
-// saturation analyzer's stash, whose forget deletes the variant's entry
-// there). A test holds every field that is not a
-// plain value to one of the three lists (TestForget_EveryFieldIsClassified).
+// the accelerator memo (accelerators), as the saturation analyzer drops its
+// lastAccelerator: a variant forgotten after a move to new hardware would
+// otherwise key its next line under the old card for any cycle whose pods do
+// not resolve one; and the TTFT windows (imbalance, decodeTTFT).
+//
+// What it keeps: transients, the model's recent fleet history, which is no
+// learned state of the variant; ownSettled (and ownSettle), when each replica
+// was last seen, which the line reads its settle from and the engine's tracker
+// keeps alike; paths, the replay's counters over every fit.
+//
+// The rest is configuration or plumbing (router, store, now, mu, rec, settle,
+// prefillEstimates: the last is a handle to the saturation analyzer's stash,
+// whose forget deletes the variant's entry there). A test holds every field
+// that is not a plain value to one of the three lists
+// (TestForget_EveryFieldIsClassified).
 
 // SwitchITLForgetReachesTheLine is the replay switch for the forget: on, the
 // annotation forgets the variant's ITL line here too, under every key it was
@@ -68,7 +70,7 @@ func (a *Analyzer) forgetVariant(namespace, modelID, variant string) (int, []lea
 		delete(a.accelerators, namespace+"/"+variant)
 		n++
 	}
-	key := prefillBoundKey(namespace, modelID, variant)
+	key := ttftWindowKey(namespace, modelID, variant)
 	if _, ok := a.imbalance[key]; ok {
 		delete(a.imbalance, key)
 		n++

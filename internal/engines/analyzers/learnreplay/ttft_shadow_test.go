@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +26,52 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/prefill"
 )
+
+// The caveat the metric's help and the docs carry is the frozen table: the
+// counts and the worst of each, read from it, so a change to the model that
+// moves them fails here and not in an operator's reading of the help.
+func TestS1_TheCaveatIsTheFrozenTable(t *testing.T) {
+	var points, over, under, overP90, overP95, underP90, underP95 int
+	var worstOverP90, worstOverP95, worstUnder float64
+	for _, c := range ttftFrozen {
+		if c.fixture == ttftSaturatedFixture {
+			continue // refused, and at saturation; the caveat is light load
+		}
+		ratio := c.predicted / c.observed
+		isOver := strings.HasPrefix(c.verdict, verdictOver)
+		isUnder := strings.HasPrefix(c.verdict, verdictUnder)
+		switch {
+		case c.cv == s1PromptCV:
+			points++
+			if isOver {
+				over++
+				if c.q == 0.9 {
+					overP90++
+					worstOverP90 = max(worstOverP90, ratio)
+				} else {
+					overP95++
+					worstOverP95 = max(worstOverP95, ratio)
+				}
+			}
+		case isUnder:
+			under++
+			worstUnder = max(worstUnder, 1-ratio)
+			if c.q == 0.9 {
+				underP90++
+			} else {
+				underP95++
+			}
+		}
+	}
+	require.Equal(t, 14, points)
+	t.Logf("over %d (p90 %d, p95 %d), worst %.2fx p90, %.2fx p95; under %d (p90 %d, p95 %d), worst %.1f%%",
+		over, overP90, overP95, worstOverP90, worstOverP95, under, underP90, underP95, 100*worstUnder)
+	c := constants.SLOTTFTPredictionCaveat
+	assert.Contains(t, c, fmt.Sprintf("over the router at %d of %d points", over, points))
+	assert.Contains(t, c, fmt.Sprintf("worst %.2fx at p90 and %.2fx at p95", worstOverP90, worstOverP95))
+	assert.Contains(t, c, fmt.Sprintf("under at %d of %d, worst %.0f%% under", under, points, 100*worstUnder))
+	assert.Equal(t, []int{6, 7, 5, 4}, []int{overP90, overP95, underP90, underP95}, "the docs' split by percentile")
+}
 
 // S1 on the recordings. The two goldens slo-published.csv moves in have no
 // prefill capacity to price; the prefill-stress goldens were recorded with no

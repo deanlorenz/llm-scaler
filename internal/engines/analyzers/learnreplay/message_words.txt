@@ -167,6 +167,7 @@ ITL
 If
 Ignoring
 ImagePullBackOff
+ImbalanceNotSustained
 Inf
 InferencePool
 Inferencepool
@@ -293,6 +294,7 @@ Preserving
 PriorityClass
 Processing
 Prometheus
+PromptSpreadAbovePeak
 PromptSpreadClamped
 Published
 REST_CLIENT_TIMEOUT
@@ -1010,6 +1012,8 @@ f
 fAtPods
 fPods
 fRaw
+fRawLeast
+fRawWindowFull
 fRefused
 fSamples
 fSamplesAtPods
@@ -1809,6 +1813,7 @@ orderedBehindQueue
 oscillate
 other
 other-role-cannot-grow
+otherPrefillPods
 others
 otherwise
 out

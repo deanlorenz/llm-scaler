@@ -820,10 +820,10 @@ func (a *Analyzer) noteVariantsPresent(namespace, modelID string, variantNames [
 				a.seen[key] = now
 			}
 		}
-		if w := a.imbalance[prefillBoundKey(namespace, modelID, name)]; w != nil {
+		if w := a.imbalance[ttftWindowKey(namespace, modelID, name)]; w != nil {
 			w.seen = now
 		}
-		if w := a.decodeTTFT[prefillBoundKey(namespace, modelID, name)]; w != nil {
+		if w := a.decodeTTFT[ttftWindowKey(namespace, modelID, name)]; w != nil {
 			w.seen = now
 		}
 	}
