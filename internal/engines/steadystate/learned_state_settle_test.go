@@ -280,12 +280,12 @@ func TestLearnedStateSettle_ADocumentTooOldGivesBackNoSightings(t *testing.T) {
 		age  time.Duration
 		kept bool
 	}{
-		"one minute":          {time.Minute, true},
-		"the bound exactly":   {2 * time.Minute, true},
-		"a second past it":    {2*time.Minute + time.Second, false},
-		"six minutes":         {6 * time.Minute, false},
-		"an hour":             {time.Hour, false},
-		"three days":          {72 * time.Hour, false},
+		"one minute":        {time.Minute, true},
+		"the bound exactly": {2 * time.Minute, true},
+		"a second past it":  {2*time.Minute + time.Second, false},
+		"six minutes":       {6 * time.Minute, false},
+		"an hour":           {time.Hour, false},
+		"three days":        {72 * time.Hour, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c2 := fake.NewClientBuilder().Build()
