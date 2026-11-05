@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -118,30 +119,54 @@ func TestTTFTSamples_ReadsServingRowsOnly(t *testing.T) {
 	s.note(pdInput(prefillRow("p0", 2000, 1), notReady, bridge), 1)
 	tokens, _, _, _ := promptOf(s.prompts["pre"])
 	assert.InDelta(t, 2000, tokens, 1e-9)
-	require.Len(t, s.shares["pre"], 1)
-	assert.Equal(t, 1, s.shares["pre"][0].pods)
+	require.NotNil(t, s.shares["pre"])
+	assert.Equal(t, 1, s.shares["pre"].pods)
 }
 
-// f_raw is the busiest pod over the mean, the largest over the window, and
-// the window restarts at another pod count.
+// f_raw is the busiest pod over the mean, a pod with no rate counting as one
+// that computed nothing; the window is the largest and least over the cycles
+// that read one, and restarts at another pod count.
 func TestTTFTSamples_RawShare(t *testing.T) {
-	assert.InDelta(t, 2, rawShare([]float64{3, 1, 0.5, 1.5}), 1e-9)
-	assert.Zero(t, rawShare([]float64{0, 0}))
-	assert.Zero(t, rawShare(nil))
+	share := func(rows ...domain.ReplicaMetrics) (float64, float64, bool) {
+		s := newTTFTSamples()
+		s.note(pdInput(rows...), 1)
+		return s.shares["pre"].read()
+	}
+	// Four Ready pods, one unread: 3000 over 5000/4.
+	unread := prefillRow("p3", 0, 1)
+	unread.PrefillComputedTokenRateKnown = false
+	got, _, _ := share(prefillRow("p0", 3000, 1), prefillRow("p1", 1000, 1), prefillRow("p2", 1000, 1), unread)
+	assert.InDelta(t, 2.4, got, 1e-9)
+	got, _, _ = share(prefillRow("p0", 0, 1), prefillRow("p1", 0, 1))
+	assert.Zero(t, got, "no rate on any row")
+	got, _, _ = share(prefillRow("p0", 500, 1))
+	assert.Zero(t, got, "one pod has no share")
 
 	s := newTTFTSamples()
 	s.note(pdInput(prefillRow("p0", 900, 1), prefillRow("p1", 100, 1)), 1) // 1.8, on two pods
-	s.note(pdInput(prefillRow("p0", 500, 1)), 2)                           // one pod
-	s.note(pdInput(prefillRow("p0", 300, 1), prefillRow("p1", 200, 1)), 3) // 1.2
+	s.note(pdInput(prefillRow("p0", 500, 1)), 2)                           // one pod: restarts
+	s.note(pdInput(prefillRow("p0", 300, 1), prefillRow("p1", 200, 1)), 3) // two pods: restarts, 1.2
 	s.note(pdInput(prefillRow("p0", 400, 1), prefillRow("p1", 200, 1)), 4) // 1.33
-	assert.InDelta(t, 4.0/3, shareAt(s.shares["pre"], 2), 1e-9)
-	assert.Zero(t, shareAt(s.shares["pre"], 3))
+	largest, least, full := s.shares["pre"].read()
+	assert.InDelta(t, 4.0/3, largest, 1e-9)
+	assert.InDelta(t, 1.2, least, 1e-9)
+	assert.False(t, full)
 
-	for c := 5; c < 5+rawShareCycles; c++ {
+	// An idle tail forgets nothing: S1 appends only the cycles that read one.
+	for c := 5; c < 5+2*rawShareCycles; c++ {
+		s.note(pdInput(prefillRow("p0", 0, 0), prefillRow("p1", 0, 0)), c)
+	}
+	largest, _, full = s.shares["pre"].read()
+	assert.InDelta(t, 4.0/3, largest, 1e-9)
+	assert.False(t, full)
+
+	for c := 20; c < 20+rawShareCycles; c++ {
 		s.note(pdInput(prefillRow("p0", 300, 1), prefillRow("p1", 200, 1)), c)
 	}
-	assert.Len(t, s.shares["pre"], rawShareCycles)
-	assert.InDelta(t, 1.2, shareAt(s.shares["pre"], 2), 1e-9)
+	largest, least, full = s.shares["pre"].read()
+	assert.InDelta(t, 1.2, largest, 1e-9)
+	assert.InDelta(t, 1.2, least, 1e-9)
+	assert.True(t, full)
 }
 
 // The decode engine's TTFT is a pair: the largest cycle's mean, with that
@@ -154,9 +179,10 @@ func TestTTFTSamples_EngineTTFTIsAPair(t *testing.T) {
 	assert.InDelta(t, 0.25, s.engineTTFT["dec"][0].Seconds, 1e-9)
 	assert.InDelta(t, 8000, s.engineTTFT["dec"][0].PromptTokens, 1e-9)
 
-	// No prompt in the cycle: nothing to pair it with.
+	// No prompt in the cycle: nothing to pair it with, an empty slot.
 	s.note(pdInput(prefillRow("p0", 0, 0), decodeRow("d0", 9, 1)), 3)
-	assert.Len(t, s.engineTTFT["dec"], 2)
+	require.Len(t, s.engineTTFT["dec"], 3)
+	assert.Zero(t, s.engineTTFT["dec"][2])
 
 	// Rows with no request rate read equally.
 	u := newTTFTSamples()
@@ -164,10 +190,58 @@ func TestTTFTSamples_EngineTTFTIsAPair(t *testing.T) {
 	u.note(pdInput(prefillRow("p0", 2000, 1), d0, d1), 1)
 	assert.InDelta(t, 0.2, u.engineTTFT["dec"][0].Seconds, 1e-9)
 
-	for c := 0; c < decodeTTFTCycles+2; c++ {
-		s.note(pdInput(prefillRow("p0", 2000, 1), decodeRow("d0", 0.01, 1)), 10+c)
-	}
+	// The last 5 cycles, not the last 5 readings: idle cycles age a figure out.
+	idle := func(c int) { s.note(pdInput(prefillRow("p0", 0, 0), decodeRow("d0", 0, 0)), c) }
+	idle(10)
+	idle(11)
+	idle(12)
+	assert.InDelta(t, 0.05, largestTTFT(s.engineTTFT["dec"]).Seconds, 1e-12, "the 0.25 has aged out")
+	idle(13)
 	assert.Len(t, s.engineTTFT["dec"], decodeTTFTCycles)
+	assert.Zero(t, largestTTFT(s.engineTTFT["dec"]))
+}
+
+// A zero is no reading of a latency: it does not pull a mean low.
+func TestTTFTSamples_ZeroReadingsAreSkipped(t *testing.T) {
+	s := newTTFTSamples()
+	zero := decodeRow("d1", 0, 1)
+	zero.AvgKVTransferTime, zero.AvgKVTransferTimeKnown = 0, true
+	d0 := decodeRow("d0", 0.1, 1)
+	d0.AvgKVTransferTime, d0.AvgKVTransferTimeKnown = 0.02, true
+	s.note(pdInput(prefillRow("p0", 2000, 1), d0, zero), 1)
+	assert.InDelta(t, 0.1, s.engineTTFT["dec"][0].Seconds, 1e-12)
+	assert.InDelta(t, 0.02, s.transfers["dec"][0], 1e-12)
+}
+
+// The figures the CLI's closing note quotes, from the frozen table: the ratio
+// of predicted to observed at the assumed spread, and the most under at the
+// sent one. A move of the table fails here before the note goes stale.
+func TestTTFTFrozen_TheNotesFigures(t *testing.T) {
+	var assumed []float64
+	under := 1.0
+	for _, c := range ttftFrozen {
+		if c.refused != "" {
+			continue
+		}
+		r := c.predicted / c.observed
+		if c.cv == s1PromptCV {
+			assumed = append(assumed, r)
+		} else {
+			under = min(under, r)
+		}
+	}
+	require.Len(t, assumed, 14)
+	assert.InDelta(t, 1.1, slices.Min(assumed), 0.05)
+	assert.InDelta(t, 4.1, slices.Max(assumed), 0.05)
+	assert.InDelta(t, 0.34, 1-under, 0.005)
+	assert.InDelta(t, 0.06, knownPromptCV, 0.005)
+	over := 0
+	for _, r := range assumed {
+		if r > 1.25 {
+			over++
+		}
+	}
+	assert.Equal(t, 13, over, "reads over at all but one level")
 }
 
 // The largest TTFT comes with its own cycle's prompt.

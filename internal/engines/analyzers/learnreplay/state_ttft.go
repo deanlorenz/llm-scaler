@@ -38,20 +38,24 @@ type PrefillState struct {
 	PromptFromCycle, PromptToCycle, PromptCycles int
 	// RawShare is f_raw, the busiest pod's share of the computed-token rate
 	// over the mean share, not de-biased: the largest over the latest
-	// rawShareCycles cycles at the cycle's pod count. 0 with no
-	// computed-token rate on any row. The slo-tiers rule reads settled rows;
-	// here a pod still warming up reads low, which raises the share, the
-	// side that rule permits.
-	RawShare float64
+	// rawShareCycles cycles that read one at the cycle's pod count. A pod with
+	// no rate counts as a pod that computed nothing. 0 with none, or one pod.
+	// RawShareLeast is the window's least, and RawShareFull says it holds
+	// rawShareCycles readings: what the routing-bound flag reads. The
+	// slo-tiers rule reads settled rows; here a pod still warming up reads
+	// low, which raises the share, the side that rule permits.
+	RawShare, RawShareLeast float64
+	RawShareFull            bool
 }
 
 // DecodeTTFTState is what a decode variant's rows say of the decode side of
 // a TTFT, read from its serving rows.
 type DecodeTTFTState struct {
-	// EngineTTFT is the decode engine's TTFT: of the latest
-	// decodeTTFTCycles cycles that read one, the largest, each a mean over
-	// the rows weighted by their request rate, with the mean effective prompt
-	// of the same cycle (the pair is never split). Zero when unread.
+	// EngineTTFT is the decode engine's TTFT: of the latest decodeTTFTCycles
+	// cycles, the largest, each a mean over the rows weighted by their
+	// request rate, with the mean effective prompt of the same cycle (the
+	// pair is never split). A cycle with no reading holds an empty slot, so a
+	// figure ages out when the rows stop carrying one. Zero when unread.
 	EngineTTFT whatif.DecodeTTFT
 	// TransferSeconds is the mean KV transfer time over the rows that read
 	// one, over the latest shapeCycles cycles with a reading; 0 with none.
@@ -73,22 +77,45 @@ type promptSample struct {
 	computed, request float64
 }
 
-// shareSample is one cycle's f_raw of a prefill variant, and its pod count.
-type shareSample struct {
-	pods  int
-	share float64
+// shareWindow is a prefill variant's raw shares at its current pod count. A
+// new count restarts it; a cycle that reads no share leaves it as it is, so
+// an idle tail forgets nothing.
+type shareWindow struct {
+	pods   int
+	shares []float64
+}
+
+// note folds in a cycle's share at pods.
+func (w *shareWindow) note(pods int, share float64, ok bool) {
+	if w.pods != pods {
+		w.pods, w.shares = pods, nil
+	}
+	if ok {
+		w.shares = keepLast(w.shares, share, rawShareCycles)
+	}
+}
+
+// read is the window's largest and least, and whether it is full.
+func (w *shareWindow) read() (largest, least float64, full bool) {
+	for i, s := range w.shares {
+		largest = max(largest, s)
+		if i == 0 || s < least {
+			least = s
+		}
+	}
+	return largest, least, len(w.shares) == rawShareCycles
 }
 
 // ttftSamples is the windows of the rows a TTFT question reads, by variant.
 type ttftSamples struct {
 	prompts    map[string][]promptSample
-	shares     map[string][]shareSample
+	shares     map[string]*shareWindow
 	engineTTFT map[string][]whatif.DecodeTTFT
 	transfers  map[string][]float64
 }
 
 func newTTFTSamples() *ttftSamples {
-	return &ttftSamples{prompts: map[string][]promptSample{}, shares: map[string][]shareSample{},
+	return &ttftSamples{prompts: map[string][]promptSample{}, shares: map[string]*shareWindow{},
 		engineTTFT: map[string][]whatif.DecodeTTFT{}, transfers: map[string][]float64{}}
 }
 
@@ -118,88 +145,103 @@ type decodeRows struct {
 	transferRows                        int
 }
 
+// prefillRows is one prefill variant's readings in one cycle.
+type prefillRows struct {
+	pods                  int
+	sum, busiest          float64
+	computedRate, reqRate float64
+}
+
+// positive reports a reading above 0 that is finite: a zero is no reading of
+// a latency, and pulls a mean low.
+func positive(x float64) bool { return whatif.Finite(x) && x > 0 }
+
 // note takes one cycle's rows.
 func (t *ttftSamples) note(in domain.AnalyzerInput, cycle int) {
 	roles := rolesOf(in)
-	rates := map[string][]float64{}
-	computed, requests := map[string]float64{}, map[string]float64{}
+	pre := map[string]*prefillRows{}
 	decode := map[string]*decodeRows{}
+	for v, role := range roles {
+		switch domain.CanonicalRole(role) {
+		case domain.RolePrefill:
+			pre[v] = &prefillRows{}
+		case domain.RoleDecode:
+			decode[v] = &decodeRows{}
+		}
+	}
 	for _, rm := range in.ReplicaMetrics {
 		if !prefill.Serving(rm) {
 			continue
 		}
 		v := rm.VariantName
-		switch domain.CanonicalRole(roles[v]) {
-		case domain.RolePrefill:
-			if _, ok := rates[v]; !ok {
-				rates[v] = nil
-			}
-			if !rm.PrefillComputedTokenRateKnown {
+		if p := pre[v]; p != nil {
+			p.pods++
+			if !rm.PrefillComputedTokenRateKnown || !positive(rm.PrefillComputedTokenRate) {
 				continue
 			}
-			rates[v] = append(rates[v], rm.PrefillComputedTokenRate)
+			p.sum += rm.PrefillComputedTokenRate
+			p.busiest = max(p.busiest, rm.PrefillComputedTokenRate)
 			if rm.RequestRateKnown && rm.RequestRate > 0 {
-				computed[v] += rm.PrefillComputedTokenRate
-				requests[v] += rm.RequestRate
+				p.computedRate += rm.PrefillComputedTokenRate
+				p.reqRate += rm.RequestRate
 			}
-		case domain.RoleDecode:
-			d := decode[v]
-			if d == nil {
-				d = &decodeRows{}
-				decode[v] = d
+			continue
+		}
+		d := decode[v]
+		if d == nil {
+			continue
+		}
+		if rm.AvgTTFTKnown && positive(rm.AvgTTFT) {
+			d.ttftRows++
+			d.ttftPlain += rm.AvgTTFT
+			if rm.RequestRateKnown && rm.RequestRate > 0 {
+				d.ttftWeighted += rm.AvgTTFT * rm.RequestRate
+				d.ttftWeight += rm.RequestRate
 			}
-			if rm.AvgTTFTKnown {
-				d.ttftRows++
-				d.ttftPlain += rm.AvgTTFT
-				if rm.RequestRateKnown && rm.RequestRate > 0 {
-					d.ttftWeighted += rm.AvgTTFT * rm.RequestRate
-					d.ttftWeight += rm.RequestRate
-				}
-			}
-			if rm.AvgKVTransferTimeKnown {
-				d.transfer += rm.AvgKVTransferTime
-				d.transferRows++
-			}
+		}
+		if rm.AvgKVTransferTimeKnown && positive(rm.AvgKVTransferTime) {
+			d.transfer += rm.AvgKVTransferTime
+			d.transferRows++
 		}
 	}
 	var allComputed, allRequests float64
-	for v := range computed {
-		if !(computed[v] > 0) {
-			continue
+	for v, p := range pre {
+		w := t.shares[v]
+		if w == nil {
+			w = &shareWindow{}
+			t.shares[v] = w
 		}
-		allComputed += computed[v]
-		allRequests += requests[v]
-		t.prompts[v] = keepLast(t.prompts[v], promptSample{cycle: cycle, computed: computed[v], request: requests[v]}, shapeCycles)
-	}
-	for v, rs := range rates {
-		t.shares[v] = keepLast(t.shares[v], shareSample{pods: len(rs), share: rawShare(rs)}, rawShareCycles)
+		share, ok := rawShare(p.pods, p.sum, p.busiest)
+		w.note(p.pods, share, ok)
+		if p.computedRate > 0 {
+			allComputed += p.computedRate
+			allRequests += p.reqRate
+			t.prompts[v] = keepLast(t.prompts[v], promptSample{cycle: cycle, computed: p.computedRate, request: p.reqRate}, shapeCycles)
+		}
 	}
 	for v, d := range decode {
 		if d.transferRows > 0 {
 			t.transfers[v] = keepLast(t.transfers[v], d.transfer/float64(d.transferRows), shapeCycles)
 		}
-		if d.ttftRows == 0 || !(allComputed > 0) {
-			continue
+		var slot whatif.DecodeTTFT
+		if d.ttftRows > 0 && allComputed > 0 {
+			slot = whatif.DecodeTTFT{Seconds: d.ttftPlain / float64(d.ttftRows), PromptTokens: allComputed / allRequests}
+			if d.ttftWeight > 0 {
+				slot.Seconds = d.ttftWeighted / d.ttftWeight
+			}
 		}
-		mean := d.ttftPlain / float64(d.ttftRows)
-		if d.ttftWeight > 0 {
-			mean = d.ttftWeighted / d.ttftWeight
-		}
-		t.engineTTFT[v] = keepLast(t.engineTTFT[v], whatif.DecodeTTFT{Seconds: mean, PromptTokens: allComputed / allRequests}, decodeTTFTCycles)
+		t.engineTTFT[v] = keepLast(t.engineTTFT[v], slot, decodeTTFTCycles)
 	}
 }
 
-// rawShare is the busiest pod's rate over the mean, 0 when no pod has one.
-func rawShare(rates []float64) float64 {
-	var sum, top float64
-	for _, r := range rates {
-		sum += r
-		top = max(top, r)
+// rawShare is one cycle's f_raw: the busiest of pods over the mean, a pod with
+// no rate counting as one that computed nothing, which reads high, the
+// permitted side. False with fewer than two pods or no rate on any.
+func rawShare(pods int, sum, busiest float64) (float64, bool) {
+	if pods < 2 || !(sum > 0) {
+		return 0, false
 	}
-	if !(sum > 0) {
-		return 0
-	}
-	return top * float64(len(rates)) / sum
+	return busiest * float64(pods) / sum, true
 }
 
 // promptOf is a prefill variant's mean effective prompt over its samples,
@@ -217,20 +259,6 @@ func promptOf(samples []promptSample) (tokens float64, from, to, cycles int) {
 	return computed / requests, samples[0].cycle, samples[len(samples)-1].cycle, len(samples)
 }
 
-// shareAt is the largest f_raw of the samples at pods, read back from the
-// last and stopping where the count differs: the window restarts when the
-// pod count changes.
-func shareAt(samples []shareSample, pods int) float64 {
-	top := 0.0
-	for _, s := range slices.Backward(samples) {
-		if s.pods != pods {
-			break
-		}
-		top = max(top, s.share)
-	}
-	return top
-}
-
 // fillTTFT sets what the state says of a TTFT question, from the samples
 // through the cycle in and from P1's estimates.
 func (r *replayer) fillTTFT(st *State, in domain.AnalyzerInput, t *ttftSamples) {
@@ -245,7 +273,10 @@ func (r *replayer) fillTTFT(st *State, in domain.AnalyzerInput, t *ttftSamples) 
 		if domain.CanonicalRole(roles[v]) != domain.RolePrefill {
 			continue
 		}
-		ps := PrefillState{Variant: v, Pods: pods[v], RawShare: shareAt(t.shares[v], pods[v])}
+		ps := PrefillState{Variant: v, Pods: pods[v]}
+		if w := t.shares[v]; w != nil {
+			ps.RawShare, ps.RawShareLeast, ps.RawShareFull = w.read()
+		}
 		ps.PromptTokens, ps.PromptFromCycle, ps.PromptToCycle, ps.PromptCycles = promptOf(t.prompts[v])
 		ps.Estimate, ps.EstimateRead = estimateAt(r.sat.PrefillEstimate, in.Namespace, in.ModelID, v, st.At)
 		st.Prefill = append(st.Prefill, ps)
