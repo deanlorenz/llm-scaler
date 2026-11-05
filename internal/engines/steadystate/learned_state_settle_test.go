@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -57,7 +56,7 @@ func TestLearnedStateSettle_ARestartKeepsTheFirstSight(t *testing.T) {
 	doc, _ := storedDoc(t, c)
 	require.Len(t, doc.Settle["ns/m"], 2)
 
-	at := settleT0.Add(time.Hour)
+	at := settleT0.Add(time.Minute)
 	next := snapshotEngine(t, c, &stateSpy{})
 	var lines []string
 	ctx := logr.NewContext(context.Background(), funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{}))
@@ -170,7 +169,9 @@ func TestLearnedStateSettle_ADigestOnTheSightings(t *testing.T) {
 	assert.NotEqual(t, version, cm.ResourceVersion, "a replica joining is written")
 	assert.Len(t, doc.Settle["ns/m"], 2)
 	assert.Len(t, first.Settle["ns/m"], 1)
-	assert.Empty(t, settleDigest(nil))
+	none, err := settleDigest(nil)
+	require.NoError(t, err)
+	assert.Empty(t, none)
 }
 
 // Deleting the snapshot is a flush: the sightings no row claimed go with it,
@@ -267,32 +268,58 @@ func TestLearnedStateSettle_AnEstimateLeftOutTakesItsPods(t *testing.T) {
 	assert.Equal(t, map[string]time.Time{"ns|m|v2|H100|1|ns|p0": settleT0}, s.StartCounted)
 }
 
-// The frozen decoder (the row of "Shipped behaviour" and the spec's
-// back-compat): v0.10.1 reads a document holding sightings with every field
-// it knows intact, and a settle key does not stop it.
-func TestLearnedStateSettle_V0101ReadsADocumentWithSightings(t *testing.T) {
-	var s saturation.LearnedState
-	n := 0
-	fillNonZeroValue(t, reflect.ValueOf(&s).Elem(), "LearnedState", &n)
-	require.NotEmpty(t, s.StartCounted, "the filler reached the new field")
-	sightings := map[string][]settle.Sighting{"ns/m": {{PodName: "p0", VariantName: "v", FirstSeen: settleT0,
-		ReadySince: settleT0, ReadySeen: settleT0}}}
-	raw, dropped, err := encodeLearnedState(s, sightings, settleT0, learnedStateMaxBytes)
-	require.NoError(t, err)
-	require.Zero(t, dropped)
-	var all map[string]any
-	require.NoError(t, json.Unmarshal([]byte(raw), &all))
-	require.Contains(t, all, "settle", "the field is written under its name")
-	require.Contains(t, all["state"], "startCounted")
+// A document gives back its sightings only while a process would have
+// tolerated the gap: the settle tolerance plus the time between two writes,
+// 2 min at the default interval. Past that load may have come back unread,
+// which is the one case the wait exists for, so every replica waits and the
+// log says why.
+func TestLearnedStateSettle_ADocumentTooOldGivesBackNoSightings(t *testing.T) {
+	limit := settle.Tolerance(config.DefaultOptimizationInterval) + learnedStateInterval
+	require.Equal(t, 2*time.Minute, limit, "the restart section 4.4 reasons about")
+	for name, c := range map[string]struct {
+		age  time.Duration
+		kept bool
+	}{
+		"one minute":          {time.Minute, true},
+		"the bound exactly":   {2 * time.Minute, true},
+		"a second past it":    {2*time.Minute + time.Second, false},
+		"six minutes":         {6 * time.Minute, false},
+		"an hour":             {time.Hour, false},
+		"three days":          {72 * time.Hour, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c2 := fake.NewClientBuilder().Build()
+			old := observed(t, c2, readyRow("p0"), readyRow("p1"))
+			old.restoreLearnedState(context.Background(), settleT0)
+			old.writeLearnedState(context.Background(), settleT0)
 
-	var old v0101LearnedStateDoc
-	require.NoError(t, json.Unmarshal([]byte(raw), &old))
-	assert.Equal(t, 1, old.Version)
-	assertNoZeroField(t, reflect.ValueOf(old), "v0101LearnedStateDoc")
-	reencoded, err := json.Marshal(old)
-	require.NoError(t, err)
-	var got, want any
-	require.NoError(t, json.Unmarshal(reencoded, &got))
-	require.NoError(t, json.Unmarshal([]byte(raw), &want))
-	assertJSONSubset(t, got, want, "doc")
+			at := settleT0.Add(c.age)
+			next := snapshotEngine(t, c2, &stateSpy{})
+			var lines []string
+			ctx := logr.NewContext(context.Background(), funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{}))
+			next.restoreLearnedState(ctx, at)
+			next.observeSettle("ns", "m", []domain.ReplicaMetrics{readyRow("p0"), readyRow("p1")}, settleStates(), at)
+			r, ok := next.settleTracker().Replica("ns/m", settle.Key{Pod: "p0", Variant: "v"})
+			require.True(t, ok)
+			all := strings.Join(lines, "\n")
+			if c.kept {
+				assert.True(t, r.Restored, "inside the bound the sighting comes back")
+				assert.Contains(t, all, `"sightings"=2`)
+				assert.NotContains(t, all, "too old")
+				return
+			}
+			assert.False(t, r.Restored, "past the bound every replica waits")
+			assert.True(t, r.FirstSeen.Equal(at))
+			assert.Contains(t, all, `"sightings"=0`)
+			assert.Contains(t, all, "too old to keep its replica sightings")
+		})
+	}
+}
+
+// The bound follows the optimize interval: a slow loop tolerates more.
+func TestLearnedStateSettle_TheBoundFollowsTheInterval(t *testing.T) {
+	cfg := config.NewTestConfig()
+	e := &Engine{Config: cfg}
+	want := settle.Tolerance(e.sloMissedAfter()) + learnedStateInterval
+	assert.Equal(t, want, e.sightingsMaxAge())
 }

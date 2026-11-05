@@ -258,7 +258,7 @@ func (e *Engine) restoreLearnedState(ctx context.Context, now time.Time) {
 		return
 	}
 	rep := analyzer.RestoreLearnedState(doc.State)
-	sightings := e.restoreSettle(doc.Settle, now)
+	sightings := e.restoreSettle(logger, doc, now)
 	logger.Info("Learned state: snapshot restored",
 		"writtenAt", doc.WrittenAt, "writer", doc.Writer.Identity,
 		"pendingVariants", rep.PendingVariants, "itlLines", rep.ITLLines,
@@ -324,7 +324,11 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 	}
 	state := analyzer.ExportLearnedState()
 	sightings := e.settleTracker().Sightings()
-	digest := learnedStateDigest(state) + settleDigest(sightings)
+	sightingsDigest, err := settleDigest(sightings)
+	if err != nil {
+		logger.Error(err, "Learned state: could not digest the replica sightings; the snapshot is written as if they changed")
+	}
+	digest := learnedStateDigest(state) + sightingsDigest
 	if digest == st.lastDigest && now.Sub(st.lastWriteDone) < learnedStateRefresh {
 		return
 	}
@@ -491,16 +495,16 @@ func learnedStateDigest(s saturation.LearnedState) string {
 
 // settleDigest identifies the sightings. Their times are fixed per sighting,
 // so a fleet that does not change does not rewrite the document.
-func settleDigest(sightings map[string][]settle.Sighting) string {
+func settleDigest(sightings map[string][]settle.Sighting) (string, error) {
 	if len(sightings) == 0 {
-		return ""
+		return "", nil
 	}
 	raw, err := json.Marshal(sightings)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // sig3 rounds x to three significant figures, for the digest only.
@@ -613,7 +617,9 @@ func documentEntries(doc *learnedStateDoc) []learnedStateEntry {
 		for _, s := range list {
 			out = append(out, learnedStateEntry{spare: true, at: s.FirstSeen,
 				key: "settle|" + model + "|" + s.VariantName + "|" + s.PodName, drop: func() {
-					doc.Settle[model] = slices.DeleteFunc(doc.Settle[model], func(o settle.Sighting) bool { return o == s })
+					doc.Settle[model] = slices.DeleteFunc(doc.Settle[model], func(o settle.Sighting) bool {
+						return o.PodName == s.PodName && o.VariantName == s.VariantName
+					})
 					if len(doc.Settle[model]) == 0 {
 						delete(doc.Settle, model)
 					}

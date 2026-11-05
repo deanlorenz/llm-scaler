@@ -396,13 +396,20 @@ func recordRun(t *testing.T, start time.Time, record bool) ([]byte, [][]allocati
 // recordRunEngine is recordRun, with the engine that recorded.
 func recordRunEngine(t *testing.T, start time.Time, record bool) ([]byte, [][]allocation.NamedAnalyzerResult, *Engine) {
 	t.Helper()
+	return recordRunRestartingAt(t, start, start.Add(30*time.Minute), record)
+}
+
+// recordRunRestartingAt is the scripted run with the controller restarting at
+// restartAt. The first controller's last cycle is 6 min after start, so the
+// usual 30 min is a document far past sightingsMaxAge: its replicas wait.
+func recordRunRestartingAt(t *testing.T, start, restartAt time.Time, record bool) ([]byte, [][]allocation.NamedAnalyzerResult, *Engine) {
+	t.Helper()
 	s := newRecScript(start)
 	first := s.engine(t)
 	// Long enough apart for each snapshot write to land.
 	for i := range 4 {
 		s.cycle(t, first, i, start.Add(time.Duration(i)*2*time.Minute))
 	}
-	restartAt := start.Add(30 * time.Minute)
 	second := s.engine(t)
 	var buf bytes.Buffer
 	if record {
@@ -526,15 +533,14 @@ func TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult(t *testing
 		// are fitted and published, a decode line and, since #432, an
 		// aggregated one under its own |both key, and each is borrowed on
 		// three cycles.
-		saturation.KindPublishLine:  17,
-		saturation.KindBorrowLine:   21,
+		saturation.KindPublishLine:  2,
+		saturation.KindBorrowLine:   6,
 		slo.KindBeginCycle:          12,
 		slo.KindEvictStale:          12,
 		slo.KindNoteVariantsPresent: 28,
 		// The forget reaches the slo line too (#431), on the same token.
 		slo.KindForgetVariant: 1,
 		settle.KindObserve:    28,
-		settle.KindRestore:    1,
 	}, kinds, "the events the scripted run records")
 	t.Logf("recorded %d bytes: %v", len(recording), kinds)
 	assertResultsPriced(t, recording)
@@ -1046,16 +1052,11 @@ func assertResultsPriced(t *testing.T, recording []byte) {
 	// after the controller start and after each day the clock jumps
 	// (throughput.SwitchITLWaitsAfterRestart and the tracker's absence
 	// tolerance). Its above-band fallback does not wait after the restart
-	// (it is one-sided): it priced 8, 4 of them pd-d from above the band
+	// (it is one-sided): it prices 8, 4 of them pd-d from above the band
 	// (T2-above-band), which the wait kept silent before 4b-2's review.
-	//
-	// Since learner PR 5d the run's mid-run restart restores first sight
-	// (settle.SwitchFirstSightRestored): the replicas Ready across it do not
-	// wait, so the lines fit through it. slo prices 21 (was 6), throughput 19
-	// (was 8), and pd-d moves from the one-sided fallback to its own fit.
-	assert.Equal(t, map[string]int{saturation.KindAnalyze: 64, slo.KindAnalyze: 21, throughput.KindAnalyze: 19}, priced,
+	assert.Equal(t, map[string]int{saturation.KindAnalyze: 64, slo.KindAnalyze: 6, throughput.KindAnalyze: 8}, priced,
 		"variants priced per analyzer")
-	assert.Equal(t, map[string]int{"agg-a T1-ols": 9, "agg-a T2-held": 2, "pd-d T1-ols": 8},
+	assert.Equal(t, map[string]int{"agg-a T1-ols": 1, "agg-a T2-held": 2, "pd-d T2-above-band": 4, "pd-d T2-default": 1},
 		throughputPriced, "the throughput analyzer's priced variants, by reason")
 }
 

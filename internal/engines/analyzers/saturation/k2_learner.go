@@ -511,7 +511,7 @@ func (a *SaturationAnalyzer) logLearnerStart(ctx context.Context, namespace, mod
 		settleUntil = now.Add(JoinedReplicaWindow)
 		reason = "the analyzer's first cycle for this model, after a controller start or as the model first appears: each replica waits its settle, k2 and the mu written beside it a rate window from the controller's first sight of it, so by settleUntil at the latest"
 		if sightings > 0 {
-			reason = "the analyzer's first cycle for this model after a controller start: a replica whose first sight the snapshot restored keeps its settle, and each other replica waits its settle, k2 and the mu written beside it a rate window from the controller's first sight of it, so by settleUntil at the latest"
+			reason = "the analyzer's first cycle for this model after a controller start: a replica whose first sight the snapshot restored keeps its settle, and each other replica waits its settle; settleUntil is when the last k2 wait ends, and the ITL line's wait, steadyFor, runs on past it"
 			if coldReplicas == 0 {
 				settleUntil = sightedUntil
 				if settleUntil.Before(now) {

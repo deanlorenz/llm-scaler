@@ -472,6 +472,7 @@ after
 again
 against
 age
+ageSeconds
 aged
 ago
 agree
@@ -855,6 +856,7 @@ did
 differ
 differences
 differs
+digest
 dir
 dirCeilingBytes
 direct
@@ -1520,6 +1522,7 @@ match
 matches
 matrix
 max
+maxAgeSeconds
 maxBytes
 maxHeadroomReplicas
 maxNumActiveSeqs

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
@@ -53,12 +55,31 @@ func (e *Engine) holdSettle(namespace, modelID string, now time.Time) {
 	e.settleTracker().Hold(utils.GetNamespacedKey(namespace, modelID), now)
 }
 
-// restoreSettle hands the settle tracker the sightings a restored document
-// held, read at now, records them when a learner recording is open, and
-// returns how many the tracker took. Only the snapshot's restore calls it,
-// so with the snapshot off nothing is restored (SwitchFirstSightRestored).
-func (e *Engine) restoreSettle(sightings map[string][]settle.Sighting, now time.Time) int {
+// sightingsMaxAge is how old a document may be and still give back its
+// sightings: the gap one process would tolerate without a row
+// (settle.Tolerance), plus the time between two writes
+// (learnedStateInterval), since the document was up to that old when the gap
+// began. 2 min at the default interval, the restart section 4.4 of
+// analyzer-learner.md reasons about. Past it a replica has been unread for
+// longer than one process would let pass, so load may have come back in the
+// gap, and every replica waits.
+func (e *Engine) sightingsMaxAge() time.Duration {
+	return settle.Tolerance(e.sloMissedAfter()) + learnedStateInterval
+}
+
+// restoreSettle hands the settle tracker the sightings of a restored
+// document, read at now, records them when a learner recording is open, and
+// returns how many the tracker took. A document older than sightingsMaxAge
+// gives none back, and the log says why. Only the snapshot's restore calls
+// it, so with the snapshot off nothing is restored (SwitchFirstSightRestored).
+func (e *Engine) restoreSettle(logger logr.Logger, doc learnedStateDoc, now time.Time) int {
+	sightings := doc.Settle
 	if len(sightings) == 0 {
+		return 0
+	}
+	if age, limit := now.Sub(doc.WrittenAt), e.sightingsMaxAge(); age > limit {
+		logger.Info("Learned state: the snapshot is too old to keep its replica sightings; every replica waits its settle",
+			"ageSeconds", age.Seconds(), "maxAgeSeconds", limit.Seconds())
 		return 0
 	}
 	ev := settle.RestoreEvent{Interval: e.sloMissedAfter()}

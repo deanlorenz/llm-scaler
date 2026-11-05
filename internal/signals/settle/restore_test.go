@@ -255,8 +255,9 @@ func TestRestore_AReplicaAlreadyObservedIsNotOverwritten(t *testing.T) {
 }
 
 // A sighting no row has claimed is exported, so a second restart inside the
-// first loses nothing, and goes at the forget horizon, so the set is bounded.
-// An unclaimed one is not lost on a cycle that holds or sees other replicas.
+// first loses nothing, and goes past the tolerance, as a replica missing that
+// long settles again. An unclaimed one is not lost on a cycle that holds or
+// sees other replicas.
 func TestRestore_UnclaimedSightingsAreKeptThenExpire(t *testing.T) {
 	tr := restored(t, "d", "e")
 	tr.Observe(model, []Row{busy("d")}, t0)
@@ -276,19 +277,46 @@ func TestRestore_UnclaimedSightingsAreKeptThenExpire(t *testing.T) {
 		t.Fatalf("an unclaimed sighting changed: %+v", s[1])
 	}
 
-	// One row later, within the horizon, it is claimed.
-	tr.Observe(model, []Row{busy("d"), busy("e")}, t0.Add(TraceHorizon))
+	// At the tolerance exactly it is claimed.
+	tr.Observe(model, []Row{busy("d"), busy("e")}, t0.Add(Period))
 	if r, _ := tr.Replica(model, key("e")); !r.Restored {
-		t.Fatalf("at the horizon exactly it is still claimed: %+v", r)
+		t.Fatalf("at the tolerance exactly it is still claimed: %+v", r)
 	}
 
-	// Past the horizon it is gone: the replica is first seen.
+	// Past it, it is gone: the replica is first seen.
 	tr = restored(t, "d", "e")
 	tr.Observe(model, []Row{busy("d")}, t0)
-	at := t0.Add(TraceHorizon + time.Second)
+	at := t0.Add(Period + time.Second)
 	tr.Observe(model, []Row{busy("d"), busy("e")}, at)
 	if r, _ := tr.Replica(model, key("e")); r.Restored || !r.FirstSeen.Equal(at) {
-		t.Fatalf("past the horizon: %+v", r)
+		t.Fatalf("past the tolerance: %+v", r)
+	}
+}
+
+// A replica already absent past the tolerance when the document is written
+// is not kept: back in this process it would settle again, so a restart in
+// between must not spare it. At the tolerance exactly it is kept, as a row
+// then would keep it. A held cycle is no absence.
+func TestSightings_AReplicaAbsentPastTheToleranceIsNotKept(t *testing.T) {
+	gone := func(after time.Duration) []Sighting {
+		tr := NewTracker()
+		tr.Observe(model, []Row{busy("d"), busy("e")}, t0)
+		tr.Observe(model, []Row{busy("e")}, t0.Add(after))
+		return tr.Sightings()[model]
+	}
+	if got := gone(Period); len(got) != 2 {
+		t.Fatalf("at the tolerance: %+v", got)
+	}
+	got := gone(Period + time.Second)
+	if len(got) != 1 || got[0].PodName != "e" {
+		t.Fatalf("past the tolerance: %+v", got)
+	}
+
+	held := NewTracker()
+	held.Observe(model, []Row{busy("d")}, t0)
+	held.Hold(model, t0.Add(10*time.Minute/5))
+	if s := held.Sightings()[model]; len(s) != 1 {
+		t.Fatalf("a held cycle: %+v", s)
 	}
 }
 

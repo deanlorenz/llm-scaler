@@ -60,8 +60,10 @@ func sightingOf(r *replica) (Sighting, bool) {
 // Sightings is what the snapshot keeps, per model, each model's replicas
 // sorted, so one state always encodes to one document: the replicas the
 // tracker holds, and the restored sightings no row has claimed yet, so a
-// second restart inside the first does not lose them. Nil when there is
-// nothing to keep, or with SwitchFirstSightRestored off.
+// second restart inside the first does not lose them. A replica already
+// absent past the tolerance is not kept: back now it would settle again
+// (Rejoined), so a restart must not spare it that. Nil when there is nothing
+// to keep, or with SwitchFirstSightRestored off.
 func (t *Tracker) Sightings() map[string][]Sighting {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -71,6 +73,9 @@ func (t *Tracker) Sightings() map[string][]Sighting {
 	out := map[string][]Sighting{}
 	for name, m := range t.models {
 		for _, r := range m.replicas {
+			if m.last.Sub(r.LastSeen) > t.tolerance {
+				continue
+			}
 			if s, ok := sightingOf(r); ok {
 				out[name] = append(out[name], s)
 			}
@@ -98,8 +103,10 @@ func (t *Tracker) Sightings() map[string][]Sighting {
 // returns how many it took. Each waits for its replica's first row
 // (installRestored). One that is not usable is not taken, nor one whose
 // replica this process has already observed: nothing it saw itself is
-// overwritten. Those left unclaimed go after the forget horizon. With
-// SwitchFirstSightRestored off nothing is taken.
+// overwritten. Those left unclaimed go after the tolerance, as a replica
+// missing that long would settle again. With SwitchFirstSightRestored off
+// nothing is taken. The caller decides whether the document is young enough
+// to offer them at all: the tracker cannot see how long the gap was.
 func (t *Tracker) Restore(sightings map[string][]Sighting, now time.Time) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -123,7 +130,7 @@ func (t *Tracker) Restore(sightings map[string][]Sighting, now time.Time) int {
 			pending[s.key()] = s
 		}
 	}
-	t.restoredUntil = now.Add(t.forgetAfter())
+	t.restoredUntil = now.Add(t.tolerance)
 	return taken
 }
 
@@ -197,8 +204,9 @@ func ReplaySwitchNames() []string {
 // A name it does not know is an error, and sets nothing. Never called on a
 // production path; a test holds that.
 func (t *Tracker) SetSwitchesForReplay(switches map[string]bool) error {
+	known := ReplaySwitchNames()
 	unknown := slices.Sorted(maps.Keys(switches))
-	unknown = slices.DeleteFunc(unknown, func(n string) bool { return n == SwitchFirstSightRestored })
+	unknown = slices.DeleteFunc(unknown, func(n string) bool { return slices.Contains(known, n) })
 	if len(unknown) > 0 {
 		return fmt.Errorf("settle: no replay switch %s", strings.Join(unknown, ", "))
 	}

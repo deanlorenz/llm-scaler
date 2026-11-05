@@ -9,7 +9,6 @@
 2026-03-02T09:30:00Z saturation.StableAcceleratorFor 6
 2026-03-02T09:30:00Z saturation.TakeRestoreOutcomes 1
 2026-03-02T09:30:00Z settle.Observe 3
-2026-03-02T09:30:00Z settle.Restore 1
 2026-03-02T09:30:00Z slo.Analyze 3
 2026-03-02T09:30:00Z slo.BeginCycle 1
 2026-03-02T09:30:00Z slo.EvictStale 1
@@ -23,8 +22,6 @@
 2026-03-02T09:30:15Z saturation.NoteVariantsPresent 3
 2026-03-02T09:30:15Z saturation.StableAcceleratorFor 6
 2026-03-02T09:30:15Z saturation.TakeRestoreOutcomes 1
-2026-03-02T09:30:15Z saturation.borrowLine 2
-2026-03-02T09:30:15Z saturation.publishLine 2
 2026-03-02T09:30:15Z settle.Observe 3
 2026-03-02T09:30:15Z slo.Analyze 3
 2026-03-02T09:30:15Z slo.BeginCycle 1
@@ -39,8 +36,6 @@
 2026-03-02T09:30:30Z saturation.NoteVariantsPresent 3
 2026-03-02T09:30:30Z saturation.StableAcceleratorFor 6
 2026-03-02T09:30:30Z saturation.TakeRestoreOutcomes 1
-2026-03-02T09:30:30Z saturation.borrowLine 2
-2026-03-02T09:30:30Z saturation.publishLine 2
 2026-03-02T09:30:30Z settle.Observe 3
 2026-03-02T09:30:30Z slo.Analyze 3
 2026-03-02T09:30:30Z slo.BeginCycle 1
@@ -55,8 +50,6 @@
 2026-03-02T09:30:45Z saturation.NoteVariantsPresent 3
 2026-03-02T09:30:45Z saturation.StableAcceleratorFor 6
 2026-03-02T09:30:45Z saturation.TakeRestoreOutcomes 1
-2026-03-02T09:30:45Z saturation.borrowLine 2
-2026-03-02T09:30:45Z saturation.publishLine 2
 2026-03-02T09:30:45Z settle.Observe 3
 2026-03-02T09:30:45Z slo.Analyze 3
 2026-03-02T09:30:45Z slo.BeginCycle 1
@@ -72,8 +65,6 @@
 2026-03-02T09:31:00Z saturation.NoteVariantsPresent 2
 2026-03-02T09:31:00Z saturation.StableAcceleratorFor 5
 2026-03-02T09:31:00Z saturation.TakeRestoreOutcomes 1
-2026-03-02T09:31:00Z saturation.borrowLine 2
-2026-03-02T09:31:00Z saturation.publishLine 2
 2026-03-02T09:31:00Z settle.Observe 2
 2026-03-02T09:31:00Z slo.Analyze 2
 2026-03-02T09:31:00Z slo.BeginCycle 1
@@ -88,8 +79,6 @@
 2026-03-02T09:31:15Z saturation.NoteVariantsPresent 2
 2026-03-02T09:31:15Z saturation.StableAcceleratorFor 5
 2026-03-02T09:31:15Z saturation.TakeRestoreOutcomes 1
-2026-03-02T09:31:15Z saturation.borrowLine 2
-2026-03-02T09:31:15Z saturation.publishLine 2
 2026-03-02T09:31:15Z settle.Observe 2
 2026-03-02T09:31:15Z slo.Analyze 2
 2026-03-02T09:31:15Z slo.BeginCycle 1
@@ -106,8 +95,6 @@
 2026-03-02T09:31:30Z saturation.NoteVariantsPresent 2
 2026-03-02T09:31:30Z saturation.StableAcceleratorFor 5
 2026-03-02T09:31:30Z saturation.TakeRestoreOutcomes 1
-2026-03-02T09:31:30Z saturation.borrowLine 1
-2026-03-02T09:31:30Z saturation.publishLine 1
 2026-03-02T09:31:30Z settle.Observe 2
 2026-03-02T09:31:30Z slo.Analyze 2
 2026-03-02T09:31:30Z slo.BeginCycle 1
@@ -124,8 +111,6 @@
 2026-03-02T09:31:45Z saturation.NoteVariantsPresent 2
 2026-03-02T09:31:45Z saturation.StableAcceleratorFor 5
 2026-03-02T09:31:45Z saturation.TakeRestoreOutcomes 1
-2026-03-02T09:31:45Z saturation.borrowLine 2
-2026-03-02T09:31:45Z saturation.publishLine 2
 2026-03-02T09:31:45Z settle.Observe 2
 2026-03-02T09:31:45Z slo.Analyze 2
 2026-03-02T09:31:45Z slo.BeginCycle 1
