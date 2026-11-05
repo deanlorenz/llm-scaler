@@ -147,6 +147,11 @@ func TestOLSSweep_FitsAAndRefusesVPAndF(t *testing.T) {
 	assert.InDelta(t, overhead, est.AOverhead, 0.00025, "a's overhead")
 	assert.InDelta(t, intercept+overhead, est.A, 0.00025, "a: the intercept plus the least overhead")
 	assert.GreaterOrEqual(t, est.APromptMax, MinPromptSpread*est.APromptMin)
+	// Two prompt levels, 1k and 6k: the curve needs three, and a is the
+	// line's (fixed.go).
+	assert.Equal(t, AModelLinear, est.AModel)
+	assert.Equal(t, TooFewPromptClusters, est.ALineReason)
+	assert.Equal(t, 2, est.AClusters)
 	// The slope bound is a validation signal, far above the 30k tok/s the
 	// pod was offered at its peak: about 520k tok/s.
 	assert.InEpsilon(t, 1/slope, est.SlopeBound, 0.1, "the slope bound")

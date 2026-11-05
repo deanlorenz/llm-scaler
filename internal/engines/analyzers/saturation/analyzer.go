@@ -423,6 +423,9 @@ type SaturationAnalyzer struct {
 	// prefillBusyMinutes is SwitchPrefillBusyMinutes (P1's busy minutes): on
 	// from the constructor; a replay turns it off (SetSwitchesForReplay).
 	prefillBusyMinutes bool
+	// prefillAQuadratic is SwitchPrefillAQuadratic (a's curved fit): on
+	// from the constructor; a replay turns it off (SetSwitchesForReplay).
+	prefillAQuadratic bool
 	// itlOneSidedAtCap is SwitchITLOneSidedAtCap (issue #467,
 	// itl_one_sided.go): on from the constructor; a replay turns it off
 	// (SetSwitchesForReplay).
@@ -629,6 +632,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		k2Pending:              make(map[string]*k2PendingReadings),
 		prefillObserve:         true,
 		prefillBusyMinutes:     true,
+		prefillAQuadratic:      true,
 		itlOneSidedAtCap:       true,
 		prefillObserver:        prefill.NewObserver(),
 		prefillBounds:          make(map[string]stashedBound),
