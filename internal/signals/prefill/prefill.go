@@ -47,9 +47,11 @@ const idleRows = 2
 type Source string
 
 const (
-	// SourceBusyMinutes is the median computed-token rate over minutes in
-	// which the pod's queue was above zero on every sample and decode was not
-	// back-pressuring it.
+	// SourceBusyMinutes is the median computed-token rate over the last
+	// BusyWindow's minutes in which the pod's queue was above zero on every
+	// sample, its KV was not full and decode was not back-pressuring it. It
+	// reads at or below V_P, at it when the pod truly ran flat out; a
+	// data-parallel pod is flagged a lower bound (DataParallelRanks).
 	SourceBusyMinutes Source = "busy-minutes"
 	// SourcePeakUnderQueue is the highest computed-token rate sustained over
 	// PeakRun minutes in each of which the pod held a queue on some sample. A
@@ -98,6 +100,20 @@ const (
 	TooFewImbalanceMinutes Refusal = "TooFewImbalanceMinutes"
 )
 
+// BoundReason is why a V_P from busy minutes is a lower bound.
+type BoundReason string
+
+// DataParallelRanks is busy minutes of which some came from a pod with more
+// than one data-parallel rank: its queue minimum is the ranks' least summed,
+// so the pod held work every sample of the minute but one rank may have
+// idled, and the minute reads under the pod's capacity.
+//
+// One such minute flags the whole median, however many single-rank minutes
+// stand beside it: the median cannot say which minutes it rests on, and
+// for an observe-only signal flagging too often under-promises, the
+// conservative side.
+const DataParallelRanks BoundReason = "DataParallelRanks"
+
 // Row refusals, counted per cycle in Estimate.Refused.
 const (
 	rowNotReady = "not-ready"
@@ -136,10 +152,15 @@ type Cycle struct {
 	// Rows is the variant's rows this cycle.
 	Rows []domain.ReplicaMetrics
 	// QueueMin is, per pod, the least waiting count over the minute
-	// (min_over_time of num_requests_waiting), where one was read. No
-	// collector query reads it today, so a busy minute is never recognised
-	// until one does.
-	QueueMin map[string]int
+	// (min_over_time of num_requests_waiting), where one was read: the rows'
+	// domain.ReplicaMetrics.QueueMin, by QueueMins. A pod it does not name
+	// has no busy minute this cycle.
+	QueueMin map[string]float64
+	// KVFull names the pods whose KV cache was full this cycle (the
+	// saturation analyzer's kvFull at the policy's KV threshold). A full
+	// prefill pod can hold a queue it cannot schedule, so its minute is not
+	// busy whatever its queue minimum.
+	KVFull map[string]bool
 	// DownstreamSaturated says decode is back-pressuring prefill this cycle:
 	// the test computeK2 applies (k2ReasonObsDownstream).
 	DownstreamSaturated bool
@@ -158,23 +179,34 @@ type Estimate struct {
 	// VPSource where it came from and VPRefused why there is none.
 	// VPSamples is how many minutes (or bound readings) it rests on.
 	//
-	// VPLowerBound says the source is a lower bound (sources 2 and 3): the
-	// true V_P is at or above VP. For the peak under a queue it is a bound
-	// only up to the noise of a one-minute rate(): the peak is the max of
-	// many runs' least minutes, so it can read above V_P by about that
-	// noise (capacity.go). The name is kept, not softened, because the
-	// direction is what a reader acts on: a lower bound under-promises, and
-	// the noise is a stated limit of it, not a different kind of figure.
+	// VPLowerBound says the source is a lower bound (sources 2 and 3, and
+	// busy minutes of a data-parallel pod): the true V_P is at or above VP.
+	// For the peak under a queue it is a bound only up to the noise of a
+	// one-minute rate(): the peak is the max of many runs' least minutes,
+	// so it can read above V_P by about that noise (capacity.go). The name
+	// is kept, not softened, because the direction is what a reader acts
+	// on: a lower bound under-promises, and the noise is a stated limit of
+	// it, not a different kind of figure.
 	VP           float64
 	VPSource     Source
 	VPLowerBound bool
-	VPRefused    Refusal
-	VPSamples    int
+	// VPLowerBoundReason says why busy minutes are a lower bound
+	// (DataParallelRanks). Empty otherwise: sources 2 and 3 are bounds by
+	// their source, and single-rank busy minutes are not one.
+	VPLowerBoundReason BoundReason
+	VPRefused          Refusal
+	VPSamples          int
 	// VPQueuedMinutes, VPLongestQueuedRun and VPBusyMinutes say why V_P was
 	// refused or where it stands: the samples kept that held a queue on
 	// some sample, the longest run of them (a peak needs PeakRun), and the
-	// busy minutes (which need Cycle.QueueMin; busy minutes need
+	// busy minutes (which need Cycle.QueueMin; V_P from them needs
 	// MinBusyMinutes). Read over every replica of the key.
+	//
+	// They are read over different windows: the queued minutes over every
+	// sample kept (Retention), as the peak is; the busy minutes over the
+	// last BusyWindow only. So a busy-minute count above the queued count
+	// is impossible, but the two are not a ratio, and nothing compares them:
+	// the only reader is the saturation analyzer's log line.
 	VPQueuedMinutes    int
 	VPLongestQueuedRun int
 	VPBusyMinutes      int
@@ -219,8 +251,12 @@ type sample struct {
 	rateOK bool
 	// queued: the queue was above zero on some sample of the minute.
 	queued bool
-	// busy: above zero on every sample, with decode not back-pressuring.
+	// busy: above zero on every sample, with decode not back-pressuring and
+	// the pod's KV not full.
 	busy bool
+	// multiRank: the pod runs more than one data-parallel rank, so its
+	// queue minimum is the ranks' summed and one rank may have idled.
+	multiRank bool
 	// lowLoad: admitted to the fit of a, at ieff and svc, with the
 	// overhead when overheadOK.
 	lowLoad    bool
@@ -351,9 +387,10 @@ func (o *Observer) Observe(c Cycle) Estimate {
 		s := sample{at: c.Now}
 		s.rate, s.rateOK = computedRate(rm, sglang)
 		s.queued = rm.QueueLength > 0
-		if qmin, ok := c.QueueMin[rm.PodName]; ok {
-			s.busy = qmin > 0 && s.queued && !c.DownstreamSaturated
-		}
+		// A pod QueueMin does not name reads zero, which is not busy.
+		qmin := c.QueueMin[rm.PodName]
+		s.busy = finitePositive(qmin) && s.queued && !c.DownstreamSaturated && !c.KVFull[rm.PodName]
+		s.multiRank = rm.Ranks() > 1
 		svc := rm.AvgServiceTime
 		rr, rrOK := requestRate(rm)
 		if c.Disaggregated && steady && rm.QueueLength == 0 && rrOK && finitePositive(svc) &&
@@ -410,6 +447,28 @@ func (s *Settle) settled(rm domain.ReplicaMetrics, now time.Time) bool {
 		start = back
 	}
 	return !start.IsZero() && now.Sub(start) >= SteadyFor
+}
+
+// QueueMins is, per pod, the least waiting count each row read over the
+// minute (domain.ReplicaMetrics.QueueMin), for Cycle.QueueMin: only a row
+// whose QueueMinKnown is set, so a zero a row never read is not taken for a
+// queue that emptied. A row of a pod with data-parallel ranks carries the
+// ranks' least summed (the collector's pod collapse): above zero, the pod
+// held work every sample of the minute, though one rank may not have, and
+// that minute's rate reads under V_P, never over, and V_P from such minutes
+// is flagged a lower bound (DataParallelRanks). Nil when no row read one.
+func QueueMins(rows []domain.ReplicaMetrics) map[string]float64 {
+	var out map[string]float64
+	for _, rm := range rows {
+		if !rm.QueueMinKnown {
+			continue
+		}
+		if out == nil {
+			out = map[string]float64{}
+		}
+		out[rm.PodName] = rm.QueueMin
+	}
+	return out
 }
 
 // computedRate is the row's computed-token rate, and whether it is a

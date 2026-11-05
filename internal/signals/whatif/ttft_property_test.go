@@ -214,7 +214,7 @@ func TestProperty_TTFTNonFiniteIsRefused(t *testing.T) {
 // 0.1 (across the boundary at 1, where the tail changes form), at p90, p95
 // and p99 and at 0.3 to 0.85 of the prefill knee. Above cv 3 the gamma's
 // p90 can fall at very low load (most of its mass sits below the mean);
-// S1's design caps an assumed cv at 3, and so does this property.
+// S1 passes no cv above 3, assumed or measured, and this property stops there.
 func TestProperty_TTFTMonotoneInPromptSpread(t *testing.T) {
 	for _, q := range []float64{0.9, 0.95, 0.99} {
 		for _, frac := range []float64{0.3, 0.5, 0.7, 0.85} {

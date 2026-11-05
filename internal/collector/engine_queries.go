@@ -38,7 +38,8 @@ var engineSpecificReplicaQueries = []string{
 	registration.QueryKvUsageMean,
 	registration.QueryRequestRate,
 	registration.QueryRunningRequests,
-	// Recorded for the TTFT model and read by nothing yet (ttft_inputs.go).
+	// Recorded for the TTFT model (ttft_inputs.go); only QueueMin is read
+	// yet, by the prefill observation's busy minutes.
 	registration.QueryPromptTokensBuckets,
 	registration.QueryTTFTBuckets,
 	registration.QueryAvgQueueTime,
@@ -87,10 +88,12 @@ var ttftAgnosticQueries = []string{
 	registration.QueryTPOTBuckets,
 }
 
-// recordOnlyReplicaQueries are the replica queries above whose results only
-// a learner recording reads: the TTFT model's inputs. They are issued only
+// recordOnlyReplicaQueries are the replica queries above issued only while a
+// learner recording is on: the TTFT model's inputs. They are issued only
 // while the collector records them (SetRecordTTFTInputs), so a controller
-// that records nothing pays nothing for them.
+// that records nothing pays nothing for them. One is also read while it is
+// issued: QueryQueueMin, by the saturation analyzer's prefill observation
+// (busy minutes, logs only), which outside a recording sees none.
 var recordOnlyReplicaQueries = map[string]bool{
 	registration.QueryPromptTokensBuckets: true,
 	registration.QueryTTFTBuckets:         true,

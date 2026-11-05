@@ -113,6 +113,7 @@ CrashLoopBackOff
 CreateContainerConfigError
 CreateContainerError
 D
+DataParallelRanks
 Datastore
 DecodeOnsetUnchecked
 DecodeSideOmitted
@@ -621,6 +622,7 @@ busiestRankKvUsage
 busiestRankQueue
 busy-minutes
 busyMinutes
+busyMinutesOn
 but
 by
 byRole
@@ -1347,6 +1349,7 @@ kvCacheThreshold
 kvCacheUsagePct
 kvCeiling
 kvFromInstant
+kvFullPods
 kvMaxToMean
 kvReqFleet
 kvReqPerSeq
@@ -1885,6 +1888,7 @@ preemptions
 preempts
 prefill
 prefill-bound
+prefill-busy-minutes
 prefill-capacity-observe
 prefill-capacity-observed
 prefill-catchup
@@ -1957,6 +1961,7 @@ queueLength
 queueLengthThreshold
 queueMax
 queueMean
+queueMinPods
 queueOverThreshold
 queueThreshold
 queued
@@ -2673,6 +2678,7 @@ volume
 vp
 vpAboveSlopeBound
 vpLowerBound
+vpLowerBoundReason
 vpRefused
 vpSamples
 vpSource

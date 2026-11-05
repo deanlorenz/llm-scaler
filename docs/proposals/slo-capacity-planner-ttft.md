@@ -87,7 +87,12 @@ alone: `S_work = I_eff/V_P`, `ρ = λ·E[I_eff]/V_P`.
    not back-pressuring it (the test `computeK2` applies,
    `k2ReasonObsDownstream`). `V_P` is the median of `PrefillComputedTokenRate`
    over at least 5 such minutes. On P/D this is rare: saturation has never
-   recorded a non-back-pressured prefill saturation there.
+   recorded a non-back-pressured prefill saturation there. As built, the
+   minimum is the recorder's per-pod `QueueMin`, read only while a learner
+   recording is on. A minute on a KV-full prefill pod is not busy, and only
+   the last 30 minutes are read. A busy minute reads at or below capacity:
+   data-parallel pods (flagged a lower bound) and stalls under-read
+   ([P1 and busy minutes](slo-capacity-planner.md#pr-plan)).
 2. **Observed peak under a queue.** The highest `PrefillComputedTokenRate`
    sustained over 3 minutes in which the pod held a queue on some sample.
    Throughput never exceeds capacity, so this is a lower bound. Flagged. A peak
@@ -270,7 +275,7 @@ that is itself wrong (the exponential tail, Poisson arrivals, an omitted
 | --- | --- |
 | Wait tail at prompt cv above 1: `ρ_w·e^(−γt)`, `γ` the Cramér-Lundberg root ([as built](#the-model-as-built)) | Under-promises against a Lindley simulation (cv 2 and 3, `ρ` 0.3 and 0.6): by 3–28% at p90, 4–16% at p99 and 3–12% at p999; not a proven bound. Kingman's `1/θ` alone over-promised by up to 10% here |
 | Wait tail at prompt cv below 1: Taylor's bound `min(ρ_w, C·e^(−γt))` | Under-promises, provably: by 8–18% at p90, 4–12% at p99 and 4–10% at p999 against a simulation (cv 0 and 0.5), and 1–17% against Erlang's exact M/D/1 wait. The exponential body it replaced read an M/D/1 p90 sojourn 10% short at `ρ` 0.2 |
-| Prompt cv above 3 | Either way, and not monotone: the gamma's p90 can fall as cv rises at very low load, since most of its mass sits below the mean. S1 caps an assumed cv at 3; nothing here is tested above it |
+| Prompt cv above 3 | Either way, and not monotone: the gamma's p90 can fall as cv rises at very low load, since most of its mass sits below the mean. S1 passes no cv above 3, assumed or measured (it assumes 2); nothing here is tested above it |
 | Wait tail with bursty arrivals (`Ca²` ≠ 1): Kingman's `1/θ`, never above the work's own tail rate | Not checked against a simulation; burstiness lengthens the tail, and Kingman's decay is taken as its conservative side |
 | Poisson arrivals on bursty traffic | Over-promises |
 | Per-pod model above the flow-control onset | Either way; the pooled bound printed beside it over-promises |
@@ -304,8 +309,8 @@ The staircase is the TTFT pass mark (decode is validated against the goldens).
 | --- | --- |
 | Fleet | Fixed `N_p` = 2, `N_d` = 2; ScaledObjects paused (`autoscaling.keda.sh/paused`) |
 | Load | guidellm, constant rate, streamed, from `test/benchmark` behind a make target |
-| Buckets | A: prompts 1000, answers 1000 (decode-bound). B: prompts 8000, answers 200 (prefill-bound) |
-| Flow control | Each bucket twice: off, then on (utilization detector, one band, static ceiling) |
+| Buckets | A: prompts 1000, answers 1000 (decode-bound). B: prompts 8000, answers 200 (prefill-bound). C (bursty): B's shape with arrivals at an interarrival `Ca²` of 4, the squared coefficient of variation P3's `ArrivalCV2` takes. The arrivals are a renewal process: i.i.d. gaps from a balanced two-phase hyperexponential with mean `1/λ` and SCV 4, which is on/off traffic with exponential phase lengths. The fallback is batches at Poisson epochs: a batch of `k` simultaneous requests gives gaps of SCV `2k − 1`, so `k` = 2 (3) and `k` = 3 (5) bracket 4. The harness measures `Ca²` per step from the request send times and records it; a step outside 3 to 5 is rerun. guidellm's built-in rate profiles are constant or Poisson, so bucket C needs a driver of its own in `test/benchmark` (not yet written) |
+| Flow control | Each bucket twice: off, then on (utilization detector, one band, static ceiling). Bucket C is predicted with the measured `Ca²`, not Poisson |
 | Start | 40% of the predicted knee |
 | Steps | +10% to 70% of the knee, then +3% to 110% |
 | Hold | 10 minutes per step; the first 3 discarded |
@@ -324,6 +329,17 @@ prefill at 30k tok/s; a step whose window holds fewer than 4 such times is
 flagged and lengthened. Until the run passes, every TTFT figure prints
 UNVALIDATED.
 
+**Which bucket lifts which flag.** The SLO analyzer's S2 does not size on a
+figure carrying a flag below until the bucket named passes the mark above,
+in all its repeats ([S1 decisions](slo-tiers.md#s1-decisions)):
+
+| Flag | Lifted by |
+| --- | --- |
+| `UnvalidatedTTFT` | Buckets A and B, flow control off and on |
+| `AssumedPoissonArrivals` | Bucket C, flow control off and on, predicted at the measured `Ca²` |
+| `AboveFlowControlOnset` (on a rate answer) | Buckets B and C with flow control on, with steps above the prefill onset |
+| `FlowControlInferredOff` | Never by the staircase: it is a missing series, fixed by scraping it |
+
 ## As built (P3)
 
 `internal/signals/whatif`, files `ttft.go`, `ttft_queue.go`, `ttft_result.go`
@@ -331,8 +347,9 @@ and `ttft_prefill.go`. Library only: no switch, no caller in the controller,
 no CLI wiring (that follows D3), no golden moves.
 
 **Built before its validation.** The plan has P3 depend on P2, the
-prefill-stress recording kept as a golden. That run is blocked on cluster
-access, so P3 was built against known truth and synthetic fleets instead.
+prefill-stress recordings kept as goldens. Those runs were blocked on cluster
+access when P3 was built, so P3 was built against known truth and synthetic
+fleets instead.
 Every TTFT figure carries the flag `UnvalidatedTTFT`, and nothing here has
 been compared with a measured TTFT.
 

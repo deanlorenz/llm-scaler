@@ -468,11 +468,12 @@ is made.**
 | D3 | Accessors, the replay function, bands, basis, `cmd/whatif` from a recording or snapshot, footer, exit codes | none | D2 |
 | D4 | Standalone answers from `--prometheus`; no switch (adapter only) | none | D3, R2 |
 | P1 | `internal/signals/prefill`, observing: `V_P`, `a`, `f`; logs only; switch `prefill-capacity-observe`. On `ols-sweep` it fits `a` and refuses `V_P` and `f` | none | — |
-| P2 | The prefill-stress recording as a golden | adds one | P1, R1, the run |
-| P3 | The TTFT model in `whatif`; UNVALIDATED; no switch. Built before P2, against closed-form and synthetic cases, because the prefill-stress run is blocked on cluster access: [as built](slo-capacity-planner-ttft.md#as-built-p3) | none | P2 (to validate), D2 |
-| S1, S2 | The SLO analyzer prices TTFT, shadow then enforce, on the same `prefill` and `whatif` library: [SLO tiers, phase 2](slo-tiers.md#phase-2-ttft) | with its switch | P3 |
+| P2 | The prefill-stress recordings as goldens: runs 1, 2 and 3 ([the recordings](slo-tiers.md#the-p2-recordings)) | adds three | P1, R1, the runs |
+| P3 | The TTFT model in `whatif`; UNVALIDATED; no switch. Built before P2, against closed-form and synthetic cases, because the prefill-stress runs were blocked on cluster access: [as built](slo-capacity-planner-ttft.md#as-built-p3) | none | P2 (to validate), D2 |
+| S1, S2 | The SLO analyzer prices TTFT, shadow then enforce, on the same `prefill` and `whatif` library: [SLO tiers, phase 2](slo-tiers.md#phase-2-ttft) | with its switch | S1: P3. S2: S1, Q1, M2 |
 | M1 | Per-bucket and mix answers; aggregated TTFT | none | P3, R1, #276 |
 | M2 | The staircase run; an operator page in `docs/reference/`; drops UNVALIDATED if it passes | — | D4, P3 |
+| Q1 | Issue the queue-minimum query every cycle, not only while a recording is on, and add the per-request computed-prefill-token histogram (`vllm:request_prefill_kv_computed_tokens_bucket`, per instance), for namespaces holding a model whose policy sets a TTFT target: busy minutes fire in production, and the measured effective-prompt spread replaces S1's assumed `cv` 2. Before S2, not S1: [S1 decisions](slo-tiers.md#s1-decisions) | none for the queue minimum (recordings carry it); the histogram is new, so recordings made after Q1 carry it | P1's busy minutes (PR #470) |
 | Only if asked | The controller endpoint and two gauges | none | P3 |
 | Later | Prefill line and learned batch cap in the snapshot; the floor's prefill mu from `V_P`; a shared prefill/decode budget; #275, #277 | — | — |
 
@@ -484,6 +485,64 @@ least waiting count over the minute (`min_over_time` of
 back-pressure bound). R1 adds a per-pod `QueueMin` with a presence bit
 (`QueueMinKnown`); once R1 merges, a follow-up to P1 wires it into the
 observation.
+
+*As built (the P1 follow-up).* The saturation analyzer passes each prefill
+row's `QueueMin` to the observation where `QueueMinKnown` is set
+(`prefill.QueueMins`), behind its own replay switch,
+`prefill-busy-minutes`. A minute is busy when that minimum is above zero
+(finite), the queue's peak is above zero, the prefill pod's KV is not full
+(`kvFull` at the policy's `kvCacheThreshold`), and decode is not
+back-pressuring prefill. `V_P` is the median computed-token rate over the
+busy minutes of the last 30 minutes (`prefill.BusyWindow`), from at least 5.
+A zero, a minimum that was not read, NaN or `+Inf` is not busy.
+
+**A busy minute reads at or below capacity, never above**: at it when the
+pod ran flat out, under it when it did not. Data-parallel pods and stalls
+under-read:
+
+- On a data-parallel pod the minimum is each rank's least, summed. Above
+  zero, the pod held work every sample of the minute, but one rank may
+  have idled while another queued. When any pod behind the busy minutes
+  has more than one rank, `V_P` is flagged a lower bound
+  (`vpLowerBoundReason=DataParallelRanks`).
+- A stall can leave the queue non-empty while throughput falls. A KV-full
+  prefill pod is excluded, and so is a cycle that the saturation test reads
+  as decode back-pressure. Back-pressure that test does not catch (decode's
+  KV full with a short queue) still counts, and under-reads.
+
+The window exists because `V_P` depends on the prompt lengths a pod is fed,
+and a median over the observation's six hours would keep a load long gone
+and win over the fresher sources. Thirty minutes is six times the 5 busy
+minutes needed, so a pod saturated one minute in six keeps its source.
+`busyMinutes` is counted over this window and `queuedMinutes` over the six
+hours kept, so the two are not comparable; nothing compares them, and the
+log line is their only reader. One busy minute from a multi-rank pod flags
+the whole median a lower bound: the conservative side for an observe-only
+signal.
+
+The observation log carries:
+
+- `busyMinutesOn`, the switch;
+- `queueMinPods`, the pods whose row read a minimum this cycle, whether or
+  not the switch feeds them;
+- `kvFullPods`;
+- `vpLowerBoundReason`.
+
+Three limits:
+
+- The collector issues the queue-minimum query only while a learner
+  recording is on (`SetRecordTTFTInputs`), like every R1 field. With none
+  on, no row carries one and no new busy minute is read: `queueMinPods`
+  reads 0 with `busyMinutesOn=true`. Busy minutes already read stay for the
+  window, so for up to 30 minutes after a recording stops the log can show
+  `vpSource=busy-minutes` with `queueMinPods=0`. Issuing the query every
+  cycle is a collector change, left for P3 or the first consumer that
+  sizes from `V_P`.
+- The KV-full test reads the row's KV at the cycle, a one-minute row, so a
+  pod that filled and drained within the minute is not caught.
+- No committed recording carries a queue minimum, so no golden moves; the
+  switch is held by its unit tests (`heldBy`). The prefill-stress recording
+  (P2) is the first that will exercise it.
 
 **P3 and the bias of `f`.** P1's `f` is de-biased for Poisson arrivals, and
 the de-bias errs both ways

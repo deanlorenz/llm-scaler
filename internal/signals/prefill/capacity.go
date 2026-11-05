@@ -12,10 +12,19 @@ import (
 // work is at most V_P. The sources are taken in the page's order, and only
 // sources that cannot over-state V_P:
 //
-//  1. Busy minutes: the queue above zero on every sample of the minute and
-//     decode not back-pressuring; V_P is their median, over at least
-//     MinBusyMinutes. A busy minute needs the least waiting count of the
-//     minute (Cycle.QueueMin), which no collector query reads today.
+//  1. Busy minutes: the queue above zero on every sample of the minute, the
+//     pod's KV not full and decode not back-pressuring; V_P is their median
+//     over the last BusyWindow, from at least MinBusyMinutes. A busy minute
+//     needs the least waiting count of the minute (Cycle.QueueMin, from the
+//     rows' QueueMin by QueueMins) read and above zero: a pod whose queue
+//     min was not read has none. A busy minute reads at or below V_P: at it
+//     when the pod ran flat out, under it when a data-parallel rank idled
+//     (flagged, DataParallelRanks: one multi-rank minute in the window
+//     flags the whole median, the conservative side) or the pod stalled on
+//     something the tests above miss (decode back-pressure that its
+//     saturation test does not catch, say). The busy minutes are counted
+//     over BusyWindow and the queued minutes over Retention, so the two
+//     counts are not compared (Estimate).
 //  2. The peak under a queue: the highest rate sustained over PeakRun
 //     minutes, each with a queue on some sample. A lower bound. A peak with
 //     no queue is the offered load, not capacity, and is not used.
@@ -33,6 +42,15 @@ import (
 
 // MinBusyMinutes is the fewest busy minutes V_P is taken from.
 const MinBusyMinutes = 5
+
+// BusyWindow is how far back busy minutes are read. V_P depends on the
+// prompt lengths a pod is fed (each step pays a fixed cost the prompts
+// share), so a busy minute speaks for the load it ran under, and a median
+// over Retention would keep a load that has gone for six hours and win over
+// the fresher sources below. Thirty minutes is six times MinBusyMinutes:
+// room for a pod saturated one minute in six to keep its source, while a
+// busy period that ended leaves it within half an hour.
+const BusyWindow = 30 * time.Minute
 
 // PeakRun is how many queued minutes in a row a peak must be sustained over.
 const PeakRun = 3
@@ -53,10 +71,13 @@ func (est *Estimate) capacity(ks *keyState, c Cycle, sglang bool) {
 		return
 	}
 	est.VPQueuedMinutes, est.VPLongestQueuedRun = queuedRuns(ks)
-	v, n := busyMedian(ks)
+	v, n, multiRank := busyMedian(ks, c.Now)
 	est.VPBusyMinutes = n
 	if n >= MinBusyMinutes {
 		est.VP, est.VPSource, est.VPSamples = v, SourceBusyMinutes, n
+		if multiRank {
+			est.VPLowerBound, est.VPLowerBoundReason = true, DataParallelRanks
+		}
 		return
 	}
 	if v, ok := peakUnderQueue(ks); ok {
@@ -70,21 +91,25 @@ func (est *Estimate) capacity(ks *keyState, c Cycle, sglang bool) {
 	est.VPRefused = NoPrefillCapacity
 }
 
-// busyMedian is the median rate over every replica's busy minutes, and how
-// many there are.
-func busyMedian(ks *keyState) (float64, int) {
+// busyMedian is the median rate over every replica's busy minutes no older
+// than BusyWindow at now, how many there are, and whether any came from a
+// pod with more than one data-parallel rank.
+func busyMedian(ks *keyState, now time.Time) (float64, int, bool) {
+	cutoff := now.Add(-BusyWindow)
 	var rates []float64
+	multiRank := false
 	for _, name := range ks.podNames() {
 		for _, s := range ks.pods[name].samples {
-			if s.busy && s.rateOK && s.rate > 0 {
+			if s.busy && s.rateOK && s.rate > 0 && !s.at.Before(cutoff) {
 				rates = append(rates, s.rate)
+				multiRank = multiRank || s.multiRank
 			}
 		}
 	}
 	if len(rates) == 0 {
-		return 0, 0
+		return 0, 0, false
 	}
-	return median(rates), len(rates)
+	return median(rates), len(rates), multiRank
 }
 
 // peakUnderQueue is the highest rate any replica sustained over PeakRun

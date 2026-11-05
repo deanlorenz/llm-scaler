@@ -3023,6 +3023,7 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n hack/check-kps-images.sh
 	@bash -n deploy/ci-pr-checks/free-disk.sh
 	@bash -n deploy/ci-pr-checks/disk-report.sh
+	@bash -n hack/check-disk-report.sh
 	@bash -n hack/check-policy-apply-docs.sh
 	@bash -n hack/check-release-latest.sh
 	@bash -n hack/check-controller-ready.sh
@@ -3251,6 +3252,9 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# above never saw it: Grafana came from Docker Hub. Renders the release
 	@# deploy_prometheus_kube_stack installs; needs helm and the chart repo.
 	@bash hack/check-kps-images.sh
+	@echo "Checking the e2e disk report never fails the job, whatever its samples..."
+	@# It runs after every e2e job; an empty sample value made it exit 1.
+	@bash hack/check-disk-report.sh
 	@echo "Checking no doc applies the sample scaling policy over an install..."
 	@# The sample has no limiters: applying it removes the GPU limit.
 	@bash hack/check-policy-apply-docs.sh
