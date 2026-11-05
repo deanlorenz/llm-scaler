@@ -63,6 +63,15 @@ const (
 // from what P1 computes.
 const pr475A = 0.00795 + 0.00291
 
+// pr475B and pr475C are the same curve's b and c, in seconds a token and a
+// token squared (TestQuadratic_Runs3And4PooledGiveA): the per-token cost
+// b + c*I that P3 rescales V_P along where a fixture fits no curve of its
+// own (runs 3 and 2). TestTTFTValidation_PooledAIsP1s holds them to P1 too.
+const (
+	pr475B = 7.1815e-07
+	pr475C = 2.0280e-10
+)
+
 // knownPromptCV is the spread the load generator sent: n words drawn
 // uniformly from 0.9n to 1.1n, about one token a word, so cv 0.2/sqrt(12).
 var knownPromptCV = 0.2 / math.Sqrt(12)
@@ -123,6 +132,9 @@ type p1Line struct {
 	AIntercept   float64 `json:"aIntercept"`
 	AOverhead    float64 `json:"aOverhead"`
 	AModel       string  `json:"aModel"`
+	ASlope       float64 `json:"aSlope"`
+	ACurve       float64 `json:"aCurve"`
+	VPPrompt     float64 `json:"vpPromptTokens"`
 	ARefused     string  `json:"aRefused"`
 	ASamples     int     `json:"aSamples"`
 	F            float64 `json:"f"`
@@ -138,6 +150,7 @@ func (l p1Line) estimate() prefill.Estimate {
 		VPRefused: prefill.Refusal(l.VPRefused), VPSamples: l.VPSamples, SlopeBound: l.SlopeBound,
 		A: l.A, ARefused: prefill.Refusal(l.ARefused), ASamples: l.ASamples,
 		F: l.F, FRefused: prefill.Refusal(l.FRefused), FSamples: l.FSamples,
+		VPPromptTokens: l.VPPrompt, AModel: prefill.AModel(l.AModel), ASlope: l.ASlope, ACurve: l.ACurve,
 	}
 }
 
@@ -320,13 +333,15 @@ func ttftVerdict(pred, obs, lo, hi float64) string {
 // ttftFleetAt is the fleet one level is priced on: one prefill pod at V_P
 // and a, the level's measured effective prompt at the given spread, its
 // measured KV transfer per token, Poisson arrivals, flow control off. No
-// decode role: no committed run fitted a decode ITL line from its loaded
-// levels (decode KV stayed near 0.01), so the fleet is the prefill side
-// alone, as S1 prices it with flow control off (DecodeSideOmitted).
-func ttftFleetAt(p whatif.Prefill, prompt, transfer, cv float64) whatif.TTFTFleet {
+// decode line: no committed run fitted a decode ITL line from its loaded
+// levels (decode KV stayed near 0.01). Decode's part of the TTFT is the
+// decode engine's mean TTFT over the level, at the level's prompt
+// (whatif.DecodeTTFT, flagged DecodeEngineMeasured), as S1 prices it.
+func ttftFleetAt(p whatif.Prefill, prompt, transfer, decodeTTFT, cv float64) whatif.TTFTFleet {
 	p.Replicas, p.PromptTokens, p.PromptCV = 1, prompt, cv
 	p.TransferSecondsPerToken = transfer / prompt
-	return whatif.TTFTFleet{Prefill: p, FlowControl: whatif.FlowControl{State: whatif.FlowControlOff}}
+	return whatif.TTFTFleet{Prefill: p, DecodeTTFT: whatif.DecodeTTFT{Seconds: decodeTTFT, PromptTokens: prompt},
+		FlowControl: whatif.FlowControl{State: whatif.FlowControlOff}}
 }
 
 // ttftCase is one frozen row: a level, a spread and a percentile, the
@@ -342,40 +357,40 @@ type ttftCase struct {
 
 // ttftFrozen is the frozen table. Green is not a pass: the rows record P3
 // under-predicting, and a fix to P3 must rewrite them and the counts below.
-// It is P3 (main 602054e98) against the router at
+// It is P3 (main afdac8282, with #484) against the router at
 // p90 and p95, at the spread the load generator sent (cv 0.058) and at S1's
 // assumed 2. V_P is run 2's busy minutes on main, 134,775 tok/s, for every
 // level; a is P1's own on run 4 (the curve's, 11.58 ms) and the runs 3 and 4
 // pooled curve's on runs 3 and 2 (pr475A, 10.86 ms).
 var ttftFrozen = []ttftCase{
-	{"ttft-open-loop-short", "1k", knownPromptCV, 0.9, 0.046964964693101574, 0.024064128690696185, "", "UNDER"},
-	{"ttft-open-loop-short", "1k", knownPromptCV, 0.95, 0.048502851711026626, 0.027888022236722966, "", "UNDER"},
-	{"ttft-open-loop-short", "1k", s1PromptCV, 0.9, 0.046964964693101574, 0.051306864893453735, "", "pass"},
-	{"ttft-open-loop-short", "1k", s1PromptCV, 0.95, 0.048502851711026626, 0.07375522392582565, "", "over, beyond the bucket"},
-	{"ttft-open-loop-short", "2k", knownPromptCV, 0.9, 0.04788160469667319, 0.03552364077068482, "", "UNDER"},
-	{"ttft-open-loop-short", "2k", knownPromptCV, 0.95, 0.04915280495759948, 0.04452990371052758, "", "pass"},
-	{"ttft-open-loop-short", "2k", s1PromptCV, 0.9, 0.04788160469667319, 0.0913152986561426, "", "over, beyond the bucket"},
-	{"ttft-open-loop-short", "2k", s1PromptCV, 0.95, 0.04915280495759948, 0.13518624973461837, "", "over, beyond the bucket"},
-	{"ttft-open-loop-short", "4k", knownPromptCV, 0.9, 0.09208928571428572, 0.05902633143907933, "", "UNDER"},
-	{"ttft-open-loop-short", "4k", knownPromptCV, 0.95, 0.09604464285714287, 0.07736360454314814, "", "UNDER"},
-	{"ttft-open-loop-short", "4k", s1PromptCV, 0.9, 0.09208928571428572, 0.17187540767333478, "", "over, beyond the bucket"},
-	{"ttft-open-loop-short", "4k", s1PromptCV, 0.95, 0.09604464285714287, 0.25879350478483343, "", "over, beyond the bucket"},
-	{"ttft-open-loop-short", "16k", knownPromptCV, 0.9, 0.31625000000000003, 0.1840084148519461, "", "UNDER"},
-	{"ttft-open-loop-short", "16k", knownPromptCV, 0.95, 0.358125, 0.24780433660417586, "", "UNDER"},
-	{"ttft-open-loop-short", "16k", s1PromptCV, 0.9, 0.31625000000000003, 0.5711464068730822, "", "over, beyond the bucket"},
-	{"ttft-open-loop-short", "16k", s1PromptCV, 0.95, 0.358125, 0.8915062824823984, "", "over, beyond the bucket"},
-	{"ttft-open-loop-long", "8k", knownPromptCV, 0.9, 0.09763598326359833, 0.12593111976302718, "", "over, beyond the bucket"},
-	{"ttft-open-loop-long", "8k", knownPromptCV, 0.95, 0.10964285714285714, 0.14170414477911228, "", "over"},
-	{"ttft-open-loop-long", "8k", s1PromptCV, 0.9, 0.09763598326359833, 0.33185766138296235, "", "over, beyond the bucket"},
-	{"ttft-open-loop-long", "8k", s1PromptCV, 0.95, 0.10964285714285714, 0.5036971511977187, "", "over, beyond the bucket"},
-	{"ttft-open-loop-long", "30k", knownPromptCV, 0.9, 0.5697435897435897, 0.3304961842001501, "", "UNDER, beyond the bucket"},
-	{"ttft-open-loop-long", "30k", knownPromptCV, 0.95, 0.5848717948717949, 0.3471822424503939, "", "UNDER, beyond the bucket"},
-	{"ttft-open-loop-long", "30k", s1PromptCV, 0.9, 0.5697435897435897, 1.0167420043253392, "", "over, beyond the bucket"},
-	{"ttft-open-loop-long", "30k", s1PromptCV, 0.95, 0.5848717948717949, 1.6030974047649476, "", "over, beyond the bucket"},
-	{"ttft-open-loop-long", "37k", knownPromptCV, 0.9, 0.7946666666666666, 0.41250724390102933, "", "UNDER, beyond the bucket"},
-	{"ttft-open-loop-long", "37k", knownPromptCV, 0.95, 0.9149999999999995, 0.5469056397793713, "", "UNDER, beyond the bucket"},
-	{"ttft-open-loop-long", "37k", s1PromptCV, 0.9, 0.7946666666666666, 1.300073029879777, "", "over, beyond the bucket"},
-	{"ttft-open-loop-long", "37k", s1PromptCV, 0.95, 0.9149999999999995, 2.0433615982497244, "", "over, beyond the bucket"},
+	{"ttft-open-loop-short", "1k", knownPromptCV, 0.9, 0.046964964693101574, 0.03205189263487375, "", "UNDER"},
+	{"ttft-open-loop-short", "1k", knownPromptCV, 0.95, 0.048502851711026626, 0.03639224916826264, "", "UNDER"},
+	{"ttft-open-loop-short", "1k", s1PromptCV, 0.9, 0.046964964693101574, 0.05155667352013814, "", "pass"},
+	{"ttft-open-loop-short", "1k", s1PromptCV, 0.95, 0.048502851711026626, 0.06804197839674676, "", "over, beyond the bucket"},
+	{"ttft-open-loop-short", "2k", knownPromptCV, 0.9, 0.04788160469667319, 0.04477440513217962, "", "pass"},
+	{"ttft-open-loop-short", "2k", knownPromptCV, 0.95, 0.04915280495759948, 0.05451087902054527, "", "pass"},
+	{"ttft-open-loop-short", "2k", s1PromptCV, 0.9, 0.04788160469667319, 0.0877606470113836, "", "over, beyond the bucket"},
+	{"ttft-open-loop-short", "2k", s1PromptCV, 0.95, 0.04915280495759948, 0.12248856740118555, "", "over, beyond the bucket"},
+	{"ttft-open-loop-short", "4k", knownPromptCV, 0.9, 0.09208928571428572, 0.07042363483243055, "", "UNDER"},
+	{"ttft-open-loop-short", "4k", knownPromptCV, 0.95, 0.09604464285714287, 0.09030200062819052, "", "pass"},
+	{"ttft-open-loop-short", "4k", s1PromptCV, 0.9, 0.09208928571428572, 0.16003100022811548, "", "over, beyond the bucket"},
+	{"ttft-open-loop-short", "4k", s1PromptCV, 0.95, 0.09604464285714287, 0.23089808926129796, "", "over, beyond the bucket"},
+	{"ttft-open-loop-short", "16k", knownPromptCV, 0.9, 0.31625000000000003, 0.212818229405279, "", "UNDER"},
+	{"ttft-open-loop-short", "16k", knownPromptCV, 0.95, 0.358125, 0.2816659040997275, "", "UNDER"},
+	{"ttft-open-loop-short", "16k", s1PromptCV, 0.9, 0.31625000000000003, 0.5226584800980371, "", "over, beyond the bucket"},
+	{"ttft-open-loop-short", "16k", s1PromptCV, 0.95, 0.358125, 0.7846906014684796, "", "over, beyond the bucket"},
+	{"ttft-open-loop-long", "8k", knownPromptCV, 0.9, 0.09763598326359833, 0.1463867158051446, "", "over, beyond the bucket"},
+	{"ttft-open-loop-long", "8k", knownPromptCV, 0.95, 0.10964285714285714, 0.16057175696996404, "", "over"},
+	{"ttft-open-loop-long", "8k", s1PromptCV, 0.9, 0.09763598326359833, 0.3077818743796636, "", "over, beyond the bucket"},
+	{"ttft-open-loop-long", "8k", s1PromptCV, 0.95, 0.10964285714285714, 0.4531461601144341, "", "over, beyond the bucket"},
+	{"ttft-open-loop-long", "30k", knownPromptCV, 0.9, 0.5697435897435897, 0.37991619603970506, "", "UNDER"},
+	{"ttft-open-loop-long", "30k", knownPromptCV, 0.95, 0.5848717948717949, 0.39253387349028235, "", "UNDER"},
+	{"ttft-open-loop-long", "30k", s1PromptCV, 0.9, 0.5697435897435897, 0.9230159414573099, "", "over, beyond the bucket"},
+	{"ttft-open-loop-long", "30k", s1PromptCV, 0.95, 0.5848717948717949, 1.3957045336664022, "", "over, beyond the bucket"},
+	{"ttft-open-loop-long", "37k", knownPromptCV, 0.9, 0.7946666666666666, 0.5224629865548522, "", "UNDER, beyond the bucket"},
+	{"ttft-open-loop-long", "37k", knownPromptCV, 0.95, 0.9149999999999995, 0.7137288996469937, "", "UNDER, beyond the bucket"},
+	{"ttft-open-loop-long", "37k", s1PromptCV, 0.9, 0.7946666666666666, 1.3729570090221657, "", "over, beyond the bucket"},
+	{"ttft-open-loop-long", "37k", s1PromptCV, 0.95, 0.9149999999999995, 2.0876265672745546, "", "over, beyond the bucket"},
 	{"ttft-saturated", "30k-x32", knownPromptCV, 0.9, 7.8, 0, "Saturated", "refused"},
 	{"ttft-saturated", "30k-x32", knownPromptCV, 0.95, 7.8999999999999995, 0, "Saturated", "refused"},
 	{"ttft-saturated", "30k-x32", s1PromptCV, 0.9, 7.8, 0, "Saturated", "refused"},
@@ -384,10 +399,10 @@ var ttftFrozen = []ttftCase{
 	{"ttft-saturated", "30k-x96", knownPromptCV, 0.95, 29.5, 0, "Saturated", "refused"},
 	{"ttft-saturated", "30k-x96", s1PromptCV, 0.9, 29, 0, "Saturated", "refused"},
 	{"ttft-saturated", "30k-x96", s1PromptCV, 0.95, 29.5, 0, "Saturated", "refused"},
-	{"ttft-saturated", "37k-x64", knownPromptCV, 0.9, 28.929411764705883, 2.572060664679908, "", "UNDER, beyond the bucket"},
-	{"ttft-saturated", "37k-x64", knownPromptCV, 0.95, 29.46470588235294, 3.2221987735019786, "", "UNDER, beyond the bucket"},
-	{"ttft-saturated", "37k-x64", s1PromptCV, 0.9, 28.929411764705883, 11.389771258409523, "", "UNDER, beyond the bucket"},
-	{"ttft-saturated", "37k-x64", s1PromptCV, 0.95, 29.46470588235294, 14.899197259718216, "", "UNDER, beyond the bucket"},
+	{"ttft-saturated", "37k-x64", knownPromptCV, 0.9, 28.929411764705883, 0, "Saturated", "refused"},
+	{"ttft-saturated", "37k-x64", knownPromptCV, 0.95, 29.46470588235294, 0, "Saturated", "refused"},
+	{"ttft-saturated", "37k-x64", s1PromptCV, 0.9, 28.929411764705883, 0, "Saturated", "refused"},
+	{"ttft-saturated", "37k-x64", s1PromptCV, 0.95, 29.46470588235294, 0, "Saturated", "refused"},
 }
 
 // TestTTFTValidation_PooledAIsP1s holds pr475A to P1: the prefill rows of
@@ -454,6 +469,8 @@ func TestTTFTValidation_PooledAIsP1s(t *testing.T) {
 	t.Logf("runs 3+4 pooled: a %.5f = intercept %.5f + overhead %.5f, %d minutes in %d clusters",
 		est.A, est.AIntercept, est.AOverhead, est.ASamples, est.AClusters)
 	assert.InDelta(t, pr475A, est.A, 0.00001, "pr475A against P1's pooled fit")
+	assert.InEpsilon(t, pr475B, est.ASlope, 1e-4, "pr475B against P1's pooled fit")
+	assert.InEpsilon(t, pr475C, est.ACurve, 1e-4, "pr475C against P1's pooled fit")
 }
 
 // TestTTFTValidation_P1OnTheGoldens holds what main's P1 learns from each
@@ -511,6 +528,11 @@ func ttftPrefill(t *testing.T, vp, own p1Line) (whatif.Prefill, string) {
 	if own.ARefused != "" {
 		est.A, est.ARefused, src = pr475A, "", "runs 3+4 pooled"
 	}
+	if own.AModel == string(prefill.AModelQuadratic) {
+		est.AModel, est.ASlope, est.ACurve = prefill.AModelQuadratic, own.ASlope, own.ACurve
+	} else {
+		est.AModel, est.ASlope, est.ACurve = prefill.AModelQuadratic, pr475B, pr475C
+	}
 	p, u := whatif.PrefillFromEstimate(est)
 	require.Nil(t, u)
 	return p, src
@@ -528,13 +550,15 @@ func TestTTFTValidation_AgainstTheRouter(t *testing.T) {
 			o := observeLevel(t, raw, lv)
 			require.InDelta(t, 300, o.window, 0, "the router's window")
 			for _, cv := range []float64{knownPromptCV, s1PromptCV} {
-				fl := ttftFleetAt(p, o.prompt, o.transfer, cv)
+				fl := ttftFleetAt(p, o.prompt, o.transfer, o.decodeTTFT, cv)
 				for _, q := range []float64{0.9, 0.95} {
 					obs, lo, hi := bucketQuantile(o.router, q)
 					c := ttftCase{fixture: f, level: lv.name, cv: cv, q: q, observed: obs}
 					switch r := whatif.TTFTAt(fl, o.rate, q).(type) {
 					case whatif.TTFT:
-						require.True(t, r.HasFlag(whatif.DecodeSideOmitted))
+						// No decode line, the decode engine's TTFT measured.
+						require.True(t, r.HasFlag(whatif.DecodeEngineMeasured), "%v", r.Flags)
+						require.False(t, r.HasFlag(whatif.DecodeSideOmitted), "%v", r.Flags)
 						c.predicted, c.verdict = r.Seconds, ttftVerdict(r.Seconds, obs, lo, hi)
 					case whatif.Unanswerable:
 						c.refused, c.verdict = r.Reason, verdictRefused
@@ -562,11 +586,12 @@ func TestTTFTValidation_AgainstTheRouter(t *testing.T) {
 			assert.InEpsilon(t, w.predicted, g.predicted, 1e-6, "row %d: predicted", i)
 		}
 	}
-	// The finding, counted. At the spread the runs sent, P3 is under the
-	// mark at every light-load level but 8k: 11 of 14 rows (2k passes at
-	// p95), 4 of them below even the bucket's lower bound. At S1's assumed
-	// cv 2 it is over at all but one, and under at every priced row of
-	// run 2.
+	// The finding, counted. At the spread the runs sent, P3 (with #484's
+	// decode-engine term, V_P rescaled to the prompt and the margin near the
+	// knee) is under the mark at 9 of 14 light-load rows (2k at both
+	// percentiles and 4k at p95 pass, 8k is over), 2 of them below even the
+	// bucket's lower bound (37k). At S1's assumed cv 2 it is over at all but
+	// one. Every row of run 2 is refused (Saturated), so none is under.
 	count := func(cv float64, fixtures []string, prefix string) int {
 		n := 0
 		for _, c := range got {
@@ -577,10 +602,11 @@ func TestTTFTValidation_AgainstTheRouter(t *testing.T) {
 		return n
 	}
 	lightRuns := []string{ttftOpenShortFixture, ttftOpenLongFixture}
-	assert.Equal(t, 11, count(knownPromptCV, lightRuns, verdictUnder), "light load, sent spread, under")
-	assert.Equal(t, 4, count(knownPromptCV, lightRuns, verdictUnderSolid), "light load, sent spread, under beyond the bucket")
+	assert.Equal(t, 9, count(knownPromptCV, lightRuns, verdictUnder), "light load, sent spread, under")
+	assert.Equal(t, 2, count(knownPromptCV, lightRuns, verdictUnderSolid), "light load, sent spread, under beyond the bucket")
 	assert.Equal(t, 13, count(s1PromptCV, lightRuns, verdictOver), "light load, cv 2, over")
-	assert.Equal(t, 4, count(s1PromptCV, []string{ttftSaturatedFixture}, verdictUnderSolid)+count(knownPromptCV, []string{ttftSaturatedFixture}, verdictUnderSolid), "run 2, under")
+	assert.Equal(t, 0, count(s1PromptCV, []string{ttftSaturatedFixture}, verdictUnderSolid)+count(knownPromptCV, []string{ttftSaturatedFixture}, verdictUnderSolid), "run 2, under")
+	assert.Equal(t, 12, count(knownPromptCV, []string{ttftSaturatedFixture}, verdictRefused)+count(s1PromptCV, []string{ttftSaturatedFixture}, verdictRefused), "run 2, every row refused")
 }
 
 // TestTTFTValidation_TheResidual is S1's item 5 at light load, as far as the
@@ -662,11 +688,11 @@ func TestTTFTValidation_WhatTheRunsShow(t *testing.T) {
 			o := observeLevel(t, raw, lv)
 			require.False(t, math.IsNaN(o.queuedOverFirst), "%s: a queue-time histogram", lv.name)
 			assert.Zero(t, o.queuedOverFirst, "%s: queued past %g s", lv.name, o.firstQueueBound)
-			r, ok := whatif.TTFTAt(ttftFleetAt(p, o.prompt, o.transfer, knownPromptCV), o.rate, 0.9).(whatif.TTFT)
+			r, ok := whatif.TTFTAt(ttftFleetAt(p, o.prompt, o.transfer, o.decodeTTFT, knownPromptCV), o.rate, 0.9).(whatif.TTFT)
 			require.True(t, ok)
 			tail := r.PrefillUtilization * math.Exp(-(o.firstQueueBound-r.WaitOffset)/r.WaitScale)
 			assert.Positive(t, tail, "%s: P3's P(W > %g s)", lv.name, o.firstQueueBound)
-			assert.Less(t, tail, 0.01, "%s: P3's P(W > %g s)", lv.name, o.firstQueueBound)
+			assert.Less(t, tail, 0.02, "%s: P3's P(W > %g s)", lv.name, o.firstQueueBound)
 			light = append(light, o.prefillTTFT-o.prefillQueue-o.prefillService)
 			t.Logf("wait: %s queued past %g s %.3f, P3 %.2e; engine TTFT %.4f = queue %.4f + service %.4f + %.4f",
 				lv.name, o.firstQueueBound, o.queuedOverFirst, tail, o.prefillTTFT, o.prefillQueue, o.prefillService, light[len(light)-1])

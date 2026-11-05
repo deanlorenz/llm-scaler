@@ -185,6 +185,10 @@ var replaySwitches = map[string][]string{
 		"ols-sweep-slo/composite-results.csv", "ols-sweep-slo/results.csv",
 		"ols-sweep-slo-restart/composite-results.csv", "ols-sweep-slo-restart/results.csv",
 		"pd-restart/composite-results.csv", "pd-restart/results.csv",
+		// P2's ttft-saturated (#482), added before 5c merged: its decode
+		// key holds two Pods, so RoleStartSeconds.decode rises, 98.3 ->
+		// 100.5 on every cycle. No other TTFT golden moves.
+		"ttft-saturated/composite-results.csv", "ttft-saturated/results.csv",
 	},
 }
 
@@ -739,6 +743,9 @@ var switchBase = map[string]string{
 	"ols-sweep-slo-restart/results.csv":           "49a51c8b1bdbcbfd2401b05b383113727ec51384867dfa49c31e17349d60ae47",
 	"pd-restart/composite-results.csv":            "7cd3bf0237b97c5ec7ec2a26e4c096701275ca79d622ad064c1ce06e3734b3f2",
 	"pd-restart/results.csv":                      "1f7f9e64e4fa1cb7aa467e70358fd74778c45045f7f5460791bd5861e9234637",
+	// ttft-saturated as #482 added it, before 5c (1ffdb6ad8).
+	"ttft-saturated/composite-results.csv": "a94dd5a36fea549888a525795b152e7199969f46319e25d95bf2f5c8211688bd",
+	"ttft-saturated/results.csv":           "4c1da5e9d1ecb5f7c084703c99c1907811de56e7974fc62b6d96ec965f05b7d7",
 }
 
 // The slow tests of this package run in parallel with each other (each

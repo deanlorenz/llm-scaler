@@ -965,10 +965,10 @@ The mark is S1's: more than 10% under fails (UNDER), more than 25% over fails
 | 2 | 37k, 64 in flight | 28.9 | refused, `Saturated` | | refused | | 29.5 | refused | | refused | |
 
 At the sent spread (cv 0.058), the light-load points under the mark fall
-from 12 of 14 in P2's table (main at 602054e98) and 11 on main today (run
-4's `a` is 11.58 ms since #475, not 3.74) to 9, and those beyond the bucket
-from 7 and 4 to 2. The ratios
-of the points still under rise from 0.35–0.75 to 0.66–0.79, and the three
+from 11 of 14 in [P2's table](#the-result-table) (12 at 602054e98, before
+#475 raised run 4's `a` from 3.74 to 11.58 ms) to 9, and those beyond the
+bucket from 4 (7) to 2. The ratios of the points still under rise from
+0.51–0.81 (0.35–0.75) to 0.66–0.79, and the three
 that now pass read 0.94 to 1.11. Run 2's 37k level, priced at 2.6 s
 against 28.9 s, is now refused `Saturated`: the rescaled, margined knee is
 below its rate, and S1 reads that as unmet, the right side. At cv 2 nothing
