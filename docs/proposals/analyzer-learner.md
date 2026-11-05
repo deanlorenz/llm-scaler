@@ -1660,7 +1660,7 @@ band and the load's tail, in the table.
 | load | `hack/benchmark/closed_loop_sweep.py`, default schedule, then a 48 s rise to 80 in flight, 8 min at 80 (cap of 64, the rest waiting), 35 min at 2 in flight: 98 min |
 | restart | the leader Pod deleted 90 s into level 5 (1200 s, 20 min in), snapshot off, as for the slo pair. The first recording is `throughput-sweep`, the second `throughput-sweep-restart`. The run is taken at a commit with 4b-0 merged; the recipe is [testing.md](../developer-guide/testing.md#learner-goldens) |
 | GPUs | 2 H200 for 2 h including setup; torn down on every exit path |
-| counters above zero | throughput OLS and pinned cycles and settling readings in both; at-cap readings in the restart recording |
+| counters above zero | throughput OLS and pinned cycles and settling readings in both (the wait after a controller start: no joiner is recorded, the one decode pod never scales); at-cap readings in the restart recording |
 
 A kind or simulator run is not enough: the simulator's ITL has no warm-up
 and no thrashing above the band, which are the readings this PR removes,
@@ -1674,10 +1674,12 @@ Measured, by the replay's counters:
 | `throughput-sweep-restart` | 10 | 14 | 8 | 20 | 0 | 0 |
 
 The cap was expected to stay synthetic; it did not. 80 in flight held the
-decode pod at 64 running with requests waiting, at k 0.77 to 0.90, and
-the band's top of 0.70 put those readings above it. The raw rows give the
-same 20. The preemption total reached 37 and 4 decode rows of the restart
-recording show preemption, none of them among the 20.
+decode pod at 64 running with requests waiting, at mean k 0.77 to 0.90
+(`KvUsageMean`, the k the line reads), and the band's top of 0.70 put those
+readings above it. The raw rows give the same 20. By peak `KvCacheUsage` 22
+rows qualify: on the rise, the 22:11:50Z and 22:12:05Z rows read in the band
+at mean k 0.50 and 0.60. The preemption total reached 37 and 4 decode rows of
+the restart recording show preemption, none of them among the 20.
 
 The held slope stays synthetic (2.8): it ran 0 times in both. A shape change
 drops the held slope with the window, and through the 35 min of light load
@@ -1997,11 +1999,13 @@ with the wait off. Both inside the probe's 5 min, on the SLO side as 4.4
 says. Before the round-1 review the 15 s case was under need for 1m45s and
 silent 8 cycles (2 min): the restart wait held the above-band fallback too.
 
-**Goldens.** No committed recording gives the throughput analyzer the
-engine's view (the in-process three predate `ThroughputConfig`), so the
-restart wait moves none, and is held by its unit tests (`heldBy`). It moves
-nothing on `throughput-sweep-restart` either, which has the view (measured
-when that landed). Measured after the round-1 review, each alone
+**Goldens.** The in-process three predate `ThroughputConfig`, so they give
+the throughput analyzer no engine view and the restart wait moves none of
+them; its unit tests hold it (`heldBy`). The `throughput-sweep` recordings,
+which landed later, have the view. There it moves no output file, but every
+settling reading they hold rests on it: off, `throughput-itl-settling` falls
+5 -> 0 and 8 -> 0, and `TestGoldens_ThroughputSweepFloors` replays that.
+Measured after the round-1 review, each alone
 against all off from main's goldens: none of the six moves a golden, and
 all on reproduces main's goldens byte for byte, so each is held by its unit
 tests. Before the review the move moved `acceptance/variant-capacities.csv`

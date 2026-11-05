@@ -900,9 +900,9 @@ What is restored, and what is not:
   throughput (see below): a changed value would look identical, so its start
   estimate and ITL baseline are not restored. A new engine image with the same arguments
   keeps them; only the ITL baseline, a latency figure, needs the same image
-  too. The ITL slope a variant holds through light load comes back with the
-  ITL baseline, on the same terms, and is still held only for the bucket
-  retention after it was fitted;
+  too. The ITL slope a variant holds through light load at the same request
+  shape comes back with the ITL baseline, on the same terms, and is still
+  held only for the bucket retention after it was fitted;
 - with that slope back, a variant has its **own ITL line**, and so a derived
   service rate (mu), from its first cycle after the restart. The restored
   slope is held until fresh readings fit a new line. This does not need

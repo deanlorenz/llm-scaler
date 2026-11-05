@@ -755,8 +755,12 @@ and a tail on the sweep (steps 2 and 4). What its replay reached, by
 | `throughput-sweep-restart` | 10 | 14 | 8 | 20 | 0 | 0 | 595 KB |
 
 `TestGoldens_ThroughputSweepFloors` requires each non-zero count above zero.
-The held slope ran 0 times: through the 35 minutes of light load the line
-was silent with cause `shape-change`, so the held slope stays synthetic.
+Every settling reading is the wait after a controller start: no joiner is
+recorded, since the one decode pod never scales. The test replays with
+`throughput.SwitchITLWaitsAfterRestart` off, and with
+`throughput.SwitchITLAdmitsAtSequenceCap` off, and requires that floor to
+fail. The held slope ran 0 times: through the 35 minutes of light load the
+line was silent with cause `shape-change`, so the held slope stays synthetic.
 
 It needs 2 H200 (one decode, one prefill) for about 2 hours, setup
 included. It is a shared cluster: on any failure or abort, go straight to
@@ -923,7 +927,12 @@ so the controller, its policy map and the model all live there.
      event: the restart restored nothing.
    - Each file holds `throughput.Analyze` events for the model.
    - **Count each side the same way**, for each file and its log, over the
-     file's window: from its start line's `Now` to its last event's `Now`.
+     file's window: from its start line's `Now` to one controller interval
+     (15 s) past its last event's `Now`. A cycle logs `analyzer-result` after
+     its last event, so a window that stops at that event loses the file's
+     last line: 19 ms and 15 ms late in the committed run, and at most 0.39 s
+     late on any cycle. Take the log straight after the file, so the log holds
+     no cycle the file does not.
      - *Log side.* The lines of `controller-N.log` whose message is
        `analyzer-result`, with `"analyzer":"throughput"` and the model's
        `modelID`, and a timestamp inside the window. That is one line a
@@ -940,9 +949,7 @@ so the controller, its policy map and the model all live there.
        `Reason` in their `data`. `T2-failed` is the events less those
        rows.
 
-     Both sides must give the same `T1-ols`, `T2-pinned` and `T2-default`
-     counts per variant. `T2-failed` may read one less on the log side, as
-     the committed run did in both files. The first file
+     Both sides must give the same four counts per variant. The first file
      should hold some `T1-ols` (it has three level changes before the
      restart). If it holds none and the GPS check of step 4 counted
      clears, keep it (step 4). If it holds none and there were no clears,

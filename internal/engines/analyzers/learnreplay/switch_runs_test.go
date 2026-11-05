@@ -102,9 +102,11 @@ import (
 //     order (throughput/settle.go, observeOwnSettle), and the goldens came
 //     back byte for byte to main's. Its unit tests hold it.
 //   - SwitchITLWaitsAfterRestart moves nothing: an analyzer with no engine
-//     view never waits. It moves nothing on the throughput-sweep-restart
-//     recording either, which has the view (measured when it landed). Its
-//     unit tests hold it.
+//     view never waits. On the throughput-sweep recordings, which have the
+//     view, it moves no output file either, but every settling reading they
+//     hold rests on it: off, throughput-itl-settling falls 5 -> 0 and 8 -> 0,
+//     and TestGoldens_ThroughputSweepFloors replays that. Its unit tests hold
+//     it.
 //   - The other four move nothing, as their 4a twins moved nothing; their
 //     unit tests hold them.
 //

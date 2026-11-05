@@ -20,9 +20,10 @@ import (
 // sweep, the leader controller Pod deleted 20 min in, so the run gives two
 // recordings, throughput-sweep and throughput-sweep-restart
 // (analyzer-learner.md, PR 4b, "Recordings"). They are the only goldens whose
-// throughput line sees a real decode engine: settling readings, readings above
-// the band, full fits, and a replica at its sequence cap. The run's policy band
-// is 0.12-0.70, not the default.
+// throughput line sees a real decode engine: the wait after a controller
+// start, readings above the band, full fits, and a replica at its sequence
+// cap. No joiner is recorded: the one decode pod never scales. The run's
+// policy band is 0.12-0.70, not the default.
 const (
 	throughputSweepFixture        = "throughput-sweep"
 	throughputSweepRestartFixture = "throughput-sweep-restart"
@@ -36,6 +37,12 @@ const (
 // counted 18 full, 9 pinned and 5 settling in throughput-sweep, and 10 full,
 // 14 pinned, 8 settling and 20 at the cap in throughput-sweep-restart; a PR
 // that lowers a floor says why.
+//
+// Every settling reading in both is the wait after a controller start: a
+// replica already serving when the controller started
+// (throughput.SwitchITLWaitsAfterRestart). With that switch off the path counts
+// 0 in both, though no output file moves, so a settling floor is all that
+// holds it here; floorSwitches names it.
 //
 // The held slope has no floor here: it ran 0 times in both. The restart
 // recording ends with 35 minutes of light load, and the line stayed silent
@@ -53,6 +60,13 @@ var throughputSweepFloors = []throughputSweepFloor{
 		throughput.PathITLOLS: 1, throughput.PathITLPinned: 1, throughput.PathITLSettling: 1}},
 	{fixture: throughputSweepRestartFixture, paths: map[string]int64{
 		throughput.PathITLOLS: 1, throughput.PathITLPinned: 1, throughput.PathITLSettling: 1, throughput.PathITLAtCap: 1}},
+}
+
+// floorSwitches is, for a floor that rests on one switch, that switch: its
+// replay with the switch off must fail that floor and no other.
+var floorSwitches = map[string]string{
+	throughput.PathITLSettling: throughput.SwitchITLWaitsAfterRestart,
+	throughput.PathITLAtCap:    throughput.SwitchITLAdmitsAtSequenceCap,
 }
 
 // throughputFloorProblems names each path of floor a replay's counts fall
@@ -73,7 +87,9 @@ func throughputFloorProblems(f throughputSweepFloor, paths map[string]int64) []s
 // its settling stamp or its cap admission would still pass the summed path
 // check and the row comparison, which make learner-goldens rewrites. The
 // same replay with the line's steady gate off (the parent's line, which
-// counts nothing) is the negative control: every floor fails.
+// counts nothing) shows only that a silent counter fails. So each floor that
+// rests on one switch (floorSwitches) is replayed with that switch off too,
+// with the rest of the line on: that floor alone must fail.
 func TestGoldens_ThroughputSweepFloors(t *testing.T) {
 	for _, f := range throughputSweepFloors {
 		t.Run(f.fixture, func(t *testing.T) {
@@ -95,6 +111,18 @@ func TestGoldens_ThroughputSweepFloors(t *testing.T) {
 			require.NoError(t, err)
 			assert.Len(t, throughputFloorProblems(f, off.Paths), len(f.paths),
 				"negative control: the parent's line reaches none of the floor's paths")
+
+			for path, name := range floorSwitches {
+				if _, floored := f.paths[path]; !floored {
+					continue
+				}
+				off, err := Replay(context.Background(), rec, Options{Mode: Normal, Switches: map[string]map[string]bool{
+					PackageThroughput: {name: false}}})
+				require.NoError(t, err)
+				t.Logf("%s: %s off, throughput line paths %v", f.fixture, name, throughputPaths(off.Paths))
+				assert.Equal(t, []string{fmt.Sprintf("%s: the throughput line's path %s ran 0 times, under its floor of %d",
+					f.fixture, path, f.paths[path])}, throughputFloorProblems(f, off.Paths), "%s off", name)
+			}
 		})
 	}
 }
