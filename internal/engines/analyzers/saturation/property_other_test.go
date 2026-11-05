@@ -22,6 +22,7 @@ func otherCases() []propCase {
 		{class: classNDependence, learner: "prefill-bound", name: "iid-max", family: familyDirect, tuning: tunedDefault, seeds: 10, check: checkMuNDependence(bound, false)},
 		{class: classEdges, learner: "idle", name: "idle-line-030", family: familyTimeBase, tuning: tunedDefault, seeds: cheapSeeds, check: checkIdleEdge(realIdleVerdict)},
 		{class: classFirstSample, learner: "start-time", name: "between-sample-and-default", family: familyDirect, tuning: tunedDefault, seeds: cheapSeeds, check: checkStartFirstSample},
+		{class: classFirstSample, learner: "start-time", name: "seed-bounds", family: familyDirect, tuning: tunedDefault, seeds: cheapSeeds, check: checkStartSeedBounds},
 		{class: classStale, learner: "start-time", name: "reaches-measured", family: familyDirect, tuning: tunedDefault, seeds: cheapSeeds, check: checkStartConverges},
 		{class: classEdges, learner: "start-time", name: "outlier-3x", family: familyDirect, tuning: tunedDefault, seeds: cheapSeeds, check: checkStartOutlier},
 	}
@@ -117,22 +118,65 @@ func (s *startRig) add(sample float64) float64 {
 	rm := satRow("p"+string(rune('a'+len(s.pods))), 100_000, 0, 1)
 	rm.StartSeconds = sample
 	s.pods = append(s.pods, rm)
-	s.a.noteReplicaStart(s.key, "test-ns", "v", s.pods, logr.Discard())
+	s.a.noteReplicaStartFor(startNote{key: s.key, namespace: "test-ns", variant: "v"}, s.pods, logr.Discard())
 	if est, ok := s.a.startSeconds[s.key]; ok && est > 0 {
 		return est
 	}
 	return DefaultReplicaStartSeconds
 }
 
+// published is the rig's published estimate, with seed (0 for none): what the
+// gauge and the log show (startFiguresLocked).
+func (s *startRig) published(seed float64) startFigures {
+	s.a.mu.Lock()
+	defer s.a.mu.Unlock()
+	return s.a.startFiguresLocked(s.key, seed)
+}
+
+// addSeeded is add for a variant seeded with seed, returning its figures.
+func (s *startRig) addSeeded(seed, sample float64) startFigures {
+	rm := satRow("p"+string(rune('a'+len(s.pods))), 100_000, 0, 1)
+	rm.StartSeconds = sample
+	s.pods = append(s.pods, rm)
+	s.a.noteReplicaStartFor(startNote{key: s.key, namespace: "test-ns", variant: "v", seed: seed}, s.pods, logr.Discard())
+	return s.published(seed)
+}
+
 // checkStartFirstSample is PR 5's acceptance for a variant with no seed: the
-// first sample moves the estimate strictly between itself and the 70 s
-// default, never all the way to either.
+// first sample moves the published estimate strictly between itself and the
+// 70 s default, never all the way to either (learner PR 5c,
+// SwitchStartBlendsFirstSamples); and sizing never reads it shorter than the
+// sample.
 func checkStartFirstSample(seed uint64) error {
 	r := propRand(seed)
 	s := []float64{15, 460}[r.IntN(2)] * (1 + 0.1*r.Float64())
-	est := newStartRig().add(s)
+	f := newStartRig().addSeeded(0, s)
 	lo, hi := min(s, DefaultReplicaStartSeconds), max(s, DefaultReplicaStartSeconds)
-	return holds(est > lo && est < hi, kindAdoptedRaw, "a first sample of %.0f s set the estimate to %.1f s: not strictly between it and the %.0f s default", s, est, DefaultReplicaStartSeconds)
+	if err := holds(f.published > lo && f.published < hi, kindAdoptedRaw, "a first sample of %.0f s set the estimate to %.1f s: not strictly between it and the %.0f s default", s, f.published, DefaultReplicaStartSeconds); err != nil {
+		return err
+	}
+	return holds(f.sized >= s, kindWrongSide, "a first sample of %.0f s is sized at %.1f s, shorter than measured", s, f.sized)
+}
+
+// checkStartSeedBounds is PR 5's acceptance with a seed S: a first sample
+// under S gives a published estimate in [S/2, S], one over it an estimate in
+// [S, 2S]; sizing never reads it shorter than the sample.
+func checkStartSeedBounds(seed uint64) error {
+	r := propRand(seed)
+	const s = 120.0
+	sample := []float64{15, 460, 3600}[r.IntN(3)] * (1 + 0.05*r.Float64())
+	if sample > 3600 {
+		sample = 3600
+	}
+	f := newStartRig().addSeeded(s, sample)
+	lo, hi := startSeedLowFactor*s, s
+	if sample > s {
+		lo, hi = s, startSeedHighFactor*s
+	}
+	if err := holds(f.published >= lo && f.published <= hi, kindAdoptedRaw, "seed %.0f s, a first sample of %.0f s: published %.1f s, outside [%.0f, %.0f]", s, sample, f.published, lo, hi); err != nil {
+		return err
+	}
+	return holds(f.sized >= sample, kindWrongSide, "seed %.0f s, a first sample of %.0f s is sized at %.1f s, shorter than measured", s, sample, f.sized)
 }
 
 // checkStartConverges: after a first pod 50 % off, ten pods agreeing on the

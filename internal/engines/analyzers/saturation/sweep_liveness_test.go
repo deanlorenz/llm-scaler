@@ -21,7 +21,7 @@ import (
 // reports normally. Keying the sweep on Len() == 0 therefore deleted the
 // learned start estimate and the learned ITL baseline of the fleets that were
 // doing fine, every cycle, and the re-stamp that keeps a live Pod counted then
-// stopped noteReplicaStart from putting the estimate back. The figure was gone
+// stopped noteReplicaStartFor from putting the estimate back. The figure was gone
 // until the Pod was replaced.
 //
 // What it costs when it goes: the floor loses the landing projection and its
@@ -58,7 +58,7 @@ var _ = Describe("the sweep's liveness test", func() {
 		key := a.itlWindowKey(ns, model, decodeV, accel, 1)
 		rms := []domain.ReplicaMetrics{belowBand("pod-a", decodeV, 70)}
 
-		a.noteReplicaStart(key, ns, decodeV, rms, logr.Discard())
+		a.noteReplicaStartFor(startNote{key: key, namespace: ns, variant: decodeV}, rms, logr.Discard())
 		a.noteITL(key, rms, decodeV, itl.Admission{}, base, logr.Discard())
 		a.itlTracker.SetBaseline(key, 0.011) // as an OLS fit would have left it earlier
 
@@ -76,13 +76,13 @@ var _ = Describe("the sweep's liveness test", func() {
 			at := base.Add(time.Duration(i) * step)
 			a.now = func() time.Time { return at }
 			a.EvictStaleHistory()
-			a.noteReplicaStart(key, ns, decodeV, rms, logr.Discard())
+			a.noteReplicaStartFor(startNote{key: key, namespace: ns, variant: decodeV}, rms, logr.Discard())
 			a.noteITL(key, rms, decodeV, itl.Admission{}, at, logr.Discard())
 		}
 
 		Expect(a.startSeconds).To(HaveKey(key),
 			"the start estimate of a reporting variant was swept because its "+
-				"window holds nothing -- and the re-stamp means noteReplicaStart "+
+				"window holds nothing -- and the re-stamp means noteReplicaStartFor "+
 				"cannot put it back while the Pod lives")
 		Expect(a.startSeconds[key]).To(Equal(measured),
 			"and it must be the figure that was measured, not a reseeded one")
@@ -100,7 +100,7 @@ var _ = Describe("the sweep's liveness test", func() {
 		key := a.itlWindowKey(ns, model, decodeV, accel, 1)
 		rms := []domain.ReplicaMetrics{belowBand("pod-a", decodeV, 70)}
 
-		a.noteReplicaStart(key, ns, decodeV, rms, logr.Discard())
+		a.noteReplicaStartFor(startNote{key: key, namespace: ns, variant: decodeV}, rms, logr.Discard())
 		a.noteITL(key, rms, decodeV, itl.Admission{}, base, logr.Discard())
 		a.itlTracker.SetBaseline(key, 0.011)
 		Expect(a.startSeconds).To(HaveKey(key))
@@ -129,7 +129,7 @@ var _ = Describe("the sweep's liveness test", func() {
 		a.now = func() time.Time { return base }
 		key := a.itlWindowKey(ns, model, "prefill-v", accel, 1)
 
-		a.noteReplicaStart(key, ns, "prefill-v",
+		a.noteReplicaStartFor(startNote{key: key, namespace: ns, variant: "prefill-v"},
 			[]domain.ReplicaMetrics{belowBand("pod-p", "prefill-v", 40)}, logr.Discard())
 		Expect(a.startSeconds).To(HaveKey(key))
 		Expect(a.itlWindowLens()).NotTo(HaveKey(key),

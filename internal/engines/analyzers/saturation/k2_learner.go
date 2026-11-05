@@ -314,6 +314,9 @@ func (a *SaturationAnalyzer) sweepLearnerMapsLocked() {
 	// has gone unseen (variantIsStale, in evictStaleHistory).
 	maps.DeleteFunc(a.itlCycles, func(m string, _ []learn.Report) bool { return gone(m) })
 	maps.DeleteFunc(a.itlForgotten, func(m string, _ map[string][]learn.Forgotten) bool { return gone(m) })
+	// The start learner's, the same way (start_learner.go).
+	maps.DeleteFunc(a.startCycles, func(m string, _ []learn.Report) bool { return gone(m) })
+	maps.DeleteFunc(a.startForgotten, func(m string, _ map[string][]learn.Forgotten) bool { return gone(m) })
 }
 
 // LearnerReports is each learner's report of each variant the model priced
@@ -346,6 +349,8 @@ func (a *SaturationAnalyzer) forgetLearnerLocked(name, namespace, modelID, varia
 		return a.forgetK2Locked(namespace, modelID, variant, by), true
 	case learn.ITL:
 		return a.forgetITLLocked(namespace, modelID, variant, by), true
+	case learn.Start:
+		return a.forgetStartLocked(namespace, modelID, variant, by), true
 	}
 	ctrl.Log.WithName("saturation").Error(nil, "learner on learn.Learners has no forget code; nothing forgotten",
 		"learner", name, "namespace", namespace, "modelID", modelID, "variant", variant)

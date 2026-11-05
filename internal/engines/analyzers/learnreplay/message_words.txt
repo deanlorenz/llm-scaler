@@ -109,6 +109,7 @@ Configuration
 Conflict
 Consider
 Context
+Correct
 Cost-aware
 Could
 CrashLoopBackOff
@@ -758,6 +759,7 @@ contains
 contamination-heterogeneity
 context_length
 continues
+contradicted
 contributors
 control
 controller
@@ -1150,6 +1152,7 @@ hi
 hicache_size
 hierarchical
 high
+highSeconds
 highest
 highestGroup
 hint
@@ -1482,6 +1485,7 @@ lose
 lost
 low-confirmed
 lowHoldFor
+lowSeconds
 lower
 lower-bound
 lower-only
@@ -1535,6 +1539,7 @@ meanwhile
 measure
 measured
 measuredRate
+measuredSeconds
 measures
 medianErrPct
 medianSeconds
@@ -1889,6 +1894,7 @@ pod/
 podGPUs
 pod_name
 pods
+podsNeeded
 podsOmitted
 point
 pointer
@@ -1951,6 +1957,7 @@ prices
 prior
 prior-live
 priorBeyondReadings
+priorSource
 priority
 priorityClassName
 priork2|
@@ -1972,6 +1979,7 @@ provided
 provider
 providersSkipped
 published
+publishedSeconds
 publishes
 python3
 q
@@ -2095,6 +2103,7 @@ replica-start-measured
 replica-start-outlier-rejected
 replicaDemand
 replicaKvTokens
+replicaStartSeconds
 replicas
 replicasByVariant
 replicasImplied
@@ -2340,6 +2349,7 @@ single-accelerator
 single-sample
 sit
 size
+sizedSeconds
 sizes
 skipped
 skippedWaits
@@ -2413,12 +2423,21 @@ stalled
 standard
 start
 start-above-bound
+start-blends-first-samples
 start-confirms-by-distinct-pod
+start-reads-replica-start-seed
+startAdmittedAt
+startCycles
 startEstimateSeconds
 startEstimates
+startForgotten
+startLogged
 startOutlierPods
 startOutliers
+startRestored
+startSamples
 startSeconds
+startSeedWarned
 startSeenPods
 startSource
 started

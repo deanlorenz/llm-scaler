@@ -103,6 +103,10 @@ func (a *Analyzer) forgetLearnerLocked(name, namespace, modelID, variant string)
 		// k2 is the saturation analyzer's alone: this analyzer reads the
 		// capacity store, which that analyzer's forget clears.
 		return 0, nil, true
+	case learn.Start:
+		// The start time is the saturation analyzer's alone: this analyzer
+		// keeps no start estimate.
+		return 0, nil, true
 	}
 	ctrl.Log.WithName("slo").Error(nil, "learner on learn.Learners has no forget decision in the slo analyzer; nothing forgotten",
 		"learner", name, "namespace", namespace, "modelID", modelID, "variant", variant)

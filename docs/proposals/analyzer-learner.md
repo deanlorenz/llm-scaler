@@ -1021,15 +1021,22 @@ commit) accepts it. Its start line carries the capture's flags
 (`learnrec.Start.Caveats`), so a golden made from it says what the capture
 could not see.
 
-**Follow-up: Replay does not retain the settle tracker.** The engine records
-no event for `retainSettle`, so a Fidelity replay (`learnreplay/settle.go`)
-never forgets a model's settle record, where the engine and Generate do. A
-recording in which a model is parked whole and returns within
-`settle.TraceHorizon` replays with that model's stale sightings, and its
-returning replicas are judged as already watched rather than joined. None of
-the committed goldens has such a model. The fix records the retained set
-(or derives it from each cycle's Analyze and parked events) and applies it in
-replay; it changes Replay, so it is its own PR.
+**Replay retains the settle tracker too.** The engine records no event for
+`retainSettle`, so a replay (`learnreplay/settle.go`) derives it: the
+engine observes or holds every model it reconciles once a cycle, and every
+cycle opens with `slo.BeginCycle`. A model with no observation or hold for
+a whole cycle was parked whole, and its record is forgotten before its next
+observation or hold applies, which is before anything reads it. Two
+BeginCycles under half an interval apart are one cycle (the catch-up after
+failed cycles, which comes on one clock reading). Not a whole interval:
+real cycles come an interval apart, and a wall clock stepped back a few
+milliseconds would merge two of them. A recording with no observation events, or no slo analyzer,
+forgets nothing. It moves no golden: no committed recording parks a model
+whole (the acceptance and engine runs' model-02 leaves for good, and is
+never observed again), so it has no switch.
+`TestReplay_ForgetsTheSettleRecordOfAModelParkedWhole` holds it, and
+`TestWhatifCapture` replays the engine's own recording of a model parked
+whole to the engine's verdicts.
 
 **Roles and readiness for a past window** cannot come from a kubeconfig, which
 sees today's pods: a scaled-out run's pods are gone. They come from
@@ -3013,6 +3020,92 @@ on from the constructor.
   at `>`, the pod count read before the close, the off path's reason,
   `Analyze` not feeding the estimate, runs shared across a variant's keys,
   the sweep counting a key twice, and the parent (switch off everywhere).
+
+#### 5c as built
+
+Built on main 602054e98 (5b merged). Changes A and C, behind two switches,
+both on from the constructor: `saturation.SwitchStartReadsSeed`
+(`start-reads-replica-start-seed`) and
+`saturation.SwitchStartBlendsFirstSamples` (`start-blends-first-samples`).
+
+- **Three figures per key** (`startFiguresLocked`, `D/start_est.go`). E is
+  the measured estimate the fold keeps (`startSeconds`: the first sample, the
+  EWMA, or a 5b run's median). With n < N = 3 distinct Pods counted
+  (`startSamples`) and m their plain mean:
+  - published = ((N - n) * P + n * m) / N, held in [S/2, 2S] with a seed S;
+  - sized = max(published, m, E);
+  - from N Pods on, both are E.
+
+  P is the seed when one is set, else 70 s. The 5b guard compares with E
+  alone (`TestStartBlend_TheGuardReadsTheMeasurementNotTheBlend`).
+- **Why E is in the max.** The design said max(blend, m). The fold is an
+  EWMA, so with two Pods m can sit below E: 460 s then 15 s give m 237.5 s
+  and E 326.5 s, and sizing at max(blend, m) read a shorter start than the
+  parent did (`TestStartBlend_SizingNeverReadsShorterThanTheParent`).
+- **A longer start can order less.** `backlogAtLanding` credits each Ready
+  replica with mu x S of drain, and past the 60 s drain time `DrainHorizon`
+  spreads the backlog over S. On a fleet that drains faster than work
+  arrives, a longer S orders less. On the floor rig at λ 2.5, a first start
+  of 15 s published as 51.7 s cut the order from 2.91M to 2.32M tokens. So
+  the floor prices twice, at 5c's start and at 5b's (the fastest measured E,
+  no seed), and each role keeps the larger order and names the start that
+  priced it (`roleStarts`, `TestStartBlend_ThroughAnalyzeALongerStartNeverOrdersLess`).
+  Where the two start maps are equal, it prices once.
+- **The seed (A).** A role with no measured variant is sized at its
+  fastest variant's seed: projected by the floor (`startSource: seed`) and
+  read by share pacing. Pacing is the one reader a seed can move *down*: a
+  seed under `shareModelLoadEstimate` (5 min) paces moves faster than main
+  did. The timing source says `seed` (published as `scaledobject`), not
+  `measured`, through `AnalyzerResult.RoleStartSeeded` (omitzero, so no
+  recording changes). Beside a measured sibling, a seed never shortens the
+  floor's start: the fastest *measured* variant wins. Share pacing takes the
+  slowest variant as sized, seeds included. An unseeded, unmeasured role stays
+  unprojected. A seed of 0 or less is no prior.
+- **The gauge.** `wva_replica_start_seconds_estimate` publishes the published
+  figure, with `source` `default`, `seed`, `blended` (fewer than three Pods
+  measured, with a prior) or `measured`, and deletes the other children. With
+  the seed switch off, the labels are the parent's (`seed` for the default,
+  `measured` for a blend). Round 1 added `blended`: published as
+  `measured`, a seed of 3600 s contradicted by a 70 s start read as a
+  measurement while sizing held at 1800 s or more.
+- **A contradicted seed warns.** While the measured mean lies outside
+  [S/2, 2S], `A variant's replicaStartSeconds is contradicted by its
+  measured starts` is logged at the default level, once per key and seed
+  (working state, so again after a restart). It is the analyzer's line, not
+  the engine's ignored-seed report: only the analyzer knows the measurement.
+  A one-replica variant can stay there for days, and the count survives a
+  restart.
+- **Persistence.** Two new `omitempty` fields: `startSamples` (per key, pods
+  and mean, only while fewer than N) and `startAdmittedAt`. The design had n
+  and m in one field; it holds both. An estimate with no count has full
+  authority, so an older document moves no fleet. A count no live key could
+  hold (no Pods, N or more, a mean that is not a positive number) is not
+  installed, and a restored mean over 3600 s (the collector's
+  `maxCredibleStartSeconds`) is clamped to it. Both are exported beside a
+  pending restore's estimate, dropped
+  with the variant, and trimmed with its liveness in the store.
+- **Learner `start`.** It is on `learn.Learners` (the slo analyzer holds
+  none of it). Each cycle it files a `learn.Report` per variant, with
+  `Samples` the Pods counted and `LastAdmitted` the stamp. It logs
+  `learner-write` at V(3) when the published figure is first set, changes
+  source, moves `StartWriteBand` (5 %, unmeasured) or reaches the heartbeat.
+  The line carries `restored: true` until the key's first admitted start
+  after a restore. A forget drops the estimate, count, stamp and log memo,
+  and reports each key forgotten.
+- **Not built here.** `learner-start` does not count start keys yet, and
+  the "Learned state: snapshot restored" line does not gain `startKeys`; both
+  are 5d's, with `sightings`.
+- **`replica-start-measured`** gains `pods`, `prior`, `priorSource` and
+  `sizedSeconds` with the blend on. Off, it is the parent's line byte for byte.
+- **Goldens.** Measured alone against all off, the seed switch moves nothing:
+  no recording seeds a variant. The blend switch moves twelve outputs, every
+  figure up and none down. `RoleStartSeconds` rises where a key has fewer
+  than three Pods: 63 to 67.67 (ols-sweep, decode), 62 to 67.33 (prefill),
+  60 to 66.67 (both ols-sweep-slo), 68 to 69.33 (pd-restart, prefill), and
+  231.6 to 234 (e1-tuned). `learned-state.csv` gains a `StartAdmittedAt` row
+  per key per export. No `TotalDemand` and no variant capacity moves. The
+  property case `first-sample/start-time/between-sample-and-default` passes
+  and leaves the known failures; `seed-bounds` is new.
 
 ## 8. Risks and limits
 

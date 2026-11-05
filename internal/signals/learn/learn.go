@@ -29,13 +29,18 @@ const Mu = "mu"
 // slope.
 const ITL = "itl"
 
+// Start is the saturation analyzer's replica start time (its row 12): how
+// long a replica of a variant takes to become Ready, per key, and the
+// distinct Pods it is from.
+const Start = "start"
+
 // Learners is every learner the forget-learned-state annotation reaches, by
 // name, in the order Forget reaches them. A plain list, not a registry: each
 // analyzer forgets a name on it with code of its own, and a test holds every
 // name to that code. A learner joins the list in the PR that moves it onto
 // the shared rules.
 func Learners() []string {
-	return []string{K2, ITL}
+	return []string{K2, ITL, Start}
 }
 
 // By is what forgot a key.

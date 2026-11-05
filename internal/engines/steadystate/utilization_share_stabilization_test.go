@@ -76,3 +76,26 @@ func TestShareStabilizationTimingsComeFromThePolicy(t *testing.T) {
 		t.Fatal("auto reported as policy")
 	}
 }
+
+// A group whose slowest start is a ScaledObject seed publishes its swing
+// window as read from the ScaledObject, not measured (learner PR 5c): the
+// seed is the only input, and a measured start would say measured.
+func TestShareTimingSeriesNamesASeededStart(t *testing.T) {
+	swing := func(seeded bool) string {
+		_, src := allocation.DeriveShareTimings(allocation.ShareTimingInputs{
+			Cycle: 30 * time.Second, ReplicaStart: time.Minute, ReplicaStartSeeded: seeded,
+			ScaleDownWindow: nil}, nil)
+		for _, s := range shareTimingSeries(allocation.ShareTimings{}, src) {
+			if s.Param == constants.UtilizationShareParamSwingWindow {
+				return s.Source
+			}
+		}
+		return ""
+	}
+	if got := swing(true); got != "scaledobject" {
+		t.Errorf("seeded start: swing window source %q, want scaledobject", got)
+	}
+	if got := swing(false); got != "measured" {
+		t.Errorf("measured start: swing window source %q, want measured", got)
+	}
+}
