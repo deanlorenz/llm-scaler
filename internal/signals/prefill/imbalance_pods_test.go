@@ -62,6 +62,20 @@ func TestImbalance_ALearnedFAtThreeIsNotReadAtFour(t *testing.T) {
 	assert.Contains(t, est.FByPods, 3)
 }
 
+// A count with exactly MinImbalanceMinutes minutes gives an f; one fewer
+// does not.
+func TestImbalance_ByPodsAtTheMinuteBoundary(t *testing.T) {
+	rng := rand.New(rand.NewPCG(8, 1))
+	cs := append(fixedShares(rng, MinImbalanceMinutes, 3, 1, 1), fixedShares(rng, MinImbalanceMinutes-1, 1, 1, 1, 1)...)
+	for i := range cs {
+		cs[i].Now = t0.Add(time.Duration(i) * minute)
+	}
+	est := run(NewObserver(), cs...)
+	require.Equal(t, map[int]int{3: MinImbalanceMinutes, 4: MinImbalanceMinutes - 1}, est.FSamplesByPods)
+	assert.Contains(t, est.FByPods, 3, "exactly MinImbalanceMinutes")
+	assert.NotContains(t, est.FByPods, 4, "one fewer")
+}
+
 // No minute kept: both maps nil. One pod: no minute is a share, so none.
 func TestImbalance_ByPodsIsNilWithNoMinute(t *testing.T) {
 	rng := rand.New(rand.NewPCG(6, 1))

@@ -84,11 +84,43 @@ func TestPrefillEstimate_TheHandleReturnsACopy(t *testing.T) {
 	est.Refused["mutated"] = 1
 	again, _, _ := h.a.PrefillEstimate("test-ns", "test-model", "prefill")
 	assert.NotContains(t, again.Refused, "mutated")
+
+	// The per-count maps too: a stash holding both, as a multi-pod variant's
+	// does, read and mutated.
+	k := prefillBoundStashKey("test-ns", "test-model", "prefill-3")
+	h.a.mu.Lock()
+	h.a.prefillEstimates[k] = stashedEstimate{at: h.clock, est: prefill.Estimate{
+		FByPods: map[int]float64{3: 1.8}, FSamplesByPods: map[int]int{3: 8}}}
+	h.a.mu.Unlock()
+	est, _, ok = h.a.PrefillEstimate("test-ns", "test-model", "prefill-3")
+	require.True(t, ok)
+	est.FByPods[3], est.FByPods[4] = 9, 9
+	est.FSamplesByPods[3], est.FSamplesByPods[4] = 99, 99
+	again, _, _ = h.a.PrefillEstimate("test-ns", "test-model", "prefill-3")
+	assert.Equal(t, map[int]float64{3: 1.8}, again.FByPods, "FByPods is a copy")
+	assert.Equal(t, map[int]int{3: 8}, again.FSamplesByPods, "FSamplesByPods is a copy")
 }
 
 // Forgetting the variant deletes its stashed estimate and leaves a
-// sibling's; the eviction sweep drops one older than prefillBoundsStaleAfter
-// and counts it, and keeps one stashed this cycle.
+// sibling's; the eviction sweep drops one older than the variant timeout
+// and counts it, and keeps a younger one.
+
+// At a 120s interval, the sweep that runs before each cycle finds the last
+// cycle's estimate two minutes old: it keeps it, and evicts nothing, every
+// cycle. Swept on prefillBoundsStaleAfter, it was evicted (and the engine
+// logged an eviction) on every cycle.
+func TestPrefillEstimate_ASlowIntervalEvictsNothing(t *testing.T) {
+	h := newObserveHarness(t, &capacity.EngineParams{Engine: inferenceengine.EngineVLLM})
+	for i := range 6 {
+		ev := h.a.EvictStaleHistory()
+		assert.Zero(t, ev.PrefillEstimates, "cycle %d", i)
+		assert.False(t, ev.Any(), "cycle %d: an eviction would be logged: %+v", i, ev)
+		h.cycle(20000)
+		h.clock = h.clock.Add(time.Minute) // cycle adds one: 120s apart
+	}
+	_, _, ok := h.a.PrefillEstimate("test-ns", "test-model", "prefill")
+	assert.True(t, ok)
+}
 func TestPrefillEstimate_ForgetAndEvictionDeleteIt(t *testing.T) {
 	t.Run("forget", func(t *testing.T) {
 		h := newObserveHarness(t, &capacity.EngineParams{Engine: inferenceengine.EngineVLLM})
@@ -115,7 +147,10 @@ func TestPrefillEstimate_ForgetAndEvictionDeleteIt(t *testing.T) {
 		h.clock = h.clock.Add(-time.Minute) // the cycle's own clock
 		ev := h.a.EvictStaleHistory()
 		assert.Zero(t, ev.PrefillEstimates, "one stashed this cycle stays")
-		h.clock = h.clock.Add(prefillBoundsStaleAfter + time.Second)
+		h.clock = h.clock.Add(h.a.Horizons().VariantTimeout)
+		ev = h.a.EvictStaleHistory()
+		assert.Zero(t, ev.PrefillEstimates, "at the variant timeout it stays")
+		h.clock = h.clock.Add(time.Second)
 		ev = h.a.EvictStaleHistory()
 		assert.Equal(t, 1, ev.PrefillEstimates)
 		assert.True(t, ev.Any())

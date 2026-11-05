@@ -369,13 +369,13 @@ func (o *Observer) Observe(c Cycle) Estimate {
 	var shares []share
 	allAdmitted, serving := true, 0
 	for _, rm := range c.Rows {
-		if !rm.Ready {
-			est.Refused[rowNotReady]++
-			continue
-		}
-		if rm.FromWarmPool {
-			// A bridge serves the variant's load on another engine.
-			est.Refused[rowBridge]++
+		if !Serving(rm) {
+			if !rm.Ready {
+				est.Refused[rowNotReady]++
+			} else {
+				// A bridge serves the variant's load on another engine.
+				est.Refused[rowBridge]++
+			}
 			continue
 		}
 		serving++
@@ -425,6 +425,15 @@ func (o *Observer) Observe(c Cycle) Estimate {
 		est.VPAboveSlopeBound = true
 	}
 	return est
+}
+
+// Serving reports whether rm is one of the variant's serving pods: Ready,
+// and not a warm-pool bridge, which serves the variant's load on another
+// engine. It is the pod rule behind every per-count figure (FPodsLast,
+// FByPods), so a caller that reads f at a pod count (the slo analyzer's
+// N_p, docs/proposals/slo-tiers.md decision 3) counts pods by it too.
+func Serving(rm domain.ReplicaMetrics) bool {
+	return rm.Ready && !rm.FromWarmPool
 }
 
 // sweep forgets the keys with no cycle for Retention, and returns how many.

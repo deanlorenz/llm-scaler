@@ -43,8 +43,10 @@ func (a *Analyzer) WithPrefillEstimates(p PrefillEstimates) *Analyzer {
 // runs saturation before this analyzer, so the estimate is the one made from
 // this cycle's rows.
 //
-// It takes a.mu, then the saturation analyzer's lock through the handle: the
-// order the TTFT pricing reads it in, beside the state it keeps under a.mu.
+// It takes a.mu, then the saturation analyzer's lock through the handle. In
+// S1a a.mu guards nothing the read touches: it is taken to fix the lock
+// order now, so the race test holds it. S1b's TTFT state (the imbalance
+// windows) is kept under a.mu, and read beside the estimate.
 func (a *Analyzer) prefillEstimate(namespace, modelID, variant string, now time.Time) (prefill.Estimate, bool) {
 	if a.prefillEstimates == nil {
 		return prefill.Estimate{}, false

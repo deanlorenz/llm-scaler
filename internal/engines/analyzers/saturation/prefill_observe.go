@@ -29,8 +29,9 @@ import (
 
 // SwitchPrefillCapacityObserve is the replay switch for the observation. On,
 // each prefill variant's rows are observed and logged every cycle. Off,
-// nothing is observed or logged. It moves no golden output: the observation
-// writes no state any output reads.
+// nothing is observed or logged. It moves no golden output in S1a: the
+// observation writes no state any output reads there. S1b's TTFT pricing
+// reads the stashed estimate (PrefillEstimate).
 const SwitchPrefillCapacityObserve = "prefill-capacity-observe"
 
 // SwitchPrefillBusyMinutes is the replay switch for V_P's first source,
@@ -119,15 +120,21 @@ func (a *SaturationAnalyzer) stashPrefillBound(rm domain.ReplicaMetrics, tokens 
 
 // prefillBoundsStaleAfter is how old a stashed bound is when the eviction
 // sweep drops it. A bound is stashed and taken within one Analyze; one left
-// longer belongs to a cycle that never took it. A stashed estimate is swept
-// on it too: one is read only in the cycle that stashed it.
+// longer belongs to a cycle that never took it.
 const prefillBoundsStaleAfter = time.Minute
 
 // evictPrefillObservationLocked sweeps the observation's keys with no cycle
-// for prefill.Retention, the stashed bounds no cycle took and the stashed
-// estimates older than prefillBoundsStaleAfter, and returns how many of
-// each. Callers hold a.mu; the observer's lock is its own.
-func (a *SaturationAnalyzer) evictPrefillObservationLocked(now time.Time) (keys, bounds, estimates int) {
+// for prefill.Retention, the stashed bounds no cycle took, and the stashed
+// estimates older than variantTimeout, and returns how many of each.
+// Callers hold a.mu; the observer's lock is its own.
+//
+// An estimate is swept on the variant timeout, not on
+// prefillBoundsStaleAfter: the sweep runs before each cycle's Analyze, so at
+// an interval over a minute every variant's estimate from the cycle before
+// would be evicted, and logged, every cycle. A stale one is never read
+// anyway (the slo analyzer refuses an estimate not stamped with its own
+// cycle); the sweep only keeps the map from outliving its variants.
+func (a *SaturationAnalyzer) evictPrefillObservationLocked(now time.Time, variantTimeout time.Duration) (keys, bounds, estimates int) {
 	keys = a.prefillObserver.Sweep(now)
 	for k, sb := range a.prefillBounds {
 		if now.Sub(sb.at) > prefillBoundsStaleAfter {
@@ -136,7 +143,7 @@ func (a *SaturationAnalyzer) evictPrefillObservationLocked(now time.Time) (keys,
 		}
 	}
 	for k, se := range a.prefillEstimates {
-		if now.Sub(se.at) > prefillBoundsStaleAfter {
+		if now.Sub(se.at) > variantTimeout {
 			delete(a.prefillEstimates, k)
 			estimates++
 		}

@@ -497,8 +497,8 @@ type Evicted struct {
 	// PrefillObservations is the prefill observation's keys with no cycle
 	// for prefill.Retention, and PrefillBounds the back-pressure bounds
 	// stashed for a cycle that never took them (prefill_observe.go).
-	// PrefillEstimates is the stashed estimates past
-	// prefillBoundsStaleAfter, which the slo analyzer would refuse anyway.
+	// PrefillEstimates is the stashed estimates of variants with none
+	// stashed for the variant timeout (evictPrefillObservationLocked).
 	// Omitted when zero, as BatchCaps is.
 	PrefillObservations int `json:",omitempty"`
 	PrefillBounds       int `json:",omitempty"`
@@ -842,7 +842,8 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 		}
 	}
 	a.sweepK2PendingLocked(now)
-	evicted.PrefillObservations, evicted.PrefillBounds, evicted.PrefillEstimates = a.evictPrefillObservationLocked(now)
+	evicted.PrefillObservations, evicted.PrefillBounds, evicted.PrefillEstimates =
+		a.evictPrefillObservationLocked(now, variantTimeout)
 	evicted.BatchCaps += a.sweepBatchCapsLocked(now, bucketRetention)
 	// A window's arguments go with the window.
 	maps.DeleteFunc(a.k2WindowArgs, func(key, _ string) bool {

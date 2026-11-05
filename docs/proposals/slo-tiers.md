@@ -785,7 +785,7 @@ P3's on the answer.
 | --- | --- |
 | `V_P`, `a` and their flags | P1's stashed estimate, through `whatif.PrefillFromEstimate` |
 | `f` | [Decision 1](#1-the-imbalance-f), at `pods` |
-| `N_p` | `pods`: the variant's Ready replicas for S1, each `N'` for S2 |
+| `N_p` | `pods`: the variant's Ready replicas for S1, each `N'` for S2. Counted by `prefill.Serving` (Ready, not a warm-pool bridge), the rule P1 counts `FByPods` by, so `f` is read at the count it was learned at |
 | `PromptTokens` | The effective prompt, `E[I_eff]` (prefix hits are not prefill work), as P1 reads it |
 | `PromptCV` | Measured from the computed-prefill-token histogram where a row carries it (Q1); otherwise 2, flagged `AssumedPromptSpread` ([below](#the-prompt-spread)) |
 | `ArrivalCV2` | 0, Poisson (P3's open question 5), flagged `AssumedPoissonArrivals`: an S1 flag, since P3 has none for it. Poisson over-promises on bursty traffic. Lifted by the staircase's bursty bucket ([which bucket lifts which flag](slo-capacity-planner-ttft.md#ground-truth-and-the-staircase)) |
