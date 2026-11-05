@@ -2644,7 +2644,8 @@ empties a variant's ITL rows while its scale target rolls out
 not taken as the new engine's. The throughput line never had that guard,
 before 4b or since; with the cap read from the store, a rollout that
 changes `--max-num-seqs` can briefly judge old pods against the new cap.
-A small PR of its own, with the forget for this line.
+A small PR of its own. (The forget for this line has landed:
+[as built](#the-throughput-lines-forget-as-built). The rollout guard has not.)
 
 #### 4b-3 round-2 review
 
@@ -2692,6 +2693,59 @@ killed):
 | one-sided with a learned B | `TestITLCap_ALearnedBEndsTheOneSidedPriceAndAForgetBringsItBack` |
 | the summary omits `pinnedAtLeastITL` | the probe |
 | the negative control's knob ignored | the bias table and the probe |
+
+#### The throughput line's forget, as built
+
+The forget-learned-state annotation reaches this line, as #431 took it to
+the slo line. One switch, on by the constructor:
+`throughput-itl-forget-reaches-the-line` (`T/forget.go`). `forgetOnRequest`
+calls `ThroughputAnalyzer.ForgetVariant` on the token the saturation analyzer
+acts on, after the slo analyzer's, found among the built-ins because only the
+saturation config registers it. The forget log line gains `throughputEntries`.
+
+- **What goes.** Everything the tracker holds of the key, through
+  `itl.Tracker.ForgetKeys`: the window, the steady window, both above-band
+  windows, the traces, B and the held slope. The settling stamps and the
+  readings at the cap go with the windows. Also `itlLogged`, the parent's
+  window and B, this cycle's reading and the figures priced from the line.
+- **What stays.** The settle (`ownSettle`, `ownSettled`), so a replica inside
+  its settle at a forget stays inside it
+  (`TestForget_AReplicaSettlingAtAForgetStillSettles`); the shape, the traffic
+  now; the log lines' memories. Two tests hold every field to a list
+  (`TestForget_EveryFieldIsClassified`,
+  `TestForget_EveryVariantStateFieldIsClassified`). The cap is read from the
+  store each cycle, so with B gone a line at the cap prices one-sided again
+  (`TestForget_AtTheCapALineIsPricedOneSidedAgain`).
+- **Nothing refills it.** This analyzer has no snapshot and no restore: a
+  test fails if a method named like one appears
+  (`TestForget_NothingHereRestoresALine`). It borrows no line, and a key is
+  one variant's. A lent replica's rows are dropped by `ownReplicasOnly` and
+  refused by the tracker
+  (`TestForget_NoSiblingOrLentReplicaRefillsTheLine`, 16 cycles of a
+  sibling's and lent rows leave the key empty).
+- **Reuse.** `itl.Tracker.ForgetKeys` is the sweep and sorted key list that
+  the saturation and slo forgets each wrote out, and now call.
+  `logging.ForgottenKeys` is slo's per-key log line, moved: `learn` logs
+  nothing and imports only the standard library, so it could not go there. It
+  writes a key's NUL separators as `|`. Which learners an analyzer keeps
+  stays each analyzer's own code, as `learn.Learners` says it should.
+- **Learner series.** `learn.Report` has no consumer for this line and no
+  learner series exists, so the deferred clause "when no key remains, the
+  variant's learner series are deleted" still has nothing to apply to. Each
+  key is logged instead.
+- **Goldens.** None moves. No committed recording carries
+  `throughput.ForgetVariant`. Measured on the `acceptance` and `engine` runs
+  taken again: each carries one event (Dropped 1: a window, no intercept), the
+  recording is otherwise line for line the one main writes, and all 19 outputs
+  are byte for byte the same with the event and without it. So the unit tests
+  hold the switch (`heldBy`), and the replay of the event is held by
+  `TestReplay_TheThroughputForgetIsApplied`. Taking those two recordings again
+  moves 9 outputs on main with no change at all; that drift is not this
+  change's, and they were not retaken here.
+- **Measured versus assumed.** The tests above are unit and replay tests on
+  synthetic rows. It has not been run on a cluster. That the line is silent
+  until 10 new readings comes from `itl.DefaultMinSamples`, on three replicas
+  in the tests: four cycles.
 
 #### 4b-3's follow-up: the saturation and slo lines at the cap (#467)
 
@@ -3154,7 +3208,7 @@ Round-3 lows, each settled in the PR named.
 | The recorder volume's `sizeLimit` is the per-volume ceiling (two recordings at the cap) plus headroom for the export. The writer stops each recording at the cap and deletes the oldest closed recording before the ceiling | 0b |
 | The export also pseudonymises args and config strings and borrowed-line donors, with a per-export key that is not committed | 0b |
 | `learner-write`'s `pods` lists at most 16, lowest reading first, with `podsOmitted` | 2 |
-| Forget reaches every learner through a plain list of learner names in `learn`, not a registry; it is a named change of its own; when no key remains, the variant's learner series are deleted | 2 |
+| Forget reaches every learner through a plain list of learner names in `learn`, not a registry; it is a named change of its own; when no key remains, the variant's learner series are deleted. Built for the saturation analyzer (2), the slo line (#431) and the throughput line ([as built](#the-throughput-lines-forget-as-built)). No learner series exists yet, so the deletion still has nothing to apply to | 2 |
 | Each operator-column cell names its metric series, or "metrics: none" | each PR |
 | A witness column per learner in 3.4 ("witnessed when", "non-saturating witness"), which also tells the probe which side to drive | 3 |
 | 3.6's cycle-count clocks become durations, or record the cycle interval in the threshold | each learner's PR |

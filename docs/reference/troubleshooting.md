@@ -1252,8 +1252,10 @@ what it has learned.
 
 2. Check the controller log on the variant's next cycle:
    `Learned state forgotten for one variant, on request`, with the variant,
-   the number of `entries` dropped, and `sloEntries`, the number of ITL
-   windows, intercepts and accelerator memos the SLO analyzer dropped.
+   the number of `entries` dropped, `sloEntries`, the number of ITL
+   windows, intercepts and accelerator memos the SLO analyzer dropped, and
+   `throughputEntries`, the number of ITL windows and intercepts the
+   throughput analyzer dropped.
 
    `sloEntries` of 0 means the SLO analyzer held nothing for that variant,
    and nothing failed. That happens when the model's policy does not list
@@ -1262,16 +1264,25 @@ what it has learned.
    once it is analysed again, and the line it kept while parked is
    dropped then.)
 
-   For each line the SLO analyzer dropped, it also logs
-   `Learned state forgotten for one key, on request`. Its `key` field names
-   the line: namespace, model, variant, accelerator and GPU count.
+   `throughputEntries` of 0 means the same for the throughput analyzer. It
+   also reads 0 when no saturation config entry enables `throughput`, and
+   when the line was evicted after an hour unseen.
+
+   For each line either analyzer dropped, it also logs
+   `Learned state forgotten for one key, on request`. Its `analyzer` field
+   says which, and its `key` field names the line: namespace, model, variant,
+   and for the SLO analyzer accelerator and GPU count.
 
 What is forgotten: the variant's measured k2 and throughput, its ITL line
 (including one it lent to siblings), its replica start estimate, and its
 capacity record. Also its previous k2 (`P2-prior`), the old service rate
 that holds the throughput floor after a change of arguments, and the
-windows set aside under earlier arguments for a rollback. The SLO analyzer
-keeps an ITL line of its own for the variant, and that is forgotten too.
+windows set aside under earlier arguments for a rollback. The SLO and
+throughput analyzers each keep an ITL line of their own for the variant, and
+those are forgotten too: the readings, including those above the band and at
+the sequence cap, the intercept and the held slope. The throughput analyzer
+has no line for the variant until its window holds 10 new readings, and has
+no say in the variant's scaling until then.
 The variant then prices as a new variant would until it saturates again:
 from its deployment-derived figure, or from a lower measured k2 of a
 compatible sibling where one exists (the k2 borrow), which orders more

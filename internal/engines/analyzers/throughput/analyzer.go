@@ -69,6 +69,9 @@ type ThroughputAnalyzer struct {
 	// itlAdmitsAtCap is the replay switch of learner PR 4b-3 (admission.go):
 	// SwitchITLAdmitsAtSequenceCap. On by the constructor.
 	itlAdmitsAtCap bool
+	// itlForgetReachesLine is the replay switch of the forget (forget.go):
+	// SwitchITLForgetReachesTheLine. On by the constructor.
+	itlForgetReachesLine bool
 	// capPinsDefaultB prices readings at the cap through the default B
 	// alone, as 4b-3 first built it (itl.Admission.OneSidedAboveKSat off),
 	// for the tests' negative controls only: set by withCapPinnedAtDefaultB,
@@ -165,6 +168,7 @@ func NewThroughputAnalyzer() *ThroughputAnalyzer {
 		itlIdleOnEvidence:     true,
 		itlFiniteOnly:         true,
 		itlAdmitsAtCap:        true,
+		itlForgetReachesLine:  true,
 		ownSettle:             settle.NewTracker(),
 		ownSettled:            make(map[string]time.Time),
 	}

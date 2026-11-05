@@ -531,9 +531,11 @@ func TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult(t *testing
 		slo.KindBeginCycle:          12,
 		slo.KindEvictStale:          12,
 		slo.KindNoteVariantsPresent: 28,
-		// The forget reaches the slo line too (#431), on the same token.
-		slo.KindForgetVariant: 1,
-		settle.KindObserve:    28,
+		// The forget reaches the slo line (#431) and the throughput line too,
+		// on the same token.
+		slo.KindForgetVariant:        1,
+		throughput.KindForgetVariant: 1,
+		settle.KindObserve:           28,
 	}, kinds, "the events the scripted run records")
 	t.Logf("recorded %d bytes: %v", len(recording), kinds)
 	assertResultsPriced(t, recording)
@@ -623,6 +625,7 @@ func TestLearnerRecording_EveryEventRoundTripsByteForByte(t *testing.T) {
 		slo.KindNoteVariantsPresent:         func() any { return &slo.PresentEvent{} },
 		slo.KindForgetVariant:               func() any { return &slo.ForgetVariantEvent{} },
 		throughput.KindAnalyze:              func() any { return &throughput.AnalyzeEvent{} },
+		throughput.KindForgetVariant:        func() any { return &throughput.ForgetVariantEvent{} },
 		capacity.KindFileScaleTarget:        func() any { return &capacity.FileScaleTargetEvent{} },
 		capacity.KindEvictStale:             func() any { return &capacity.EvictStaleEvent{} },
 		settle.KindObserve:                  func() any { return &settle.ObserveEvent{} },

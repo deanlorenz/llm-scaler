@@ -91,6 +91,7 @@ func (a *ThroughputAnalyzer) switchFields() map[string]*bool {
 		SwitchITLIdleOnEvidence:               &a.itlIdleOnEvidence,
 		SwitchITLReadsFinitePodMean:           &a.itlFiniteOnly,
 		SwitchITLAdmitsAtSequenceCap:          &a.itlAdmitsAtCap,
+		SwitchITLForgetReachesTheLine:         &a.itlForgetReachesLine,
 	}
 }
 

@@ -415,8 +415,9 @@ func (e *Engine) publishEngineConfig(namespace, modelID, variantName, accelerato
 // forgetOnRequest forgets one variant's learned state when its scale target
 // carries the ForgetLearnedState annotation with a token not yet acted on.
 // Nothing is forgotten when the saturation analyzer cannot forget: it keeps
-// the token acted on. When it acts on one, the slo analyzer forgets the
-// variant's ITL line too (issue #431); its entries are logged apart.
+// the token acted on. When it acts on one, the slo and throughput analyzers
+// forget the variant's ITL line too (issue #431); their entries are logged
+// apart.
 func (e *Engine) forgetOnRequest(ctx context.Context, namespace, modelID, variant string, target scaletarget.ScaleTargetAccessor) {
 	token := scaletarget.Annotations(target)[annotations.ForgetLearnedState]
 	if token == "" {
@@ -431,9 +432,23 @@ func (e *Engine) forgetOnRequest(ctx context.Context, namespace, modelID, varian
 	if e.sloAnalyzer != nil {
 		sloN = e.sloAnalyzer.ForgetVariant(ctx, namespace, modelID, variant)
 	}
+	throughputN := e.forgetThroughputLine(ctx, namespace, modelID, variant)
 	ctrl.LoggerFrom(ctx).Info("Learned state forgotten for one variant, on request",
 		"namespace", namespace, "modelID", modelID, "variant", variant,
-		"annotation", annotations.ForgetLearnedState, "token", token, "entries", n, "sloEntries", sloN)
+		"annotation", annotations.ForgetLearnedState, "token", token, "entries", n, "sloEntries", sloN,
+		"throughputEntries", throughputN)
+}
+
+// forgetThroughputLine forgets the variant's ITL line in the throughput
+// analyzer, and returns how many entries it dropped: 0 when the analyzer is
+// not registered, which the saturation config decides.
+func (e *Engine) forgetThroughputLine(ctx context.Context, namespace, modelID, variant string) int {
+	for _, entry := range e.analyzers.builtins() {
+		if a, ok := entry.analyzer.(*throughput.ThroughputAnalyzer); ok {
+			return a.ForgetVariant(ctx, namespace, modelID, variant)
+		}
+	}
+	return 0
 }
 
 // beginSLOCycle starts a cycle for the slo analyzer: its cycle count, by

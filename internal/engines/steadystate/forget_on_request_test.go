@@ -12,7 +12,9 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/annotations"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
@@ -102,6 +104,75 @@ func TestForgetOnRequest_ReachesTheSLOAnalyzerOncePerToken(t *testing.T) {
 	assert.Len(t, spy.forgotten, 1, "a token left in place forgot the slo line again")
 	forget("t2")
 	assert.Equal(t, []string{"ns/m/v1", "ns/m/v1"}, spy.forgotten, "a new token did not ask the slo analyzer again")
+}
+
+// forgetThroughputRows is the cycle's rows of v1's replicas, on a line, at
+// fills that keep them in the band.
+func forgetThroughputRows() []domain.ReplicaMetrics {
+	row := func(pod string, k float64) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{PodName: pod, VariantName: "v1", Ready: true, ReadySince: time.Now().Add(-time.Hour),
+			KvCacheUsage: k, KvUsageInstant: k, TotalKvCapacityTokens: 65536, AvgInputTokens: 1024, AvgOutputTokens: 256,
+			AvgITL: 0.006 + 0.05*k, AvgITLKnown: true, RequestRate: 2}
+	}
+	return []domain.ReplicaMetrics{row("pod-a", 0.30), row("pod-b", 0.45), row("pod-c", 0.60)}
+}
+
+// The forget reaches the throughput analyzer's line too, on the token the
+// saturation analyzer acts on: once per token, and again for a new one.
+// Before, its line kept pricing from the readings taken before the forget.
+// The engine finds the analyzer among the built-ins: only the saturation
+// config registers it.
+func TestForgetOnRequest_ReachesTheThroughputLineOncePerToken(t *testing.T) {
+	e, _ := engineConfigEngine(t)
+	a := throughput.NewThroughputAnalyzer()
+	e.analyzers = testAnalyzers(saturation.NewSaturationAnalyzer(e.capacityStore),
+		analyzerEntry{name: throughput.AnalyzerName, analyzer: a})
+	analyze := func() {
+		_, err := a.Analyze(context.Background(), domain.AnalyzerInput{ModelID: "m", Namespace: "ns",
+			ReplicaMetrics: forgetThroughputRows(),
+			VariantStates:  []domain.VariantReplicaState{{VariantName: "v1", CurrentReplicas: 3, GPUsPerReplica: 1}}})
+		require.NoError(t, err)
+	}
+	samples := func() int {
+		st, ok := a.VariantState("m", "ns", "v1")
+		require.True(t, ok, "premise: the analyzer holds the variant")
+		return st.SampleCount
+	}
+	deploy := deployWithArgs("--max-num-seqs=128")
+	forget := func(token string) {
+		deploy.Annotations = map[string]string{annotations.ForgetLearnedState: token}
+		e.forgetOnRequest(context.Background(), "ns", "m", "v1", scaletarget.NewDeploymentAccessor(deploy))
+	}
+
+	analyze()
+	require.Equal(t, 3, samples(), "premise: the line holds a cycle's readings")
+	e.forgetOnRequest(context.Background(), "ns", "m", "v1", scaletarget.NewDeploymentAccessor(deployWithArgs()))
+	require.Equal(t, 3, samples(), "control: no annotation, nothing forgotten")
+
+	forget("t1")
+	assert.Zero(t, samples(), "the annotation did not reach the throughput line")
+	analyze()
+	forget("t1")
+	assert.Equal(t, 3, samples(), "a token left in place forgot the line again")
+	forget("t2")
+	assert.Zero(t, samples(), "a new token did not ask the throughput analyzer again")
+}
+
+// With no saturation analyzer to keep the token, nothing is forgotten in the
+// throughput analyzer either: it would forget again on every cycle.
+func TestForgetOnRequest_NoSaturationForgetterForgetsNothingInThroughput(t *testing.T) {
+	e, _ := engineConfigEngine(t)
+	a := throughput.NewThroughputAnalyzer()
+	e.analyzers = testAnalyzers(plainAnalyzer{}, analyzerEntry{name: throughput.AnalyzerName, analyzer: a})
+	_, err := a.Analyze(context.Background(), domain.AnalyzerInput{ModelID: "m", Namespace: "ns",
+		ReplicaMetrics: forgetThroughputRows(),
+		VariantStates:  []domain.VariantReplicaState{{VariantName: "v1", CurrentReplicas: 3, GPUsPerReplica: 1}}})
+	require.NoError(t, err)
+	deploy := deployWithArgs()
+	deploy.Annotations = map[string]string{annotations.ForgetLearnedState: "t1"}
+	e.forgetOnRequest(context.Background(), "ns", "m", "v1", scaletarget.NewDeploymentAccessor(deploy))
+	st, _ := a.VariantState("m", "ns", "v1")
+	assert.Equal(t, 3, st.SampleCount)
 }
 
 // An engine with no slo analyzer (a hand-built one; NewEngine always builds

@@ -104,6 +104,7 @@
 2026-03-02T09:31:30Z store.EvictStale 1
 2026-03-02T09:31:30Z store.FileScaleTarget 5
 2026-03-02T09:31:30Z throughput.Analyze 1
+2026-03-02T09:31:30Z throughput.ForgetVariant 1
 2026-03-02T09:31:45Z engine.Composite 2
 2026-03-02T09:31:45Z saturation.Analyze 2
 2026-03-02T09:31:45Z saturation.EvictStaleHistory 1
