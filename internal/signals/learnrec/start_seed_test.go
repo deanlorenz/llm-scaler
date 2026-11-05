@@ -78,7 +78,7 @@ func TestStartSeed_APre5aRecordingIsWrittenAgainByteForByte(t *testing.T) {
 	for _, f := range files {
 		n := 0
 		golden := filepath.Base(filepath.Dir(f))
-		afterSeed := strings.HasPrefix(golden, "start-seed")
+		afterSeed := strings.HasPrefix(golden, "start-seed") || golden == "start-restored"
 		eachRecordedState(t, f, func(raw json.RawMessage) {
 			n++
 			if !afterSeed {
@@ -97,7 +97,7 @@ func TestStartSeed_APre5aRecordingIsWrittenAgainByteForByte(t *testing.T) {
 	}
 	// Not an empty pass: the goldens hold states, and the walk read them.
 	require.Greater(t, total, 100, "the walk read only %d states", total)
-	for _, golden := range []string{"start-seed", "start-seed-restart", "start-seed-restart-2"} {
+	for _, golden := range []string{"start-seed", "start-seed-restart", "start-seed-restart-2", "start-restored"} {
 		require.Positive(t, seeded[golden], "no state of %s carries the seed", golden)
 	}
 	t.Logf("%d states across %d recordings, with a seed per golden: %v", total, len(files), seeded)

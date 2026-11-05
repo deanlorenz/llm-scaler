@@ -194,9 +194,14 @@ func (t *Tracker) installRestored(r *replica, name string, row Row) bool {
 	return true
 }
 
+// switchNames is the package's replay switches.
+func switchNames() []string {
+	return []string{SwitchFirstSightRestored}
+}
+
 // ReplaySwitchNames is every name SetSwitchesForReplay accepts.
 func ReplaySwitchNames() []string {
-	return []string{SwitchFirstSightRestored}
+	return switchNames()
 }
 
 // SetSwitchesForReplay sets the package's replay switches by name: the test
@@ -204,7 +209,7 @@ func ReplaySwitchNames() []string {
 // A name it does not know is an error, and sets nothing. Never called on a
 // production path; a test holds that.
 func (t *Tracker) SetSwitchesForReplay(switches map[string]bool) error {
-	known := ReplaySwitchNames()
+	known := switchNames()
 	unknown := slices.Sorted(maps.Keys(switches))
 	unknown = slices.DeleteFunc(unknown, func(n string) bool { return slices.Contains(known, n) })
 	if len(unknown) > 0 {
