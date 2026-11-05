@@ -125,7 +125,7 @@ func TestCapacity_BusyMinutesAreTheMedianWhenDecodeIsNotFull(t *testing.T) {
 	for _, downstream := range []bool{false, true} {
 		cs := queuedMinutes(30000, 31000, 29000, 30500, 29500)
 		for i := range cs {
-			cs[i].QueueMin = map[string]int{"p-0": 1}
+			cs[i].QueueMin = map[string]float64{"p-0": 1}
 			cs[i].DownstreamSaturated = downstream
 		}
 		est := run(NewObserver(), cs...)
@@ -145,10 +145,112 @@ func TestCapacity_BusyMinutesAreTheMedianWhenDecodeIsNotFull(t *testing.T) {
 func TestCapacity_AMinuteThatEmptiedIsNotBusy(t *testing.T) {
 	cs := queuedMinutes(30000, 31000, 29000, 30500, 29500)
 	for i := range cs {
-		cs[i].QueueMin = map[string]int{"p-0": 0}
+		cs[i].QueueMin = map[string]float64{"p-0": 0}
 	}
 	est := run(NewObserver(), cs...)
 	assert.Equal(t, SourcePeakUnderQueue, est.VPSource)
+}
+
+// A queue minimum that is not a reading is not a busy minute: NaN, +Inf and a
+// negative each leave the minutes a peak under a queue.
+func TestCapacity_AQueueMinThatIsNotAReadingIsNotBusy(t *testing.T) {
+	for _, qmin := range []float64{math.NaN(), math.Inf(1), -1} {
+		cs := queuedMinutes(30000, 31000, 29000, 30500, 29500)
+		for i := range cs {
+			cs[i].QueueMin = map[string]float64{"p-0": qmin}
+		}
+		est := run(NewObserver(), cs...)
+		assert.Zero(t, est.VPBusyMinutes, "queue min %v", qmin)
+		assert.Equal(t, SourcePeakUnderQueue, est.VPSource, "queue min %v", qmin)
+	}
+}
+
+// A minute on a pod whose KV is full is not busy, whatever its queue
+// minimum: the pod can hold a queue it cannot schedule. With the KV full on
+// one of the five minutes, four are busy and V_P falls back to the peak.
+func TestCapacity_AKVFullMinuteIsNotBusy(t *testing.T) {
+	cs := queuedMinutes(30000, 31000, 29000, 30500, 29500)
+	for i := range cs {
+		cs[i].QueueMin = map[string]float64{"p-0": 1}
+	}
+	cs[2].KVFull = map[string]bool{"p-0": true}
+	est := run(NewObserver(), cs...)
+	assert.Equal(t, 4, est.VPBusyMinutes)
+	assert.Equal(t, SourcePeakUnderQueue, est.VPSource)
+
+	// The full pod's name alone is what excludes it: another pod's KV full
+	// leaves p-0's minutes busy.
+	cs[2].KVFull = map[string]bool{"p-1": true}
+	est = run(NewObserver(), cs...)
+	assert.Equal(t, 5, est.VPBusyMinutes)
+	assert.Equal(t, SourceBusyMinutes, est.VPSource)
+}
+
+// Busy minutes of a pod with more than one data-parallel rank are a lower
+// bound, with the reason: its queue minimum is the ranks' summed, and one
+// rank may have idled. One such pod among single-rank pods flags the whole
+// median; single-rank pods alone do not.
+func TestCapacity_ADataParallelPodsBusyMinutesAreALowerBound(t *testing.T) {
+	for _, ranks := range [][2]int{{1, 1}, {2, 1}, {1, 4}} {
+		o := NewObserver()
+		var est Estimate
+		for i := range 5 {
+			a, b := queued("p-0", 24000, 3), queued("p-1", 24000, 3)
+			a.EngineRanks, b.EngineRanks = ranks[0], ranks[1]
+			c := cycle(t0.Add(time.Duration(i)*minute), a, b)
+			c.QueueMin = map[string]float64{"p-0": 2, "p-1": 2}
+			est = o.Observe(c)
+		}
+		multi := ranks[0] > 1 || ranks[1] > 1
+		assert.Equal(t, SourceBusyMinutes, est.VPSource, "ranks %v", ranks)
+		assert.Equal(t, 24000.0, est.VP, "ranks %v", ranks)
+		assert.Equal(t, multi, est.VPLowerBound, "ranks %v", ranks)
+		if multi {
+			assert.Equal(t, DataParallelRanks, est.VPLowerBoundReason, "ranks %v", ranks)
+		} else {
+			assert.Empty(t, est.VPLowerBoundReason, "ranks %v", ranks)
+		}
+	}
+}
+
+// Busy minutes are read over the last BusyWindow only, thirty minutes (by
+// literal: the value the proposal states): five busy minutes from t0 to
+// t0+4m are V_P's source at t0+30m, the oldest exactly thirty minutes old,
+// and a second later the oldest has left and four are not a source.
+func TestCapacity_BusyMinutesOlderThanTheWindowAreExcluded(t *testing.T) {
+	for _, tc := range []struct {
+		at   time.Duration
+		busy int
+		want Source
+	}{
+		{30 * time.Minute, 5, SourceBusyMinutes},
+		{30*time.Minute + time.Second, 4, SourcePeakUnderQueue},
+		{34*time.Minute + time.Second, 0, SourcePeakUnderQueue},
+	} {
+		cs := queuedMinutes(30000, 31000, 29000, 30500, 29500)
+		for i := range cs {
+			cs[i].QueueMin = map[string]float64{"p-0": 1}
+		}
+		// An unqueued row moves the clock on and adds no busy minute.
+		cs = append(cs, cycle(t0.Add(tc.at), base("p-0")))
+		est := run(NewObserver(), cs...)
+		assert.Equal(t, tc.busy, est.VPBusyMinutes, "at %v", tc.at)
+		assert.Equal(t, tc.want, est.VPSource, "at %v", tc.at)
+	}
+}
+
+// QueueMins takes a row's queue minimum only where QueueMinKnown is set, a
+// zero included, and is nil when no row read one.
+func TestQueueMins_TakesOnlyAReading(t *testing.T) {
+	read := base("p-0")
+	read.QueueMin, read.QueueMinKnown = 2, true
+	emptied := base("p-1")
+	emptied.QueueMinKnown = true
+	unread := base("p-2")
+	unread.QueueMin = 5
+	assert.Equal(t, map[string]float64{"p-0": 2, "p-1": 0}, QueueMins([]domain.ReplicaMetrics{read, emptied, unread}))
+	assert.Nil(t, QueueMins([]domain.ReplicaMetrics{unread, base("p-3")}))
+	assert.Nil(t, QueueMins(nil))
 }
 
 // The back-pressure bound is the last source, and needs MinBoundSamples.
@@ -175,7 +277,7 @@ func TestCapacity_SGLangIsRefused(t *testing.T) {
 	for i := range 8 {
 		c := cycle(t0.Add(time.Duration(i)*minute), queued("p-0", 30000, 3), queued("p-1", 30000, 3))
 		c.Engine = inferenceengine.EngineSGLang
-		c.QueueMin = map[string]int{"p-0": 2, "p-1": 2}
+		c.QueueMin = map[string]float64{"p-0": 2, "p-1": 2}
 		c.Bound = Bound{Tokens: 25000, Samples: 5}
 		for j := range c.Rows {
 			c.Rows[j].RequestRate = 10
@@ -839,7 +941,7 @@ func TestCapacity_TheThresholdsAreTwoBoundReadingsAndFiveBusyMinutes(t *testing.
 		rates := []float64{30000, 31000, 29000, 30500, 29500}[:minutes]
 		cs := queuedMinutes(rates...)
 		for i := range cs {
-			cs[i].QueueMin = map[string]int{"p-0": 1}
+			cs[i].QueueMin = map[string]float64{"p-0": 1}
 		}
 		est := run(NewObserver(), cs...)
 		assert.Equal(t, want, est.VPSource, "%d busy minutes", minutes)
