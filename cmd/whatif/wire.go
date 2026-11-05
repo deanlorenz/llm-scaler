@@ -231,21 +231,21 @@ type wireAnswer struct {
 // wireTTFTAnswer is whatif.TTFT on the wire, beside the value: the figures
 // beside the union bound, and its parts' means, in seconds.
 type wireTTFTAnswer struct {
-	Independent           float64       `json:"independent"`
-	Pooled                float64       `json:"pooled"`
-	DecodeShare           float64       `json:"decodeShare"`
-	EngineWait            float64       `json:"engineWait"`
-	OwnPrefill            float64       `json:"ownPrefill"`
-	DecodeWait            float64       `json:"decodeWait"`
-	FirstStep             float64       `json:"firstStep"`
-	DecodeEngine          float64       `json:"decodeEngine"`
-	PrefillUtilization    float64       `json:"prefillUtilization"`
-	VPMarginApplied       float64       `json:"vpMarginApplied"`
-	WaitScale             float64       `json:"waitScale"`
-	WaitOffset            float64       `json:"waitOffset"`
-	DecodeWaitProbability float64       `json:"decodeWaitProbability"`
-	PrefillKnee           float64       `json:"prefillKnee"`
-	DecodeKnee            float64       `json:"decodeKnee"`
+	Independent           float64 `json:"independent"`
+	Pooled                float64 `json:"pooled"`
+	DecodeShare           float64 `json:"decodeShare"`
+	EngineWait            float64 `json:"engineWait"`
+	OwnPrefill            float64 `json:"ownPrefill"`
+	DecodeWait            float64 `json:"decodeWait"`
+	FirstStep             float64 `json:"firstStep"`
+	DecodeEngine          float64 `json:"decodeEngine"`
+	PrefillUtilization    float64 `json:"prefillUtilization"`
+	VPMarginApplied       float64 `json:"vpMarginApplied"`
+	WaitScale             float64 `json:"waitScale"`
+	WaitOffset            float64 `json:"waitOffset"`
+	DecodeWaitProbability float64 `json:"decodeWaitProbability"`
+	PrefillKnee           float64 `json:"prefillKnee"`
+	DecodeKnee            float64 `json:"decodeKnee"`
 	// Onsets are the flow-control onsets, absent with flow control off.
 	Onsets *wireOnsets `json:"onsets,omitempty"`
 }

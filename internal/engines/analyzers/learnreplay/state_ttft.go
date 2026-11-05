@@ -34,7 +34,7 @@ type PrefillState struct {
 	// variant's latest shapeCycles cycles with traffic, so that a recording
 	// that ends idle is priced at the traffic it last served; 0 with none.
 	// PromptFromCycle, PromptToCycle and PromptCycles say which cycles.
-	PromptTokens                               float64
+	PromptTokens                                 float64
 	PromptFromCycle, PromptToCycle, PromptCycles int
 	// RawShare is f_raw, the busiest pod's share of the computed-token rate
 	// over the mean share, not de-biased: the largest over the latest
