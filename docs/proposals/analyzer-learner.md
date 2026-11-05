@@ -2343,7 +2343,8 @@ engine restart) was skipped; `pd-restart` and the synthetic suite cover it.
 - **Start keys restored:** 2 at each of the two restarts, in the recording's
   `saturation.RestoreLearnedState` and in the ConfigMap after it.
   `learner-start` does not count them yet (5d).
-- **Sightings:** none. This build does not write them (5d).
+- **Sightings:** none. This build does not write them (5d; `start-restored` does,
+  see "5d as built").
 - **The seed:** `RoleStartSeconds` reads 120 on 12 cycles, then the first
   measured Pod. Published 160.3 s, sized 241 s, as `(2 x 120 + 241) / 3`
   predicts. Measured alone, `start-reads-replica-start-seed` moves 12 rows of
@@ -3220,9 +3221,10 @@ package's first switch, with its own hook (`Tracker.SetSwitchesForReplay`,
   snapshot: `LEARNED_STATE_SNAPSHOT` off stores and restores neither field.
 - **Spare entries.** Both fields are spare at the size bound, oldest first: a
   dropped sighting costs one replica one wait, a dropped count one more fold.
-  Measured with 64 Pods in each field and realistic names: 135 B an entry, at
+  With 64 Pods in each field and long names the test measures 135 B an entry, at
   whole-second times. A live `firstSeen` or `readySeen` is the controller's clock
-  and carries nanoseconds, 10 B more each, so a sighting runs up to 20 B over that.
+  and carries nanoseconds: the kind run's documents hold 138 B per counted Pod and
+  207 B per sighting.
   The sightings are in the digest, and their times do not move, so a steady fleet
   does not rewrite the document (tested).
 - **Recording.** `settle.KindRestore` carries the sightings with the namespace
@@ -3304,26 +3306,33 @@ package's first switch, with its own hook (`Tracker.SetSwitchesForReplay`,
   the parent on all 12 cycles.
 - **Goldens.** Measured alone against all off, D adds rows to three
   `learned-state.csv` (acceptance 103, engine 99, mu-paths 180), changes none,
-  and moves no other output: no recorded document holds `startCounted`. The
-  three start-seed goldens gain the same rows (38, 80 and 51). E moves nothing:
-  no recording holds a `settle.Restore` event.
-- **On the recorded fleet.** The start-seed goldens were recorded before 5d, so
-  their restores hold neither field, and replayed as committed they still fold
-  the running Pods. `TestGoldens_StartSeedChainRestoresCountsAndFirstSight` runs
-  5d on their real rows: each restart restores its recorded document plus what
-  the replay of the run before it stored on this build, Pods carried across by
-  variant and Ready time. It is a replay with spliced documents, not a cluster
-  run on a 5d build; one is still to be recorded.
+  and moves no other output there: no recorded document holds `startCounted`. The
+  three start-seed goldens gain the same rows (38, 80 and 51). On `start-restored`,
+  whose document holds it, D also moves `results.csv` and `composite-results.csv`:
+  off, the running Pods are folded again. E alone moves no output of any golden.
+  On `start-restored` its restored windows and lines price the fleet either way,
+  so it shows in the refusals, not in an order.
+- **The real run.** `start-restored` is a kind run of a build of this branch
+  (9c7aa470c), the steps of "Recording", with the snapshot on and two controller
+  restarts. It is the recording between them: a real `settle.Restore`, and
+  `startCounted` read back by a real restore.
 
-  | restart | slow variant, D on | D off | the cluster measured | `startKeys` | `sightings` | k2 refused as joined, E on / off |
-  | --- | --- | --- | --- | --- | --- | --- |
-  | first | 241.4599 | 241.6593 | 241.66 | 2 | 10 | 0 / 12 |
-  | second | 241.6593 | 241.7678 | 241.77 | 2 | 10 | 0 / 0 |
+  | restart | document age | `startKeys`, both lines | `sightings`, both lines | slow variant before and after, ConfigMap | fast |
+  | --- | --- | --- | --- | --- | --- |
+  | first, under load | 18 s | 2 | 10 | 242.147, 242.147 | 22, 22 |
+  | second, light load | 15 s | 2 | 10 | 242.147, 242.147 | 22, 22 |
 
-  With D on, `learner-write` says `restored: true` (2 lines at each restart), and
-  with D off it never does: the fold ends the mark on the first cycle. At the
-  second restart no replica saturated in the first minute, so E has no reading to
-  admit there.
+  Replayed, k2 refuses 0 readings as joined with E on and 17 with E off, and
+  `learner-write` says `restored: true` with D on and never with D off, where the
+  same recording folds the running Pods again
+  (`TestGoldens_StartRestoredRestoresForReal`). Both restarts were well inside the
+  bound, so the run does not exercise `too old`; a test does.
+- **The start-seed goldens** predate 5d, so replayed as committed they still fold.
+  `TestGoldens_StartSeedChainRestoresCountsAndFirstSight` splices in what each run
+  stored on this build, Pods carried across by variant and Ready time: it gives
+  241.4599 and 241.6593 with D on, against 241.6593 and 241.7678 off, the 241.66
+  and 241.77 the cluster measured then. That test is spliced; `start-restored` is
+  not.
 - **Back-compat.** The document stays v1 and additive. v0.10.1's frozen decoder
   reads a document with both new fields with every field it knows intact
   (`TestLearnedStateSettle_V0101ReadsADocumentWithSightings`). The v0.10.1 fixture
@@ -3334,11 +3343,12 @@ package's first switch, with its own hook (`Tracker.SetSwitchesForReplay`,
 - **Tests.** The design's negative controls, each asserted both ways: restored 70
   and four Pods at 90 s stays 70 on and reaches 85.2 off; four replicas Ready 1 h
   are admitted on the first cycle on, and refused `P1-obs-unsettled` for 1 min off.
-  MUTANTS-LINE, among them
+  Sixty-four mutants, each killed in a full run, among them
   the Ready check, the Ready-time equality, a bridge kept, the first row not
-  claiming, the switch-off paths, and each `settleUntil` branch. A mutant that
-  survived showed an export filter was dead, and it was removed; two more showed
-  the claim and the spare order were not reached, and tests now reach them.
+  claiming, the switch-off paths, each `settleUntil` branch, the age bound off, at
+  `>=`, without the write interval and at the forget horizon. Mutants that survived
+  an earlier pass showed an export filter and a clone were dead, both removed, and
+  that the claim and the spare order were not reached, which tests now reach.
 
 ## 8. Risks and limits
 

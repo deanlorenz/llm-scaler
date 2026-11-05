@@ -160,6 +160,27 @@ goldens:
   recording: pd-restart/recording.jsonl.gz
   source: P/D benchmark scenario, flow control off, saturated load, one decode engine
     restarted in its own pod, recorder on
+- name: start-restored
+  notRun:
+  - slo
+  outputs:
+  - start-restored/learned-state.csv
+  - start-restored/lines.csv
+  - start-restored/results.csv
+  - start-restored/slo-published.csv
+  - start-restored/store-records.csv
+  - start-restored/variant-capacities.csv
+  - start-restored/composite-holds.csv
+  - start-restored/composite-release.csv
+  - start-restored/composite-results.csv
+  - start-restored/composite-roles.csv
+  - start-restored/composite-variants.csv
+  - start-restored/warm-pool-pressure.csv
+  - start-restored/warm-pool-supply.csv
+  recording: start-restored/recording.jsonl.gz
+  source: One model, two variants on a kind cluster with the simulator, recorder on,
+    snapshot on, default analyzerTuning; after a controller restart under load, snapshot
+    restored, then light load
 - name: start-seed
   notRun:
   - slo

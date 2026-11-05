@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -34,6 +36,16 @@ import (
 // A recording's export names Pods per recording, so a Pod is carried across
 // by its variant and its Ready time. Two Pods that share both are the same
 // to everything read here.
+
+// goldenRecording is one golden's exported recording, as it is committed.
+func goldenRecording(t *testing.T, fixture string) []byte {
+	t.Helper()
+	gz, err := os.ReadFile(filepath.Join(goldenDir, fixture, RecordingName))
+	require.NoError(t, err)
+	rec, err := gunzip(gz)
+	require.NoError(t, err)
+	return rec
+}
 
 // chainRun is one replay of a chain link.
 type chainRun struct {
@@ -256,7 +268,7 @@ func restoredWrites(run chainRun) int {
 // spliced recording. With both on, start keys and restored sightings count
 // above zero at both restarts.
 func TestGoldens_StartSeedChainRestoresCountsAndFirstSight(t *testing.T) {
-	prev := replayChain(t, startSeedRecording(t, startSeedFixture), nil)
+	prev := replayChain(t, goldenRecording(t, startSeedFixture), nil)
 	require.NotEmpty(t, prev.state.StartCounted, "premise: a 5d build stores the counted Pods")
 	require.NotEmpty(t, prev.sightings, "premise: a 5d build stores the sightings")
 
@@ -271,7 +283,7 @@ func TestGoldens_StartSeedChainRestoresCountsAndFirstSight(t *testing.T) {
 		{startSeedRestart2Fixture, 241.66, 241.77, 0},
 	} {
 		t.Run(link.fixture, func(t *testing.T) {
-			recording := spliced(t, startSeedRecording(t, link.fixture), prev)
+			recording := spliced(t, goldenRecording(t, link.fixture), prev)
 
 			on := replayChain(t, recording, nil)
 			dOff := replayChain(t, recording, map[string]map[string]bool{
@@ -310,8 +322,16 @@ func TestGoldens_StartSeedChainRestoresCountsAndFirstSight(t *testing.T) {
 // above shows it stop.
 func TestGoldens_StartSeedRecordingsPredate5d(t *testing.T) {
 	for _, fixture := range startSeedFixtures {
-		rec := startSeedRecording(t, fixture)
-		assert.Zero(t, bytes.Count(rec, []byte(`"Kind":"`+settle.KindRestore+`"`)), fixture)
-		assert.Zero(t, bytes.Count(rec, []byte(`"StartCounted":{"`)), fixture)
+		for _, ev := range startSeedEvents(t, fixture) {
+			assert.NotEqual(t, settle.KindRestore, ev.Kind, fixture)
+			if ev.Kind != saturation.KindRestoreLearnedState {
+				continue
+			}
+			var d saturation.RestoreEvent
+			require.NoError(t, ev.DecodeData(&d))
+			var s saturation.LearnedState
+			require.NoError(t, d.State.Decode(&s))
+			assert.Empty(t, s.StartCounted, fixture)
+		}
 	}
 }

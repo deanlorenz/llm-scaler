@@ -229,6 +229,9 @@ var replaySwitches = map[string][]string{
 		// a StartAdmittedAt row per key per export.
 		"start-seed/composite-results.csv", "start-seed/learned-state.csv", "start-seed/results.csv",
 		"start-seed-restart/learned-state.csv", "start-seed-restart-2/learned-state.csv",
+		// start-restored, recorded on a 5d build: a StartAdmittedAt row per
+		// key per export.
+		"start-restored/learned-state.csv",
 	},
 
 	// Learner PR 5d, on main after 5c and #482 (59772fce2). Measured, each
@@ -240,17 +243,21 @@ var replaySwitches = map[string][]string{
 	//     rows). No recorded document holds the field, so no restore in any
 	//     recording reads it, and no figure moves. Its unit tests hold what it does
 	//     after a restart (start_counted_test.go).
-	//   - settle.SwitchFirstSightRestored moves nothing: no committed
-	//     recording holds a settle.Restore event, the start-seed goldens
-	//     included. Its unit tests hold it (heldBy), and
-	//     TestGoldens_StartSeedChainRestoresCountsAndFirstSight runs both
-	//     switches on the start-seed rows.
+	//   - settle.SwitchFirstSightRestored moves nothing. start-restored
+	//     holds a real settle.Restore, and E alone moves none of its outputs:
+	//     its restored windows and lines price the fleet either way. Its unit
+	//     tests hold it (heldBy), and
+	//     TestGoldens_StartRestoredRestoresForReal asserts it on and off.
 	saturation.SwitchStartCountedPodsRestored: {
 		"acceptance/learned-state.csv", "engine/learned-state.csv", "mu-paths/learned-state.csv",
 		// The start-seed goldens the same way. They predate 5d, so their
 		// restores hold no startCounted and these replays still fold the
 		// running Pods: golden_start_seed_chain_test.go shows the fold stop.
 		"start-seed/learned-state.csv", "start-seed-restart/learned-state.csv", "start-seed-restart-2/learned-state.csv",
+		// A real restart of a 5d build, whose document holds the field: off,
+		// the running Pods are folded again, so RoleStartSeconds and the
+		// estimate rows differ, beside the StartCounted rows.
+		"start-restored/composite-results.csv", "start-restored/learned-state.csv", "start-restored/results.csv",
 	},
 	settle.SwitchFirstSightRestored: nil,
 }
@@ -458,17 +465,19 @@ var earlierSeams = withMoves(startSeedSeamMoves, withSeams(learner4b2Seams, with
 }))))
 
 // startSeedSeamMoves is what each earlier seam, off alone from all on, moves
-// in the start-seed goldens. Measured at 59772fce2, the commit that recorded
-// them. They are the first cluster goldens with k2, mu and ITL learning on a
+// in the start-seed goldens, and in start-restored. Measured at 59772fce2, the
+// commit that recorded the first three, and at 9c7aa470c, the fourth's. They are the first cluster goldens with k2, mu and ITL learning on a
 // simulator's fleet, so seams that move no other recording move them.
 var startSeedSeamMoves = map[string][]string{
 	saturation.SwitchITLAggregatedShapeTerm: {
 		"start-seed/variant-capacities.csv", "start-seed-restart/learned-state.csv", "start-seed-restart/lines.csv",
 		"start-seed-restart/variant-capacities.csv", "start-seed-restart-2/variant-capacities.csv",
+		"start-restored/learned-state.csv", "start-restored/lines.csv", "start-restored/variant-capacities.csv",
 	},
 	saturation.SwitchITLFitsAggregated: {
 		"start-seed/variant-capacities.csv", "start-seed-restart/learned-state.csv", "start-seed-restart/lines.csv",
 		"start-seed-restart/variant-capacities.csv", "start-seed-restart-2/variant-capacities.csv",
+		"start-restored/learned-state.csv", "start-restored/lines.csv", "start-restored/variant-capacities.csv",
 	},
 	saturation.SwitchITLWaitsAfterRestart: {
 		"start-seed-restart-2/learned-state.csv", "start-seed-restart-2/lines.csv", "start-seed-restart-2/variant-capacities.csv",
@@ -476,11 +485,13 @@ var startSeedSeamMoves = map[string][]string{
 	saturation.SwitchK2FirstReadingWaits: {
 		"start-seed/composite-variants.csv", "start-seed/learned-state.csv", "start-seed/variant-capacities.csv",
 		"start-seed-restart/learned-state.csv", "start-seed-restart/variant-capacities.csv",
+		"start-restored/composite-results.csv", "start-restored/learned-state.csv", "start-restored/results.csv",
+		"start-restored/variant-capacities.csv",
 	},
 	saturation.SwitchK2KeyBucketHeld: {
 		"start-seed/learned-state.csv", "start-seed/variant-capacities.csv", "start-seed-restart-2/learned-state.csv",
 	},
-	saturation.SwitchKVPerRequestOutputDispersion: {"start-seed-restart/learned-state.csv"},
+	saturation.SwitchKVPerRequestOutputDispersion: {"start-seed-restart/learned-state.csv", "start-restored/variant-capacities.csv"},
 	saturation.SwitchMuKeyBucketHeld: {
 		"start-seed/composite-results.csv", "start-seed/learned-state.csv", "start-seed/results.csv", "start-seed/variant-capacities.csv",
 		"start-seed-restart-2/composite-results.csv", "start-seed-restart-2/learned-state.csv",
@@ -898,6 +909,12 @@ var switchBase = map[string]string{
 	"start-seed/results.csv":                 "84c0d2fee77414c2816bb49818aa0466ddbc51501e29dbc621430c7b21bb7265",
 	"start-seed-restart/learned-state.csv":   "ae524f09cd431c1bd754cc903d0870d0d32e9b9b39b9a2a2999595e4cf7c4eb4",
 	"start-seed-restart-2/learned-state.csv": "099f2c638296ba7f62820ed86fbfdcaf30dfcfc1e6d069bbc8b80080414a835d",
+
+	// start-restored has no base commit either: every switch of
+	// replaySwitches off, at 9c7aa470c.
+	"start-restored/composite-results.csv": "9838f3fcbd4a6d6f1aa2786eb7c24ba97c1da456d976903eb9307c7f363eab9e",
+	"start-restored/learned-state.csv":     "7bcb943f4f131f080ab70e27571c1dcffaad974d840ddb11954f9ef79d88afee",
+	"start-restored/results.csv":           "6b7a8e062c42203b92eff8e2a1738a98aafb91c69a29c229dbcbfd3b5821cc0d",
 }
 
 // The slow tests of this package run in parallel with each other (each
