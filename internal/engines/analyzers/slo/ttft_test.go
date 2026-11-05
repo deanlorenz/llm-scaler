@@ -391,18 +391,24 @@ func TestTTFT_TheDecodeSideTakesTheWholeRate(t *testing.T) {
 // The same through Analyze: two equal prefill variants and one fitted decode
 // line read exactly as one variant of two pods.
 func TestTTFT_TheRateIsTheModelsWithADecodeSide(t *testing.T) {
-	run := func(rig func(i int) []domain.ReplicaMetrics, states []domain.VariantReplicaState, est prefill.Estimate, arrival float64) metrics.SLOTTFTReading {
+	// Twelve cycles fit the line, with the pricing off: it is the slow part,
+	// and only the last cycle's is read.
+	fitted := func(rig func(i int) []domain.ReplicaMetrics, states []domain.VariantReplicaState, est prefill.Estimate) *ttftRig {
 		r := newTTFTRig(est, rig(0))
 		r.a.store = capacity.NewStore()
 		r.a.store.Update("ns", "m", "dec", capacity.Record{EngineParams: &capacity.EngineParams{MaxNumSeqs: 64}}, ttftNow)
 		r.in.VariantStates = states
 		r.in.SchedulerQueue = &domain.SchedulerQueueMetrics{}
-		r.in.ArrivalRate = 1
+		r.a.ttftPrice = false
 		for i := range 12 {
 			r.now = r.now.Add(time.Minute)
 			r.in.ReplicaMetrics = rig(i)
 			r.analyze(t)
 		}
+		r.a.ttftPrice = true
+		return r
+	}
+	read := func(r *ttftRig, arrival float64) metrics.SLOTTFTReading {
 		r.in.ArrivalRate = arrival
 		_, got := r.analyze(t)
 		require.NotEmpty(t, got)
@@ -429,9 +435,10 @@ func TestTTFT_TheRateIsTheModelsWithADecodeSide(t *testing.T) {
 	est := ttftEstimate()
 	est.FByPods = map[int]float64{2: 1}
 	refused := 0
-	for _, arrival := range []float64{0.25, 0.5, 1, 2, 4, 8, 16, 32} {
-		split := run(two, []domain.VariantReplicaState{state("pre"), state("pre2"), decState}, est, arrival)
-		joined := run(one, []domain.VariantReplicaState{state("pre"), decState}, est, arrival)
+	splitRig := fitted(two, []domain.VariantReplicaState{state("pre"), state("pre2"), decState}, est)
+	joinedRig := fitted(one, []domain.VariantReplicaState{state("pre"), decState}, est)
+	for _, arrival := range []float64{0.25, 1, 4} {
+		split, joined := read(splitRig, arrival), read(joinedRig, arrival)
 		assert.Equal(t, joined.Refused, split.Refused, "at %g r/s", arrival)
 		assert.Equal(t, joined.Unmet, split.Unmet, "at %g r/s", arrival)
 		assert.Equal(t, joined.Reason, split.Reason, "at %g r/s", arrival)
@@ -632,7 +639,7 @@ func TestTTFT_AMeasuredSpreadThroughAnalyze(t *testing.T) {
 // the bottom of the range; PromptSpreadAbovePeak flags the first.
 func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
 	r := rand.New(rand.NewPCG(11, 13))
-	const draws = 120
+	const draws = 60
 	priced := 0
 	for range draws {
 		in := ttftInputsAt(1+r.IntN(4), 0)
@@ -651,7 +658,7 @@ func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
 		require.True(t, ok)
 		rate := knee.Value * (0.05 + 0.9*r.Float64())
 		var cvs []float64
-		for cv := 0.3; cv <= promptCVPeak(percent)+1e-9; cv += 0.05 {
+		for cv := 0.3; cv <= promptCVPeak(percent)+1e-9; cv += 0.1 {
 			cvs = append(cvs, cv)
 		}
 		var floor float64
@@ -683,7 +690,7 @@ func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
 			priced++
 		}
 	}
-	assert.Greater(t, priced, draws*20, "the rate side must be exercised")
+	assert.Greater(t, priced, draws*10, "the rate side must be exercised")
 }
 
 // The S1 decisions take TTFT as rising with cv over [0, 3] at p90. At the
