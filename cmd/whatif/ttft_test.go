@@ -135,7 +135,7 @@ func TestTTFT_TheNoteFollowsTheSpread(t *testing.T) {
 // computes by hand. The page assumes cv 1, and a 1.6 ms above P1's: the
 // figures are the page's, read 1.6 ms lower as it says they would.
 func TestTTFT_TheWorkedExampleFromTheRecording(t *testing.T) {
-	st := replayed(t, olsSweep, "model-02")
+	st := workedState(t)
 	f := answerFlags{question: "replicas-to-slo", set: map[string]bool{"assume-vp": true, "prefill": true, "decode": true,
 		"assume-input-tokens": true, "assume-output-tokens": true}, assumeVP: 30000, prefill: 1, decode: 1,
 		inputTokens: 1000, outputTokens: 1000}
@@ -201,10 +201,10 @@ func TestTTFT_HandComputedAtCV2(t *testing.T) {
 	near(t, "rho", ans.Parts.PrefillUtilization, 0.85, 1e-9)
 }
 
-// replayed is the state at the recording's last cycle.
-func replayed(t *testing.T, path, model string) *learnreplay.State {
+// workedState is the worked example's state, at the recording's last cycle.
+func workedState(t *testing.T) *learnreplay.State {
 	t.Helper()
-	f := answerFlags{recording: path, model: model, cycle: "last", window: captureFlags{}}
+	f := answerFlags{recording: olsSweep, model: "model-02", cycle: "last", window: captureFlags{}}
 	st, err := f.readState(context.Background())
 	require.NoError(t, err)
 	return st
@@ -370,7 +370,7 @@ func TestTTFT_FlowControl(t *testing.T) {
 // The decode side: a line that prices, else the engine's measured TTFT, else
 // nothing, which P3 flags as left out.
 func TestTTFT_DecodeSide(t *testing.T) {
-	st := replayed(t, olsSweep, "model-02")
+	st := workedState(t)
 	f := answerFlags{set: map[string]bool{"assume-vp": true}, assumeVP: 30000}
 	variants, err := f.decodeVariants(st)
 	require.NoError(t, err)
@@ -691,14 +691,16 @@ func TestTTFT_RoutingFlags(t *testing.T) {
 			}
 		})
 	}
-	// Another count than the window's reads no flag.
-	pf := read(learnreplay.PrefillState{Pods: 2, RawShare: 1.9, RawShareLeast: 1.7, RawShareFull: true}, answerFlags{prefill: 3}, "prefill")
+	// Another count than the window's reads no flag, though f / N' reaches it.
+	pf := read(learnreplay.PrefillState{Pods: 3, RawShare: 2.9, RawShareLeast: 2.8, RawShareFull: true}, answerFlags{prefill: 2}, "prefill")
+	assert.Equal(t, 2.0, pf.fleet.Prefill.Imbalance)
 	assert.NotContains(t, pf.flags, routingBound)
+	assert.NotContains(t, pf.flags, imbalanceNotSustained)
 }
 
 // A variant's own flags reach question 2's TTFT, as they reach every Answer.
 func TestTTFT_VariantFlagsReachTheTTFT(t *testing.T) {
-	st := replayed(t, olsSweep, "model-02")
+	st := workedState(t)
 	f := answerFlags{set: map[string]bool{"assume-vp": true}, assumeVP: 30000}
 	variants, err := f.decodeVariants(st)
 	require.NoError(t, err)
@@ -781,7 +783,7 @@ func TestFleetRate(t *testing.T) {
 
 // The percentile of question 2: the flag, else the policy's, else 90.
 func TestTTFT_PercentileOrder(t *testing.T) {
-	st := replayed(t, olsSweep, "model-02")
+	st := workedState(t)
 	f := answerFlags{set: map[string]bool{"assume-vp": true}}
 	q, err := f.replicasTTFT()
 	require.NoError(t, err)
@@ -1064,7 +1066,7 @@ func TestTTFT_SeveralVariants(t *testing.T) {
 
 	out, _ = runCmd(t, slices.Concat(ask, []string{"-o", "json"})...)
 	w := decodeOutput(t, out)
-	var roles []string
+	roles := make([]string, 0, len(w.Roles))
 	for _, r := range w.Roles {
 		roles = append(roles, r.Role+":"+r.Variant)
 	}

@@ -811,7 +811,7 @@ func (o operatingTTFT) writeRows(b *strings.Builder) {
 	switch v := o.ttft.(type) {
 	case whatif.TTFT:
 		row(b, o.q.label(), msText(v.Seconds), "", "end to end; "+pf.verdict())
-		if v.Independent != v.Seconds {
+		if msText(v.Independent) != msText(v.Seconds) {
 			fmt.Fprintf(b, "%-16s(%s if prefill and decode waits were independent)\n", "", msText(v.Independent))
 		}
 		fmt.Fprintf(b, "%-16s(floor %s, pooled %s, worst pod utilization %.3f)\n", "", msText(v.Floor), msText(v.Pooled), v.PrefillUtilization)
