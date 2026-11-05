@@ -2319,6 +2319,46 @@ Later and optional, after 5d: a GPU witness. One small model, one variant,
 1 GPU per replica, 1 to 4 replicas, one restart; about 30 min and 4 GPUs on a
 shared cluster, torn down on every exit path. No PR waits for it.
 
+#### Recording as run
+
+Run on kind with main 59772fce2 (5a to 5c merged, 5d not): the goldens
+`start-seed`, `start-seed-restart` and `start-seed-restart-2`, one per
+controller start. Everything below is measured on that run. How to take it
+again: [the start-seed goldens](../developer-guide/testing.md#the-start-seed-goldens).
+
+Two things differ from the plan above. A cheaper fast variant at a ceiling of 5
+made the slow one scale: the cost-aware optimizer adds to the cheapest variant
+first, so without the ceiling the slow variant never scales. Step 3 (the
+engine restart) was skipped; `pd-restart` and the synthetic suite cover it.
+
+| measure | fast | slow |
+| --- | --- | --- |
+| Pods' own creation to Ready, 18 Pods from the per-minute dumps | 9 Pods, 20 to 22 s, mean 21.22 s | 9 Pods, 241 to 242 s, mean 241.44 s |
+| Learned after the first scale-up | 21.66 s | 241.46 s |
+| Learned at the end | 21.03 s | 241.29 s |
+| `startSamples` in the ConfigMap, first scale-up | 1 Pod, mean 21 | 1 Pod, mean 241 |
+
+- **Start samples written:** 8 of the first run's 10 exports hold
+  `startSamples`; none does after the third Pod of each key, as designed.
+- **Start keys restored:** 2 at each of the two restarts, in the recording's
+  `saturation.RestoreLearnedState` and in the ConfigMap after it.
+  `learner-start` does not count them yet (5d).
+- **Sightings:** none. This build does not write them (5d).
+- **The seed:** `RoleStartSeconds` reads 120 on 12 cycles, then the first
+  measured Pod. Published 160.3 s, sized 241 s, as `(2 x 120 + 241) / 3`
+  predicts. Measured alone, `start-reads-replica-start-seed` moves 12 rows of
+  `results.csv` from 21 to 120, and the blend moves them from 21 to 53.67.
+- **The contradicted-seed line fired once**: 241 s is 1 s over 2 x 120. A seed
+  half the true start sits at the edge of the band.
+- **What 5d changes here:** after each restart the running Pods were folded
+  again: slow went 241.46 to 241.66 at the first restart and 241.66 to 241.77
+  at the second, and no `learner-write` carried `restored: true`, since
+  the first cycle admits a sample.
+- **Not reached:** the floor's projection logged `startSource: none` on all 31
+  lines. The simulator run has no router, so no true arrival rate, and the
+  floor projects only over one. No refused outlier either: no start was over
+  three times the estimate.
+
 #### Split and order
 
 | PR | content | fleet sizing |

@@ -190,9 +190,12 @@ var replaySwitches = map[string][]string{
 	// with it (SwitchStartBlendsFirstSamples). Measured, each alone against
 	// all off:
 	//
-	//   - SwitchStartReadsSeed moves nothing: no committed recording seeds a
-	//     variant (StartSeedSet is absent from every recorded state). Its
-	//     unit tests hold it (heldBy).
+	//   - SwitchStartReadsSeed moved nothing when 5c merged: no recording
+	//     seeded a variant. The start-seed goldens do, so it now moves
+	//     RoleStartSeconds on start-seed's first twelve cycles: 21 -> 120
+	//     while the seeded variant has no measured start (share pacing reads
+	//     the slowest variant, seeds included). Its unit tests hold what no
+	//     golden reaches (heldBy).
 	//   - SwitchStartBlendsFirstSamples moves the twelve outputs below, every
 	//     figure up, none down. RoleStartSeconds (share pacing, the slowest
 	//     variant as sized) rises where a key holds fewer than three Pods:
@@ -205,8 +208,12 @@ var replaySwitches = map[string][]string{
 	//     5c's start and at 5b's, and none of these fleets projects a backlog
 	//     at a start the blend changed.
 	//
-	// Both on moves the blend's twelve and no more: no interaction.
-	saturation.SwitchStartReadsSeed: nil,
+	// Both on moves the blend's twelve and no more: no interaction. On
+	// start-seed the blend's RoleStartSeconds rises 21 -> 53.67 alone, and
+	// the two together give the seed's 120, then 241 (the measured Pod).
+	saturation.SwitchStartReadsSeed: {
+		"start-seed/composite-results.csv", "start-seed/results.csv",
+	},
 	saturation.SwitchStartBlendsFirstSamples: {
 		"acceptance/learned-state.csv", "e1-tuned/results.csv", "engine/learned-state.csv",
 		"mu-paths/learned-state.csv",
@@ -218,6 +225,10 @@ var replaySwitches = map[string][]string{
 		// key holds two Pods, so RoleStartSeconds.decode rises, 98.3 ->
 		// 100.5 on every cycle. No other TTFT golden moves.
 		"ttft-saturated/composite-results.csv", "ttft-saturated/results.csv",
+		// The start-seed goldens, recorded after 5c: RoleStartSeconds and
+		// a StartAdmittedAt row per key per export.
+		"start-seed/composite-results.csv", "start-seed/learned-state.csv", "start-seed/results.csv",
+		"start-seed-restart/learned-state.csv", "start-seed-restart-2/learned-state.csv",
 	},
 
 	// Learner PR 5d, on main after 5c and #482 (59772fce2). Measured, each
@@ -343,7 +354,7 @@ func switchPackage(name string) string {
 // in the PR, or cleanup PR, that deletes it with zero golden diff. Learner
 // PR 4a's rows are learner4aSeams, 4b-1's learner4b1Seams and 4b-2's
 // learner4b2Seams, merged in.
-var earlierSeams = withSeams(learner4b2Seams, withSeams(learner4b1Seams, withSeams(learner4aSeams, map[string][]string{
+var earlierSeams = withMoves(startSeedSeamMoves, withSeams(learner4b2Seams, withSeams(learner4b1Seams, withSeams(learner4aSeams, map[string][]string{
 	// #275 (two switches) and #438, this file's own rows before learner PR
 	// 4b-1 (see replaySwitches).
 	saturation.SwitchZeroReplicaDataParallel: nil,
@@ -438,7 +449,59 @@ var earlierSeams = withSeams(learner4b2Seams, withSeams(learner4b1Seams, withSea
 		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
 		"engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
 	},
-})))
+}))))
+
+// startSeedSeamMoves is what each earlier seam, off alone from all on, moves
+// in the start-seed goldens. Measured at 59772fce2, the commit that recorded
+// them. They are the first cluster goldens with k2, mu and ITL learning on a
+// simulator's fleet, so seams that move no other recording move them.
+var startSeedSeamMoves = map[string][]string{
+	saturation.SwitchITLAggregatedShapeTerm: {
+		"start-seed/variant-capacities.csv", "start-seed-restart/learned-state.csv", "start-seed-restart/lines.csv",
+		"start-seed-restart/variant-capacities.csv", "start-seed-restart-2/variant-capacities.csv",
+	},
+	saturation.SwitchITLFitsAggregated: {
+		"start-seed/variant-capacities.csv", "start-seed-restart/learned-state.csv", "start-seed-restart/lines.csv",
+		"start-seed-restart/variant-capacities.csv", "start-seed-restart-2/variant-capacities.csv",
+	},
+	saturation.SwitchITLWaitsAfterRestart: {
+		"start-seed-restart-2/learned-state.csv", "start-seed-restart-2/lines.csv", "start-seed-restart-2/variant-capacities.csv",
+	},
+	saturation.SwitchK2FirstReadingWaits: {
+		"start-seed/composite-variants.csv", "start-seed/learned-state.csv", "start-seed/variant-capacities.csv",
+		"start-seed-restart/learned-state.csv", "start-seed-restart/variant-capacities.csv",
+	},
+	saturation.SwitchK2KeyBucketHeld: {
+		"start-seed/learned-state.csv", "start-seed/variant-capacities.csv", "start-seed-restart-2/learned-state.csv",
+	},
+	saturation.SwitchKVPerRequestOutputDispersion: {"start-seed-restart/learned-state.csv"},
+	saturation.SwitchMuKeyBucketHeld: {
+		"start-seed/composite-results.csv", "start-seed/learned-state.csv", "start-seed/results.csv", "start-seed/variant-capacities.csv",
+		"start-seed-restart-2/composite-results.csv", "start-seed-restart-2/learned-state.csv",
+		"start-seed-restart-2/results.csv", "start-seed-restart-2/variant-capacities.csv",
+	},
+	saturation.SwitchMuMarginClamp: {
+		"start-seed-restart-2/composite-results.csv", "start-seed-restart-2/learned-state.csv",
+		"start-seed-restart-2/results.csv", "start-seed-restart-2/variant-capacities.csv",
+	},
+	saturation.SwitchMuSwapFreeze: {
+		"start-seed/composite-results.csv", "start-seed/learned-state.csv", "start-seed/results.csv", "start-seed/variant-capacities.csv",
+		"start-seed-restart-2/composite-results.csv", "start-seed-restart-2/learned-state.csv",
+		"start-seed-restart-2/results.csv", "start-seed-restart-2/variant-capacities.csv",
+	},
+}
+
+// withMoves is rows with more's outputs added to rows the same switch
+// already has; a name with no row panics.
+func withMoves(more, rows map[string][]string) map[string][]string {
+	for name, outs := range more {
+		if _, ok := rows[name]; !ok {
+			panic("earlierSeams: " + name + " has no row to add to")
+		}
+		rows[name] = append(rows[name], outs...)
+	}
+	return rows
+}
 
 // withSeams is rows with more's rows added; a name in both is a row given
 // twice, and panics.
@@ -821,6 +884,14 @@ var switchBase = map[string]string{
 	// ttft-saturated as #482 added it, before 5c (1ffdb6ad8).
 	"ttft-saturated/composite-results.csv": "a94dd5a36fea549888a525795b152e7199969f46319e25d95bf2f5c8211688bd",
 	"ttft-saturated/results.csv":           "4c1da5e9d1ecb5f7c084703c99c1907811de56e7974fc62b6d96ec965f05b7d7",
+
+	// The start-seed goldens have no base commit: each digest is the output
+	// replayed with every switch of replaySwitches off, at 59772fce2.
+	"start-seed/composite-results.csv":       "2c3b9c87e8540ac2281582ac49f0d740458109bca6c2f63f4b30c319fb4543dd",
+	"start-seed/learned-state.csv":           "860fbdbd8559d29d4caf900c85802657bbacd811bf816175ae21c6d574f06346",
+	"start-seed/results.csv":                 "84c0d2fee77414c2816bb49818aa0466ddbc51501e29dbc621430c7b21bb7265",
+	"start-seed-restart/learned-state.csv":   "ae524f09cd431c1bd754cc903d0870d0d32e9b9b39b9a2a2999595e4cf7c4eb4",
+	"start-seed-restart-2/learned-state.csv": "099f2c638296ba7f62820ed86fbfdcaf30dfcfc1e6d069bbc8b80080414a835d",
 }
 
 // The slow tests of this package run in parallel with each other (each
