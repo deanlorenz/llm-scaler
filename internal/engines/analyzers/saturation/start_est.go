@@ -1,6 +1,7 @@
 package saturation
 
 import (
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -285,9 +286,11 @@ func (a *SaturationAnalyzer) startGaugeSourceLocked(f startFigures) string {
 // (collector.maxCredibleStartSeconds), so no live mean exceeds it.
 const maxRestoredStartSeconds = 3600.0
 
-// noteReplicaStart folds this cycle's observed start times into the per-variant
-// estimate, publishes both the observation and the estimate, and forgets the
-// replicas that have gone.
+// noteReplicaStartFor folds this cycle's observed start times into the
+// per-variant estimate of note's key, publishes both the observation and the
+// estimate the seed and the blend make of it, files the start learner's
+// report (SwitchStartBlendsFirstSamples), and forgets the replicas that have
+// gone. A note with no model files no report.
 //
 // Warm-pool bridges are skipped. A bridged Pod reaching Ready in a second is a
 // wake, not a start, and says nothing about how long this variant's own replicas
@@ -306,17 +309,6 @@ const maxRestoredStartSeconds = 3600.0
 // already-counted branch below re-stamps rather than leaving an entry to
 // expire under a live Pod. A set keyed per Pod is the fastest-growing state on this
 // struct, so it cannot be left to a sweep that does not run.
-func (a *SaturationAnalyzer) noteReplicaStart(
-	key, namespace, variantName string,
-	replicas []domain.ReplicaMetrics,
-	logger logr.Logger,
-) {
-	a.noteReplicaStartFor(startNote{key: key, namespace: namespace, variant: variantName}, replicas, logger)
-}
-
-// noteReplicaStartFor is noteReplicaStart for a variant whose seed and model
-// are known, which publishes the estimate the seed and the blend make of it
-// and files the start learner's report (SwitchStartBlendsFirstSamples).
 func (a *SaturationAnalyzer) noteReplicaStartFor(
 	note startNote,
 	replicas []domain.ReplicaMetrics,
@@ -526,9 +518,13 @@ func (a *SaturationAnalyzer) noteReplicaStartFor(
 // replica starts lies outside [S/2, 2S] of its replicaStartSeconds seed S and
 // fewer than startConfirmPods Pods are measured: the seed is wrong, and
 // holds the estimate until they are.
-const StartSeedContradictedMessage = "WARNING: A variant's replicaStartSeconds is contradicted by its measured starts: " +
-	"the start estimate is held between half and twice the seed until three of its pods have started. " +
-	"Correct or remove the seed on the ScaledObject"
+//
+// Its bounds and Pod count are built from startSeedLowFactor,
+// startSeedHighFactor and startConfirmPods, so the text cannot drift from the
+// rule.
+var StartSeedContradictedMessage = fmt.Sprintf("WARNING: A variant's replicaStartSeconds is contradicted by its measured starts: "+
+	"the start estimate is held between %g and %g times the seed until %d of its pods have started. "+
+	"Correct or remove the seed on the ScaledObject", startSeedLowFactor, startSeedHighFactor, startConfirmPods)
 
 // noteSeedContradictionLocked says whether f is a blend whose measured mean
 // lies outside [S/2, 2S] of its seed S, and records that it said so for that
@@ -819,12 +815,12 @@ func startSource(measured bool) string {
 
 // evictStartSeenPods drops bookkeeping older than the timeout.
 //
-// A backstop only: noteReplicaStart already forgets a Pod the cycle it stops
+// A backstop only: noteReplicaStartFor already forgets a Pod the cycle it stops
 // reporting, which is what actually bounds the map. This exists for the one
 // case that cannot reach -- a variant which disappears entirely, never
 // reported again, so never pruned by its own cycle. EvictStaleHistory now has
 // a caller (steadystate.evictStaleLearnedState), so this runs every cycle, and
-// noteReplicaStart re-stamps a Pod it still sees precisely so that a live Pod
+// noteReplicaStartFor re-stamps a Pod it still sees precisely so that a live Pod
 // is never swept out from under its own "already counted" record.
 func (a *SaturationAnalyzer) evictStartSeenPods(now time.Time, timeout time.Duration) int {
 	dropped := 0

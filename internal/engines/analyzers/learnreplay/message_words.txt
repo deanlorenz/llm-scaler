@@ -2522,7 +2522,6 @@ they
 this
 thisControllerGPUs
 those
-three
 threshold
 thresholdPct
 throughput

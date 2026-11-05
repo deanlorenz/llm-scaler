@@ -293,7 +293,7 @@ func TestStartSeed_AContradictedSeedIsWarnedOfOnce(t *testing.T) {
 // The gauge carries the published figure, not the sized one: a first start
 // of 460 s with no seed publishes 200 s under source blended, though sizing
 // reads 460 s.
-func TestStartBlend_GaugeMutantProbe(t *testing.T) {
+func TestStartBlend_TheGaugePublishesTheBlend(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	require.NoError(t, metrics.InitMetrics(registry))
 	a := blendAnalyzer(t, true, true)
@@ -659,6 +659,9 @@ func TestStartBlend_ThroughAnalyzeALongerStartNeverOrdersLess(t *testing.T) {
 	}{
 		{"a fast first start, blended", 15, 0, 15.0, startSourceMeasured},
 		{"a seed, nothing measured", 0, 120, 0.0, "none"},
+		// The clamp holds the published blend at 2S = 40 s, far under the
+		// 460 s measured; sizing still reads 460, as the parent does.
+		{"a short seed clamped under a slow sample", 460, 20, 460.0, startSourceMeasured},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			on, onRes := floorRun(t, map[string]bool{}, 2.5, c.start, c.seed)

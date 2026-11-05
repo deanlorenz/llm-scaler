@@ -26,8 +26,8 @@ func TestReplicaStartLinesNameTheNamespace(t *testing.T) {
 	var lines []string
 	logger := funcr.New(func(prefix, args string) { lines = append(lines, prefix+" "+args) }, funcr.Options{Verbosity: 10})
 	a := NewSaturationAnalyzer(capacity.NewStore())
-	a.noteReplicaStart(key, "team-a", variant, []domain.ReplicaMetrics{replica("d0", 80)}, logger)
-	a.noteReplicaStart(key, "team-a", variant,
+	a.noteReplicaStartFor(startNote{key: key, namespace: "team-a", variant: variant}, []domain.ReplicaMetrics{replica("d0", 80)}, logger)
+	a.noteReplicaStartFor(startNote{key: key, namespace: "team-a", variant: variant},
 		[]domain.ReplicaMetrics{replica("d1", 80*maxStartOutlierFactor*2)}, logger)
 
 	for _, msg := range []string{"replica-start-measured", "replica-start-outlier-rejected"} {

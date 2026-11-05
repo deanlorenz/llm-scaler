@@ -161,13 +161,13 @@ func (a *SaturationAnalyzer) itlUnderArgs(key, args string) {
 // the next, and clearing it would reintroduce exactly the wait this replaces.
 func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetrics,
 	variantName string, adm itl.Admission, now time.Time, logger logr.Logger) itl.Reading {
-	// Stamped here as well as in noteReplicaStart, because this function
+	// Stamped here as well as in noteReplicaStartFor, because this function
 	// CREATES learned state (the window, and the baseline the tracker writes
 	// on a full fit) and the sweep's rule is that an unstamped key counts as
-	// stale. Stamping only in noteReplicaStart made that rule hold by the
+	// stale. Stamping only in noteReplicaStartFor made that rule hold by the
 	// order two calls happen in a third file -- fitLines calls
-	// noteReplicaStart just before the decode guard that reaches this
-	// function -- so any early return added to noteReplicaStart, or a
+	// noteReplicaStartFor just before the decode guard that reaches this
+	// function -- so any early return added to noteReplicaStartFor, or a
 	// reordering of those two calls, would have deleted every learned ITL
 	// baseline on the first sweep 24h later, silently, falling back to
 	// itl.DefaultBaselineSec. A producer of learned state stamps its own key.

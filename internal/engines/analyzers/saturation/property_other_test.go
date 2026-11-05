@@ -118,7 +118,7 @@ func (s *startRig) add(sample float64) float64 {
 	rm := satRow("p"+string(rune('a'+len(s.pods))), 100_000, 0, 1)
 	rm.StartSeconds = sample
 	s.pods = append(s.pods, rm)
-	s.a.noteReplicaStart(s.key, "test-ns", "v", s.pods, logr.Discard())
+	s.a.noteReplicaStartFor(startNote{key: s.key, namespace: "test-ns", variant: "v"}, s.pods, logr.Discard())
 	if est, ok := s.a.startSeconds[s.key]; ok && est > 0 {
 		return est
 	}

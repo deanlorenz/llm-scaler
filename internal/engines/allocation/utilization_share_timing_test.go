@@ -96,6 +96,10 @@ var _ = Describe("DeriveShareTimings", func() {
 		Entry("a faster role seeded", map[string]float64{"a": 120, "b": 600}, map[string]bool{"a": true}, 10*time.Minute, false),
 		Entry("a tie with a measured role", map[string]float64{"a": 600, "b": 600}, map[string]bool{"a": true}, 10*time.Minute, false),
 		Entry("a low seed alone", map[string]float64{"a": 60}, map[string]bool{"a": true}, time.Minute, true),
+		Entry("both at or over the cap, unequal: the larger, seeded", map[string]float64{"a": 1800, "b": 7200},
+			map[string]bool{"b": true}, 30*time.Minute, true),
+		Entry("both at or over the cap, unequal: the larger, measured", map[string]float64{"a": 1800, "b": 7200},
+			map[string]bool{"a": true}, 30*time.Minute, false),
 	)
 
 	It("names a seeded start as seed, under the 5 min default as well as over it", func() {

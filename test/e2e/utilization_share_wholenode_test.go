@@ -210,7 +210,11 @@ var _ = Describe("Utilization share with a whole-node model: funded by small mod
 		// G's long start is seeded, as a real whole-node model's is: until
 		// three of its pods have started, the published estimate blends
 		// the seed with the measurement (learner PR 5c), and one replica
-		// unseeded would publish (2 x 70 + 180) / 3 = 107 s.
+		// unseeded would publish (2 x 70 + 180) / 3 = 107 s. A seed of
+		// startDelay makes the gauge read the seed whether or not G is
+		// measured, so the spec below also asserts the measured path. An
+		// unseeded G's blend is covered by the saturation unit tests
+		// (start_blend_test.go) and the learner replay goldens.
 		e.register(soG, depG, modelG, 1, 2, "",
 			fixtures.WithReplicaStartSeconds(strconv.Itoa(int(startDelay.Seconds()))))
 		e.register(soS1, depS1, modelS1, 5, 5, "")
@@ -226,6 +230,22 @@ var _ = Describe("Utilization share with a whole-node model: funded by small mod
 			g.Expect(v).To(BeNumerically(">=", 0.8*startDelay.Seconds()), "G's start estimate")
 			wnMeasure("long start: G start estimate (s)", v)
 		}, 8*time.Minute, 15*time.Second).Should(Succeed())
+
+		By("G's start was measured, not only seeded")
+		Eventually(func(g Gomega) {
+			// The gauge's source leaves seed once a pod of G is measured:
+			// blended for one or two pods, measured from three.
+			_, measured := shareGauge(pc, fmt.Sprintf(
+				`max(wva_replica_start_seconds_estimate{exported_namespace=%q,variant_name=~%q,source=~"measured|blended"})`,
+				e.ns, msG+"-.*"))
+			g.Expect(measured).To(BeTrue(), "G's start estimate is still the seed: no pod of G was measured")
+			// And the measurement itself is G's long start: the line's
+			// pods and sizedSeconds, which is never under a measured start.
+			line, found := lastStartMeasured(controllerLogsSince(setUp), e.ns, msG)
+			g.Expect(found).To(BeTrue(), "no replica-start-measured line names G")
+			g.Expect(line.Pods).To(BeNumerically(">=", 1))
+			g.Expect(line.SizedSeconds).To(BeNumerically(">=", 0.8*startDelay.Seconds()), "G's measured start")
+		}, 2*time.Minute, 15*time.Second).Should(Succeed())
 	})
 
 	It("empties node 2 for G with one set of S1 and S2 pods, then raises G onto it", func() {

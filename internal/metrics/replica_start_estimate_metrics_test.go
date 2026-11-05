@@ -44,3 +44,46 @@ func TestReplicaStartSecondsEstimateKeepsOneSource(t *testing.T) {
 		}
 	}
 }
+
+// A fresh registry forgets what source a variant was published under: after
+// InitMetrics, a call keeps nothing from before, and a series of another
+// source set on the new registry is deleted by the first call.
+func TestReplicaStartSecondsEstimateAfterInit(t *testing.T) {
+	_, _ = engineConfigEmitter(t)
+	SetReplicaStartSecondsEstimate("ns", "x", 90, ReplicaStartSourceMeasured)
+	_, registry := engineConfigEmitter(t)
+	stray := variantSeriesLabels("ns", "x")
+	stray[constants.LabelStartSource] = ReplicaStartSourceSeed
+	replicaStartSecondsEstimate.With(stray).Set(1)
+	SetReplicaStartSecondsEstimate("ns", "x", 91, ReplicaStartSourceMeasured)
+	if _, ok := seriesValue(t, registry, constants.WVAReplicaStartSecondsEstimate, map[string]string{
+		constants.LabelVariantName: "x", constants.LabelStartSource: ReplicaStartSourceSeed,
+	}); ok {
+		t.Fatal("after InitMetrics the first call kept another source's child")
+	}
+}
+
+// The other sources are deleted when the source changes, not on every call:
+// a call that keeps the source leaves a child of another source alone (here
+// one set behind the setter's back), and the next change deletes it.
+func TestReplicaStartSecondsEstimateDeletesOnlyOnAChange(t *testing.T) {
+	_, registry := engineConfigEmitter(t)
+	present := func(source string) bool {
+		_, ok := seriesValue(t, registry, constants.WVAReplicaStartSecondsEstimate, map[string]string{
+			constants.LabelVariantName: "w", constants.LabelStartSource: source,
+		})
+		return ok
+	}
+	SetReplicaStartSecondsEstimate("ns", "w", 70, ReplicaStartSourceDefault)
+	stray := variantSeriesLabels("ns", "w")
+	stray[constants.LabelStartSource] = ReplicaStartSourceSeed
+	replicaStartSecondsEstimate.With(stray).Set(1)
+	SetReplicaStartSecondsEstimate("ns", "w", 71, ReplicaStartSourceDefault)
+	if !present(ReplicaStartSourceSeed) {
+		t.Fatal("an unchanged source deleted the other children")
+	}
+	SetReplicaStartSecondsEstimate("ns", "w", 90, ReplicaStartSourceMeasured)
+	if present(ReplicaStartSourceSeed) || present(ReplicaStartSourceDefault) {
+		t.Fatal("a change of source left the other children")
+	}
+}

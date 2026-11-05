@@ -656,23 +656,7 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	tf := estimate(starts.sized)
 	startSeconds, startSources := starts.sized, starts.source
 	if !maps.Equal(starts.sized, starts.parent) {
-		parent := estimate(starts.parent)
-		startSeconds, startSources = maps.Clone(starts.sized), maps.Clone(starts.source)
-		for role, tokens := range parent.ByRole {
-			if have, ok := tf.ByRole[role]; ok && !(tokens > have) {
-				continue
-			}
-			if tf.ByRole == nil {
-				tf.ByRole, tf.Terms = map[string]float64{}, map[string]floor.Term{}
-			}
-			tf.ByRole[role], tf.Terms[role] = tokens, parent.Terms[role]
-			if s, ok := starts.parent[role]; ok {
-				startSeconds[role], startSources[role] = s, startSourceMeasured
-			} else {
-				delete(startSeconds, role)
-				delete(startSources, role)
-			}
-		}
+		tf, startSeconds, startSources = pickLargerFloor(tf, estimate(starts.parent), starts)
 	}
 
 	// Prefill with no mu: the scheduler queue's prompts are not resident work
@@ -844,6 +828,36 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 			"roles", roles)
 	}
 	return totalDemand
+}
+
+// pickLargerFloor is, per role, the larger of the floor priced at 5c's
+// start (sized) and at 5b's (parent), with the start each role was priced at
+// and its source: a role parent orders more for takes parent's term and the
+// measured start 5b used, or no start where 5b projected none. Neither input
+// is changed.
+func pickLargerFloor(sized, parent floor.Floor, starts roleStarts) (floor.Floor, map[string]float64, map[string]string) {
+	out := sized
+	out.ByRole, out.Terms = maps.Clone(sized.ByRole), maps.Clone(sized.Terms)
+	startSeconds, startSources := maps.Clone(starts.sized), maps.Clone(starts.source)
+	if startSeconds == nil {
+		startSeconds, startSources = map[string]float64{}, map[string]string{}
+	}
+	for role, tokens := range parent.ByRole {
+		if have, ok := out.ByRole[role]; ok && !(tokens > have) {
+			continue
+		}
+		if out.ByRole == nil {
+			out.ByRole, out.Terms = map[string]float64{}, map[string]floor.Term{}
+		}
+		out.ByRole[role], out.Terms[role] = tokens, parent.Terms[role]
+		if s, ok := starts.parent[role]; ok {
+			startSeconds[role], startSources[role] = s, startSourceMeasured
+		} else {
+			delete(startSeconds, role)
+			delete(startSources, role)
+		}
+	}
+	return out, startSeconds, startSources
 }
 
 // A NOTE ON WHAT THE MODEL TOTAL HOLDS, and why there is no correction here.

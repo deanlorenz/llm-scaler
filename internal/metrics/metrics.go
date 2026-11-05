@@ -36,6 +36,16 @@ var (
 	replicaSeriesAccel = map[string]string{}
 )
 
+// replicaStartSourceMu guards replicaStartSource: the source each variant's
+// wva_replica_start_seconds_estimate was last published under, keyed
+// namespace/variant, so SetReplicaStartSecondsEstimate deletes the other
+// sources' children only when the source changes. Bounded like
+// replicaSeriesAccel, by one entry per variant ever seen.
+var (
+	replicaStartSourceMu sync.Mutex
+	replicaStartSource   = map[string]string{}
+)
+
 // replicaSeriesKey identifies a VA's replica-gauge series independent of
 // accelerator_type. controllerInstance is process-global (set once at
 // InitMetrics) so it is intentionally not part of the key.
@@ -138,6 +148,9 @@ func InitMetrics(registry prometheus.Registerer) error {
 	replicaSeriesMu.Lock()
 	replicaSeriesAccel = map[string]string{}
 	replicaSeriesMu.Unlock()
+	replicaStartSourceMu.Lock()
+	replicaStartSource = map[string]string{}
+	replicaStartSourceMu.Unlock()
 
 	// Build label sets based on whether controller_instance is configured.
 	// Existing replica metrics (baseLabels, scalingLabels) are unchanged.
@@ -1247,7 +1260,16 @@ func SetReplicaStartSecondsEstimate(namespace, variantName string, seconds float
 	// for a variant over its life, and a child is scraped until it is
 	// removed, so keeping a stale one makes sum by (variant_name) return the
 	// two added. A panel or alert written without a source selector would
-	// read a variant with a 300 s measured start as 370.
+	// read a variant with a 300 s measured start as 370. Only when the source
+	// changed: the others were deleted the last time it did.
+	key := namespace + "/" + variantName
+	replicaStartSourceMu.Lock()
+	last, seen := replicaStartSource[key]
+	replicaStartSource[key] = source
+	replicaStartSourceMu.Unlock()
+	if seen && last == source {
+		return
+	}
 	for _, other := range replicaStartSources {
 		if other == source {
 			continue

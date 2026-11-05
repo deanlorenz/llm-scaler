@@ -270,9 +270,9 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 		//
 		// noteITL creates the ITL window and writes the learned baseline and
 		// stamped neither. It was harmless only by the order of two calls in
-		// a third file: fitLines calls noteReplicaStart, which stamps, just
+		// a third file: fitLines calls noteReplicaStartFor, which stamps, just
 		// before the decode guard that reaches noteITL. So an early return
-		// added to noteReplicaStart, or a reordering of those two calls,
+		// added to noteReplicaStartFor, or a reordering of those two calls,
 		// would have deleted every learned ITL baseline on the first sweep --
 		// silently, falling back to itl.DefaultBaselineSec, the direction this
 		// project has recorded as collapsing a fleet.
@@ -280,7 +280,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 		// This spec calls noteITL ALONE, which is what no existing spec does
 		// and why the gap was invisible: driven through fitLines the suite
 		// stays green with the stamp removed.
-		It("keeps the window noteITL created, without noteReplicaStart having run", func() {
+		It("keeps the window noteITL created, without noteReplicaStartFor having run", func() {
 			a := NewSaturationAnalyzer(capacity.NewStore())
 			key := "ns|m|decode-v|NVIDIA-H200|1"
 			now := time.Now()
@@ -292,7 +292,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 
 			Expect(a.itlWindowLens()).To(HaveKey(key),
 				"noteITL must stamp the key it creates state under, rather than relying on "+
-					"noteReplicaStart having been called first by a third file")
+					"noteReplicaStartFor having been called first by a third file")
 		})
 	})
 
@@ -324,7 +324,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 			base := time.Now()
 			a.now = func() time.Time { return base }
 
-			a.noteReplicaStart(key, ns, variant, reporting(70), logr.Discard())
+			a.noteReplicaStartFor(startNote{key: key, namespace: ns, variant: variant}, reporting(70), logr.Discard())
 			Expect(a.startSeconds[key]).To(BeNumerically("==", 70))
 			Expect(a.startSeenPods).To(HaveLen(1))
 
@@ -332,7 +332,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 			// start time now reads 0. This is the cycle that must re-stamp.
 			quiet := base.Add(capacity.HistoryEvictionTimeout - time.Minute)
 			a.now = func() time.Time { return quiet }
-			a.noteReplicaStart(key, ns, variant, reporting(0), logr.Discard())
+			a.noteReplicaStartFor(startNote{key: key, namespace: ns, variant: variant}, reporting(0), logr.Discard())
 
 			// A sweep past the ORIGINAL stamp. Re-stamped, the record is two
 			// minutes old and survives; gated below StartSeconds > 0 it is
@@ -346,7 +346,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 
 			// It reports a start time again -- a different one, so a second
 			// fold is visible rather than hidden by an EWMA onto itself.
-			a.noteReplicaStart(key, ns, variant, reporting(130), logr.Discard())
+			a.noteReplicaStartFor(startNote{key: key, namespace: ns, variant: variant}, reporting(130), logr.Discard())
 			Expect(a.startSeconds[key]).To(BeNumerically("==", 70),
 				"one Pod's start is one sample however many cycles report it; folded in "+
 					"twice the estimate drifts toward whatever the longest-lived replica "+

@@ -176,6 +176,8 @@ func (a *SaturationAnalyzer) forgetStartLocked(namespace, modelID, variant strin
 	n += before - len(a.startSamples) - len(a.startAdmittedAt)
 	maps.DeleteFunc(a.startRestored, func(k string, _ struct{}) bool { return of(k) })
 	maps.DeleteFunc(a.startLogged, func(k string, _ startLogged) bool { return of(k) })
+	// A forgotten key's seed is judged afresh, so its warning may fire again.
+	maps.DeleteFunc(a.startSeedWarned, func(k string, _ float64) bool { return of(k) })
 	if len(keys) > 0 && a.startBlends {
 		model := namespace + "|" + modelID
 		if a.startForgotten[model] == nil {

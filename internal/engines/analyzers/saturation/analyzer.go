@@ -274,10 +274,10 @@ type SaturationAnalyzer struct {
 	// Len() == 0 therefore deleted the learned start estimate and the ITL
 	// baseline of exactly the fleets that were doing fine, every cycle; and
 	// because startSeenPods is re-stamped for a Pod still being reported,
-	// noteReplicaStart could never put the start estimate back. The figure was
+	// noteReplicaStartFor could never put the start estimate back. The figure was
 	// gone until the Pod was replaced.
 	//
-	// Stamped by noteITL and by noteReplicaStart, so it covers every role
+	// Stamped by noteITL and by noteReplicaStartFor, so it covers every role
 	// rather than decode alone -- which also bounds the start estimate of a
 	// prefill or RoleBoth variant, whose keys the window cascade could never
 	// visit and so never swept at all. Both producers stamp their own key,
@@ -939,7 +939,7 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 	// changed, from "its window is empty" to "nothing has reported it".
 	// The tracker sweeps windows and baselines in separate passes, and the
 	// start estimates below have their own loop, not one pass over the
-	// windows: noteReplicaStart runs for every role while noteITL runs for
+	// windows: noteReplicaStartFor runs for every role while noteITL runs for
 	// decode only, so a prefill or RoleBoth variant has a start estimate and
 	// no window at all. Sweeping these through the window map left those keys
 	// unbounded -- the very leak the sweep was wired up to close.
