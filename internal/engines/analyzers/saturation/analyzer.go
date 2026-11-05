@@ -236,6 +236,28 @@ type SaturationAnalyzer struct {
 	// 5b): on from the constructor; a replay turns it off
 	// (SetSwitchesForReplay), and the guard counts refusals as before.
 	startConfirmsByPod bool
+	// startReadsSeed is SwitchStartReadsSeed and startBlends
+	// SwitchStartBlendsFirstSamples (learner PR 5c, start_est.go): on from
+	// the constructor; a replay turns them off.
+	startReadsSeed bool
+	startBlends    bool
+	// startSamples is, per start key whose estimate is from fewer than
+	// startConfirmPods distinct Pods, how many and their mean start; a key
+	// it does not hold has full authority. startAdmittedAt is when each key
+	// last admitted a start. Both are in the snapshot, and go with the
+	// estimate (the sweep, a forget). startRestored marks a key whose
+	// estimate was restored and has admitted nothing since: learner-write
+	// says restored on it.
+	startSamples    map[string]startSample
+	startAdmittedAt map[string]time.Time
+	startRestored   map[string]struct{}
+	// Start time as a learner (start_learner.go): its reports of the cycle
+	// in progress per namespace|model, what learner-write last logged per
+	// start key, and the keys forgotten per namespace|model and variant
+	// since the variant's last report.
+	startCycles    map[string][]learn.Report
+	startLogged    map[string]startLogged
+	startForgotten map[string]map[string][]learn.Forgotten
 	// variantSeenAt is when each variant key was last REPORTED, which is what
 	// the learned per-variant state is swept on.
 	//
@@ -570,6 +592,14 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		startOutliers:          make(map[string]int),
 		startOutlierPods:       make(map[string]map[string]startRunPod),
 		startConfirmsByPod:     true,
+		startReadsSeed:         true,
+		startBlends:            true,
+		startSamples:           make(map[string]startSample),
+		startAdmittedAt:        make(map[string]time.Time),
+		startRestored:          make(map[string]struct{}),
+		startCycles:            make(map[string][]learn.Report),
+		startLogged:            make(map[string]startLogged),
+		startForgotten:         make(map[string]map[string][]learn.Forgotten),
 		variantSeenAt:          make(map[string]time.Time),
 		now:                    clock.RealClock{}.Now,
 		readySince:             replicaReadySince,
@@ -903,6 +933,29 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 			delete(a.startSeconds, key)
 			delete(a.startOutliers, key)
 			evicted.StartEstimates++
+		}
+	}
+	// The start learner's per-key state goes with its key's liveness, as
+	// the estimate does; a count or stamp with no estimate beside it is
+	// never read, and goes too.
+	for key := range a.startSamples {
+		if _, ok := a.startSeconds[key]; !ok || a.variantIsStale(key, now, variantTimeout) {
+			delete(a.startSamples, key)
+		}
+	}
+	for key := range a.startAdmittedAt {
+		if _, ok := a.startSeconds[key]; !ok || a.variantIsStale(key, now, variantTimeout) {
+			delete(a.startAdmittedAt, key)
+		}
+	}
+	for key := range a.startRestored {
+		if _, ok := a.startSeconds[key]; !ok {
+			delete(a.startRestored, key)
+		}
+	}
+	for key := range a.startLogged {
+		if a.variantIsStale(key, now, variantTimeout) {
+			delete(a.startLogged, key)
 		}
 	}
 	// The arguments the ITL state was learned under, and the baselines put

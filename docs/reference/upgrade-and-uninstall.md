@@ -108,6 +108,10 @@ only to change it. Limiters an admin published in a policy namespace
 
 An ordinary aggregated deployment (a variant with no `llm-d.ai/role` label) now reports an inter-token-latency line and the service rate it derives: `wva_itl_line_slope` and `wva_service_rate_per_replica{source="derived-report-only"}` appear for it. Once the line accounts for the request shape and has matched the replicas' generated tokens for 3 cycles, the variant is sized from it (`source="derived-aggregated"`), never above a measured rate of its own. A vLLM aggregated variant needs `vllm:num_requests_running` scraped for that; an SGLang one stays reported only. The learned-state document gains `itlLineShapes`; an older controller ignores it. An aggregated line restored from a document written before this release has no shape, so it prices nothing, reported or sized, until the variant fits it again under load.
 
+The ScaledObject's `replicaStartSeconds` is now used. A variant with no start measured yet is sized at that figure: the throughput floor projects its backlog over it, and utilization-share pacing reads it in place of 5 minutes. Until three of a variant's pods have started, the published start estimate blends the seed (or the 70 s default) with the measured starts. Sizing reads the larger of that blend and the measurement, so the controller may order more replicas during a variant's first starts, and never fewer.
+
+`wva_replica_start_seconds_estimate` changes its `source` label: `default` is the 70 s default, which earlier releases labelled `seed`; `seed` is now only a ScaledObject's `replicaStartSeconds`. Update any query or alert on `source="seed"`. The learned-state document gains `startSamples` and `startAdmittedAt`; an older controller ignores them, and an estimate restored from an older document is treated as fully measured.
+
 ### Upgrading from v0.10.1 to v0.10.2
 
 Follow [Upgrade](#upgrade) above: back up the policy first, check out

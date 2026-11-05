@@ -2796,6 +2796,76 @@ on from the constructor.
   `Analyze` not feeding the estimate, runs shared across a variant's keys,
   the sweep counting a key twice, and the parent (switch off everywhere).
 
+#### 5c as built
+
+Built on main 602054e98 (5b merged). Changes A and C, behind two switches,
+both on from the constructor: `saturation.SwitchStartReadsSeed`
+(`start-reads-replica-start-seed`) and
+`saturation.SwitchStartBlendsFirstSamples` (`start-blends-first-samples`).
+
+- **Three figures per key** (`startFiguresLocked`, `D/start_est.go`). E is
+  the measured estimate the fold keeps (`startSeconds`: the first sample, the
+  EWMA, or a 5b run's median). With n < N = 3 distinct Pods counted
+  (`startSamples`) and m their plain mean:
+  - published = ((N - n) * P + n * m) / N, held in [S/2, 2S] with a seed S;
+  - sized = max(published, m, E);
+  - from N Pods on, both are E.
+
+  P is the seed when one is set, else 70 s. The 5b guard compares with E
+  alone (`TestStartBlend_TheGuardReadsTheMeasurementNotTheBlend`).
+- **Why E is in the max.** The design said max(blend, m). The fold is an
+  EWMA, so with two Pods m can sit below E: 460 s then 15 s give m 237.5 s
+  and E 326.5 s, and sizing at max(blend, m) read a shorter start than the
+  parent did (`TestStartBlend_SizingNeverReadsShorterThanTheParent`).
+- **A longer start can order less.** `backlogAtLanding` credits each Ready
+  replica with mu x S of drain, and past the 60 s drain time `DrainHorizon`
+  spreads the backlog over S. On a fleet that drains faster than work
+  arrives, a longer S orders less. On the floor rig at λ 2.5, a first start
+  of 15 s published as 51.7 s cut the order from 2.91M to 2.32M tokens. So
+  the floor prices twice, at 5c's start and at 5b's (the fastest measured E,
+  no seed), and each role keeps the larger order and names the start that
+  priced it (`roleStarts`, `TestStartBlend_ThroughAnalyzeALongerStartNeverOrdersLess`).
+  Where the two start maps are equal, it prices once.
+- **The seed (A).** A role with no measured variant is sized at its
+  fastest variant's seed: projected by the floor (`startSource: seed`) and
+  read by share pacing. Beside a measured sibling, a seed never shortens the
+  floor's start: the fastest *measured* variant wins. Share pacing takes the
+  slowest variant as sized, seeds included. An unseeded, unmeasured role stays
+  unprojected. A seed of 0 or less is no prior.
+- **The gauge.** `wva_replica_start_seconds_estimate` publishes the published
+  figure, with `source` `default`, `seed` or `measured`, and deletes the other
+  two children. With the seed switch off, the labels are the parent's
+  (`seed` for the default).
+- **Persistence.** Two new `omitempty` fields: `startSamples` (per key, pods
+  and mean, only while fewer than N) and `startAdmittedAt`. The design had n
+  and m in one field; it holds both. An estimate with no count has full
+  authority, so an older document moves no fleet. A count no live key could
+  hold (no Pods, N or more, a mean that is not a positive number) is not
+  installed. Both are exported beside a pending restore's estimate, dropped
+  with the variant, and trimmed with its liveness in the store.
+- **Learner `start`.** It is on `learn.Learners` (the slo analyzer holds
+  none of it). Each cycle it files a `learn.Report` per variant, with
+  `Samples` the Pods counted and `LastAdmitted` the stamp. It logs
+  `learner-write` at V(3) when the published figure is first set, changes
+  source, moves `StartWriteBand` (5 %, unmeasured) or reaches the heartbeat.
+  The line carries `restored: true` until the key's first admitted start
+  after a restore. A forget drops the estimate, count, stamp and log memo,
+  and reports each key forgotten.
+- **Not built here.** `learner-start` does not count start keys yet, and
+  the "Learned state: snapshot restored" line does not gain `startKeys`; both
+  are 5d's, with `sightings`.
+- **`replica-start-measured`** gains `pods`, `prior`, `priorSource` and
+  `sizedSeconds` with the blend on. Off, it is the parent's line byte for byte.
+- **Goldens.** Measured alone against all off, the seed switch moves nothing:
+  no recording seeds a variant. The blend switch moves twelve outputs, every
+  figure up and none down. `RoleStartSeconds` rises where a key has fewer
+  than three Pods: 63 to 67.67 (ols-sweep, decode), 62 to 67.33 (prefill),
+  60 to 66.67 (both ols-sweep-slo), 68 to 69.33 (pd-restart, prefill), and
+  231.6 to 234 (e1-tuned). `learned-state.csv` gains a `StartAdmittedAt` row
+  per key per export. No `TotalDemand` and no variant capacity moves. The
+  property case `first-sample/start-time/between-sample-and-default` passes
+  and leaves the known failures; `seed-bounds` is new.
+
 ## 8. Risks and limits
 
 - **One shared bug.** A defect in the settle tracker reaches every learner at

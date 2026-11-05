@@ -1,6 +1,7 @@
 package saturation
 
 import (
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -85,6 +86,19 @@ const (
 	startOutlierRelog = 10 * time.Minute
 )
 
+// The bounds a ScaledObject's replicaStartSeconds seed S holds the published
+// estimate in while fewer than startConfirmPods Pods are measured
+// (SwitchStartBlendsFirstSamples): [S/2, 2S].
+//
+// Unmeasured: wide enough that a first start a few times off the seed moves
+// the estimate most of the way, narrow enough that one Pod reporting its age
+// cannot. They bound the published figure only: sizing never reads a start
+// shorter than one measured (startFiguresLocked).
+const (
+	startSeedLowFactor  = 0.5
+	startSeedHighFactor = 2.0
+)
+
 // SwitchStartConfirmsByDistinctPod is the replay switch for learner PR 5b
 // (analyzer-learner.md, PR 5, change B): the start guard opens when
 // startConfirmPods distinct Pods have reported a start over
@@ -93,6 +107,165 @@ const (
 // counted per refusal, so one Pod reporting its age on four cycles folds
 // it. On from the constructor; a replay turns it off (SetSwitchesForReplay).
 const SwitchStartConfirmsByDistinctPod = "start-confirms-by-distinct-pod"
+
+// SwitchStartReadsSeed is the replay switch for learner PR 5c's change A
+// (analyzer-learner.md, PR 5): the ScaledObject's replicaStartSeconds seed
+// is the prior. A seeded variant with no start measured is sized at the
+// seed, so the floor projects its backlog over it and share pacing reads it;
+// the blend's prior and bounds are the seed; and the estimate gauge's source
+// says default, seed or measured. Off, the seed is read by nothing, as in
+// 5a, and the gauge labels the 70 s default "seed". On from the constructor;
+// a replay turns it off (SetSwitchesForReplay).
+const SwitchStartReadsSeed = "start-reads-replica-start-seed"
+
+// SwitchStartBlendsFirstSamples is the replay switch for learner PR 5c's
+// change C: while fewer than startConfirmPods Pods of a key are measured,
+// the published estimate (the gauge, the log, learner start) blends the
+// prior with the measured estimate, and sizing reads the larger of the blend
+// and the measured estimate, never a start shorter than one measured. The
+// key's sample count and last admitted start are kept and stored in the
+// snapshot. Off, the measured estimate is published and sized from its
+// first sample, as in 5b. On from the constructor; a replay turns it off.
+const SwitchStartBlendsFirstSamples = "start-blends-first-samples"
+
+// The estimate gauge's sources (wva_replica_start_seconds_estimate), and the
+// start learner's: the 70 s default, the ScaledObject's seed, or a start
+// measured on a Pod of the variant.
+const (
+	startSourceDefault  = metrics.ReplicaStartSourceDefault
+	startSourceSeed     = metrics.ReplicaStartSourceSeed
+	startSourceMeasured = metrics.ReplicaStartSourceMeasured
+)
+
+// startNote names what a cycle's start samples are noted for: the start key,
+// the variant, and what the start learner reports it under. modelID empty
+// files no learner report (a direct call from a test of the fold).
+type startNote struct {
+	key, namespace, modelID, variant, role string
+	// seed is the variant's replicaStartSeconds, 0 when unset.
+	seed float64
+}
+
+// startFigures is a key's start estimate as each reader takes it
+// (startFiguresLocked).
+type startFigures struct {
+	// published is what the gauge, the log and learner start show: the
+	// blend while fewer than startConfirmPods Pods are measured, else the
+	// measured estimate; the prior when nothing is measured.
+	published float64
+	// sized is what the floor's projection and share pacing read: the
+	// largest of the blend, the measured mean and the measured estimate;
+	// the seed for a seeded, unmeasured key; 0 for an unseeded, unmeasured
+	// one, which is not projected.
+	sized float64
+	// measured is the measured estimate (startSeconds), 0 when none. The
+	// 5b guard compares with it, never with the blend.
+	measured float64
+	// mean is the plain mean of the counted Pods' starts while fewer than
+	// startConfirmPods are counted, else the measured estimate.
+	mean float64
+	// pods is how many distinct Pods the estimate is from, at most
+	// startConfirmPods: a key at the cap, or measured before the count was
+	// kept, has full authority.
+	pods int
+	// prior and priorSource are the blend's prior: the seed, or the default.
+	prior       float64
+	priorSource string
+	// source is startSourceMeasured, startSourceSeed or startSourceDefault.
+	source string
+}
+
+// startFiguresLocked is the start estimate of key, a variant seeded with
+// seed (0 when unset), as published and as sized. Callers hold a.mu.
+//
+// With n < startConfirmPods (N) Pods counted, m their mean start and E the
+// measured estimate (startSeconds):
+//
+//	published = ((N - n) * P + n * m) / N, held in [S/2, 2S] with a seed S
+//	sized     = max(published, m, E)
+//
+// E is in the max because the fold keeps an EWMA, not a mean: two Pods
+// starting in 460 s and then 15 s give a mean of 237.5 s and an estimate of
+// 326.5 s, and sizing at the mean alone would read a shorter start than the
+// parent sized at. Sizing errs toward a longer start only, which on a
+// scale-up projects more backlog and orders more. From N Pods on, every
+// reader takes E.
+func (a *SaturationAnalyzer) startFiguresLocked(key string, seed float64) startFigures {
+	if !a.startReadsSeed || !(seed > 0) {
+		seed = 0
+	}
+	f := startFigures{prior: DefaultReplicaStartSeconds, priorSource: startSourceDefault}
+	if seed > 0 {
+		f.prior, f.priorSource = seed, startSourceSeed
+	}
+	e, measured := a.startSeconds[key]
+	if !measured || !(e > 0) {
+		f.published, f.source = f.prior, f.priorSource
+		f.sized = seed
+		return f
+	}
+	f.measured, f.mean, f.published, f.sized, f.source = e, e, e, e, startSourceMeasured
+	f.pods = startConfirmPods
+	if !a.startBlends {
+		return f
+	}
+	s, counting := a.startSamples[key]
+	if !counting || s.pods >= startConfirmPods || !(s.mean > 0) {
+		return f
+	}
+	f.pods, f.mean = s.pods, s.mean
+	blend := (float64(startConfirmPods-s.pods)*f.prior + float64(s.pods)*s.mean) / startConfirmPods
+	if seed > 0 {
+		blend = min(max(blend, startSeedLowFactor*seed), startSeedHighFactor*seed)
+	}
+	f.published = blend
+	f.sized = max(blend, s.mean, e)
+	return f
+}
+
+// startSample is a key's count of the distinct Pods whose start it admitted,
+// and their mean start, while fewer than startConfirmPods
+// (SwitchStartBlendsFirstSamples). A key with none has full authority.
+type startSample struct {
+	pods int
+	mean float64
+}
+
+// noteStartSampleLocked stamps when key last admitted a start, ends its
+// restored mark, and counts the start, sample seconds, toward the blend
+// (SwitchStartBlendsFirstSamples). A key measured before the count was kept
+// (restored from a document without it) has full authority already, and is
+// not counted again; a key that reaches startConfirmPods drops its count,
+// which reads as full authority. Off, nothing is kept, so the snapshot holds
+// what the parent's did. Callers hold a.mu.
+func (a *SaturationAnalyzer) noteStartSampleLocked(key string, sample float64, wasMeasured bool, now time.Time) {
+	if !a.startBlends {
+		return
+	}
+	a.startAdmittedAt[key] = now
+	delete(a.startRestored, key)
+	s, counting := a.startSamples[key]
+	if wasMeasured && !counting {
+		return
+	}
+	if s.pods+1 >= startConfirmPods {
+		delete(a.startSamples, key)
+		return
+	}
+	s.mean = (float64(s.pods)*s.mean + sample) / float64(s.pods+1)
+	s.pods++
+	a.startSamples[key] = s
+}
+
+// startGaugeSourceLocked is the estimate gauge's source for f: default,
+// seed or measured with SwitchStartReadsSeed on; off, the parent's, which
+// labels the 70 s default "seed". Callers hold a.mu.
+func (a *SaturationAnalyzer) startGaugeSourceLocked(f startFigures) string {
+	if a.startReadsSeed {
+		return f.source
+	}
+	return startSource(f.source == startSourceMeasured)
+}
 
 // noteReplicaStart folds this cycle's observed start times into the per-variant
 // estimate, publishes both the observation and the estimate, and forgets the
@@ -120,6 +293,18 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 	replicas []domain.ReplicaMetrics,
 	logger logr.Logger,
 ) {
+	a.noteReplicaStartFor(startNote{key: key, namespace: namespace, variant: variantName}, replicas, logger)
+}
+
+// noteReplicaStartFor is noteReplicaStart for a variant whose seed and model
+// are known, which publishes the estimate the seed and the blend make of it
+// and files the start learner's report (SwitchStartBlendsFirstSamples).
+func (a *SaturationAnalyzer) noteReplicaStartFor(
+	note startNote,
+	replicas []domain.ReplicaMetrics,
+	logger logr.Logger,
+) {
+	key, namespace, variantName := note.key, note.namespace, note.variant
 	type outlier struct {
 		pod     string
 		sample  float64
@@ -219,6 +404,7 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 		}
 		a.startSeenPods[seen] = now
 		observed++
+		a.noteStartSampleLocked(key, rm.StartSeconds, measured && cur > 0, now)
 
 		if measured && cur > 0 {
 			a.startSeconds[key] = (1-startSecondsAlpha)*cur + startSecondsAlpha*rm.StartSeconds
@@ -235,6 +421,12 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 	if a.startConfirmsByPod {
 		confirmed = a.closeStartRunLocked(key, endsRun, present, now)
 		if confirmed != nil {
+			// startConfirmPods Pods agreed: the median has full authority.
+			if a.startBlends {
+				delete(a.startSamples, key)
+				delete(a.startRestored, key)
+				a.startAdmittedAt[key] = now
+			}
 			observed += len(confirmed.samples)
 			for _, s := range confirmed.samples {
 				metrics.ObserveReplicaStartSeconds(namespace, variantName, s)
@@ -257,13 +449,13 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 			delete(a.startSeenPods, k)
 		}
 	}
-	est, measured := a.startSeconds[key]
+	f := a.startFiguresLocked(key, note.seed)
+	gaugeSource := a.startGaugeSourceLocked(f)
+	blends := a.startBlends
+	write := a.noteStartLearnerLocked(note, f, observed, now)
 	a.mu.Unlock()
 
-	if !measured || !(est > 0) {
-		est = DefaultReplicaStartSeconds
-	}
-	metrics.SetReplicaStartSecondsEstimate(namespace, variantName, est, measured)
+	metrics.SetReplicaStartSecondsEstimate(namespace, variantName, f.published, gaugeSource)
 	for _, o := range rejected {
 		if o.byPod && confirmed != nil {
 			// The run confirmed this cycle: its line names the Pods.
@@ -287,10 +479,16 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 			"previousEstimateSeconds", confirmed.previous)
 	}
 	if observed > 0 {
-		logger.V(logging.DEFAULT).Info("replica-start-measured",
-			"namespace", namespace, "variant", variantName, "observations", observed,
-			"estimateSeconds", est, "source", startSource(measured))
+		kv := []any{"namespace", namespace, "variant", variantName, "observations", observed,
+			"estimateSeconds", f.published, "source", startSource(f.source == startSourceMeasured)}
+		if blends {
+			// Off, the parent's line, byte for byte.
+			kv = append(kv, "pods", f.pods, "prior", f.prior, "priorSource", f.priorSource,
+				"sizedSeconds", f.sized)
+		}
+		logger.V(logging.DEFAULT).Info("replica-start-measured", kv...)
 	}
+	write.log(logger)
 }
 
 // startPodKey is the key a replica's start is counted under
@@ -415,44 +613,76 @@ func (a *SaturationAnalyzer) closeStartRunLocked(
 }
 
 // startSecondsByRole is how long one replica of each role takes to become Ready,
-// from the per-variant estimates.
+// from the per-variant estimates as sized (startFiguresLocked), and where
+// each role's figure came from: measured, or seed.
 //
-// The MINIMUM over a role's variants, not the maximum or the mean: it is the
-// first relief to arrive, and the projection is what gets ordered on. Taking the
-// slowest would project more arrivals and order more replicas on a role whose
-// variants differ -- the wrong direction to err, given the failure this whole
-// file is chasing is a fleet that over-orders and cannot come back down.
+// The MINIMUM over a role's measured variants, not the maximum or the mean: it
+// is the first relief to arrive, and the projection is what gets ordered on.
+// Taking the slowest would project more arrivals and order more replicas on a
+// role whose variants differ -- the wrong direction to err, given the failure
+// this whole file is chasing is a fleet that over-orders and cannot come back
+// down.
 //
-// A role with no measured variant is absent from the result, which leaves the
-// floor on its observed backlog for that role.
+// A seed enters only for a role with no measured variant
+// (SwitchStartReadsSeed): beside a measured sibling, a short seed would be
+// the minimum and project less backlog than the measurement does. A role with
+// neither is absent from the result, which leaves the floor on its observed
+// backlog for that role.
 func (a *SaturationAnalyzer) startSecondsByRole(
 	input domain.AnalyzerInput, roleOf map[string]string,
-) map[string]float64 {
-	return a.startSecondsPerRole(input, roleOf, false)
+) roleStarts {
+	sized, source, parent := a.startSecondsPerRole(input, roleOf, false)
+	return roleStarts{sized: sized, source: source, parent: parent}
 }
 
-// slowestStartSecondsByRole is the MAXIMUM over each role's measured variants,
-// for a consumer that must not act before a replica serves
-// (domain.AnalyzerResult.RoleStartSeconds): the utilization-share planner
-// paces its moves on how long a moved replica takes to land, and erring short
-// there moves GPUs for a burst that ends before they serve.
+// roleStarts is each role's start time for the floor's projection
+// (startSecondsByRole).
+type roleStarts struct {
+	// sized is the role's start as 5c sizes it, and source where it came
+	// from: measured, or seed.
+	sized  map[string]float64
+	source map[string]string
+	// parent is the role's start as 5b sized it: the fastest measured
+	// variant's measured estimate, no seed and no blend; a role with none is
+	// absent. The floor prices both and keeps the larger order
+	// (applyThroughputFloor), because a longer start does not always order
+	// more: on a fleet that drains faster than work arrives it projects more
+	// drain, and past the 60 s drain time it spreads the backlog over a
+	// longer horizon. Equal to sized with both 5c switches off.
+	parent map[string]float64
+}
+
+// slowestStartSecondsByRole is the MAXIMUM over each role's variants as
+// sized, seeded ones included, for a consumer that must not act before a
+// replica serves (domain.AnalyzerResult.RoleStartSeconds): the
+// utilization-share planner paces its moves on how long a moved replica takes
+// to land, and erring short there moves GPUs for a burst that ends before
+// they serve. A seed longer than a measured sibling lengthens it; a shorter
+// one cannot be the maximum.
 func (a *SaturationAnalyzer) slowestStartSecondsByRole(
 	input domain.AnalyzerInput, roleOf map[string]string,
 ) map[string]float64 {
-	return a.startSecondsPerRole(input, roleOf, true)
+	out, _, _ := a.startSecondsPerRole(input, roleOf, true)
+	return out
 }
 
-// startSecondsPerRole folds the per-variant estimates into one per role: the
-// slowest when slowest is set, else the fastest. A role with no measured
-// variant is absent.
+// startSecondsPerRole folds the per-variant estimates as sized into one per
+// role, and names each role's source: the slowest variant when slowest is
+// set, else the fastest measured one, or the fastest seed when the role has
+// no measured variant. A role with neither is absent. parent is the same
+// fold over the measured estimates alone, as 5b sized them.
 func (a *SaturationAnalyzer) startSecondsPerRole(
 	input domain.AnalyzerInput, roleOf map[string]string, slowest bool,
-) map[string]float64 {
+) (sized map[string]float64, sources map[string]string, parent map[string]float64) {
 	accel := make(map[string]string, len(input.VariantStates))
 	gpus := make(map[string]int, len(input.VariantStates))
+	seeds := make(map[string]float64, len(input.VariantStates))
 	for _, vs := range input.VariantStates {
 		accel[vs.VariantName] = vs.AcceleratorName
 		gpus[vs.VariantName] = vs.GPUsPerReplica
+		if vs.StartSeedSet {
+			seeds[vs.VariantName] = vs.StartSeedSeconds
+		}
 	}
 
 	// Keys FIRST, outside the lock. itlWindowKey reaches stableAccelerator,
@@ -466,23 +696,43 @@ func (a *SaturationAnalyzer) startSecondsPerRole(
 	}
 
 	out := make(map[string]float64, 2)
+	source := make(map[string]string, 2)
+	parent = make(map[string]float64, 2)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for variant, role := range roleOf {
-		est, ok := a.startSeconds[keys[variant]]
-		if !ok || !(est > 0) {
+	// Sorted, so a tie between two variants of one role names the same
+	// source every cycle.
+	for _, variant := range slices.Sorted(maps.Keys(roleOf)) {
+		role := roleOf[variant]
+		f := a.startFiguresLocked(keys[variant], seeds[variant])
+		if e := f.measured; e > 0 {
+			if cur, seen := parent[role]; !seen || (slowest && e > cur) || (!slowest && e < cur) {
+				parent[role] = e
+			}
+		}
+		if !(f.sized > 0) {
 			continue
 		}
+		est := f.sized
 		cur, seen := out[role]
-		better := est < cur
-		if slowest {
+		var better bool
+		switch {
+		case !seen:
+			better = true
+		case slowest:
 			better = est > cur
+		case f.source != source[role]:
+			// The fastest: a measured variant replaces a seed, and a seed
+			// never replaces a measurement.
+			better = f.source == startSourceMeasured
+		default:
+			better = est < cur
 		}
-		if !seen || better {
-			out[role] = est
+		if better {
+			out[role], source[role] = est, f.source
 		}
 	}
-	return out
+	return out, source, parent
 }
 
 // startSource labels the estimate for the log and the metric, so a run says

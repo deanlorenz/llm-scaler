@@ -163,6 +163,11 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		// (start_est.go).
 		SwitchStartConfirmsByDistinctPod: &a.startConfirmsByPod,
 
+		// Learner PR 5c: the seed is the prior, and the first samples blend
+		// with it (start_est.go).
+		SwitchStartReadsSeed:          &a.startReadsSeed,
+		SwitchStartBlendsFirstSamples: &a.startBlends,
+
 		// #276: the spread of output lengths in the KV per request.
 		SwitchKVPerRequestOutputDispersion: &a.kvOutputDispersion,
 

@@ -1210,38 +1210,49 @@ func ObserveReplicaStartSeconds(namespace, variantName string, seconds float64) 
 	replicaStartSeconds.With(variantSeriesLabels(namespace, variantName)).Observe(seconds)
 }
 
-// SetReplicaStartSecondsEstimate publishes the start time sizing is using for a
-// variant, and whether it was measured or seeded.
+// The values of the source label on wva_replica_start_seconds_estimate: the
+// controller's 70 s default, the ScaledObject's replicaStartSeconds seed, or a
+// start measured on the variant's Pods.
+const (
+	ReplicaStartSourceDefault  = "default"
+	ReplicaStartSourceSeed     = "seed"
+	ReplicaStartSourceMeasured = "measured"
+)
+
+// replicaStartSources is every source a variant's estimate is published
+// under, the one SetReplicaStartSecondsEstimate deletes the others of.
+var replicaStartSources = []string{ReplicaStartSourceDefault, ReplicaStartSourceSeed, ReplicaStartSourceMeasured}
+
+// SetReplicaStartSecondsEstimate publishes the start time the controller
+// estimates for a variant, and where it came from (source, one of the
+// ReplicaStartSource values).
 //
-// Both label values are published for the same variant over its life -- seed
-// until the first replica starts under observation, measured after -- so a query
-// reading the series without the label sees two. That is intentional: the
-// transition is the interesting moment, and collapsing it would hide whether a
-// run sized against a measurement at all.
-func SetReplicaStartSecondsEstimate(namespace, variantName string, seconds float64, measured bool) {
+// Several label values are published for the same variant over its life --
+// default or seed until the first replica starts under observation, measured
+// after -- so a query reading the series without the label sees them in turn.
+// That is intentional: the transition is the interesting moment, and
+// collapsing it would hide whether a run sized against a measurement at all.
+func SetReplicaStartSecondsEstimate(namespace, variantName string, seconds float64, source string) {
 	if replicaStartSecondsEstimate == nil {
 		return
-	}
-	source := "seed"
-	if measured {
-		source = "measured"
 	}
 	labels := variantSeriesLabels(namespace, variantName)
 	labels[constants.LabelStartSource] = source
 	replicaStartSecondsEstimate.With(labels).Set(seconds)
 
-	// The other source child is DELETED, not left behind. Both values appear for
-	// a variant over its life -- seed until the first replica starts, measured
-	// after -- and a child is scraped until it is removed, so keeping the stale
-	// one makes sum by (variant_name) return seed + measured. A panel or alert
-	// written without a source selector would read a variant with a 300 s
-	// measured start as 370.
-	stale := variantSeriesLabels(namespace, variantName)
-	stale[constants.LabelStartSource] = "measured"
-	if measured {
-		stale[constants.LabelStartSource] = "seed"
+	// The other sources' children are DELETED, not left behind. Each appears
+	// for a variant over its life, and a child is scraped until it is
+	// removed, so keeping a stale one makes sum by (variant_name) return the
+	// two added. A panel or alert written without a source selector would
+	// read a variant with a 300 s measured start as 370.
+	for _, other := range replicaStartSources {
+		if other == source {
+			continue
+		}
+		stale := variantSeriesLabels(namespace, variantName)
+		stale[constants.LabelStartSource] = other
+		replicaStartSecondsEstimate.Delete(stale)
 	}
-	replicaStartSecondsEstimate.Delete(stale)
 }
 
 // ObserveWakeDuration records how long a wake-from-zero took.

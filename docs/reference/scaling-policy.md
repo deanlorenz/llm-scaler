@@ -992,8 +992,9 @@ a cluster, and none of them is fixed by a setting other than a floor:
 - **A move's latency is the slowest model's start.** A move's latency is
   estimated as the donor's release, the receiver's start, and three
   cycles. The start is the one the controller measures for the group's
-  slowest model (`wva_replica_start_seconds_estimate`; 5 minutes until a replica
-  has started), so a whole-node model's 10 minutes counts as 10. Being one
+  slowest model (`wva_replica_start_seconds_estimate`; the ScaledObject's
+  `replicaStartSeconds`, or 5 minutes, until a replica has started), so a
+  whole-node model's 10 minutes counts as 10. Being one
   figure per group, a small model beside a whole-node one is paced on the
   whole-node start.
 - **A dip in a slow-draining model's demand, right after the group starts.**
@@ -1364,9 +1365,9 @@ so the table falls through to the built-in default. Prefer omitting the key.
 **Why the trigger and not this ConfigMap.** The figure is a fact about one
 workload's traffic, not a threshold shared by a class of workloads; a fleet-wide
 figure is what the built-in 512 already is. The trigger also declares
-`replicaStartSeconds`, another per-workload seed, but that key is **reserved:
-nothing reads it yet**; the analyzer uses its own default until it measures a
-replica start ([trigger reference](scaledobject-trigger.md)).
+`replicaStartSeconds`, another per-workload seed: the start time a variant is
+sized at until its own pods are measured
+([trigger reference](scaledobject-trigger.md)).
 
 **When a model's variants disagree.** A P/D model has a ScaledObject per role,
 so the key can appear twice. The **largest** figure wins, and the disagreement is

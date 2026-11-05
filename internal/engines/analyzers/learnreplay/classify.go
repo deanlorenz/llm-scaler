@@ -244,6 +244,7 @@ var keyRules = map[string]rule{
 	"K2BorrowedSince": {class: classComposite}, "K2Stash": {class: classComposite},
 	"LowerBounds": {class: classComposite}, "PriorK2": {class: classComposite},
 	"StartSeconds": {class: classComposite}, "Throughput": {class: classComposite},
+	"StartSamples": {class: classComposite}, "StartAdmittedAt": {class: classComposite},
 	"ThroughputArgs": {class: classComposite}, "ThroughputStash": {class: classComposite},
 	"VariantSeenAt": {class: classComposite}, "Reports": {class: classComposite},
 

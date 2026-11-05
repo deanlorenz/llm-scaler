@@ -33,13 +33,6 @@
   finding: "On the time base, a replica's first saturated rate[1m] covers only the part of the minute it served. Served for half the minute or more, the reading is at least half the derived mu and passes minMeasuredOfDerived, so a second reading moves the figure by up to half. The joined test refuses this for a replica Ready under a minute, not for one routed to late. Measured on throughputRefusal alone, so an upper bound: the analyzer's full path also applies tokensOutrunCompletions and the served bound, which may refuse some of these readings."
   measured: "51/100 seeds; seed 3: served 30 s of its first minute, rate[1m] 0.1095 against a derived 0.2118, admitted"
   owner: "#392"
-- id: first-sample/start-time/between-sample-and-default
-  class: first-sample
-  learner: start-time
-  expect: adopted-raw
-  finding: "The start-time estimator's first measurement replaces the 70 s default (DefaultReplicaStartSeconds). PR 5's acceptance: with no seed, the estimate sits strictly between the sample and 70 s."
-  measured: "100/100 seeds; seed 1: a first sample of 487 s set the estimate to 487.2 s"
-  owner: "PR 5"
 - id: liveness/k2/flow-control-on
   class: liveness
   learner: k2
