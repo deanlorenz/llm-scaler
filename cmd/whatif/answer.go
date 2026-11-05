@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
@@ -208,8 +209,14 @@ func (f *answerFlags) recordingData(ctx context.Context) (string, []byte, error)
 // Errors carry capture's and generate's prefixes and exit codes: 2 for
 // the caller's input (a window too large without --force, a role map that
 // attributes nothing), 1 for a failed query or a replay that fails inside
-// the analyzers.
+// the analyzers. An error names no secret the URL carries (redactedError).
 func (f *answerFlags) windowRecording(ctx context.Context) ([]byte, error) {
+	data, err := f.captureAndGenerate(ctx)
+	return data, redactedError(err, f.window.prometheus)
+}
+
+// captureAndGenerate is windowRecording before its errors are redacted.
+func (f *answerFlags) captureAndGenerate(ctx context.Context) ([]byte, error) {
 	opts, err := f.window.options(f.question, f.warn)
 	if err != nil {
 		return nil, err
@@ -228,7 +235,30 @@ func (f *answerFlags) windowRecording(ctx context.Context) ([]byte, error) {
 		// generateRecording's usage error, if any, keeps its exit code.
 		return nil, fmt.Errorf("generate: %w", err)
 	}
+	// What the capture could not see, as generate prints it, to stderr so
+	// that -o json stays one object.
+	start, err := startOf(rep.Recording)
+	if err != nil {
+		return nil, fmt.Errorf("generate: the generated recording: %w", err)
+	}
+	for _, c := range start.Caveats {
+		fmt.Fprintf(f.warn, "whatif: caveat: %s\n", c)
+	}
 	return rep.Recording, nil
+}
+
+// sourceLine is the first line of a human answer in --prometheus mode:
+// what it was answered for, and from which window. Empty in recording
+// mode, whose footer names the recording. The JSON carries the same in
+// source.window, and its note stays the footer, as the files' does.
+func (f *answerFlags) sourceLine(st *learnreplay.State) string {
+	o := f.captured
+	if o == nil {
+		return ""
+	}
+	return fmt.Sprintf("answered for %s/%s from %s, %s to %s every %s (captured and generated in memory)\n",
+		st.Namespace, st.ModelID, redactedURL(f.window.prometheus),
+		o.From.Format(time.RFC3339), o.To.Format(time.RFC3339), o.Step)
 }
 
 // prometheus reports whether the flags ask to answer from Prometheus

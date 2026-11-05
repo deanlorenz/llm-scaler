@@ -143,6 +143,8 @@ func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) erro
 		if err := writeJSON(out, w); err != nil {
 			return err
 		}
+	} else if _, err := io.WriteString(out, f.sourceLine(st)); err != nil {
+		return err
 	} else if err := writeReplicasText(out, &f, st, variants, answers, none, *pct, query); err != nil {
 		return err
 	}

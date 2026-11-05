@@ -742,6 +742,12 @@ whatif replicas-to-slo|slo-to-rate --prometheus URL --namespace NS
   that `--force` lifts, every sample on the step grid). Without
   `--prometheus` each of them is a usage error; `--recording` and
   `--prometheus` together are one too.
+- **Memory.** Nothing is written to disk, so this mode holds more at once
+  than `capture` does: the range queries' samples (as capture holds them,
+  bounded by `whatifsource.MaxSamples` unless `--force`), then the gzipped
+  capture, the capture unzipped, and the generated recording, all in RAM.
+  `--force` lifts the bound on the first only; for a window near the bound,
+  capture and generate to files instead.
 - **`--namespace`** is required, and is both the namespace captured and the
   one answered for.
 - **`--batch-cap`** is the engine's batch cap the window is captured with, as
@@ -752,16 +758,29 @@ whatif replicas-to-slo|slo-to-rate --prometheus URL --namespace NS
   `--lookback`, `--flow-control` and the `--fc-*` settings) are not in this
   mode. The role map is `--kube-state-metrics` or `--role-of`, as for
   capture.
-- **Warnings** (`--insecure-skip-verify`, a batch cap given twice) go to
-  stderr, so that `-o json` is still one object.
+- **Warnings** (`--insecure-skip-verify`, a batch cap given twice) and
+  the capture's caveats, as `generate` prints them (`whatif: caveat: ...`),
+  go to stderr, so that `-o json` is still one object.
+- **The text answer** opens with the window it was answered from:
+  `answered for NS/MODEL from URL, T0 to T1 every STEP (captured and
+  generated in memory)`. The rest, the footer included, is the text
+  `--recording` prints on the files.
+- **Secrets in the URL.** The URL is printed, in the source line and in
+  `source.window`, as its scheme, host and path alone: its userinfo (a
+  user and password), its query (`?token=...`) and its fragment are
+  dropped, not redacted value by value. In an error message (capture's
+  too, in text and in the `-o json` error object), each of them, and each
+  query value and password on its own, is replaced by `REDACTED`: the
+  HTTP client quotes a request's whole URL when it cannot send it.
 - **Exit codes** are capture's and the question's. `2`: a usage error, a
   window too large without `--force`, a role map that attributes no Pod, a
   model or cycle the window does not hold. `1`: a failed range query
   (`whatifsource.ErrQueryFailed`), or a replay that fails inside the
   analyzers. `3`: a role refused. With `-o json`, an error is one JSON error
   object, as in recording mode.
-- **The JSON** names the window in `source.window` (`prometheus`, its
-  password redacted, `from`, `to`, `stepSeconds` and `roles`), and
+- **The JSON** names the window in `source.window` (`prometheus`, the URL
+  without its userinfo, query or fragment, `from`, `to`, `stepSeconds` and
+  `roles`), and
   `source.recording` is empty. The field is new and optional, absent in
   recording mode, so `schemaVersion` stays `1`.
 
@@ -876,7 +895,7 @@ four results only `meanTPOT` is kept here):
 | --- | --- |
 | `schemaVersion` | The schema below; a change to any key is a new version. |
 | `question` | `replicas-to-slo` or `slo-to-rate`. |
-| `source` | The recording, the model, `firstCycle` (1), `lastCycle` (the cycle answered at) and `totalCycles` (the recording's), with their clocks. With `--prometheus`, `recording` is empty and `window` names the window: `prometheus` (the URL, its password redacted), `from`, `to`, `stepSeconds`, and `roles` (`kube-state-metrics` or `role-of`); absent in recording mode. Absent on an error object. |
+| `source` | The recording, the model, `firstCycle` (1), `lastCycle` (the cycle answered at) and `totalCycles` (the recording's), with their clocks. With `--prometheus`, `recording` is empty and `window` names the window: `prometheus` (the URL without its userinfo, query or fragment), `from`, `to`, `stepSeconds`, and `roles` (`kube-state-metrics` or `role-of`); absent in recording mode. Absent on an error object. |
 | `bands` | How the bands were drawn: block bootstrap, `blockCycles`, `resamples`, `seed`, the percentiles. Absent on an error object. |
 | `roles[]` | One per decode variant priced: `inputs` (what it was priced from) and `results`. |
 | `inputs.line` | The ITL line (`a` in seconds per unit of fill, `b` in seconds), its `tier`, the `readings` it was fitted from, their `observedFill` range and `fromCycle`-`toCycle`, and of the bootstrap's `resamples` how many (`tierChanges`) landed at another tier. |

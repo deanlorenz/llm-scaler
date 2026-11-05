@@ -70,7 +70,7 @@ func runCapture(ctx context.Context, args []string, out, warn io.Writer) error {
 	}
 	opts, err := f.options("capture", warn)
 	if err != nil {
-		return err
+		return redactedError(err, f.prometheus)
 	}
 	// Written beside -o and renamed over it once whole: a failed or
 	// cancelled capture leaves the file that was there.
@@ -81,7 +81,7 @@ func runCapture(ctx context.Context, args []string, out, warn io.Writer) error {
 		return err
 	})
 	if err != nil {
-		return captureError(err)
+		return redactedError(captureError(err), f.prometheus)
 	}
 	fmt.Fprintf(out, "captured %d steps of %s from %s to %s every %s: %d cycles, %d rows, %d variants, %d range queries, %d samples\n",
 		sum.Steps, opts.Namespace, opts.From.Format(time.RFC3339), opts.To.Format(time.RFC3339), opts.Step,

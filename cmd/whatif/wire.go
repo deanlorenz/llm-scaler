@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"io"
-	"net/url"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/learnreplay"
@@ -59,7 +58,8 @@ type wireSource struct {
 
 // wireWindow is the window of Prometheus an answer was captured from.
 type wireWindow struct {
-	// Prometheus is the base URL, its password redacted.
+	// Prometheus is the base URL with no userinfo, query or fragment
+	// (redactedURL).
 	Prometheus  string    `json:"prometheus"`
 	From        time.Time `json:"from"`
 	To          time.Time `json:"to"`
@@ -249,15 +249,6 @@ func newWireOutput(question string, f *answerFlags, st *learnreplay.State, varia
 			StepSeconds: o.Step.Seconds(), Roles: roles}
 	}
 	return w
-}
-
-// redactedURL is a URL with any password in it replaced, for output.
-func redactedURL(s string) string {
-	u, err := url.Parse(s)
-	if err != nil {
-		return s
-	}
-	return u.Redacted()
 }
 
 // inputsOf is the wire's account of what a variant was priced from.

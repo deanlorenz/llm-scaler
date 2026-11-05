@@ -102,6 +102,8 @@ func sloToRate(ctx context.Context, args []string, out, warn io.Writer) error {
 		if err := writeJSON(out, w); err != nil {
 			return err
 		}
+	} else if _, err := io.WriteString(out, f.sourceLine(st)); err != nil {
+		return err
 	} else if err := writeRateText(out, st, variants, answers, none); err != nil {
 		return err
 	}

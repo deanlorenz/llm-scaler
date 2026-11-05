@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/registration"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/whatifsource"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/whatifsource/promtest"
 )
@@ -37,6 +39,10 @@ const (
 )
 
 var sweepFrom = time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
+
+// sweepNotReadyFrom is the step from which kube-state-metrics reads the
+// sweep's last Pod as not Ready.
+const sweepNotReadyFrom = 100
 
 // sweepStepOf is the step an instant falls on, ok false off the grid or
 // past the window.
@@ -65,9 +71,18 @@ func sweepKV(j, i int) float64 {
 func sweepITL(k float64) float64 { return 0.006 + 0.02*k }
 
 // sweepServer is a Prometheus holding a window of one decode variant of
-// model m, three Pods sweeping their fill, with every series the decode
-// pricing reads.
+// model m on vLLM, three Pods sweeping their fill, with every series the
+// decode pricing reads, and the kube-state-metrics series that describe the
+// Pods.
 func sweepServer(t *testing.T) *promtest.Server {
+	t.Helper()
+	return sweepServerFor(t, inferenceengine.EngineVLLM)
+}
+
+// sweepServerFor is sweepServer with the engine's own series: a query
+// registered per engine (registration.EngineQuery) is served under the
+// engine's name, SGLang's capacity as its token gauge.
+func sweepServerFor(t *testing.T, engine inferenceengine.Engine) *promtest.Server {
 	t.Helper()
 	srv := promtest.New()
 	t.Cleanup(srv.Close)
@@ -79,6 +94,7 @@ func sweepServer(t *testing.T) *promtest.Server {
 	registration.RegisterFlowControlPoolQueries(reg)
 	registration.RegisterAlwaysOnQueries(reg)
 	q := func(name string) string {
+		name = registration.EngineQuery(engine, name)
 		params := map[string]string{source.ParamNamespace: sweepNS}
 		if qt := reg.Get("prometheus").QueryList().Get(name); qt != nil && len(qt.Params) == 0 {
 			params = nil
@@ -119,9 +135,13 @@ func sweepServer(t *testing.T) *promtest.Server {
 		add(registration.QueryMaxRankQueueLength, labels, c(0))
 		add(registration.QueryCapacityQueueLength, labels, c(0))
 		add(registration.QueryMaxRankCapacityQueueLength, labels, c(0))
-		srv.Add(q(registration.QueryCacheConfigInfo), promtest.Series{Labels: map[string]string{
-			"instance": labels["instance"], "pod": labels["pod"], "num_gpu_blocks": "8192", "block_size": "16"},
-			Value: at(c(1))})
+		if engine == inferenceengine.EngineSGLang {
+			add(registration.QueryCacheConfigInfo, labels, c(8192*16))
+		} else {
+			srv.Add(q(registration.QueryCacheConfigInfo), promtest.Series{Labels: map[string]string{
+				"instance": labels["instance"], "pod": labels["pod"], "num_gpu_blocks": "8192", "block_size": "16"},
+				Value: at(c(1))})
+		}
 		add(registration.QueryAvgOutputTokens, labels, c(1000))
 		add(registration.QueryAvgOutputTokensRecent, labels, c(1000))
 		add(registration.QueryAvgInputTokens, labels, c(1000))
@@ -140,8 +160,52 @@ func sweepServer(t *testing.T) *promtest.Server {
 		add(registration.QueryTPOTBuckets, with("le", "0.02"), c(0.5))
 		add(registration.QueryTPOTBuckets, with("le", "0.05"), c(1))
 		add(registration.QueryTPOTBuckets, with("le", "+Inf"), c(1))
+		sweepKSM(srv, labels["pod"], j == sweepPods-1)
 	}
 	return srv
+}
+
+// sweepKSM is kube-state-metrics' account of one of the sweep's Pods: a
+// Deployment's, Ready, with a role label, two GPUs on an H200 node; the
+// last Pod (late) is not Ready from sweepNotReadyFrom on, which only
+// kube-state-metrics shows. A capture reads it with --kube-state-metrics,
+// and ignores it without.
+func sweepKSM(srv *promtest.Server, pod string, late bool) {
+	k := whatifsource.KSMQueries(sweepNS)
+	l := func(extra ...string) map[string]string {
+		m := map[string]string{"namespace": sweepNS, "pod": pod}
+		for x := 0; x+1 < len(extra); x += 2 {
+			m[extra[x]] = extra[x+1]
+		}
+		return m
+	}
+	ready := float64(sweepFrom.Add(-30 * time.Minute).Unix())
+	srv.Add(k.NodeLabels, promtest.Const(map[string]string{"node": "n1", "label_nvidia_com_gpu_product": "NVIDIA-H200"}, 1))
+	srv.Add(k.ReplicaSetOwner, promtest.Const(map[string]string{"namespace": sweepNS, "replicaset": "m-dec-7c9d",
+		"owner_kind": "Deployment", "owner_name": "m-dec"}, 1))
+	srv.Add(k.DeploymentReplicas, promtest.Const(map[string]string{"namespace": sweepNS, "deployment": "m-dec"}, sweepPods))
+	srv.Add(k.PodNode, promtest.Const(l("node", "n1"), 1))
+	srv.Add(k.PodLabels, promtest.Const(l("label_llm_d_ai_role", "decode"), 1))
+	srv.Add(k.PodOwner, promtest.Const(l("owner_kind", "ReplicaSet", "owner_name", "m-dec-7c9d"), 1))
+	srv.Add(k.PodRunning, promtest.Const(l(), 1))
+	srv.Add(k.PodReady, promtest.Series{Labels: l(), Value: func(at time.Time) (float64, bool) {
+		i, ok := sweepStepOf(at)
+		return 1, ok && (!late || i < sweepNotReadyFrom)
+	}})
+	srv.Add(k.PodReadyTime, promtest.Const(l(), ready))
+	srv.Add(k.PodCreated, promtest.Const(l(), ready-60))
+	srv.Add(k.PodStarted, promtest.Const(l(), ready-60))
+	srv.Add(k.PodGPUs, promtest.Const(map[string]string{"pod": pod}, 2))
+}
+
+// sweepPolicy is a scaling-policy file whose thresholds the policy's own
+// check keeps, and that move the answer: the operating point at 0.6 of the
+// knee, not the default 0.85.
+func sweepPolicy(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("scaleUpThreshold: 0.6\nscaleDownBoundary: 0.4\n"), 0o600))
+	return path
 }
 
 // sweepWindow is the --prometheus flags of the sweep's window.
@@ -164,6 +228,29 @@ func filesAnswer(t *testing.T, window, question []string) (string, int) {
 	_, err = runCLI("generate", "-in", capture, "-o", recording)
 	require.NoError(t, err)
 	return runCmd(t, slices.Concat(question[:1], []string{"--recording", recording, "--namespace", sweepNS}, question[1:])...)
+}
+
+// rolesDiff is how two JSON outputs' roles differ, "" when they do not.
+func rolesDiff(t *testing.T, a, b string) string {
+	t.Helper()
+	var x, y map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(a), &x), a)
+	require.NoError(t, json.Unmarshal([]byte(b), &y), b)
+	if bytes.Equal(x["roles"], y["roles"]) {
+		return ""
+	}
+	return fmt.Sprintf("%s\n%s", x["roles"], y["roles"])
+}
+
+// withoutSourceLine is a --prometheus mode's text answer without the line
+// that names its window, which the files' answer does not have: the rest is
+// the answer. It fails the test when the line is not there.
+func withoutSourceLine(t *testing.T, text string) string {
+	t.Helper()
+	first, rest, ok := strings.Cut(text, "\n")
+	require.True(t, ok, text)
+	require.True(t, strings.HasPrefix(first, "answered for "+sweepNS+"/m from "), "no source line:\n%s", text)
+	return rest
 }
 
 // sameAnswer reports how two JSON outputs differ, "" when they do not: every
@@ -241,7 +328,7 @@ func TestPrometheus_TheAnswerIsTheFilesAnswer(t *testing.T) {
 				require.Equal(t, c.code, fileCode, "the files' exit code\n%s", files)
 				require.Equal(t, fileCode, promCode, "exit codes differ\n%s", prom)
 				if output == outputText {
-					assert.Equal(t, files, prom, "the text differs")
+					assert.Equal(t, files, withoutSourceLine(t, prom), "the text differs")
 					continue
 				}
 				if d := sameAnswer(t, files, prom); d != "" {
@@ -250,6 +337,50 @@ func TestPrometheus_TheAnswerIsTheFilesAnswer(t *testing.T) {
 			}
 		})
 	}
+	// The capture's own flags reach the answer the same way on both paths.
+	t.Run("capture flags", func(t *testing.T) {
+		policy := sweepPolicy(t)
+		sglang := sweepServerFor(t, inferenceengine.EngineSGLang)
+		ksm := []string{"--prometheus", srv.URL, "--namespace", sweepNS, "--kube-state-metrics",
+			"--from", sweepFrom.Format(time.RFC3339), "--to", sweepFrom.Add((sweepSteps - 1) * sweepStep).Format(time.RFC3339),
+			"--batch-cap", "64"}
+		for _, w := range []struct {
+			name   string
+			window []string
+		}{
+			{"--policy", append(slices.Clone(window), "--policy", policy)},
+			{"--gpus-per-replica, --accelerator, --engine sglang", append(sweepWindow(sglang.URL),
+				"--gpus-per-replica", "2", "--accelerator", "H100", "--engine", "sglang")},
+			{"--engine-args", slices.Concat(window[:len(window)-2], []string{"--engine-args", "--max-num-seqs=32 --max-model-len=8192"})},
+			{"--kube-state-metrics", ksm},
+		} {
+			t.Run(w.name, func(t *testing.T) {
+				// The flag moves the answer, or the identity says nothing
+				// about it: the same question without it differs.
+				q := []string{"replicas-to-slo", "-o", "json"}
+				with, _ := runCmd(t, slices.Concat(q[:1], w.window, q[1:])...)
+				without, _ := runCmd(t, slices.Concat(q[:1], window, q[1:])...)
+				require.NotEmpty(t, rolesDiff(t, with, without), "%s does not move the answer", w.name)
+				for _, q := range [][]string{
+					{"slo-to-rate", "--tpot", "15ms", "-o", "json"},
+					{"replicas-to-slo", "-o", "json"},
+					{"replicas-to-slo"},
+				} {
+					files, fileCode := filesAnswer(t, w.window, q)
+					prom, promCode := runCmd(t, slices.Concat(q[:1], w.window, q[1:])...)
+					require.Equal(t, fileCode, promCode, "exit codes differ\nfiles:\n%s\nprometheus:\n%s", files, prom)
+					if !slices.Contains(q, outputJSON) {
+						assert.Equal(t, files, withoutSourceLine(t, prom), "the text differs")
+						continue
+					}
+					if d := sameAnswer(t, files, prom); d != "" {
+						t.Errorf("the --prometheus answer is not the files' answer:\n%s", d)
+					}
+				}
+			})
+		}
+	})
+
 	// The window answered something: a line was learned and priced.
 	out, code := runCmd(t, slices.Concat([]string{"slo-to-rate"}, window, []string{"--tpot", "15ms", "-o", "json"})...)
 	require.Equal(t, 0, code, out)
@@ -285,31 +416,110 @@ func TestPrometheus_TheIdentityCheckSeesADifference(t *testing.T) {
 	assert.NotEmpty(t, sameAnswer(t, files, prom), "a shorter window answered the same")
 }
 
-// The source says which window the answer was captured from; a password in
-// the URL is not printed.
+// The source says which window the answer was captured from, in JSON and
+// in text. The URL is printed with no userinfo, query or fragment, any of
+// which can carry a secret.
 func TestPrometheus_TheSourceNamesTheWindow(t *testing.T) {
 	srv := sweepServer(t)
-	withUser := strings.Replace(srv.URL, "http://", "http://reader:hunter2@", 1)
-	out, code := runCmd(t, slices.Concat([]string{"replicas-to-slo"}, sweepWindow(withUser), []string{"--step", "15s", "-o", "json"})...)
+	secret := strings.Replace(srv.URL, "http://", "http://reader:hunter2@", 1) + "/?token=s3cr3t&x=y#frag"
+	out, code := runCmd(t, slices.Concat([]string{"replicas-to-slo"}, sweepWindow(secret), []string{"--step", "15s", "-o", "json"})...)
 	require.Equal(t, 0, code, out)
-	assert.NotContains(t, out, "hunter2")
+	for _, leak := range []string{"hunter2", "reader", "s3cr3t", "token", "frag"} {
+		assert.NotContains(t, out, leak)
+	}
 	w := decodeOutput(t, out)
 	require.NotNil(t, w.Source)
 	require.NotNil(t, w.Source.Window)
 	assert.Empty(t, w.Source.Recording)
 	win := w.Source.Window
-	assert.Equal(t, strings.Replace(withUser, "hunter2", "xxxxx", 1), win.Prometheus)
+	assert.Equal(t, srv.URL+"/", win.Prometheus)
 	assert.True(t, win.From.Equal(sweepFrom), "from %s", win.From)
 	assert.True(t, win.To.Equal(sweepFrom.Add((sweepSteps-1)*sweepStep)), "to %s", win.To)
 	assert.Equal(t, 15.0, win.StepSeconds)
 	assert.Equal(t, "role-of", win.Roles)
 	assert.Equal(t, sweepNS, w.Source.Namespace)
 
-	// A recording's source has no window.
+	text, code := runCmd(t, slices.Concat([]string{"replicas-to-slo"}, sweepWindow(secret))...)
+	require.Equal(t, 0, code, text)
+	first, _, _ := strings.Cut(text, "\n")
+	assert.Equal(t, fmt.Sprintf("answered for %s/m from %s/, %s to %s every 15s (captured and generated in memory)", sweepNS, srv.URL,
+		sweepFrom.Format(time.RFC3339), sweepFrom.Add((sweepSteps-1)*sweepStep).Format(time.RFC3339)), first)
+	assert.NotContains(t, text, "s3cr3t")
+
+	// A recording's source has no window, and its text no source line.
 	files, _ := filesAnswer(t, sweepWindow(srv.URL), []string{"replicas-to-slo", "-o", "json"})
 	fw := decodeOutput(t, files)
 	assert.Nil(t, fw.Source.Window)
 	assert.NotEmpty(t, fw.Source.Recording)
+	files, _ = filesAnswer(t, sweepWindow(srv.URL), []string{"replicas-to-slo"})
+	assert.NotContains(t, files, "answered for")
+}
+
+// An error names no secret of the URL, whether the HTTP client quotes the
+// request's URL (a query that cannot be sent) or the flags' check does (a
+// token over http): capture's and the --prometheus mode's, in text and in
+// -o json. It keeps its exit code and what errors.Is finds.
+func TestPrometheus_ErrorsNameNoSecret(t *testing.T) {
+	dead := httptest.NewServer(nil)
+	deadURL := dead.URL
+	dead.Close()
+	srv := sweepServer(t)
+	failing := sweepServer(t)
+	failing.Fail(queryOf(t, registration.QueryKvCacheUsage), "query processing would load too many samples")
+	token := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(token, []byte("abc\n"), 0o600))
+	const secret = "/?token=s3cr3t%2F&k=pw%20d"
+	out := filepath.Join(t.TempDir(), "c.gz")
+	for _, c := range []struct {
+		name string
+		args []string
+		code int
+	}{
+		{"unreachable", slices.Concat([]string{"replicas-to-slo"}, sweepWindow(deadURL+secret)), 1},
+		{"unreachable, capture", slices.Concat([]string{"capture"}, sweepWindow(deadURL+secret), []string{"-o", out}), 1},
+		{"a failed query", slices.Concat([]string{"slo-to-rate"}, sweepWindow(failing.URL+secret), []string{"--tpot", "15ms"}), 1},
+		{"a token over http", slices.Concat([]string{"replicas-to-slo"}, sweepWindow(srv.URL+secret), []string{"--bearer-token-file", token}), 2},
+		{"a token over http, capture", slices.Concat([]string{"capture"}, sweepWindow(srv.URL+secret),
+			[]string{"--bearer-token-file", token, "-o", out}), 2},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := runCLI(c.args...)
+			require.Error(t, err)
+			assert.Equal(t, c.code, exitCode(err), "%v", err)
+			for _, leak := range []string{"s3cr3t", "pw d", "pw%20d", "token=", "k="} {
+				assert.NotContains(t, err.Error(), leak)
+			}
+			if !strings.HasPrefix(c.name, "a failed query") {
+				// An API error does not quote the URL; the others do.
+				assert.Contains(t, err.Error(), "REDACTED", "%v", err)
+			}
+			if c.code == 1 {
+				assert.True(t, errors.Is(err, whatifsource.ErrQueryFailed), "%v", err)
+			}
+			if c.args[0] == "capture" {
+				return
+			}
+			js, code := runCmd(t, append(slices.Clone(c.args), "-o", "json")...)
+			assert.Equal(t, c.code, code)
+			assert.NotContains(t, js, "s3cr3t")
+			w := decodeOutput(t, js)
+			require.NotNil(t, w.Error, js)
+			assert.Equal(t, err.Error(), w.Error.Message)
+		})
+	}
+}
+
+// The capture's caveats go to stderr in --prometheus mode, as generate
+// prints them: -o json is still one object.
+func TestPrometheus_CaveatsGoToStderr(t *testing.T) {
+	srv := sweepServer(t)
+	var out, warn bytes.Buffer
+	args := slices.Concat([]string{"replicas-to-slo"}, sweepWindow(srv.URL), []string{"-o", "json"})
+	require.NoError(t, run(context.Background(), args, &out, &warn))
+	assert.Contains(t, warn.String(), "whatif: caveat: "+whatifsource.FlagNoReadiness)
+	assert.Contains(t, warn.String(), "whatif: caveat: "+whatifsource.FlagNoRollouts)
+	decodeOutput(t, out.String())
+	assert.NotContains(t, out.String(), "caveat")
 }
 
 // Each exit code of the --prometheus mode is capture's or the question's:
@@ -417,6 +627,48 @@ func TestPrometheus_ForceReachesTheCapture(t *testing.T) {
 		assert.Zero(t, f.batchCap, "--batch-cap is not also a cap to price at")
 		assert.Equal(t, defaultTimeout, f.window.timeout)
 	}
+}
+
+// Every capture flag reaches the capture the --prometheus mode makes, as
+// capture's own: the identity test cannot see a flag both paths lose, since
+// they share captureFlags.options. --gpus-per-replica and --accelerator
+// move no decode answer (they key the capacity store's reuse, not the live
+// capacity priced), so this, and capture's window line, is where they are
+// held.
+func TestPrometheus_CaptureFlagsReachTheCapture(t *testing.T) {
+	policy := sweepPolicy(t)
+	fs := newFlags("slo-to-rate", io.Discard)
+	f := answerFlags{question: "slo-to-rate", warn: io.Discard}
+	f.register(fs)
+	args := slices.Concat(sweepWindow("http://prom.example:9090"), []string{"--policy", policy, "--gpus-per-replica", "2",
+		"--accelerator", "H100", "--engine", "sglang", "--engine-args", "--max-model-len=8192 --dp=2", "--kube-state-metrics",
+		"--step", "30s", "--timeout", "7s"})
+	ok, err := parse(fs, args)
+	require.True(t, ok)
+	require.NoError(t, err)
+	require.NoError(t, f.check(fs))
+	opts, err := f.window.options(f.question, f.warn)
+	require.NoError(t, err)
+	require.NotNil(t, opts.Policy)
+	assert.InDelta(t, 0.6, opts.Policy.ScaleUpThreshold, 0)
+	assert.Equal(t, 2, opts.GPUsPerReplica)
+	assert.Equal(t, "H100", opts.Accelerator)
+	assert.Equal(t, inferenceengine.EngineSGLang, opts.Engine)
+	assert.Equal(t, []string{"--max-model-len=8192", "--dp=2"}, opts.EngineArgs)
+	assert.True(t, opts.KubeStateMetrics)
+	assert.Equal(t, 30*time.Second, opts.Step)
+	assert.Equal(t, sweepNS, opts.Namespace)
+	assert.Equal(t, 64, opts.BatchCap)
+	assert.Equal(t, 7*time.Second, f.window.timeout)
+
+	// And in a real capture, the window line holds the GPUs and the
+	// accelerator the flags gave.
+	srv := sweepServerFor(t, inferenceengine.EngineSGLang)
+	out := filepath.Join(t.TempDir(), "c.gz")
+	text, err := runCLI(slices.Concat([]string{"capture"}, sweepWindow(srv.URL),
+		[]string{"--gpus-per-replica", "2", "--accelerator", "H100", "--engine", "sglang", "-o", out})...)
+	require.NoError(t, err)
+	assert.Contains(t, text, "m/m-dec  decode  2 GPU H100")
 }
 
 // A capture's warnings go to stderr, so that -o json is still one object.

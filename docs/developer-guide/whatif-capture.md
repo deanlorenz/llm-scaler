@@ -21,7 +21,7 @@ whatif generate -in run.capture.jsonl.gz -o run.jsonl
 
 | Flag | What it does |
 | --- | --- |
-| `--prometheus` | The Prometheus base URL, http or https. Required. |
+| `--prometheus` | The Prometheus base URL, http or https. Required. An error message never quotes its userinfo, query or fragment: each is replaced by `REDACTED`. |
 | `--namespace` | The namespace whose models to capture. Required. |
 | `--kube-state-metrics` | Read Pods, owners, readiness, GPUs and nodes from kube-state-metrics in the same Prometheus. |
 | `--role-of ROLE=SELECTOR` | The Pods a label selector picks serve ROLE (`prefill`, `decode`, `both`), as one variant. Repeat per variant. |
