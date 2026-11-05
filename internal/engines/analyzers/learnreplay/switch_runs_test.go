@@ -254,11 +254,17 @@ var earlierSeams = withSeams(learner4b2Seams, withSeams(learner4b1Seams, withSea
 	saturation.SwitchZeroReplicaDataParallel: nil,
 	saturation.SwitchITLAggregatedShapeTerm:  {"acceptance/learned-state.csv", "engine/learned-state.csv"},
 	saturation.SwitchITLAggregatedSizes:      nil,
+	// The prefill-stress goldens (P2) were added after #392 and move under
+	// it too: one decode cycle each in ttft-saturated and ttft-three-pods
+	// takes k2's first reading, at the first queue (P1-obs in place of
+	// P1-obs-unadmitted and P2-hist).
 	saturation.SwitchK2FirstReadingWaits: {
 		"e1-tuned/store-records.csv", "e1-tuned/variant-capacities.csv", "e1/variant-capacities.csv",
 		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
 		"pd-restart/composite-results.csv", "pd-restart/composite-roles.csv", "pd-restart/composite-variants.csv",
 		"pd-restart/store-records.csv", "pd-restart/variant-capacities.csv", "pd-restart/warm-pool-pressure.csv",
+		"ttft-saturated/composite-variants.csv", "ttft-saturated/store-records.csv", "ttft-saturated/variant-capacities.csv",
+		"ttft-three-pods/composite-variants.csv", "ttft-three-pods/store-records.csv", "ttft-three-pods/variant-capacities.csv",
 	},
 	saturation.SwitchK2ReadsSettle:   nil,
 	saturation.SwitchMuKeyBucketHeld: nil,
@@ -282,8 +288,14 @@ var earlierSeams = withSeams(learner4b2Seams, withSeams(learner4b1Seams, withSea
 	saturation.SwitchITLPerToken:          nil,
 	// #427's zero-replica estimate at the declared batch cap.
 	saturation.SwitchBatchCapZeroReplica: nil,
-	// #276's spread of output lengths in the KV per request.
-	saturation.SwitchKVPerRequestOutputDispersion: nil,
+	// #276's spread of output lengths in the KV per request. It moved no
+	// golden until P2's ttft-three-pods, the first whose recorded output
+	// histogram spreads (250 tokens out, three decode pods): there the
+	// decode demand moves by a few parts in a million on about 80 cycles.
+	saturation.SwitchKVPerRequestOutputDispersion: {
+		"ttft-three-pods/composite-results.csv", "ttft-three-pods/composite-roles.csv",
+		"ttft-three-pods/results.csv", "ttft-three-pods/variant-capacities.csv",
+	},
 	// Issue #431 routes the forget-learned-state annotation to the slo
 	// analyzer's line, one switch, recorded as an event of its own
 	// (slo.ForgetVariant). It moves no golden, measured: the acceptance and

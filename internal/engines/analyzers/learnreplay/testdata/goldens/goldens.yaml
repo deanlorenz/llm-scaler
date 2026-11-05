@@ -160,3 +160,87 @@ goldens:
   recording: pd-restart/recording.jsonl.gz
   source: P/D benchmark scenario, flow control off, saturated load, one decode engine
     restarted in its own pod, recorder on
+- name: ttft-open-loop-long
+  notRun:
+  - slo
+  outputs:
+  - ttft-open-loop-long/learned-state.csv
+  - ttft-open-loop-long/lines.csv
+  - ttft-open-loop-long/results.csv
+  - ttft-open-loop-long/slo-published.csv
+  - ttft-open-loop-long/store-records.csv
+  - ttft-open-loop-long/variant-capacities.csv
+  - ttft-open-loop-long/composite-holds.csv
+  - ttft-open-loop-long/composite-release.csv
+  - ttft-open-loop-long/composite-results.csv
+  - ttft-open-loop-long/composite-roles.csv
+  - ttft-open-loop-long/composite-variants.csv
+  - ttft-open-loop-long/warm-pool-pressure.csv
+  - ttft-open-loop-long/warm-pool-supply.csv
+  recording: ttft-open-loop-long/recording.jsonl.gz
+  source: P/D benchmark scenario, flow control off, one prefill and one decode replica
+    fixed, open loop arrivals at prefill occupancy under 0.1, 8000 to 37000 tokens
+    in and 16 out, recorder on, default analyzerTuning
+- name: ttft-open-loop-short
+  notRun:
+  - slo
+  outputs:
+  - ttft-open-loop-short/learned-state.csv
+  - ttft-open-loop-short/lines.csv
+  - ttft-open-loop-short/results.csv
+  - ttft-open-loop-short/slo-published.csv
+  - ttft-open-loop-short/store-records.csv
+  - ttft-open-loop-short/variant-capacities.csv
+  - ttft-open-loop-short/composite-holds.csv
+  - ttft-open-loop-short/composite-release.csv
+  - ttft-open-loop-short/composite-results.csv
+  - ttft-open-loop-short/composite-roles.csv
+  - ttft-open-loop-short/composite-variants.csv
+  - ttft-open-loop-short/warm-pool-pressure.csv
+  - ttft-open-loop-short/warm-pool-supply.csv
+  recording: ttft-open-loop-short/recording.jsonl.gz
+  source: P/D benchmark scenario, flow control off, one prefill and one decode replica
+    fixed, open loop arrivals at prefill occupancy under 0.1, 1000 to 16000 tokens
+    in and 16 out, recorder on, default analyzerTuning
+- name: ttft-saturated
+  notRun:
+  - slo
+  outputs:
+  - ttft-saturated/learned-state.csv
+  - ttft-saturated/lines.csv
+  - ttft-saturated/results.csv
+  - ttft-saturated/slo-published.csv
+  - ttft-saturated/store-records.csv
+  - ttft-saturated/variant-capacities.csv
+  - ttft-saturated/composite-holds.csv
+  - ttft-saturated/composite-release.csv
+  - ttft-saturated/composite-results.csv
+  - ttft-saturated/composite-roles.csv
+  - ttft-saturated/composite-variants.csv
+  - ttft-saturated/warm-pool-pressure.csv
+  - ttft-saturated/warm-pool-supply.csv
+  recording: ttft-saturated/recording.jsonl.gz
+  source: P/D benchmark scenario, flow control off, one prefill and two decode replicas
+    fixed, closed loop to prefill saturation, 8000 to 37000 tokens in and 16 out,
+    recorder on, default analyzerTuning
+- name: ttft-three-pods
+  notRun:
+  - slo
+  outputs:
+  - ttft-three-pods/learned-state.csv
+  - ttft-three-pods/lines.csv
+  - ttft-three-pods/results.csv
+  - ttft-three-pods/slo-published.csv
+  - ttft-three-pods/store-records.csv
+  - ttft-three-pods/variant-capacities.csv
+  - ttft-three-pods/composite-holds.csv
+  - ttft-three-pods/composite-release.csv
+  - ttft-three-pods/composite-results.csv
+  - ttft-three-pods/composite-roles.csv
+  - ttft-three-pods/composite-variants.csv
+  - ttft-three-pods/warm-pool-pressure.csv
+  - ttft-three-pods/warm-pool-supply.csv
+  recording: ttft-three-pods/recording.jsonl.gz
+  source: P/D benchmark scenario, flow control off, three prefill and three decode
+    replicas fixed, closed loop of 30000 tokens in and 250 out, recorder on, default
+    analyzerTuning
