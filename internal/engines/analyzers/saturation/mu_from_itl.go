@@ -257,9 +257,18 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 		// already holds from when it was working -- and, once those have aged
 		// out, from the key's last slope (slopeHeld), so the line outlives a
 		// long light stretch (issue #284).
+		//
+		// pinnedAtBPrior says the line was priced one-sided at the cap
+		// (SwitchITLOneSidedAtCap): no learned B, and the prior's line (its
+		// intercept the prior on B, capped at the window's least ITL, through
+		// the mean of the readings at k 0.85 or more at or past the pricing
+		// k) priced higher there than the fit through the default B, which it
+		// replaced. priorBeyondReadings says the pricing k was past every
+		// such reading, where that line's bound no longer holds.
 		logger.V(logging.DEFAULT).Info("itl-fit", "variant", variantName, "tier", "pinned-B",
 			"a", r.Model.A, "b", r.Model.B, "held", r.Held, "baselineLearned", r.BaselineStored,
-			"slopeHeld", r.SlopeHeld, "slopeAge", r.SlopeAge(now))
+			"slopeHeld", r.SlopeHeld, "slopeAge", r.SlopeAge(now), "pinnedAtBPrior", r.PinnedAtBPrior,
+			"priorBeyondReadings", r.PriorBeyondReadings)
 	case r.Declined:
 		logger.V(logging.DEFAULT).Info("itl-fit-declined", "variant", variantName, "held", r.Held)
 	}

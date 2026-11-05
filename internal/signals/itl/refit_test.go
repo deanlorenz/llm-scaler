@@ -24,19 +24,19 @@ func spanReadings(line Model, n int, lo, hi float64) []Observation {
 func TestRefitTakesTheFullFitOnlyWhenReady(t *testing.T) {
 	line := Model{A: 0.004, B: 0.0015}
 	wide := spanReadings(line, 12, 0.2, 0.7)
-	if got := Refit(wide, wide, line.B, 0); got.Tier != TierOLS || len(got.Read) != len(wide) {
+	if got := Refit(wide, wide, line.B, 0, Admission{}); got.Tier != TierOLS || len(got.Read) != len(wide) {
 		t.Errorf("spread 0.5: tier %q on %d readings, want ols on all %d", got.Tier, len(got.Read), len(wide))
 	}
 	narrow := spanReadings(line, 12, 0.4, 0.65)
 	if _, ok := Fit(narrow); !ok {
 		t.Fatal("the full fit refuses the narrow readings; the case tests nothing")
 	}
-	got := Refit(narrow, narrow, line.B, 0)
+	got := Refit(narrow, narrow, line.B, 0, Admission{})
 	if got.Tier != TierPinnedB || got.Model.B != line.B {
 		t.Errorf("spread 0.25: %+v, want the pinned fit at B %g", got, line.B)
 	}
 	few := spanReadings(line, DefaultMinSamples-1, 0.2, 0.7)
-	if got := Refit(few, few, line.B, 0); got.Tier != "" || !got.Hold {
+	if got := Refit(few, few, line.B, 0, Admission{}); got.Tier != "" || !got.Hold {
 		t.Errorf("%d readings: %+v, want a hold", len(few), got)
 	}
 }
@@ -47,7 +47,7 @@ func TestRefitPinnedReadsWhatTheTrackerReads(t *testing.T) {
 	line := Model{A: 0.004, B: 0.0015}
 	obs := spanReadings(line, 12, 0.4, 0.5)
 	obs[0].settling, obs[1].settling = true, true
-	got := Refit(obs, nil, line.B, 0)
+	got := Refit(obs, nil, line.B, 0, Admission{})
 	if got.Tier != TierPinnedB || len(got.Read) != 10 {
 		t.Fatalf("%+v, want the pinned fit on the 10 settled readings", got)
 	}
@@ -72,7 +72,7 @@ func TestRefitSettledFloor(t *testing.T) {
 			for i := range len(obs) - settled {
 				obs[i].settling = true
 			}
-			got := Refit(obs, nil, line.B, minSettled)
+			got := Refit(obs, nil, line.B, minSettled, Admission{})
 			wantFit := settled >= minSettled
 			if (got.Tier == TierPinnedB) != wantFit || got.Hold == wantFit {
 				t.Errorf("minSettled %d, %d settled: %+v, want a fit %v", minSettled, settled, got, wantFit)

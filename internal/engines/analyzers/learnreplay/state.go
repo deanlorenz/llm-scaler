@@ -95,6 +95,17 @@ type VariantState struct {
 	// and MinSettled the steady gate's MinSettledSamples: what a refit takes.
 	Baseline   float64
 	MinSettled int
+	// OneSided is how the line was priced one-sided
+	// (itl.Admission.OneSidedAboveKSat, issue #467), the zero Admission for
+	// a line that was not: priced at the prior on B, B unlearned and
+	// Baseline itl.DefaultBaselineSec. A refit takes it (whatif.Refit.OneSided)
+	// to price the line the controller priced. analyzerOneSided is the
+	// admission the analyzer last priced the key with, and analyzerRaised
+	// whether that line was priced at the prior: refit takes the admission on
+	// a raised line only.
+	OneSided         itl.Admission
+	analyzerOneSided itl.Admission
+	analyzerRaised   bool
 	// CapacityTokens is C, the replica's whole KV capacity
 	// (whatif.CapacityTokens).
 	CapacityTokens float64
@@ -392,6 +403,7 @@ func (r *replayer) stateOf(in domain.AnalyzerInput, cycle int, now time.Time, sh
 		if rep.PricingKey != "" {
 			vs.PricingKey = rep.PricingKey
 			vs.Readings = r.sat.ITLReadings(rep.PricingKey)
+			vs.analyzerOneSided, vs.analyzerRaised = r.sat.ITLOneSided(rep.PricingKey)
 		}
 		vs.refit()
 		var params *capacity.EngineParams
@@ -435,13 +447,22 @@ func sameLine(a, b itl.Model) bool {
 // and, when that does not give the line back, the above-band fallback, which
 // marks the line TierAboveBand. A held or borrowed line was fitted from no
 // readings of the variant's own here.
+//
+// A pinned line the analyzer priced at the prior on B (issue #467; the
+// recorded itl.Reading.PinnedAtBPrior) is refit with the analyzer's
+// one-sided admission, which the state keeps for the bands (OneSided), so a
+// resample prices as the controller did.
 func (vs *VariantState) refit() {
 	if vs.Tier != whatif.TierOLS && vs.Tier != whatif.TierPinnedB {
 		return
 	}
 	vs.Baseline = vs.Line.B
-	if got := itl.Refit(vs.Readings.All, vs.Readings.Steady, vs.Baseline, vs.MinSettled); got.Tier != "" && sameLine(got.Model, vs.Line) {
-		vs.Tier, vs.LineReadings, vs.Refitted = got.Tier, got.Read, true
+	var adm itl.Admission
+	if vs.Tier == whatif.TierPinnedB && vs.analyzerRaised {
+		adm = vs.analyzerOneSided
+	}
+	if got := itl.Refit(vs.Readings.All, vs.Readings.Steady, vs.Baseline, vs.MinSettled, adm); got.Tier != "" && sameLine(got.Model, vs.Line) {
+		vs.Tier, vs.LineReadings, vs.Refitted, vs.OneSided = got.Tier, got.Read, true, adm
 		return
 	}
 	if got := itl.RefitAboveBand(vs.Readings.Above, vs.Readings.AboveSteady, vs.MinSettled); got.Tier != "" && sameLine(got.Model, vs.Line) {

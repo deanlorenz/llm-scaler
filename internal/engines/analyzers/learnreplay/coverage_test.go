@@ -78,11 +78,13 @@ var reviewed = map[reflect.Type]buckets{
 		// which the analyzer overwrites every cycle and nothing restores.
 		// ITLReadings copies a key's readings, and PricingBatchCap reads the
 		// cap without stamping a learned one as used: the what-if planner's
-		// views (whatif_view.go). PrefillEstimate copies a prefill variant's
-		// stashed estimate for the slo analyzer, which the analyzer
-		// overwrites every cycle and nothing restores (prefill_observe.go).
+		// views (whatif_view.go), as is ITLOneSided, which copies the
+		// one-sided admission a key was last priced with (issue #467).
+		// PrefillEstimate copies a prefill variant's stashed estimate for the
+		// slo analyzer, which the analyzer overwrites every cycle and nothing
+		// restores (prefill_observe.go).
 		readers: []string{"Name", "Horizons", "BorrowTickGap", "PathCounts", "LearnerReports",
-			"ITLReadings", "PricingBatchCap", "PrefillEstimate"},
+			"ITLReadings", "PricingBatchCap", "ITLOneSided", "PrefillEstimate"},
 		// WithSettleView hands k2 the engine's settle tracker; the replay hands
 		// it its own, observed from the settle events (settle.go).
 		builders: []string{"WithHorizons", "WithOptimizationInterval", "WithClock", "WithRecorder", "WithSettleView"},

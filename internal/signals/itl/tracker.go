@@ -3,6 +3,7 @@ package itl
 import (
 	"maps"
 	"math"
+	"sort"
 	"sync"
 	"time"
 
@@ -108,11 +109,28 @@ type Reading struct {
 	// (Admission.AboveBandFallback): the band gave no line, the key held no
 	// slope it may hold, and A was fitted from the readings above the band.
 	AboveBandFit bool
-	// PinnedAtLeastITL is set when Model is the pinned fit's line through
-	// the least ITL of the window's readings at a k of at least DefaultKSat,
-	// not through the default baseline (Admission.OneSidedAboveKSat): it
-	// priced the higher ITL at DefaultKSat.
+	// PinnedAtLeastITL is set when Model was priced one-sided
+	// (Admission.OneSidedAboveKSat): by the pinned fit's line through the
+	// least ITL of the window's readings at a k of at least DefaultKSat, not
+	// the fit through the default baseline, which priced fewer replicas.
+	// Model is that line, priced at DefaultKSat; or, for an admission that
+	// names where it is priced (OneSidedAt, OneSidedTarget), the line
+	// through the default baseline that prices the same there.
 	PinnedAtLeastITL bool
+	// PinnedAtBPrior is set in its place when the admission states a prior
+	// (Admission.BPrior): Model priced what the prior's line priced
+	// (priorLine: intercept the prior, capped at the window's least ITL,
+	// through the mean of the at-cap readings at or past the fill it is
+	// priced at), higher than the fit through the default baseline. Model is
+	// the line through the default baseline that prices the same where the
+	// line is priced.
+	PinnedAtBPrior bool
+	// PriorBeyondReadings is set with PinnedAtBPrior when the line is priced
+	// at a fill past every at-cap reading's (priorLine): the prior's line is
+	// then anchored at the highest readings, and its bound, (b - B)(1 -
+	// k/kbar) with kbar under the priced k, no longer holds there; it can
+	// price under the truth by up to (b - B)(k/kbar - 1).
+	PriorBeyondReadings bool
 	// AboveBandHeld is the above-band window's size after pruning; zero
 	// without the fallback.
 	AboveBandHeld int
@@ -424,19 +442,60 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 	}
 	m, heldA := c.model, c.model.A
 	if adm.OneSidedAboveKSat && !r.BaselineLearned {
-		if lo, ok := atLeastITLLine(c.read); ok && lo.ITLAt(DefaultKSat) > m.ITLAt(DefaultKSat) {
-			// The hold pairs its A with the baseline (above), so the A held
-			// is the one that prices the chosen line's ITL at DefaultKSat
-			// through it: a held line prices what this one did.
-			m, r.PinnedAtLeastITL = lo, true
-			heldA = (m.ITLAt(DefaultKSat) - baseline) / DefaultKSat
-		}
+		var raised, beyond bool
+		m, heldA, raised, beyond = oneSidedLine(c, baseline, adm)
+		r.PinnedAtBPrior = raised && adm.BPrior > 0
+		r.PinnedAtLeastITL = raised && !(adm.BPrior > 0)
+		r.PriorBeyondReadings = r.PinnedAtBPrior && beyond
 	}
 	t.mu.Lock()
 	t.slopes[key] = heldSlope{a: heldA, fittedAt: now, args: adm.Args}
 	t.mu.Unlock()
 	r.Model, r.Tier = m, TierPinnedB
 	return r
+}
+
+// oneSidedLine is the pinned fit c, through baseline, set against the line
+// through the least ITL of its readings at or past DefaultKSat
+// (atLeastITLLine): the one of the two that prices more replicas where adm
+// prices (Admission.OneSidedAt, OneSidedTarget) is the line, and raised says
+// it was the latter (Admission.OneSidedAboveKSat). heldA is the A a later
+// hold holds: the hold pairs its A with the baseline, so it is the one that
+// prices, through it, what the chosen line priced (Admission.keptA). Observe
+// and Refit both take it, so a refit of the same readings prices the line
+// the tracker did.
+//
+// An admission that names where its line is priced (OneSidedAt, or
+// OneSidedTarget) gets the chosen line as the held one: through baseline,
+// at the A that prices there what the line through the least ITL priced.
+// The price is the same, and the line is one every reader of a pinned fit
+// takes: A above zero (the line through the least ITL is flat on one reading,
+// and whatif.PriceTPOT and itl.ValidModel refuse a flat line), B the pin.
+//
+// With Admission.BPrior the line set against the fit is priorLine's, not
+// atLeastITLLine's, anchored where the line is priced (priceAnchor), and the
+// chosen line is always returned through baseline, whether or not the
+// admission names where it is priced: the prior's line can be flat (one
+// reading, or every ITL at the cap), and a flat line is refused by
+// whatif.PriceTPOT and ValidModel. beyond is priorLine's: the priced fill is
+// past every reading's.
+func oneSidedLine(c fitChoice, baseline float64, adm Admission) (m Model, heldA float64, raised, beyond bool) {
+	m, heldA = c.model, c.model.A
+	var lo Model
+	var ok bool
+	if adm.BPrior > 0 {
+		lo, beyond, ok = priorLine(c.read, adm.BPrior, adm.priceAnchor(c.model))
+	} else {
+		lo, ok = atLeastITLLine(c.read)
+	}
+	if !ok || !adm.pricesHigher(lo, m) {
+		return m, heldA, false, false
+	}
+	heldA = adm.keptA(lo, baseline)
+	if adm.namesItsPrice() || adm.BPrior > 0 {
+		return Model{A: heldA, B: baseline}, heldA, true, beyond
+	}
+	return lo, heldA, true, false
 }
 
 // atLeastITLLine is the line pinned at the least ITL among obs's readings at
@@ -476,6 +535,85 @@ func atLeastITLLine(obs []Observation) (Model, bool) {
 		return Model{}, false
 	}
 	return fitAboveBand(past, aboveBandB(past))
+}
+
+// priorAnchorMin is how many at-cap readings the prior's line is anchored
+// on when it can be: the mean of at least three, so one reading does not
+// carry the noise alone.
+const priorAnchorMin = 3
+
+// priorLine is the line with intercept b through an anchor point (kbar,
+// ITLbar), the mean of some of obs's readings at a k of at least DefaultKSat:
+// A = (ITLbar - b) / kbar (Admission.BPrior). b is bPrior capped at the least
+// ITL of any reading in obs (priorCap), so b is at most every ITL and so at
+// most their mean, and A is never negative. ok is false when there is no
+// usable reading at or past kSat.
+//
+// The anchor's fill must be at least at, the fill the line is priced at. On
+// readings of the true line, at a fill k the line is over the truth by (b -
+// B)(1 - k/kbar): at least zero for k <= kbar while B <= b, and under it,
+// by (b - B)(k/kbar - 1), for k past kbar. So the anchor is the mean of the
+// at-cap readings at or past at, when there are priorAnchorMin of them;
+// otherwise the mean of the priorAnchorMin readings of highest k (all of
+// them, if fewer). beyond is set when even that mean's fill is under at: the
+// line is priced past every reading, and the bound no longer holds there.
+//
+// A mean, not the least reading: on readings without noise the mean is on
+// the true line as any reading is; with noise its error falls by the square
+// root of the readings, and the least reading's selection bias (under the
+// line by about 4 % of it at some 30 readings of 2 % noise) is gone.
+func priorLine(obs []Observation, bPrior, at float64) (m Model, beyond, ok bool) {
+	var past []Observation
+	for _, o := range obs {
+		if atOrPastKSat(o.K) && usable(o) {
+			past = append(past, o)
+		}
+	}
+	if len(past) == 0 {
+		return Model{}, false, false
+	}
+	var anchor []Observation
+	for _, o := range past {
+		if o.K >= at-anchorTolerance {
+			anchor = append(anchor, o)
+		}
+	}
+	if len(anchor) < priorAnchorMin {
+		sort.SliceStable(past, func(i, j int) bool { return past[i].K > past[j].K })
+		anchor = past[:min(priorAnchorMin, len(past))]
+	}
+	var sumK, sumITL float64
+	for _, o := range anchor {
+		sumK += o.K
+		sumITL += o.ITLSec
+	}
+	b := priorCap(obs, bPrior)
+	kbar, itlbar := sumK/float64(len(anchor)), sumITL/float64(len(anchor))
+	return Model{A: (itlbar - b) / kbar, B: b}, kbar < at-anchorTolerance, true
+}
+
+// anchorTolerance is how far under the priced fill a reading's (or the
+// anchor's mean) fill may lie and count as at it: three readings at 0.95
+// average to a hair under 0.95 in floating point.
+const anchorTolerance = 1e-9
+
+// priorCap is bPrior capped at the least ITL of any usable reading in obs,
+// at any k. Every reading is ITL = B + A k with A >= 0, so that least ITL is
+// an upper bound on B the window itself proves, and a prior above it (an
+// outlier fit on the same physics key, say) would only add over-price.
+func priorCap(obs []Observation, bPrior float64) float64 {
+	b := bPrior
+	for _, o := range obs {
+		if usable(o) {
+			b = min(b, o.ITLSec)
+		}
+	}
+	return b
+}
+
+// usable reports whether a reading has a finite positive k and ITL.
+func usable(o Observation) bool {
+	return o.K > 0 && !math.IsInf(o.K, 0) && o.ITLSec > 0 && !math.IsInf(o.ITLSec, 0)
 }
 
 // atOrPastKSat reports whether a reading at fill k lies at or past
@@ -533,6 +671,13 @@ type Refitted struct {
 	Hold bool
 	// Read is the readings the line was fitted from.
 	Read []Observation
+	// PinnedAtLeastITL is set when the pinned fit was priced one-sided
+	// (oneSidedLine; Reading.PinnedAtLeastITL): Model prices what the line
+	// through the least ITL of Read's readings at or past DefaultKSat
+	// priced. PinnedAtBPrior is the same with a prior (Admission.BPrior;
+	// Reading.PinnedAtBPrior), and PriorBeyondReadings its
+	// Reading.PriorBeyondReadings.
+	PinnedAtLeastITL, PinnedAtBPrior, PriorBeyondReadings bool
 }
 
 // Refit reruns Observe's choice of fit (chooseFit) on readings a key's
@@ -543,12 +688,29 @@ type Refitted struct {
 // them: DefaultMinSamples of them, spread DefaultMinKSpread. Nothing is
 // remembered: the what-if planner bands a line by refitting resamples of
 // its readings (internal/signals/whatif, BootstrapLines).
-func Refit(obs, steady []Observation, baseline float64, minSettled int) Refitted {
+//
+// oneSided, when its OneSidedAboveKSat is set, prices the pinned fit
+// one-sided as Observe does under that admission while the key has no
+// learned B: the caller passes it for such a key only, with baseline
+// DefaultBaselineSec. Only the one-sided fields are read (OneSidedAt, BPrior,
+// OneSidedTarget, and MinK and MaxK with a target). The zero Admission is
+// the pinned fit alone. Without it a refit of a line Observe priced
+// one-sided pins the default B alone, and prices under the line the
+// controller priced (issue #467).
+func Refit(obs, steady []Observation, baseline float64, minSettled int, oneSided Admission) Refitted {
 	if minSettled <= 0 {
 		minSettled = DefaultMinSettledSamples
 	}
 	c := chooseFit(obs, steady, ready(steady, DefaultMinSamples, DefaultMinKSpread), baseline, minSettled)
-	return Refitted{Model: c.model, Tier: c.tier, Hold: c.hold, Read: c.read}
+	out := Refitted{Model: c.model, Tier: c.tier, Hold: c.hold, Read: c.read}
+	if oneSided.OneSidedAboveKSat && c.tier == TierPinnedB {
+		var raised, beyond bool
+		out.Model, _, raised, beyond = oneSidedLine(c, baseline, oneSided)
+		out.PinnedAtBPrior = raised && oneSided.BPrior > 0
+		out.PinnedAtLeastITL = raised && !(oneSided.BPrior > 0)
+		out.PriorBeyondReadings = out.PinnedAtBPrior && beyond
+	}
+	return out
 }
 
 // RefitAboveBand reruns the above-band fallback (aboveBandLine) on the

@@ -743,6 +743,69 @@ readings are left, the key's last `A` holds (`itl-fit` logs `slopeHeld`), and a
 key with no `A` yet gets no line. `itl-window` reports the marked readings as
 `settling`.
 
+#### One-sided at the cap (issue #467)
+
+A replica at its stated cap reads above `itl.DefaultKSat`. While the key has
+no learned B the pinned fit pins `DefaultBaselineSec`, and through such
+readings it prices under the true line by `(B0 - B)(1 - k/k_cap)` at a fill
+`k`. Under `SwitchITLOneSidedAtCap` (`saturation-itl-one-sided-at-cap`,
+`itl_one_sided.go`) the admission sets `itl.Admission.OneSidedAboveKSat`, as
+the throughput line does, with `OneSidedAt` the line's pricing k
+(`pricingK`) and `BPrior` the prior on B (`itlBPrior`).
+
+- **Scope.** `itlBPrior` reads only the variant's physics: the tracker's
+  keys in `itl.PriorScope` (the same model, accelerator and GPU count, the
+  same engine arguments in `itlArgs`, the same role this cycle; another
+  namespace is out of scope, since its role is unknown here), and the line
+  published for the variant's own physics key (`itlPhysicsKey`, shared only
+  with `enableLearnedStateReuse`).
+- **Floor.** `itl.BPrior` is `max(itl.DefaultBPrior, largest learned B in
+  scope)`: a learned B only raises the prior, never lowers it under 30 ms.
+- **Cap.** `itl.priorCap` caps the prior at the least ITL of any reading in
+  the variant's own window, at any k: every reading is at least B.
+- **Anchor.** `itl.priorLine` passes the prior's line through the mean
+  `(kbar, ITLbar)` of the window's readings at k >= kSat that sit at or past
+  the fill the line is priced at (`Admission.priceAnchor`: `OneSidedAt`, or
+  the fill where the default-B fit meets `OneSidedTarget`), when there are
+  three; else the three of highest k. `A = (ITLbar - b)/kbar`, never negative
+  since the cap puts `b` under every ITL. On readings without noise the
+  error at a fill k is `(b - B)(1 - k/kbar)`: over the truth for `k <= kbar`
+  while `B <= b`, under it past `kbar`, which is why the anchor sits at or
+  past the priced fill. When even the anchor's `kbar` is under it,
+  `Reading.PriorBeyondReadings` is set (logged `priorBeyondReadings`) and
+  the bound does not hold. A mean rather than the least reading: its noise
+  falls by sqrt(n), and the least reading's selection bias is gone.
+- **Line returned.** With a prior set, `oneSidedLine` always returns the
+  line through the default B at the held A, whether or not the admission
+  names its price: the prior's line can be flat (one reading, or the cap's
+  ITL at every reading), which `PriceTPOT` and `ValidModel` refuse.
+- **Not lent.** A line with `PinnedAtBPrior` is not published to
+  `itlLines` (`analyze.go`): it carries this variant's at-cap readings and
+  pricing k, so siblings borrow nothing from it while it is.
+
+The tracker compares that line with the fit through the default B at the
+pricing k, and when it is higher returns the line through the default B that
+prices the same there (`oneSidedLine`): A above zero, B the pin, so
+`DeriveMuAtCap`, `ValidModel` and line sharing read it as any pinned fit. The
+held A is that line's A, so a hold prices the same. `itl-fit` logs
+`pinnedAtBPrior`. The throughput line sets no prior and keeps 4b-3's line
+through the least ITL (`atLeastITLLine`).
+
+The slo line sets the same flag and prior under its own switch
+(`slo-itl-one-sided-at-cap`, `slo/one_sided.go`), scoped the same way on its
+own tracker and `args`, with `itl.Admission.OneSidedTarget`, the TPOT target:
+each line is judged at the fill where it meets the target (`pricedFill`,
+`PriceTPOT`'s clamp), and the lower fill wins.
+
+The what-if bands rerun the same choice: `itl.Refit` takes the admission's
+one-sided fields, `whatif.Refit.OneSided` carries them, and
+`learnreplay.VariantState.refit` passes the admission the analyzer last
+priced the key with (`SaturationAnalyzer.ITLOneSided`, kept per key in
+`itlOneSidedLast` with whether the line was raised, and evicted with its
+variant in `EvictStaleHistory`) for a line recorded as raised
+(`PinnedAtBPrior`). The scope is built by `itl.NewPriorScope`, which reads
+each analyzer's arguments map lazily, under its own lock.
+
 #### When a replica's settle starts (learner PR 4a)
 
 The settle is read from the engine's settle tracker (`internal/signals/settle`,

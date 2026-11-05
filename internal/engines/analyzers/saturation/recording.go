@@ -120,10 +120,10 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 // SwitchKVPerRequestHitsResident, SwitchZeroReplicaDataParallel,
 // SwitchITLFitsAggregated, SwitchITLAggregatedShapeTerm,
 // SwitchITLAggregatedSizes, SwitchPrefillCapacityObserve,
-// SwitchStartConfirmsByDistinctPod, SwitchPrefillBusyMinutes and
-// SwitchPrefillAQuadratic; a name it
-// does not know is an error, and sets nothing. Never called on a production
-// path; a test holds that.
+// SwitchStartConfirmsByDistinctPod, SwitchPrefillBusyMinutes,
+// SwitchPrefillAQuadratic and SwitchITLOneSidedAtCap; a name it does not
+// know is an error, and sets nothing. Never called on a production path;
+// a test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
 	rest := maps.Clone(switches)
 	fields := a.switchFields()
@@ -209,6 +209,9 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		// a's curved fit: the quadratic where the prompt clusters carry it
 		// (prefill/fixed.go).
 		SwitchPrefillAQuadratic: &a.prefillAQuadratic,
+		// Issue #467: the ITL line priced one-sided at the sequence cap
+		// while B is unlearned (itl_one_sided.go).
+		SwitchITLOneSidedAtCap: &a.itlOneSidedAtCap,
 	}
 }
 

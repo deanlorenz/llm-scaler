@@ -467,6 +467,48 @@ it needs one, and votes on scale-down. A capped replica that
 preempts more than `capMaxPreemptionRate` is not read at its cap: it stays in
 `aboveBand`, and only the fallback may use it.
 
+The saturation and slo lines price a variant at its cap one-sided too, until
+B is learned, against an upper prior on B rather than the least ITL. With no
+learned B, the line through the default 6 ms prices under the truth: at the
+saturation line's pricing point (k 0.68 with the default thresholds) by 3 to
+20 % on a true B of 10 to 30 ms, which made the derived mu too high and
+ordered too few replicas. Each line now also draws a line with its
+intercept the prior, through the mean of its readings at the cap that sit at
+or past the fill it is priced at (the three of highest fill when fewer
+do), and prices on the higher of the two where the line is priced. A line
+priced this way is not lent to other variants of the same engine: they
+borrow nothing from it while it is.
+
+The prior is 30 ms, raised to the largest B another variant has learned on
+the same physics: the same model, accelerator and GPU count, under the same
+engine arguments, in the same role. A learned B only ever raises the prior.
+A variant on other hardware, or another engine, never lowers it, so a fleet
+of small intercepts cannot pull a whole-node decode under its B. The prior
+is then capped at the least ITL the variant's own window shows, which no
+reading can put under the true B, so an outlier fit cannot inflate it.
+
+The rule: on readings without noise, at a fill k at or under the mean fill
+`kbar` of the readings the line is drawn through, the price is over the true
+line by `(b - B)(1 - k/kbar)`, `b` the capped prior. So it is not under the
+truth while the true B is at most the prior, and over it by at most the
+prior's error: on the grid, 0 to 14 % at the 30 ms prior. A true B above
+the prior is under-priced by `(B - b)(1 - k/kbar)`: 6 % at a true B of 40 ms,
+against 22 % before. Past `kbar` the error turns: the rule draws through
+readings at or past the priced fill for that reason, and where every
+reading is under it, `itl-fit` logs `priorBeyondReadings` true (`slo-variant`:
+`linePriorBeyondReadings`) and the bound does not hold there. With 2 %
+gauge noise, where the true B equals the prior, the price was at most 1.1 %
+under in simulation, 0.07 % on average.
+
+The slo line prices the fill where its ITL meets the TPOT target, and a
+line under the truth met it at too high a fill. It now meets it at or under
+the truth's fill, without noise, for a true B at most the prior. It abstains
+(`infeasible`) only where the target is under every ITL the variant has
+read, so nothing it measured shows B is under the target; one reading under
+the target is enough to price it. `itl-fit` logs `pinnedAtBPrior`, and
+`slo-variant` logs `linePinnedAtBPrior`, when the price came from the
+prior's line.
+
 | `cause` | Meaning |
 |---|---|
 | `no-healthy-rows` | no row of the variant was healthy this cycle, so nothing was read. Every count is 0 |

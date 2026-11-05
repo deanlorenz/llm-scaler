@@ -100,9 +100,45 @@ type Admission struct {
 	// at the least ITL of those readings, and the higher at DefaultKSat is
 	// the line (atLeastITLLine; Reading.PinnedAtLeastITL). A learned B ends
 	// it: the pinned fit then pins that. Without it, as before, the fit
-	// through DefaultBaselineSec is the line. Only the throughput analyzer
-	// sets it, with its cap admission.
+	// through DefaultBaselineSec is the line. The throughput analyzer sets
+	// it with its cap admission, the saturation and slo analyzers under
+	// their own switches (issue #467).
 	OneSidedAboveKSat bool
+	// OneSidedAt is the fill the one-sided rule compares the two lines at,
+	// and the held A prices the chosen line's ITL at: the k the analyzer
+	// prices its line at (the saturation line's pricing k). Zero is
+	// DefaultKSat, the throughput line's. On readings at or past kSat alone
+	// the two lines meet at the readings' mean k, at or past kSat, and under
+	// it the one with the higher B is the higher, so every fill under kSat
+	// makes the same choice, and the line through the least ITL is at or
+	// above the truth there (fitAboveBand). The held A is what depends on
+	// the fill: a held line, through the default B, prices what the chosen
+	// one did there only.
+	OneSidedAt float64
+	// OneSidedTarget, above zero, prices the line at an ITL instead of a
+	// fill: the slo line prices the fill in the band where its ITL meets the
+	// TPOT target (whatif.PriceTPOT), and a lower fill is more replicas.
+	// Each line is then judged at the fill where it meets the target,
+	// clamped to the band (pricedFill), the line with the lower fill is the
+	// line, and the held A is the one whose line meets the target at the
+	// chosen line's fill. OneSidedAt is not read.
+	OneSidedTarget float64
+	// BPrior, above zero, is the stated upper prior on B the one-sided rule
+	// pins instead of the least ITL (issue #467). The analyzers set BPrior's
+	// value: DefaultBPrior, raised, never lowered, by B learned on the
+	// variant's physics key. The line set against the fit through
+	// DefaultBaselineSec has as intercept BPrior capped at the least ITL of
+	// any reading in the window (priorCap), and passes through the mean point
+	// (kbar, ITLbar) of the readings at k >= DefaultKSat: A = (ITLbar - b) /
+	// kbar (priorLine). On readings of the true line, at a fill k
+	// under kbar, it is over the truth by (b - B)(1 - k/kbar). It never prices
+	// under the truth while the true B is at most the prior (the cap, which
+	// no reading can put under B, keeps that), and it over-prices by the
+	// prior's error, not by a line flattened to the cap's ITL. A true B above
+	// the prior is under-priced by at most (B - b)(1 - k/kbar). Zero keeps
+	// the line through the least ITL (atLeastITLLine), the throughput line's.
+	// The saturation and slo analyzers set it (Reading.PinnedAtBPrior).
+	BPrior float64
 	// AboveBandWaitsAfterRestart stamps the above-band window's readings
 	// with the restart's wait too (WaitsAfterRestart), as learner PR 4b-2
 	// first built it, before its review exempted them (aboveBandSettling).
@@ -137,6 +173,78 @@ func (a Admission) mayHold(s heldSlope, now time.Time) bool {
 		return false
 	}
 	return a.Args == "" || s.args == "" || a.Args == s.args
+}
+
+// targeted reports whether the one-sided rule prices at a target ITL
+// (OneSidedTarget) rather than at a fill (OneSidedAt).
+func (a Admission) targeted() bool {
+	return a.OneSidedTarget > 0 && !math.IsInf(a.OneSidedTarget, 0)
+}
+
+// namesItsPrice reports whether the admission says where its line is
+// priced (OneSidedAt or OneSidedTarget) rather than taking DefaultKSat.
+func (a Admission) namesItsPrice() bool {
+	return a.targeted() || (a.OneSidedAt > 0 && a.OneSidedAt <= 1)
+}
+
+// oneSidedAt is OneSidedAt, DefaultKSat when it is not a fill in (0, 1].
+func (a Admission) oneSidedAt() float64 {
+	if !(a.OneSidedAt > 0) || a.OneSidedAt > 1 {
+		return DefaultKSat
+	}
+	return a.OneSidedAt
+}
+
+// priceAnchor is the fill the prior's line must be anchored at or past
+// (priorLine): oneSidedAt, or, with a target, the fill where fit, the pinned
+// fit through the default B, meets it. The fit's fill is the higher of the
+// two lines' (the default B is under the prior), so an anchor at or past it
+// is at or past the fill the chosen line is priced at too.
+func (a Admission) priceAnchor(fit Model) float64 {
+	if a.targeted() {
+		return a.pricedFill(fit)
+	}
+	return a.oneSidedAt()
+}
+
+// pricedFill is the fill in the band where line's ITL meets OneSidedTarget,
+// as whatif.PriceTPOT clamps it: the band's top for a line that stays under
+// the target there, its bottom for one at or past it already.
+func (a Admission) pricedFill(line Model) float64 {
+	lo, hi := a.band()
+	switch {
+	case line.ITLAt(lo) >= a.OneSidedTarget:
+		return lo
+	case !(line.A > 0) || line.ITLAt(hi) <= a.OneSidedTarget:
+		return hi
+	}
+	return min(max((a.OneSidedTarget-line.B)/line.A, lo), hi)
+}
+
+// pricesHigher reports whether line prices more replicas than other does
+// where the analyzer prices: the higher ITL at oneSidedAt, or, with a
+// target, the lower fill where the ITL meets it.
+func (a Admission) pricesHigher(line, other Model) bool {
+	if a.targeted() {
+		return a.pricedFill(line) < a.pricedFill(other)
+	}
+	k := a.oneSidedAt()
+	return line.ITLAt(k) > other.ITLAt(k)
+}
+
+// keptA is the A a later hold pairs with baseline so that the held line
+// prices what line did: the same ITL at oneSidedAt, or, with a target, the
+// same ITL at the fill where line meets it (pricedFill), which gives the
+// same fill: inside the band the target itself, and at an edge line's ITL
+// there, so a line already past the target at the band's bottom is still
+// past it, and one under it at the top still under. For a line whose B is
+// baseline it is line's A, up to rounding.
+func (a Admission) keptA(line Model, baseline float64) float64 {
+	k := a.oneSidedAt()
+	if a.targeted() {
+		k = a.pricedFill(line)
+	}
+	return (line.ITLAt(k) - baseline) / k
 }
 
 // band is the admission's KV band, with the defaults for an edge left at zero.
