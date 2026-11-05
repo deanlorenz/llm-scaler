@@ -8,6 +8,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/e2e/fixtures"
 )
@@ -149,14 +150,21 @@ var _ = Describe("Warm pool - the controller drains when it returns a Pod", Labe
 		// belongs to no variant it can find short -- an orphan return. That is a
 		// real path, and the shortest way to make the controller issue a return
 		// of its own accord.
-		pod, err := k8sClient.CoreV1().Pods(cfg.LLMDNamespace).Get(ctx, podName, metav1.GetOptions{})
-		Expect(err).NotTo(HaveOccurred())
-		if pod.Labels == nil {
-			pod.Labels = map[string]string{}
-		}
-		pod.Labels["llm-d.ai/inferenceServing"] = "true"
-		pod.Labels["llm-d.ai/model"] = instanceID
-		_, err = k8sClient.CoreV1().Pods(cfg.LLMDNamespace).Update(ctx, pod, metav1.UpdateOptions{})
+		// Retried on Conflict: the kubelet writes this Pod's status on every
+		// probe, so an Update from a read a moment old can lose to it.
+		err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+			pod, err := k8sClient.CoreV1().Pods(cfg.LLMDNamespace).Get(ctx, podName, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			if pod.Labels == nil {
+				pod.Labels = map[string]string{}
+			}
+			pod.Labels["llm-d.ai/inferenceServing"] = "true"
+			pod.Labels["llm-d.ai/model"] = instanceID
+			_, err = k8sClient.CoreV1().Pods(cfg.LLMDNamespace).Update(ctx, pod, metav1.UpdateOptions{})
+			return err
+		})
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Waiting for the controller to hand the Pod back on its own")
