@@ -71,11 +71,11 @@ func (est *Estimate) capacity(ks *keyState, c Cycle, sglang bool) {
 		return
 	}
 	est.VPQueuedMinutes, est.VPLongestQueuedRun = queuedRuns(ks)
-	v, n, multiRank, prompt := busyMedian(ks, c.Now)
-	est.VPBusyMinutes = n
-	if n >= MinBusyMinutes {
-		est.VP, est.VPSource, est.VPSamples, est.VPPromptTokens = v, SourceBusyMinutes, n, prompt
-		if multiRank {
+	bm := busyMedian(ks, c.Now)
+	est.VPBusyMinutes = bm.n
+	if bm.n >= MinBusyMinutes {
+		est.VP, est.VPSource, est.VPSamples, est.VPPromptTokens = bm.rate, SourceBusyMinutes, bm.n, bm.prompt
+		if bm.multiRank {
 			est.VPLowerBound, est.VPLowerBoundReason = true, DataParallelRanks
 		}
 		return
@@ -92,26 +92,35 @@ func (est *Estimate) capacity(ks *keyState, c Cycle, sglang bool) {
 	est.VPRefused = NoPrefillCapacity
 }
 
-// busyMedian is the median rate over every replica's busy minutes no older
-// than BusyWindow at now, how many there are, whether any came from a pod
-// with more than one data-parallel rank, and their mean prompt length (zero
-// when one of them read none).
-func busyMedian(ks *keyState, now time.Time) (float64, int, bool, float64) {
+// busy is the busy minutes' reading: the median rate, how many minutes,
+// whether any came from a pod with more than one data-parallel rank, and
+// their mean prompt length (zero when one of them read none).
+type busy struct {
+	rate      float64
+	n         int
+	multiRank bool
+	prompt    float64
+}
+
+// busyMedian is the busy reading over every replica's busy minutes no older
+// than BusyWindow at now; zero with none.
+func busyMedian(ks *keyState, now time.Time) busy {
 	cutoff := now.Add(-BusyWindow)
 	var rates, prompts []float64
-	multiRank := false
+	var out busy
 	for _, name := range ks.podNames() {
 		for _, s := range ks.pods[name].samples {
 			if s.busy && s.rateOK && s.rate > 0 && !s.at.Before(cutoff) {
 				rates, prompts = append(rates, s.rate), append(prompts, s.prompt)
-				multiRank = multiRank || s.multiRank
+				out.multiRank = out.multiRank || s.multiRank
 			}
 		}
 	}
 	if len(rates) == 0 {
-		return 0, 0, false, 0
+		return busy{}
 	}
-	return median(rates), len(rates), multiRank, meanPrompt(prompts)
+	out.rate, out.n, out.prompt = median(rates), len(rates), meanPrompt(prompts)
+	return out
 }
 
 // meanPrompt is the mean of prompts, zero when one of them is zero (not

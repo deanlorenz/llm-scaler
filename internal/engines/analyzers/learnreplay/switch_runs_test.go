@@ -380,9 +380,12 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestPrefillBusy_AKVFullMinuteIsNotBusy"},
 		{"../saturation", "TestPrefillBusy_ADataParallelPodIsALowerBound"},
 	},
-	// P1's curved fit of a: it runs the switch on and off through Analyze
-	// and asserts both (the curve's 2.8 ms on, the line's refusal off).
+	// P1's curved fit of a: each runs the switch on and off through Analyze
+	// and asserts both. The first replays runs 3 and 4 of the TTFT
+	// recordings (the curve's 7.95 ms on, the line's refusal off); the
+	// second a synthetic sweep (2.8 ms on, refused off).
 	saturation.SwitchPrefillAQuadratic: {
+		{"../saturation", "TestPrefillAQuad_TheRecordingsThroughAnalyze"},
 		{"../saturation", "TestPrefillAQuad_TheSwitchFitsTheCurve"},
 	},
 	// Issue #275's lift: an aggregated figure sizes once the GPS check has

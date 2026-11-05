@@ -22,8 +22,8 @@ import (
 // everywhere else, as P1 shipped:
 //
 //   - The admitted minutes are grouped into prompt-length clusters
-//     (promptClusters), and only clusters of at least
-//     MinQuadraticClusterMinutes minutes count.
+//     (promptClusters). Only a cluster of at least
+//     MinQuadraticClusterMinutes minutes counts.
 //   - A cluster is at most MaxClusterWidth wide (longest over shortest), so
 //     a continuum of lengths, or a slow drift across a sweep, is cut into
 //     several clusters instead of chaining into one.
@@ -32,16 +32,19 @@ import (
 //     curve through each counted cluster's median prompt and median service
 //     time, weighted by relative error (1/s^2). Otherwise the line
 //     (TooFewPromptClusters, NarrowPromptClusters).
-//   - A fitted c that is not above zero is not convex: the line
-//     (ConcaveFit).
+//   - A fitted c that is not above zero is not convex, and a fitted b that
+//     is not above zero has a time per token that falls below zero at short
+//     prompts: the line (ConcaveFit, NegativeSlopeFit). A solve the points
+//     cannot carry is the line too (SingularFit).
 //   - The intercept is extrapolated from the shortest prompts the fit
 //     reads, and reads low the further they are from zero: the shortest
 //     must be at most MaxAShortestPrompt, or a is refused (NoShortPrompts,
 //     AExtrapolated). For the curve that is its shortest counted cluster's
 //     median; for the line the second shortest minute, as the spread test
 //     reads it.
-//   - The curve's intercept carries a standard error from each cluster's
-//     own spread (quadFit.se), and a curve whose standard error is above
+//   - The curve's intercept carries a standard error from the clusters'
+//     pooled spread and the curve's lack of fit (fitQuadratic), and a
+//     curve whose standard error is above
 //     MaxAInterceptRelSE of its intercept is refused (AUncertain): three
 //     medians amplify their noise into the extrapolated intercept, and a
 //     positive intercept that noise could have put at zero is not one.
@@ -57,10 +60,12 @@ import (
 // pooled moves the fit through the minutes by up to 0.55 ms and the fit
 // through the medians by up to 0.14 ms. Each cluster's median tolerates one
 // such minute in three. A trimmed mean would cost less precision, but only
-// pays from five minutes a cluster, and a cluster here may hold three. The weight is relative because the noise is: the
-// service time's spread grows with it, and a fit by absolute error lets the
-// 37k minutes set the intercept of a curve read at 1k. The line keeps P1's
-// untrimmed, unweighted fit over every minute.
+// pays from five minutes a cluster, and a cluster here may hold three.
+//
+// The weight is relative because the noise is: the service time's spread
+// grows with it, and a fit by absolute error lets the 37k minutes set the
+// intercept of a curve read at 1k. The line keeps P1's untrimmed,
+// unweighted fit over every minute.
 //
 // AvgTTFT - AvgServiceTime holds a constant overhead (tokenization,
 // scheduling, the HTTP path) beside the engine wait; with no queue there is
@@ -162,6 +167,10 @@ const (
 	NarrowPromptClusters LineReason = "NarrowPromptClusters"
 	// ConcaveFit is a fitted c not above zero.
 	ConcaveFit LineReason = "ConcaveFit"
+	// NegativeSlopeFit is a fitted b not above zero.
+	NegativeSlopeFit LineReason = "NegativeSlopeFit"
+	// SingularFit is a solve the clusters cannot carry (quadratic).
+	SingularFit LineReason = "SingularFit"
 )
 
 // fixed sets a on est from the key's low-load samples; lineOnly fits the
@@ -247,9 +256,8 @@ func (est *Estimate) fixed(ks *keyState, disaggregated, lineOnly bool) {
 	}
 }
 
-// quadFit is the quadratic s = a + b*I + c*I*I, the standard error of a
-// from the clusters' spread,
-// the shortest counted cluster's median prompt, and how many clusters of
+// quadFit is the quadratic s = a + b*I + c*I*I, the standard error of a, the
+// shortest counted cluster's median prompt, and how many clusters of
 // MinQuadraticClusterMinutes minutes the minutes held.
 type quadFit struct {
 	a, b, c  float64
@@ -258,112 +266,169 @@ type quadFit struct {
 	clusters int
 }
 
+// MinMedianRelSD is the least relative noise each cluster's service time is
+// read with, for the intercept's standard error: an SD of 1% of the
+// cluster's median. The least any counted cluster of runs 3 and 4 or
+// ols-sweep read was 0.74% (run 4 at 2k, four minutes), and their pooled
+// value is 5.4%; a cluster of identical minutes, which a replayed
+// recording or a cached response can give, would otherwise read none, and
+// an intercept with no error is never refused. One percent is under every
+// cluster measured, so it raises none of theirs.
+const MinMedianRelSD = 0.01
+
 // fitQuadratic is the convex curve through the prompt-length clusters'
 // medians, weighted by relative error, or why the line stands instead.
+//
+// The intercept's standard error is sqrt(sum of k_i^2 var_i), k_i the
+// intercept's weight on cluster i's median (a = sum of k_i y_i) and var_i
+// that median's variance: pi/(2 n_i) times the noise's variance (the
+// median's large-sample variance under normal noise). The noise is read
+// relative, as the fit weights it, and pooled over the clusters (each
+// minute about its cluster's median), so one quiet cluster of three does
+// not set its own variance near zero; it is at least MinMedianRelSD. Four
+// clusters leave the curve a residual degree of freedom, and the clusters'
+// relative residuals from it (their lack of fit, over n-3) stand for each
+// median's variance where they are larger: noise that sits between the
+// clusters, not within them, is what the pooled spread cannot see.
 func fitQuadratic(xs, ys []float64) (quadFit, LineReason) {
-	var mx, my, mw, mv []float64
-	for _, cl := range promptClusters(xs, ys) {
-		if cl.n >= MinQuadraticClusterMinutes {
-			// Every service time admitted is above zero (finitePositive).
-			mx, my, mw = append(mx, cl.x), append(my, cl.y), append(mw, 1/(cl.y*cl.y))
-			mv = append(mv, cl.medianVar)
+	var cl []cluster
+	for _, c := range promptClusters(xs, ys) {
+		if c.n >= MinQuadraticClusterMinutes {
+			cl = append(cl, c)
 		}
 	}
-	q := quadFit{clusters: len(mx)}
-	if len(mx) < MinQuadraticClusters {
+	q := quadFit{clusters: len(cl)}
+	if len(cl) < MinQuadraticClusters {
 		return q, TooFewPromptClusters
 	}
-	q.shortest = mx[0]
-	if !(mx[len(mx)-1] >= MinQuadraticSpread*mx[0]) {
+	q.shortest = cl[0].x
+	if !(cl[len(cl)-1].x >= MinQuadraticSpread*cl[0].x) {
 		return q, NarrowPromptClusters
 	}
-	var l0 [3]float64
-	q.a, q.b, q.c, l0 = quadratic(mx, my, mw)
-	if !(q.c > 0) || !isFinite(q.c) || !isFinite(q.b) {
+	mx, my, mw := make([]float64, len(cl)), make([]float64, len(cl)), make([]float64, len(cl))
+	for i, c := range cl {
+		// Every service time admitted is above zero (finitePositive).
+		mx[i], my[i], mw[i] = c.x, c.y, 1/(c.y*c.y)
+	}
+	var k []float64
+	var ok bool
+	q.a, q.b, q.c, k, ok = quadratic(mx, my, mw)
+	if !ok {
+		return q, SingularFit
+	}
+	if !(q.c > 0) {
 		return q, ConcaveFit
 	}
-	// The intercept is a = sum of l_i * y_i, l the first row of the weighted
-	// solve: its variance is the sum of l_i^2 times each median's variance.
-	var v float64
-	for i := range mx {
-		li := l0[0] + l0[1]*mx[i] + l0[2]*mx[i]*mx[i]
-		li *= mw[i]
-		v += li * li * mv[i]
+	if !(q.b > 0) {
+		// A negative b is a curve whose time per token falls below zero at
+		// short prompts: what a slow minute at the long end does to three
+		// medians (run 3 fitted through its minutes read b of -1.2e-6),
+		// not a pod. The line is read instead.
+		return q, NegativeSlopeFit
 	}
-	q.se = math.Sqrt(v)
+	q.se = interceptSE(cl, mx, my, k, q)
 	return q, ""
 }
 
-// cluster is one prompt-length cluster: its minutes' median prompt length
-// and median service time, how many minutes it holds, and the variance of
-// its median service time.
+// interceptSE is the standard error of the curve q's intercept through the
+// clusters cl (medians mx, my; the intercept's weights k), as fitQuadratic
+// gives it.
 //
-// The variance is the minutes' sample variance about their mean times
-// pi/(2n), the median's large-sample variance under normal noise, read from
-// the minutes as they stand, prompt length and all: a cluster up to
-// MaxClusterWidth wide carries the curve's own rise across it as spread,
-// which over-states the noise, the safe side for a refusal.
-type cluster struct {
-	x, y      float64
-	n         int
-	medianVar float64
+// Each median's relative variance has two parts. Within its cluster: the
+// minutes' relative noise about their medians, pooled over the clusters
+// (rel2 over dof), at least MinMedianRelSD, times the median's pi/(2n).
+// Between the clusters: noise a whole cluster shares (a level whose minutes
+// all read slow), which no cluster's own spread shows. That is read from
+// the curve's lack of fit, the medians' mean squared relative residual over
+// n-3, less what the within part already explains of it; a negative excess
+// is none (the method-of-moments estimate of a random effect). On 4000
+// seeded pods with noise of 1% to 20% within the clusters, 77.8% of
+// published intercepts fall within one standard error (68.3% would be
+// exact; the excess is chance lack of fit read as a between part, the safe
+// side) and 99.9% within three. With a 2% offset shared by each level
+// beside 1% within, 63.5% fall within one and 95.8% within three; the
+// within part alone gave 31%.
+func interceptSE(cl []cluster, mx, my, k []float64, q quadFit) float64 {
+	var rel2, dof float64
+	for _, c := range cl {
+		rel2 += c.relSS
+		dof += float64(c.n - 1)
+	}
+	noise := math.Max(rel2/dof, MinMedianRelSD*MinMedianRelSD)
+	var lack, within float64
+	for i, c := range cl {
+		r := (my[i] - (q.a + q.b*mx[i] + q.c*mx[i]*mx[i])) / my[i]
+		lack += r * r
+		within += math.Pi / (2 * float64(c.n)) * noise
+	}
+	between := math.Max(0, lack/float64(len(cl)-3)-within/float64(len(cl)))
+	var v float64
+	for i, c := range cl {
+		v += k[i] * k[i] * (math.Pi/(2*float64(c.n))*noise + between) * my[i] * my[i]
+	}
+	return math.Sqrt(v)
 }
 
+// cluster is one prompt-length cluster: its minutes' median prompt length
+// and median service time, how many minutes it holds, and the sum of its
+// minutes' squared deviations from the median service time, relative to it.
+type cluster struct {
+	x, y  float64
+	n     int
+	relSS float64
+}
+
+// promptPair is one minute's prompt length and service time.
+type promptPair struct{ x, y float64 }
+
 // promptClusters groups the points by prompt length, shortest first: sorted
-// by length, a point within MaxPromptDrift of the one before it joins its
-// cluster, and a point further away starts the next. The steady gate holds a
-// minute to MaxPromptDrift of the minutes before it, so one level of a sweep
-// is one cluster; a continuum of lengths is one cluster too, and fits the
-// line.
+// by length, a point within MaxPromptDrift of the one before it, and within
+// MaxClusterWidth of its cluster's first, joins its cluster; any other
+// starts the next. The steady gate holds a minute to MaxPromptDrift of the
+// minutes before it, so one level of a sweep is one cluster.
 func promptClusters(xs, ys []float64) []cluster {
-	idx := make([]int, len(xs))
-	for i := range idx {
-		idx[i] = i
+	pts := make([]promptPair, len(xs))
+	for i := range xs {
+		pts[i] = promptPair{xs[i], ys[i]}
 	}
-	slices.SortStableFunc(idx, func(i, j int) int {
+	slices.SortStableFunc(pts, func(p, q promptPair) int {
 		switch {
-		case xs[i] < xs[j]:
+		case p.x < q.x:
 			return -1
-		case xs[i] > xs[j]:
+		case p.x > q.x:
 			return 1
 		}
 		return 0
 	})
-	sx, sy := make([]float64, len(idx)), make([]float64, len(idx))
-	for k, i := range idx {
-		sx[k], sy[k] = xs[i], ys[i]
+	// One scratch slice for the medians: each cluster's range is copied into
+	// it and sorted there.
+	scratch := make([]float64, 0, len(pts))
+	med := func(lo, hi int, val func(promptPair) float64) float64 {
+		scratch = scratch[:0]
+		for _, p := range pts[lo:hi] {
+			scratch = append(scratch, val(p))
+		}
+		return median(scratch)
 	}
 	var out []cluster
 	start := 0
-	for k := 1; k <= len(sx); k++ {
-		if k < len(sx) && sx[k] <= (1+MaxPromptDrift)*sx[k-1] && sx[k] <= MaxClusterWidth*sx[start] {
+	for k := 1; k <= len(pts); k++ {
+		if k < len(pts) && pts[k].x <= (1+MaxPromptDrift)*pts[k-1].x && pts[k].x <= MaxClusterWidth*pts[start].x {
 			continue
 		}
-		n := k - start
-		mv := math.Pi / (2 * float64(n)) * sampleVar(sy[start:k])
-		// median sorts its slice in place: the cluster's own range, which
-		// no later cluster reads.
-		out = append(out, cluster{x: median(sx[start:k]), y: median(sy[start:k]), n: n, medianVar: mv})
+		c := cluster{
+			x: med(start, k, func(p promptPair) float64 { return p.x }),
+			y: med(start, k, func(p promptPair) float64 { return p.y }),
+			n: k - start,
+		}
+		for _, p := range pts[start:k] {
+			r := (p.y - c.y) / c.y
+			c.relSS += r * r
+		}
+		out = append(out, c)
 		start = k
 	}
 	return out
-}
-
-// sampleVar is the sample variance of vs, zero for fewer than two.
-func sampleVar(vs []float64) float64 {
-	if len(vs) < 2 {
-		return 0
-	}
-	var m float64
-	for _, v := range vs {
-		m += v
-	}
-	m /= float64(len(vs))
-	var ss float64
-	for _, v := range vs {
-		ss += (v - m) * (v - m)
-	}
-	return ss / float64(len(vs)-1)
 }
 
 // curveBound sets the slope bound from the curve: 1/(b + c*I) at the prompt
@@ -404,32 +469,47 @@ func ols(xs, ys []float64) (intercept, slope float64) {
 	return my - slope*mx, slope
 }
 
+// minSolveDet is the least determinant the scaled normal matrix may have for
+// the solve to be read: below it the points do not hold three distinct
+// lengths to the solve's precision.
+const minSolveDet = 1e-12
+
 // quadratic is the weighted least-squares curve y = a + b*x + c*x*x through
-// the points, each squared residual weighted by ws, by the normal equations,
-// and the first row of (X'WX)^-1: a is the sum over the points of
-// (l0[0] + l0[1]*x + l0[2]*x*x) * w * y. NaN when the points hold fewer
-// than three distinct x. Prompt lengths reach x^4 of about 1e24 at a
-// million tokens, well inside float64, and the solve is exact to 1e-12
-// there (TestQuadratic_TheSolveIsExactAtEveryScale).
-func quadratic(xs, ys, ws []float64) (a, b, c float64, l0 [3]float64) {
-	// s[k] is the weighted sum of x^k, t[k] of y*x^k.
+// the points, each squared residual weighted by ws, and k, the intercept's
+// weight on each point (a = sum of k_i y_i). ok is false when the solve is
+// singular: fewer than three distinct x, or a determinant under minSolveDet.
+//
+// The normal equations are built in u = x/max|x|, so their entries are
+// within the weights' range whatever the prompt lengths (raw x^4 reaches
+// 1e18 at 40k tokens, and 1e22 once weighted 1/s^2 at 10 ms); b and c are
+// unscaled after, and k needs none, since a's column is not scaled.
+func quadratic(xs, ys, ws []float64) (a, b, c float64, k []float64, ok bool) {
+	scale := 0.0
+	for _, x := range xs {
+		scale = math.Max(scale, math.Abs(x))
+	}
+	if !(scale > 0) || math.IsInf(scale, 0) {
+		return 0, 0, 0, nil, false
+	}
+	// s[j] is the weighted sum of u^j, t[j] of y*u^j.
 	var s [5]float64
 	var t [3]float64
 	for i := range xs {
-		p := ws[i]
-		for k := range s {
-			s[k] += p
-			if k < len(t) {
-				t[k] += p * ys[i]
+		u, p := xs[i]/scale, ws[i]
+		for j := range s {
+			s[j] += p
+			if j < len(t) {
+				t[j] += p * ys[i]
 			}
-			p *= xs[i]
+			p *= u
 		}
 	}
 	m := [3][3]float64{{s[0], s[1], s[2]}, {s[1], s[2], s[3]}, {s[2], s[3], s[4]}}
 	det := det3(m)
-	if !(det > 0) || math.IsInf(det, 1) {
-		nan := math.NaN()
-		return nan, nan, nan, [3]float64{nan, nan, nan}
+	// The determinant is read relative to the matrix's own size, s[0]^3
+	// (u is at most 1, so no entry is above s[0]).
+	if !(det > minSolveDet*s[0]*s[0]*s[0]) || math.IsInf(det, 0) {
+		return 0, 0, 0, nil, false
 	}
 	var sol [3]float64
 	for col := range sol {
@@ -439,14 +519,19 @@ func quadratic(xs, ys, ws []float64) (a, b, c float64, l0 [3]float64) {
 		}
 		sol[col] = det3(mc) / det
 	}
-	// The first row of the inverse: the cofactors of the first column over
-	// the determinant (m is symmetric).
-	l0 = [3]float64{
+	// The first row of the inverse: the first column's cofactors over the
+	// determinant (m is symmetric).
+	l0 := [3]float64{
 		(m[1][1]*m[2][2] - m[1][2]*m[2][1]) / det,
 		-(m[0][1]*m[2][2] - m[0][2]*m[2][1]) / det,
 		(m[0][1]*m[1][2] - m[0][2]*m[1][1]) / det,
 	}
-	return sol[0], sol[1], sol[2], l0
+	k = make([]float64, len(xs))
+	for i := range xs {
+		u := xs[i] / scale
+		k[i] = (l0[0] + l0[1]*u + l0[2]*u*u) * ws[i]
+	}
+	return sol[0], sol[1] / scale, sol[2] / (scale * scale), k, true
 }
 
 // det3 is the determinant of m.

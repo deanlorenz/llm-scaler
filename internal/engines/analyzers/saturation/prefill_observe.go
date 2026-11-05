@@ -54,9 +54,11 @@ const SwitchPrefillBusyMinutes = "prefill-busy-minutes"
 // prefill.MaxAShortestPrompt is refused (NoShortPrompts), as is a curve's
 // intercept whose standard error is above prefill.MaxAInterceptRelSE of it
 // (AUncertain); the slope bound on V_P is the curve's at V_P's prompt
-// length. Off, a and the bound are always the line's, as P1 shipped. It
-// moves no golden output: the observation writes no state any output
-// reads.
+// length. The short-prompt rule holds the line too: on, a deployment whose
+// prompts are all long (its second shortest low-load minute over 2500
+// tokens) has a refused, where P1 shipped published the line's intercept.
+// Off, a and the bound are always the line's, as P1 shipped. It moves no
+// golden output: the observation writes no state any output reads.
 const SwitchPrefillAQuadratic = "prefill-a-quadratic"
 
 // prefillKVFull is the pods of rows whose KV cache is full (kvFull at

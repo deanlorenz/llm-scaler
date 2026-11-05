@@ -90,10 +90,17 @@ Three derivations matter here:
     minutes at that length) moves a fit through the minutes. One minute 25%
     off, anywhere in runs 3 and 4 pooled, moves the fit through the minutes
     by up to 0.55 ms and the fit through the medians by up to 0.14 ms.
-  - **Refusals.** A fitted `c` that is not above zero keeps the line. An
-    intercept that is not above zero is refused. The curve's intercept
-    carries a standard error from each cluster's spread, and one above half
-    of the intercept is refused (`AUncertain`).
+  - **Refusals.** A fitted `c` or `b` that is not above zero keeps the
+    line (`ConcaveFit`, `NegativeSlopeFit`), as does a solve the clusters
+    cannot carry (`SingularFit`). An intercept that is not above zero is
+    refused. The curve's intercept carries a standard error, and one above
+    half of the intercept is refused (`AUncertain`). The error has two
+    parts: the minutes' relative noise within their clusters, pooled over
+    the clusters and at least 1% (identical minutes would otherwise read
+    none), and noise a whole cluster shares, read from the curve's lack of
+    fit beyond what the first part explains. On 2,000 seeded pods it is
+    conservative by about 1.2 times: one standard error covers 78% of the
+    intercepts, against 68% for an exact one.
   - **Extrapolation.** `a` is not observed below the shortest prompts the
     fit reads; it is extrapolated there. If the true curve is flat or
     concave below them, the extrapolated `a` reads low, which is the unsafe
@@ -102,6 +109,9 @@ Three derivations matter here:
     refused (`NoShortPrompts`, `AExtrapolated`), for the curve and the line
     alike. The curve's shortest is its shortest counted cluster's median;
     the line's is its second shortest minute, as its spread test reads it.
+    So with the switch on, a deployment whose prompts are all long has `a`
+    refused even where it keeps the plain line, where P1 shipped published
+    the line's intercept.
 
   Three recordings agree on 8 to 9 ms, and an intercept extrapolated from
   long prompts reads low:
@@ -109,8 +119,8 @@ Three derivations matter here:
   | Recording | Prompts | Model | Intercept | SE |
   |---|---|---|---|---|
   | ols-sweep | 1k, 6k | line | 8.36 ms | |
-  | run 4 | 1k, 2k, 4k, 16k | curve, 4 clusters | 8.67 ms | 0.15 ms |
-  | runs 3 and 4 pooled | 1k to 38k | curve, 7 clusters | 7.95 ms | 0.19 ms |
+  | run 4 | 1k, 2k, 4k, 16k | curve, 4 clusters | 8.67 ms | 0.52 ms |
+  | runs 3 and 4 pooled | 1k to 38k | curve, 7 clusters | 7.95 ms | 0.47 ms |
   | run 3 | 8k, 30k, 37k | line, 3 clusters | refused, `NoShortPrompts` | |
 
   Over all 185 low-load rows of runs 3 and 4, a relative-error fit gives

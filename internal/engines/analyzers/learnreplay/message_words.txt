@@ -213,6 +213,7 @@ N_dec
 NaN
 Name
 NarrowPromptClusters
+NegativeSlopeFit
 NewEngine
 NewTypeInventoryWithUsage
 No
@@ -333,6 +334,7 @@ Selected
 Set
 SetRecordedValue
 SetUsed
+SingularFit
 Skipping
 StartOptimizeLoop
 StatefulSet
