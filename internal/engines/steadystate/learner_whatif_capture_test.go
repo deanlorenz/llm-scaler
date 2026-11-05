@@ -648,6 +648,15 @@ func wiRun(t *testing.T, points int, roleOf ...string) (recorded, generated []by
 	for _, r := range settle.Reasons() {
 		require.Equal(t, verdicts[r], rep.Paths["settle-"+string(r)], "settle verdict %s", r)
 	}
+	// And a replay of the engine's own recording reaches them too: the
+	// engine records no event for its prune, and the replay forgets the
+	// parked model's record where the engine did.
+	replayed, err := learnreplay.Replay(context.Background(), recorded, learnreplay.Options{Mode: learnreplay.Fidelity})
+	require.NoError(t, err)
+	require.Empty(t, replayed.Failed())
+	for _, r := range settle.Reasons() {
+		require.Equal(t, verdicts[r], replayed.Paths["settle-"+string(r)], "replayed settle verdict %s", r)
+	}
 	return recorded, rep.Recording, srv
 }
 

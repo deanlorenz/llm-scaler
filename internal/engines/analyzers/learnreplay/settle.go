@@ -36,6 +36,22 @@ import (
 // rows the engine's saw, and k2 reads what the replay's holds. None of the
 // committed recordings has such a cycle.
 //
+// The engine also forgets, at the top of each cycle, the settle record of
+// every model it does not reconcile that cycle (retainSettle, from
+// optimizeV2's prune; retainSettle(nil) on a cycle with no active variant),
+// and records no event for it. The replay derives it: every model the
+// engine reconciles gets one observation or one hold a cycle, and every
+// cycle starts with the slo analyzer's BeginCycle. So a model whose last
+// observation or hold was before the previous cycle sat out a cycle, and
+// its record is forgotten before its next observation or hold applies
+// (retain). Only that model's own Analyze reads its record, after its
+// observation, so forgetting it then is what forgetting it at the cycle
+// that dropped it was. A cycle that follows failed ones begins twice
+// (beginSLOCycle's catch-up); two BeginCycles less than an interval apart
+// are one cycle (beginCycle). A recording with
+// no observation, or no BeginCycle, forgets nothing: its engine either had
+// no retain or no slo analyzer to count cycles by.
+//
 // The replay counts the tracker's verdicts per reason (2.5), so a golden set
 // that never reaches one says so.
 
@@ -79,26 +95,72 @@ type settleReplay struct {
 	// recorded is set once the recording has shown an observation: from
 	// then on the replay observes only where the recording did.
 	recorded bool
+
+	// cycles is how many engine cycles have begun (beginCycle), and seen,
+	// per model, the cycle of its last recorded observation or hold.
+	cycles int
+	seen   map[string]int
+	// begunAt is when the current cycle began, and interval the engine's
+	// optimize interval, as its observations last recorded it.
+	begunAt  time.Time
+	interval time.Duration
 }
 
 func newSettleReplay() *settleReplay {
 	t := settle.NewTracker()
 	t.SetInterval(config.DefaultOptimizationInterval)
-	return &settleReplay{tracker: t, pending: map[string]time.Time{}}
+	return &settleReplay{tracker: t, pending: map[string]time.Time{}, seen: map[string]int{},
+		interval: config.DefaultOptimizationInterval}
+}
+
+// beginCycle notes the slo analyzer's BeginCycle at now, the start of an
+// engine cycle. One under an interval after the last is the same cycle's:
+// the engine counts a run of failed cycles as one more cycle by beginning
+// the next one twice, and starts each cycle an interval after the last
+// one ended.
+func (s *settleReplay) beginCycle(now time.Time) {
+	if s.cycles > 0 && now.Sub(s.begunAt) < s.interval {
+		return
+	}
+	s.cycles++
+	s.begunAt = now
+}
+
+// retain forgets model's record when the engine did: when a cycle passed,
+// since the model's last observation or hold, that neither observed nor
+// held it, so the engine's prune did not keep it (settle.go, above). It
+// then marks the model reconciled this cycle.
+func (s *settleReplay) retain(model string) {
+	if last, ok := s.seen[model]; ok && last < s.cycles-1 {
+		s.tracker.Forget(model)
+	}
+	s.seen[model] = s.cycles
+}
+
+// setInterval takes the interval a recorded observation or hold carries.
+func (s *settleReplay) setInterval(d time.Duration) {
+	s.tracker.SetInterval(d)
+	if d > 0 {
+		s.interval = d
+	}
 }
 
 // observe notes a recorded observation of a model at now.
 func (s *settleReplay) observe(d settle.ObserveEvent, now time.Time) {
 	s.recorded = true
-	s.tracker.SetInterval(d.Interval)
-	s.pending[utils.GetNamespacedKey(d.Namespace, d.ModelID)] = now
+	s.setInterval(d.Interval)
+	model := utils.GetNamespacedKey(d.Namespace, d.ModelID)
+	s.retain(model)
+	s.pending[model] = now
 }
 
 // hold applies a recorded hold of a model at now.
 func (s *settleReplay) hold(d settle.ObserveEvent, now time.Time) {
 	s.recorded = true
-	s.tracker.SetInterval(d.Interval)
-	s.tracker.Hold(utils.GetNamespacedKey(d.Namespace, d.ModelID), now)
+	s.setInterval(d.Interval)
+	model := utils.GetNamespacedKey(d.Namespace, d.ModelID)
+	s.retain(model)
+	s.tracker.Hold(model, now)
 }
 
 // analyze applies the observation waiting for a saturation Analyze's rows,

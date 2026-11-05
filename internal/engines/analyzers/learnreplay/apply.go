@@ -155,6 +155,9 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 		if r.slo == nil {
 			return errNoSLO
 		}
+		// The engine's cycle starts here, and the settle tracker counts it
+		// (settleReplay.beginCycle).
+		r.settle.beginCycle(ev.Now)
 		r.slo.BeginCycle()
 	case slo.KindNoteVariantsPresent:
 		if r.slo == nil {
