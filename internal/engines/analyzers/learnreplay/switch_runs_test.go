@@ -158,19 +158,20 @@ var replaySwitches = map[string][]string{
 	// Issue #467, on main after #471 (602054e98): the saturation line priced
 	// one-sided at the sequence cap while B is unlearned
 	// (itl.Admission.OneSidedAboveKSat, at the line's pricing k), against the
-	// line through the mean at-cap point with intercept the prior on B
-	// (itl.Admission.BPrior: 30 ms, raised by B learned on the physics, capped
-	// at the window's least ITL; neither recording learns one). Measured
-	// alone against all off, it moves e1 and e1-tuned, the two cluster
-	// recordings whose
-	// decode replica sits at its stated cap above the band with no B learned:
-	// model-02's variant-01 line through the default 6 ms is raised where the
-	// prior's line is higher at k 0.68 (first moved row: A 0.0856 -> 0.0874
-	// on e1, 0.0889 -> 0.1012 on e1-tuned; ITL at the pricing k 0.0642 ->
-	// 0.0654 s and 0.0665 -> 0.0748 s), so the derived mu falls (6.38 -> 6.26
-	// and 6.17 -> 5.48 req/s). lines.csv and variant-capacities.csv carry the
-	// line and the rate (92 and 60 rows); results.csv the demand the floor
-	// prices from mu (70 and 32 rows). Nothing else moves.
+	// line through the mean of the at-cap readings at or past that k with
+	// intercept the prior on B (itl.Admission.BPrior: 30 ms, raised by B
+	// learned on the physics, capped at the window's least ITL; neither
+	// recording learns one). Measured alone against all off, it moves e1 and
+	// e1-tuned, the two cluster recordings whose decode replica sits at its
+	// stated cap above the band with no B learned: model-02's variant-01
+	// line through the default 6 ms is raised where the prior's line is
+	// higher at k 0.68 (first moved row: A 0.0856 -> 0.0874 on e1, 0.0889 ->
+	// 0.1012 on e1-tuned; ITL at the pricing k 0.0642 -> 0.0654 s and 0.0665
+	// -> 0.0748 s), so the derived mu falls (6.38 -> 6.26 and 6.17 -> 5.48
+	// req/s). variant-capacities.csv carries the line and the rate (92 and
+	// 60 rows) and results.csv the demand the floor prices from mu (70 and
+	// 32 rows). In lines.csv the same 92 and 60 publishes are gone: a raised
+	// line is not published for siblings to borrow. Nothing else moves.
 	saturation.SwitchITLOneSidedAtCap: {
 		"e1-tuned/lines.csv", "e1-tuned/results.csv", "e1-tuned/variant-capacities.csv",
 		"e1/lines.csv", "e1/results.csv", "e1/variant-capacities.csv",

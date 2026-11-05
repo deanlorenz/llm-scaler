@@ -82,11 +82,15 @@ func atCapRows(l capTruth, noise [3]float64) []domain.ReplicaMetrics {
 }
 
 // lineOf is the line the cycle priced variant v on, zero with none, and
-// whether its slope was held: the itl-fit line.
+// whether its slope was held: the itl-fit line. The model's variants are v
+// and two siblings, sib (decode, v's role) and pre (prefill), so a prior's
+// scope knows their roles.
 func lineOf(t *testing.T, r *restartRig, rows []domain.ReplicaMetrics) (itl.Model, bool) {
 	t.Helper()
 	ctx, logs := observedCtx(t)
-	r.cycleCtx(ctx, rows, decodeVariants("v", "sib"))
+	states := decodeVariants("v", "sib", "pre")
+	states[2].Role = domain.RolePrefill
+	r.cycleCtx(ctx, rows, states)
 	reports := reportsOf(r.a.LearnerReports()["test-ns|test-model"], learn.ITL)
 	require.NotEmpty(t, reports)
 	fits := logs.FilterMessage("itl-fit").All()
@@ -196,18 +200,27 @@ func learnedPrior(b float64) func(*restartRig) {
 	}
 }
 
-// otherPhysics primes a rig with learned Bs b on keys outside v's physics:
-// another accelerator, another GPU count, other engine arguments, and
-// another namespace. None may move the prior.
-func otherPhysics(b float64) func(*restartRig) {
+// outOfScope is, per dimension, a key that differs from v's physics in that
+// one dimension alone, and the engine arguments it was fitted under:
+// another accelerator, another GPU count, another namespace, other engine
+// arguments, and another role (the prefill sibling pre).
+var outOfScope = []struct{ name, key, args string }{
+	{"accelerator", "test-ns|test-model|sib|H100|1", ""},
+	{"GPU count", "test-ns|test-model|sib|H200|8", ""},
+	{"namespace", "other-ns|test-model|sib|H200|1", ""},
+	{"engine args", siblingKey, "other-args"},
+	{"role", "test-ns|test-model|pre|H200|1", ""},
+}
+
+// outOfScopePrior primes a rig with a learned B b on one out-of-scope key,
+// fitted under args (v's arguments when "").
+func outOfScopePrior(key, args string, b float64) func(*restartRig) {
 	return func(r *restartRig) {
-		for _, k := range []string{"test-ns|test-model|sib|H100|1", "test-ns|test-model|sib|H200|8",
-			"other-ns|test-model|sib|H200|1"} {
-			r.a.itlTracker.SetBaseline(k, b)
-			r.a.itlUnderArgs(k, windowArgs(capParams()))
+		if args == "" {
+			args = windowArgs(capParams())
 		}
-		r.a.itlTracker.SetBaseline(siblingKey, b)
-		r.a.itlUnderArgs(siblingKey, "other-args")
+		r.a.itlTracker.SetBaseline(key, b)
+		r.a.itlUnderArgs(key, args)
 	}
 }
 
@@ -242,58 +255,122 @@ func biasRow(t *testing.T, label string, l capTruth, prime func(*restartRig), bP
 	return on, sum / seeds, lo
 }
 
+// The noise gates at B equal to the prior, where the margin is zero: the
+// mean of 20 seeds of 2 % autocorrelated noise at most 0.5 % under the truth,
+// the worst seed at most 1.5 % under.
+const (
+	noiseMeanGate  = -0.5
+	noiseWorstGate = -1.5
+)
+
 // The bias table at the saturation line's pricing k (0.68): a variant whose
 // three replicas sit at their stated cap, no B learned on its key. Off (the
 // switch off, the negative control) the line through the default B is
 // under the truth by the derived term (B0 - B)(1 - k/kbar). On, at most the
-// prior's line (priorBound), and never under the truth while B is at most
-// the prior, without noise. Cases:
+// prior's line (priorBound), and not under the truth while B is at most the
+// prior, without noise. Cases, one subtest each:
 //
-//   - the floor, 30 ms, with nothing learned;
+//   - the floor, 30 ms, with nothing learned, and its noise gates;
 //   - a learned B of 45 ms on a sibling in the variant's physics, which
 //     raises the prior;
-//   - learned Bs of 3 ms on keys outside it (another accelerator, GPU
-//     count, namespace or engine arguments), which must not lower it: the
-//     bug the fleet-wide prior had, where one small B anywhere replaced 30
-//     ms;
+//   - a learned 45 ms on a key that differs in one dimension alone
+//     (accelerator, GPU count, namespace, engine arguments, role), which
+//     must leave the floor's price: the bug the fleet-wide prior had;
 //   - an outlier fit of 80 ms in the physics, which the window's least ITL
 //     caps;
 //   - a true B above the prior (40 ms), under by the bound.
-//
-// With 2 % autocorrelated noise, where B is the prior the margin is zero;
-// the line through the mean at-cap point carries the noise on the mean, and
-// the mean and the worst seed are held to known truth's 5 %.
 func TestITLOneSided_TheBiasTableAtThePricingK(t *testing.T) {
 	t.Log("| prior | A | B | k_cap | off | derived | on | bound | on, 2 % noise: mean [least, most] |")
-	eps := 100 * (1/1.05 - 1)
+	floor := map[capTruth]float64{}
 	for _, l := range capTruths {
-		on, mean, lo := biasRow(t, "30 ms", l, nil, itl.DefaultBPrior)
-		require.GreaterOrEqual(t, on, -1e-9, "%s: on priced under the truth without noise", l)
-		require.GreaterOrEqual(t, mean, eps, "%s: the noisy mean is past epsilon", l)
-		require.GreaterOrEqual(t, lo, eps, "%s: the worst noisy seed is past epsilon", l)
+		t.Run("floor/"+l.String(), func(t *testing.T) {
+			on, mean, lo := biasRow(t, "30 ms", l, nil, itl.DefaultBPrior)
+			floor[l] = on
+			require.GreaterOrEqual(t, on, -1e-9, "%s: on priced under the truth without noise", l)
+			if l.b == itl.DefaultBPrior {
+				require.GreaterOrEqual(t, mean, noiseMeanGate, "%s: the noisy mean past its gate", l)
+				require.GreaterOrEqual(t, lo, noiseWorstGate, "%s: the worst noisy seed past its gate", l)
+			}
+		})
 	}
 	for _, l := range capTruths {
-		on, _, _ := biasRow(t, "45 ms scoped", l, learnedPrior(0.045), 0.045)
-		require.GreaterOrEqual(t, on, -1e-9, "scoped learned prior, %s: on priced under the truth", l)
+		t.Run("scoped 45 ms/"+l.String(), func(t *testing.T) {
+			on, _, _ := biasRow(t, "45 ms scoped", l, learnedPrior(0.045), 0.045)
+			require.GreaterOrEqual(t, on, -1e-9, "scoped learned prior, %s: on priced under the truth", l)
+		})
+	}
+	for _, d := range outOfScope {
+		for _, l := range capTruths {
+			t.Run("out of scope by "+d.name+"/"+l.String(), func(t *testing.T) {
+				on, _, _ := biasRow(t, "45 ms, other "+d.name, l, outOfScopePrior(d.key, d.args, 0.045), itl.DefaultBPrior)
+				require.InDelta(t, floor[l], on, 1e-9, "%s: a 45 ms B on another %s moved the prior", l, d.name)
+			})
+		}
 	}
 	for _, l := range capTruths {
-		floor, _, _ := biasRow(t, "3 ms elsewhere", l, otherPhysics(0.003), itl.DefaultBPrior)
-		alone, _, _ := biasRow(t, "30 ms", l, nil, itl.DefaultBPrior)
-		require.InDelta(t, alone, floor, 1e-9, "%s: a B outside the physics moved the prior", l)
+		t.Run("outlier 80 ms/"+l.String(), func(t *testing.T) {
+			on, _, _ := biasRow(t, "80 ms outlier", l, learnedPrior(0.080), 0.080)
+			require.GreaterOrEqual(t, on, -1e-9, "outlier prior, %s: on priced under the truth", l)
+			// Capped at the least ITL: at most the line with that intercept.
+			capped := priorBound(l, l.itl(l.kCap-0.01), 0)
+			require.LessOrEqual(t, on, capped+0.5, "outlier prior, %s: not capped by the window", l)
+			require.Less(t, on, priorBound(l, 0.080, 0)-1, "outlier prior, %s: priced at the uncapped prior", l)
+		})
 	}
-	for _, l := range capTruths {
-		on, _, _ := biasRow(t, "80 ms outlier", l, learnedPrior(0.080), 0.080)
-		require.GreaterOrEqual(t, on, -1e-9, "outlier prior, %s: on priced under the truth", l)
-		// Capped at the least ITL: at most the line with that intercept.
-		capped := priorBound(l, l.itl(l.kCap-0.01), 0)
-		require.LessOrEqual(t, on, capped+0.5, "outlier prior, %s: not capped by the window", l)
-		require.Less(t, on, priorBound(l, 0.080, 0)-1, "outlier prior, %s: priced at the uncapped prior", l)
+	t.Run("B above the prior", func(t *testing.T) {
+		above := capTruth{0.01, 0.040, 0.97}
+		on, _, _ := biasRow(t, "30 ms", above, nil, itl.DefaultBPrior)
+		require.Negative(t, on, "B above the prior: not under the truth")
+		_, kbar := oneSidedRun(t, nil, nil, above, func(int) [3]float64 { return [3]float64{} })
+		require.InDelta(t, priorBound(above, itl.DefaultBPrior, kbar), on, 0.05, "B above the prior: not the bound")
+	})
+}
+
+// The noise gates hold for the analyzer's line (through the mean at-cap
+// point), and fail for the line through the least at-cap reading, which
+// 4b-3's rule and the first prior used: its selection bias (the least of the
+// noisy readings sits under the true line by about the noise) puts it under
+// the gates. The least-reading line is worked by hand from the readings the
+// analyzer kept, at B equal to the prior.
+func TestITLOneSided_TheLeastReadingLineFailsTheNoiseGates(t *testing.T) {
+	const seeds = 20
+	for _, l := range []capTruth{{0.05, 0.030, 0.97}, {0.01, 0.030, 0.97}} {
+		t.Run(l.String(), func(t *testing.T) {
+			truth := l.itl(oneSidedK)
+			var sumMean, sumLeast float64
+			worstMean, worstLeast := math.Inf(1), math.Inf(1)
+			for seed := uint64(1); seed <= seeds; seed++ {
+				rnd := learnertest.Rand(seed)
+				n := [3][]float64{learnertest.ARNoise(rnd, 24, 0.02, 0.5), learnertest.ARNoise(rnd, 24, 0.02, 0.5),
+					learnertest.ARNoise(rnd, 24, 0.02, 0.5)}
+				r := oneSidedRig(t, nil)
+				on := lineAfter(t, r, 24, func(c int) []domain.ReplicaMetrics { return atCapRows(l, [3]float64{n[0][c], n[1][c], n[2][c]}) })
+				rs := r.a.itlTracker.Readings(r.a.itlWindowKey("test-ns", "test-model", "v", "H200", 1))
+				src := rs.Steady
+				if len(src) < itl.DefaultMinSamples {
+					src = rs.All
+				}
+				src = src[max(0, len(src)-itl.DefaultMinSamples):]
+				least := itl.Observation{ITLSec: math.Inf(1)}
+				for _, o := range src {
+					if o.ITLSec < least.ITLSec {
+						least = o
+					}
+				}
+				lst := itl.Model{A: max(0, (least.ITLSec-itl.DefaultBPrior)/least.K), B: itl.DefaultBPrior}
+				em := 100 * (on.ITLAt(oneSidedK) - truth) / truth
+				el := 100 * (lst.ITLAt(oneSidedK) - truth) / truth
+				sumMean, sumLeast = sumMean+em, sumLeast+el
+				worstMean, worstLeast = min(worstMean, em), min(worstLeast, el)
+			}
+			t.Logf("%s: mean point mean %+.2f %% worst %+.2f %%; least reading mean %+.2f %% worst %+.2f %%",
+				l, sumMean/seeds, worstMean, sumLeast/seeds, worstLeast)
+			require.GreaterOrEqual(t, worstMean, noiseWorstGate, "the analyzer's line past the worst-seed gate")
+			require.GreaterOrEqual(t, sumMean/seeds, noiseMeanGate, "the analyzer's line past the mean gate")
+			require.False(t, sumLeast/seeds >= noiseMeanGate && worstLeast >= noiseWorstGate,
+				"the least-reading line passes the gates (mean %+.2f %%, worst %+.2f %%): they test nothing", sumLeast/seeds, worstLeast)
+		})
 	}
-	above := capTruth{0.01, 0.040, 0.97}
-	on, _, _ := biasRow(t, "30 ms", above, nil, itl.DefaultBPrior)
-	require.Negative(t, on, "B above the prior: not under the truth")
-	_, kbar := oneSidedRun(t, nil, nil, above, func(int) [3]float64 { return [3]float64{} })
-	require.InDelta(t, priorBound(above, itl.DefaultBPrior, kbar), on, 0.05, "B above the prior: not the bound")
 }
 
 // The prior reads the line published for the variant's own physics key
@@ -468,4 +545,86 @@ func TestITLOneSided_TheSwitchPicksTheLine(t *testing.T) {
 	require.Less(t, off.ITLAt(oneSidedK), l.itl(oneSidedK))
 	require.Contains(t, ReplaySwitchNames(), SwitchITLOneSidedAtCap)
 	require.NoError(t, NewSaturationAnalyzer(nil).SetSwitchesForReplay(map[string]bool{SwitchITLOneSidedAtCap: true}))
+}
+
+// ITLOneSided reads back the admission the key was last priced with: the
+// scoped prior (45 ms, a sibling's learned B in the physics), at the pricing
+// k, and whether the line was raised. Off, the zero Admission.
+func TestITLOneSided_TheWhatIfReadsTheScopedPrior(t *testing.T) {
+	l := capTruth{0.05, 0.030, 0.97}
+	key := "test-ns|test-model|v|H200|1"
+	r := oneSidedRig(t, nil)
+	learnedPrior(0.045)(r)
+	lineAfter(t, r, 12, func(int) []domain.ReplicaMetrics { return atCapRows(l, [3]float64{}) })
+	adm, raised := r.a.ITLOneSided(key)
+	require.True(t, adm.OneSidedAboveKSat, "no admission recorded")
+	require.InDelta(t, 0.045, adm.BPrior, 1e-15, "the recorded prior is not the scoped one")
+	require.InDelta(t, oneSidedK, adm.OneSidedAt, 1e-15, "the recorded fill is not the pricing k")
+	require.True(t, raised, "the line was raised and the record says not")
+
+	off := oneSidedRig(t, map[string]bool{SwitchITLOneSidedAtCap: false})
+	lineAfter(t, off, 12, func(int) []domain.ReplicaMetrics { return atCapRows(l, [3]float64{}) })
+	adm, raised = off.a.ITLOneSided(key)
+	require.Equal(t, itl.Admission{}, adm, "off: an admission recorded")
+	require.False(t, raised)
+}
+
+// The record of the admission goes with its variant: EvictStaleHistory drops
+// it once the variant is unseen past the variant timeout, as it drops the
+// variant's itlArgs.
+func TestITLOneSided_TheRecordIsEvictedWithItsVariant(t *testing.T) {
+	l := capTruth{0.05, 0.030, 0.97}
+	key := "test-ns|test-model|v|H200|1"
+	r := oneSidedRig(t, nil)
+	lineAfter(t, r, 12, func(int) []domain.ReplicaMetrics { return atCapRows(l, [3]float64{}) })
+	adm, _ := r.a.ITLOneSided(key)
+	require.True(t, adm.OneSidedAboveKSat, "premise: an admission recorded")
+	r.a.EvictStaleHistory()
+	adm, _ = r.a.ITLOneSided(key)
+	require.True(t, adm.OneSidedAboveKSat, "evicted while the variant is fresh")
+	r.now = r.now.Add(r.a.Horizons().VariantTimeout + time.Hour)
+	r.a.EvictStaleHistory()
+	adm, _ = r.a.ITLOneSided(key)
+	require.False(t, adm.OneSidedAboveKSat, "kept past the variant timeout")
+}
+
+// A line priced at the prior is not published for siblings to borrow (issue
+// #467): it carries the donor's at-cap readings and pricing k. With line
+// sharing on, a sibling of the same engine and no readings of its own
+// borrows no line while the donor is one-sided, so never the raised A; with
+// the switch off, the donor publishes its plain line and the sibling borrows
+// it.
+func TestITLOneSided_ARaisedLineIsNotLent(t *testing.T) {
+	l := capTruth{0.05, 0.030, 0.97}
+	run := func(switches map[string]bool) (donor itl.Model, borrowed []map[string]any) {
+		r := oneSidedRig(t, switches)
+		r.a.capacityStore.Update("test-ns", "test-model", "sib", capacity.Record{GpuCount: 1, EngineParams: capParams(),
+			LearnedFrom: "deployment"}, r.now)
+		for range 16 {
+			ctx, logs := observedCtx(t)
+			in := makeAnalyzerInput(atCapRows(l, [3]float64{}), decodeVariants("v", "sib"))
+			in.Config.(*config.ScalingPolicy).EnableLearnedStateReuse = true
+			r.tr.Observe(settleModel("test-ns", "test-model"), settlerow.Of(in.ReplicaMetrics, nil), r.now)
+			_, err := r.a.Analyze(ctx, in)
+			require.NoError(t, err)
+			r.now = r.now.Add(restartCycle)
+			for _, e := range logs.FilterMessage("itl-fit").All() {
+				f := e.ContextMap()
+				if f["variant"] == "v" {
+					donor = itl.Model{A: f["a"].(float64), B: f["b"].(float64)}
+				}
+			}
+			for _, e := range logs.FilterMessage("itl-line-borrowed").All() {
+				borrowed = append(borrowed, e.ContextMap())
+			}
+		}
+		return donor, borrowed
+	}
+	donor, borrowed := run(nil)
+	require.False(t, donor.IsZero(), "premise: the donor has a line")
+	require.Empty(t, borrowed, "a sibling borrowed while the donor was priced at the prior (donor %+v)", donor)
+	plain, offBorrowed := run(map[string]bool{SwitchITLOneSidedAtCap: false})
+	require.NotEmpty(t, offBorrowed, "negative control: off, the sibling borrowed nothing")
+	require.InDelta(t, plain.A, offBorrowed[len(offBorrowed)-1]["a"].(float64), 1e-12, "off: the sibling did not borrow the donor's plain line")
+	require.Greater(t, donor.A, plain.A, "premise: on, the donor's A is raised over its plain fit")
 }

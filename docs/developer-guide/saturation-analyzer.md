@@ -763,11 +763,25 @@ the throughput line does, with `OneSidedAt` the line's pricing k
   scope)`: a learned B only raises the prior, never lowers it under 30 ms.
 - **Cap.** `itl.priorCap` caps the prior at the least ITL of any reading in
   the variant's own window, at any k: every reading is at least B.
-- **Mean point.** `itl.priorLine` passes the prior's line through the mean
-  `(kbar, ITLbar)` of the window's readings at k >= kSat: `A = (ITLbar - b)/
-  kbar`, never negative since the cap puts `b` under every ITL. The bound
-  `(b - B)(1 - k/kbar)` holds without noise; with noise the mean's error
+- **Anchor.** `itl.priorLine` passes the prior's line through the mean
+  `(kbar, ITLbar)` of the window's readings at k >= kSat that sit at or past
+  the fill the line is priced at (`Admission.priceAnchor`: `OneSidedAt`, or
+  the fill where the default-B fit meets `OneSidedTarget`), when there are
+  three; else the three of highest k. `A = (ITLbar - b)/kbar`, never negative
+  since the cap puts `b` under every ITL. On readings without noise the
+  error at a fill k is `(b - B)(1 - k/kbar)`: over the truth for `k <= kbar`
+  while `B <= b`, under it past `kbar`, which is why the anchor sits at or
+  past the priced fill. When even the anchor's `kbar` is under it,
+  `Reading.PriorBeyondReadings` is set (logged `priorBeyondReadings`) and
+  the bound does not hold. A mean rather than the least reading: its noise
   falls by sqrt(n), and the least reading's selection bias is gone.
+- **Line returned.** With a prior set, `oneSidedLine` always returns the
+  line through the default B at the held A, whether or not the admission
+  names its price: the prior's line can be flat (one reading, or the cap's
+  ITL at every reading), which `PriceTPOT` and `ValidModel` refuse.
+- **Not lent.** A line with `PinnedAtBPrior` is not published to
+  `itlLines` (`analyze.go`): it carries this variant's at-cap readings and
+  pricing k, so siblings borrow nothing from it while it is.
 
 The tracker compares that line with the fit through the default B at the
 pricing k, and when it is higher returns the line through the default B that
@@ -787,7 +801,10 @@ The what-if bands rerun the same choice: `itl.Refit` takes the admission's
 one-sided fields, `whatif.Refit.OneSided` carries them, and
 `learnreplay.VariantState.refit` passes the admission the analyzer last
 priced the key with (`SaturationAnalyzer.ITLOneSided`, kept per key in
-`itlOneSidedLast`) for a pinned line through the default B.
+`itlOneSidedLast` with whether the line was raised, and evicted with its
+variant in `EvictStaleHistory`) for a line recorded as raised
+(`PinnedAtBPrior`). The scope is built by `itl.NewPriorScope`, which reads
+each analyzer's arguments map lazily, under its own lock.
 
 #### When a replica's settle starts (learner PR 4a)
 

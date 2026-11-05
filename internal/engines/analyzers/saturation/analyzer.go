@@ -434,9 +434,10 @@ type SaturationAnalyzer struct {
 	// (SetSwitchesForReplay).
 	itlOneSidedAtCap bool
 	// itlOneSidedLast is, per ITL key, the one-sided fields of the admission
-	// the line was last priced under (itlOneSided), for the what-if refit
-	// (ITLOneSided): its prior on B depends on the cycle's physics.
-	itlOneSidedLast map[string]itl.Admission
+	// the line was last priced under (itlOneSided), and whether it was raised
+	// (noteITLOneSided), for the what-if refit (ITLOneSided): its prior on B
+	// depends on the cycle's physics.
+	itlOneSidedLast map[string]itlOneSidedRecord
 }
 
 // Evicted is what one sweep of the analyzer's learned state removed, counted
@@ -644,7 +645,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		prefillBusyMinutes:     true,
 		prefillAQuadratic:      true,
 		itlOneSidedAtCap:       true,
-		itlOneSidedLast:        make(map[string]itl.Admission),
+		itlOneSidedLast:        make(map[string]itlOneSidedRecord),
 		prefillObserver:        prefill.NewObserver(),
 		prefillBounds:          make(map[string]stashedBound),
 		prefillEstimates:       make(map[string]stashedEstimate),
@@ -920,6 +921,13 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 	evicted.ITLWindows, evicted.ITLBaselines = a.itlTracker.Sweep(now, func(key string) bool {
 		return a.variantIsStale(key, now, variantTimeout)
 	})
+	// The one-sided admission a key was last priced with (issue #467) goes
+	// with its variant, as itlArgs does below.
+	for key := range a.itlOneSidedLast {
+		if a.variantIsStale(key, now, variantTimeout) {
+			delete(a.itlOneSidedLast, key)
+		}
+	}
 	for key := range a.startSeconds {
 		if a.variantIsStale(key, now, variantTimeout) {
 			delete(a.startSeconds, key)

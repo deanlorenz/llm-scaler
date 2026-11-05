@@ -12,19 +12,27 @@ import "strings"
 // lines are. The role is known only for the variants of the model being
 // analyzed (RoleOf), so a key of another namespace is out of scope: the
 // rule errs toward the floor, never toward another engine's intercept.
+//
+// NewPriorScope builds one; the zero PriorScope holds no key at all.
 type PriorScope struct {
-	// Key is the variant's own window key.
-	Key string
-	// Args is the engine arguments its readings run under, "" when unknown;
-	// with none, only the variant's own key is in scope.
-	Args string
-	// ArgsOf is the engine arguments a key was last fitted under, "" when
-	// unknown.
-	ArgsOf func(key string) string
-	// RoleOf is a variant's canonical role by name, "" when unknown; a key
-	// whose role is unknown, or differs, is out of scope.
-	RoleOf func(variant string) string
+	key, args string
+	argsOf    func(key string) string
+	roleOf    func(variant string) string
 }
+
+// NewPriorScope is the scope of the variant whose window key is key, whose
+// readings run under engine arguments args ("" when unknown: then only its
+// own key is in scope). argsOf is the engine arguments a key was last
+// fitted under, "" when unknown, and roleOf a variant's canonical role by
+// name, "" when unknown; both are read lazily, only for a key that matches
+// the variant's model, accelerator and GPU count, so the caller passes its
+// own lookups (under its own lock) rather than a copy.
+func NewPriorScope(key, args string, argsOf func(key string) string, roleOf func(variant string) string) PriorScope {
+	return PriorScope{key: key, args: args, argsOf: argsOf, roleOf: roleOf}
+}
+
+// Key is the variant's own window key.
+func (s PriorScope) Key() string { return s.key }
 
 // windowKeyFields splits a window key into its five fields; ok is false for
 // any other shape.
@@ -38,16 +46,19 @@ func windowKeyFields(key string) (f [5]string, ok bool) {
 }
 
 // In reports whether key is in the scope of s: the variant's own key, or a
-// key with the same model, accelerator and GPU count, the same known engine
-// arguments, and the same known role.
+// key of the same namespace, model, accelerator and GPU count, the same
+// known engine arguments, and the same known role.
 func (s PriorScope) In(key string) bool {
-	if key == s.Key {
-		return true
-	}
-	if s.Args == "" || s.ArgsOf == nil || s.RoleOf == nil {
+	if s.key == "" {
 		return false
 	}
-	own, ok := windowKeyFields(s.Key)
+	if key == s.key {
+		return true
+	}
+	if s.args == "" || s.argsOf == nil || s.roleOf == nil {
+		return false
+	}
+	own, ok := windowKeyFields(s.key)
 	if !ok {
 		return false
 	}
@@ -55,8 +66,8 @@ func (s PriorScope) In(key string) bool {
 	if !ok || other[0] != own[0] || other[1] != own[1] || other[3] != own[3] || other[4] != own[4] {
 		return false
 	}
-	role := s.RoleOf(own[2])
-	return role != "" && s.RoleOf(other[2]) == role && s.ArgsOf(key) == s.Args
+	role := s.roleOf(own[2])
+	return role != "" && s.roleOf(other[2]) == role && s.argsOf(key) == s.args
 }
 
 // ScopedBaselines is the learned intercepts of t's keys in scope s.

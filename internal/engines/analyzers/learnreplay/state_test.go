@@ -1,8 +1,10 @@
 package learnreplay
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -11,7 +13,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
@@ -172,11 +181,11 @@ func TestRefitFindsAnAboveBandLine(t *testing.T) {
 	}
 }
 
-// A pinned line the tracker priced one-sided at the sequence cap (issue
-// #467) is given back by the refit through the default B with the
-// analyzer's one-sided admission, which the state carries for the bands
-// (OneSided), not by the pinned fit at the line's own B. Without the
-// admission (the switch off) it is not refitted.
+// A pinned line the analyzer priced at the prior on B (issue #467; the
+// recorded PinnedAtBPrior) is given back by the refit through the default B
+// with the analyzer's one-sided admission, which the state carries for the
+// bands (OneSided). The gate is the recorded flag: a line recorded as not
+// raised gets no admission.
 func TestRefitFindsAOneSidedLine(t *testing.T) {
 	t0 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 	all := make([]itl.Observation, 0, 36)
@@ -190,39 +199,35 @@ func TestRefitFindsAOneSidedLine(t *testing.T) {
 	if !line.PinnedAtBPrior {
 		t.Fatal("the one-sided refit priced nothing one-sided; the case tests nothing")
 	}
-	vs := VariantState{Tier: whatif.TierPinnedB, Line: line.Model, Readings: itl.KeyReadings{All: all}, oneSided: adm}
+	// Recorded as raised: refit with the analyzer's admission, kept for the
+	// bands.
+	vs := VariantState{Tier: whatif.TierPinnedB, Line: line.Model, Readings: itl.KeyReadings{All: all},
+		analyzerOneSided: adm, analyzerRaised: true}
 	vs.refit()
 	if !vs.Refitted || vs.Baseline != itl.DefaultBaselineSec || vs.OneSided != adm || len(vs.LineReadings) != len(all) {
 		t.Fatalf("%+v, want it refitted one-sided through the default B on all %d readings", vs, len(all))
 	}
-	off := VariantState{Tier: whatif.TierPinnedB, Line: line.Model, Readings: itl.KeyReadings{All: all}}
+	// Recorded as not raised: the gate is the flag, not the B, so the same
+	// line is not refitted one-sided (and is not given back by the plain fit).
+	off := VariantState{Tier: whatif.TierPinnedB, Line: line.Model, Readings: itl.KeyReadings{All: all},
+		analyzerOneSided: adm}
 	off.refit()
 	if off.Refitted || off.OneSided.OneSidedAboveKSat {
-		t.Errorf("negative control: without the admission %+v was refitted", off)
+		t.Errorf("negative control: recorded as not raised, %+v was refitted one-sided", off)
 	}
-	// A line through the default B the rule did not raise this cycle still
-	// carries the admission: a resample may raise it, as the controller's
-	// next cycle would.
+	// A line through the default B the analyzer did not raise carries no
+	// admission, whatever the admission it was priced under.
 	inBand := make([]itl.Observation, 0, 12)
 	for c := range 12 {
 		k := 0.30 + 0.01*float64(c%3)
 		inBand = append(inBand, itl.Observation{K: k, ITLSec: 0.006 + 0.05*k, Timestamp: t0.Add(time.Duration(c) * 15 * time.Second)})
 	}
-	plain := itl.Refit(inBand, nil, itl.DefaultBaselineSec, 0, adm)
-	if plain.PinnedAtBPrior || plain.Tier != itl.TierPinnedB {
-		t.Fatalf("premise: %+v, want a pinned fit the rule did not raise", plain)
-	}
-	un := VariantState{Tier: whatif.TierPinnedB, Line: plain.Model, Readings: itl.KeyReadings{All: inBand}, oneSided: adm}
+	plain := itl.Refit(inBand, nil, itl.DefaultBaselineSec, 0, itl.Admission{})
+	un := VariantState{Tier: whatif.TierPinnedB, Line: plain.Model, Readings: itl.KeyReadings{All: inBand},
+		analyzerOneSided: adm}
 	un.refit()
-	if !un.Refitted || un.OneSided != adm {
-		t.Errorf("%+v, want it refitted carrying the one-sided admission", un)
-	}
-	// A learned B is not priced one-sided, and its line carries none.
-	learned := itl.Refit(inBand, nil, 0.010, 0, itl.Admission{})
-	lb := VariantState{Tier: whatif.TierPinnedB, Line: learned.Model, Readings: itl.KeyReadings{All: inBand}, oneSided: adm}
-	lb.refit()
-	if !lb.Refitted || lb.OneSided.OneSidedAboveKSat {
-		t.Errorf("a learned B: %+v, want it refitted with no one-sided admission", lb)
+	if !un.Refitted || un.OneSided.OneSidedAboveKSat {
+		t.Errorf("%+v, want it refitted with no one-sided admission", un)
 	}
 }
 
@@ -267,4 +272,94 @@ func TestStateAt_LastIsTheLastCycle(t *testing.T) {
 		t.Errorf("%d cycles, readings over cycles %d-%d", last.Cycles, d.ReadingsFrom, d.ReadingsTo)
 	}
 	t.Logf("line readings %d over cycles %d-%d", len(d.LineReadings), d.ReadingsFrom, d.ReadingsTo)
+}
+
+// scopedPriorRecording is a recording of the saturation analyzer on two
+// decode variants of one model, on one engine: sib, whose replicas step
+// through the band and learn B = 45 ms by a full fit, and v, whose three
+// replicas sit at their declared cap of 64, so the analyzer prices v
+// one-sided at a prior raised to sib's 45 ms.
+func scopedPriorRecording(t *testing.T) []byte {
+	t.Helper()
+	f := newFixture(replayAt)
+	f.buf.Reset()
+	rec := learnrec.New(f.buf, 0)
+	f.attach(rec)
+	rec.Record(learnrec.KindStart, replayAt, defaultStart())
+	params := capacity.EngineParams{Engine: inferenceengine.EngineVLLM, MaxNumSeqs: 256, DeclaredBatchCap: 64, Image: "img:1"}
+	for _, v := range []string{"v", "sib"} {
+		f.store.FileScaleTarget("ns", "m", v, "H200", 1, params, false, replayAt)
+	}
+	const a, b = 0.05, 0.045
+	row := func(variant, pod string, k float64, capped bool) domain.ReplicaMetrics {
+		rm := domain.ReplicaMetrics{PodName: pod, VariantName: variant, Ready: true, ReadySince: replayAt.Add(-time.Hour),
+			KvCacheUsage: k, KvCacheUsageKnown: true, KvUsageInstant: k, KvUsageInstantKnown: true,
+			AvgITL: a*k + b, AvgITLKnown: true, TotalKvCapacityTokens: 100000, TokensInUse: int64(k * 100000),
+			AvgInputTokens: 1000, AvgOutputTokens: 500, GenerationTokenRate: 1000, GenerationTokenRateKnown: true,
+			RequestRate: 2, RequestRateKnown: true}
+		if capped {
+			rm.RunningRequests, rm.QueueLength, rm.PreemptionRateKnown = 64, 5, true
+		}
+		return rm
+	}
+	states := []domain.VariantReplicaState{
+		{VariantName: "v", Role: domain.RoleDecode, AcceleratorName: "H200", GPUsPerReplica: 1, CurrentReplicas: 3},
+		{VariantName: "sib", Role: domain.RoleDecode, AcceleratorName: "H200", GPUsPerReplica: 1, CurrentReplicas: 2},
+	}
+	now := replayAt
+	for c := range 80 {
+		f.clk.SetTime(now)
+		k := 0.25
+		if (c/16)%2 == 1 {
+			k = 0.65
+		}
+		rows := make([]domain.ReplicaMetrics, 0, 5)
+		rows = append(rows, row("sib", "sib-0", k, false), row("sib", "sib-1", 0.45, false))
+		for i, kc := range []float64{0.96, 0.97, 0.98} {
+			rows = append(rows, row("v", fmt.Sprintf("v-%d", i), kc, true))
+		}
+		_, err := f.sat.Analyze(context.Background(), domain.AnalyzerInput{ModelID: "m", Namespace: "ns",
+			Config:        &config.ScalingPolicy{KvCacheThreshold: 0.8, ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.7},
+			VariantStates: states, ReplicaMetrics: rows})
+		require.NoError(t, err)
+		now = now.Add(15 * time.Second)
+	}
+	return bytes.Clone(f.buf.Bytes())
+}
+
+// On a recording where v is priced at a prior raised by a scoped sibling
+// (scopedPriorRecording), StateAt reads the admission the analyzer priced v
+// with (BPrior 45 ms, at the pricing k), refits the line with it, and the
+// band of the line's ITL at the pricing k brackets the controller's line.
+// Refitted without the admission (the plain fit), the band lies under it.
+func TestStateAt_TheBandBracketsTheControllersLineOnAScopedPrior(t *testing.T) {
+	rec := scopedPriorRecording(t)
+	st, err := StateAt(context.Background(), rec, Options{}, StateQuery{Namespace: "ns", ModelID: "m"})
+	require.NoError(t, err)
+	var v *VariantState
+	for i := range st.Variants {
+		if st.Variants[i].Variant == "v" {
+			v = &st.Variants[i]
+		}
+	}
+	require.NotNil(t, v, "no state for v")
+	require.True(t, v.Refitted, "v's line was not refitted: %+v", v.Line)
+	require.True(t, v.OneSided.OneSidedAboveKSat, "v's refit carries no one-sided admission")
+	require.InDelta(t, 0.045, v.OneSided.BPrior, 1e-12, "the prior is not the scoped sibling's B")
+	k := v.OneSided.OneSidedAt
+	require.Positive(t, k, "no pricing k recorded")
+	val := func(m itl.Model) (float64, bool) { return m.ITLAt(k), true }
+	ctrl := v.Line.ITLAt(k)
+	on := whatif.BootstrapLines(v.Readings, whatif.Refit{Tier: v.Tier, Line: v.Line, Baseline: v.Baseline,
+		MinSettled: v.MinSettled, OneSided: v.OneSided}, whatif.DefaultResampling())
+	off := whatif.BootstrapLines(v.Readings, whatif.Refit{Tier: v.Tier, Line: v.Line, Baseline: v.Baseline,
+		MinSettled: v.MinSettled}, whatif.DefaultResampling())
+	band := whatif.BandAnswer(whatif.Answer{Value: ctrl}, on, val)
+	plain := whatif.BandAnswer(whatif.Answer{Value: ctrl}, off, val)
+	require.NotNil(t, band.Band)
+	require.NotNil(t, plain.Band)
+	t.Logf("controller %.5f s at k %.2f; band with the admission [%.5f, %.5f], without [%.5f, %.5f]",
+		ctrl, k, band.Band.Lo, band.Band.Hi, plain.Band.Lo, plain.Band.Hi)
+	require.True(t, band.Band.Lo <= ctrl+1e-12 && ctrl <= band.Band.Hi+1e-12, "the band does not bracket the controller's line")
+	require.Less(t, plain.Band.Hi, ctrl, "negative control: without the admission the band reached the controller's line")
 }

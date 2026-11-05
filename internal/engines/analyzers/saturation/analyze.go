@@ -571,6 +571,7 @@ func (c *cycle) fitLines() {
 			}
 		}
 		reading := c.a.noteITL(variantKey, rows, variant, adm, c.a.now(), itlLogger)
+		c.a.noteITLOneSided(variantKey, reading)
 		// The line as a learner: its report and learner-write (itl_learner.go).
 		c.a.noteITLLearner(c.input.Namespace, c.input.ModelID, variant, role, variantKey, reading, c.a.now(), c.logger)
 		own := reading.Model
@@ -606,7 +607,12 @@ func (c *cycle) fitLines() {
 			// finished fit) and would overwrite a sibling's fresh line on the
 			// same configuration. What was published when it was fitted stays
 			// published, and ages from then.
-			if !reading.SlopeHeld {
+			//
+			// A line priced at the prior on B is not published either (issue
+			// #467): it carries this variant's at-cap readings and pricing k,
+			// and a sibling borrowing it would be priced on another variant's
+			// evidence. While it is one-sided, nothing is published.
+			if !reading.SlopeHeld && !reading.PinnedAtBPrior {
 				c.a.publishLineFor(physicsKey, variantKey, own, c.a.now(), params.SpeculatesPerStep())
 				if aggOn {
 					c.a.shapePublishedLine(physicsKey, aggG, aggSigma, aggSigmaOK, aggPoint, own.A, c.a.now())

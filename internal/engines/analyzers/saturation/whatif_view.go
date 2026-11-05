@@ -39,12 +39,15 @@ func (a *SaturationAnalyzer) ITLReadings(key string) itl.KeyReadings {
 
 // ITLOneSided is how the analyzer last priced the line filed under key
 // one-sided at the sequence cap (SwitchITLOneSidedAtCap): the admission's
-// one-sided fields, at its pricing k and its prior on B, for itl.Refit. The
-// zero Admission for a key it has not priced so, or with the switch off.
-func (a *SaturationAnalyzer) ITLOneSided(key string) itl.Admission {
+// one-sided fields, at its pricing k and its prior on B, for itl.Refit, and
+// raised, whether that line was priced at the prior
+// (itl.Reading.PinnedAtBPrior). The zero Admission and false for a key it
+// has not priced so, or with the switch off.
+func (a *SaturationAnalyzer) ITLOneSided(key string) (adm itl.Admission, raised bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.itlOneSidedLast[key]
+	rec := a.itlOneSidedLast[key]
+	return rec.adm, rec.raised
 }
 
 // PricingBatchCap is the batch cap per engine rank the analyzer prices a

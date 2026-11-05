@@ -169,7 +169,7 @@ func TestBPrior_ATargetPricesAFillAtOrUnderTheTruths(t *testing.T) {
 		capWindow(tr, Admission{MaxNumSeqs: 64}, g.a, g.b, g.kCap, nil)
 		rs := tr.Readings("k")
 		read, _ := pinnedReadings(rs.All, rs.Steady)
-		p, _ := priorLine(read, DefaultBPrior)
+		p, _, _ := priorLine(read, DefaultBPrior, adm.priceAnchor(lo.Model))
 		if feasible := p.ITLAt(bandLo) < target; feasible != (onFill > bandLo) {
 			t.Errorf("on: fill %.4f, but the prior's line is %.5f s at the band's bottom against the target %.5f s",
 				onFill, p.ITLAt(bandLo), target)
@@ -215,7 +215,7 @@ func TestBPrior_TheLinesAreComparedAtThePricingK(t *testing.T) {
 		tr, _ := run(Admission{MaxNumSeqs: 64})
 		rs := tr.Readings("k")
 		m := Refit(rs.All, rs.Steady, DefaultBaselineSec, 0, Admission{}).Model
-		p, ok := priorLine(rs.All, DefaultBPrior)
+		p, _, ok := priorLine(rs.All, DefaultBPrior, kPrice)
 		if !ok || m.IsZero() {
 			t.Fatalf("band ITL %.3f: premise: no lines (%+v, %v)", bandITL, m, ok)
 		}
@@ -236,27 +236,202 @@ func TestBPrior_TheLinesAreComparedAtThePricingK(t *testing.T) {
 	}
 }
 
-// The prior's line passes through the mean at-cap point, its intercept the
-// prior capped at the window's least ITL at any k, its slope floored at 0;
-// readings under kSat set the cap but not the mean.
-func TestBPrior_ThePriorLineIsThroughTheMeanAtCapPoint(t *testing.T) {
+// The prior's line passes through the mean of the at-cap readings at or
+// past the fill priced, its intercept the prior capped at the window's least
+// ITL at any k; readings under kSat set the cap but not the anchor. With
+// fewer than three at or past the fill, the three of highest k are the
+// anchor; with the priced fill past even their mean, beyond is set.
+func TestBPrior_ThePriorLineIsThroughTheAnchor(t *testing.T) {
 	obs := []Observation{{K: 0.95, ITLSec: 0.060}, {K: 0.90, ITLSec: 0.054}}
-	m, ok := priorLine(obs, 0.030)
-	if !ok || math.Abs(m.A-(0.057-0.030)/0.925) > 1e-12 || m.B != 0.030 {
-		t.Errorf("%+v, want B 0.030 through the mean (0.925, 0.057)", m)
+	m, beyond, ok := priorLine(obs, 0.030, 0.68)
+	if !ok || beyond || math.Abs(m.A-(0.057-0.030)/0.925) > 1e-12 || m.B != 0.030 {
+		t.Errorf("%+v (beyond %v), want B 0.030 through the mean (0.925, 0.057)", m, beyond)
 	}
 	// A reading under kSat at 0.010 s caps the prior at it, and is not in
-	// the mean.
+	// the anchor.
 	capped := append([]Observation{{K: 0.20, ITLSec: 0.010}}, obs...)
-	if m, _ := priorLine(capped, 0.030); m.B != 0.010 || math.Abs(m.A-(0.057-0.010)/0.925) > 1e-12 {
+	if m, _, _ := priorLine(capped, 0.030, 0.68); m.B != 0.010 || math.Abs(m.A-(0.057-0.010)/0.925) > 1e-12 {
 		t.Errorf("capped: %+v, want B 0.010 through the mean (0.925, 0.057)", m)
 	}
-	if m, _ := priorLine([]Observation{{K: 0.90, ITLSec: 0.020}}, 0.030); m.A != 0 || m.B != 0.020 {
+	if m, _, _ := priorLine([]Observation{{K: 0.90, ITLSec: 0.020}}, 0.030, 0.68); m.A != 0 || m.B != 0.020 {
 		t.Errorf("a mean under the prior: %+v, want flat at the cap 0.020", m)
 	}
-	if _, ok := priorLine([]Observation{{K: 0.80, ITLSec: 0.05}}, 0.030); ok {
+	if _, _, ok := priorLine([]Observation{{K: 0.80, ITLSec: 0.05}}, 0.030, 0.68); ok {
 		t.Error("a line from readings under kSat alone")
 	}
+	// Priced at 0.93: three readings at or past it are the anchor.
+	five := []Observation{{K: 0.86, ITLSec: 0.050}, {K: 0.88, ITLSec: 0.052}, {K: 0.93, ITLSec: 0.057},
+		{K: 0.95, ITLSec: 0.059}, {K: 0.97, ITLSec: 0.061}}
+	if m, beyond, _ := priorLine(five, 0.030, 0.93); beyond || math.Abs(m.A-(0.059-0.030)/0.95) > 1e-12 {
+		t.Errorf("at 0.93: %+v (beyond %v), want through the mean of the three past it (0.95, 0.059)", m, beyond)
+	}
+	// Priced at 0.96: one reading past it; the three of highest k, whose
+	// mean (0.95) is under 0.96, so beyond.
+	if m, beyond, _ := priorLine(five, 0.030, 0.96); !beyond || math.Abs(m.A-(0.059-0.030)/0.95) > 1e-12 {
+		t.Errorf("at 0.96: %+v (beyond %v), want the top three's mean and beyond", m, beyond)
+	}
+}
+
+// Priced above the mean at-cap fill (here at 0.95, against readings at 0.85
+// to 0.97), the line is anchored at the readings at or past it, so it is not
+// under the truth for B at or under the prior, without noise. Anchored at the
+// mean of all of them (kbar about 0.91) it would be: (b - B)(1 - 0.95/0.91)
+// under. The true B (3 ms) is under the default 6 ms, so the fit through the
+// default B is under the truth past kbar too, by (B0 - B)(1 - k/kbar), and
+// does not cover it; with B over the default, that fit is over the truth
+// past kbar, and the higher of the two is not under either way.
+func TestBPrior_PricedAboveTheMeanFillIsNotUnder(t *testing.T) {
+	const kPrice, a, b = 0.95, 0.01, 0.003
+	start := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	adm := Admission{MaxNumSeqs: 64, OneSidedAboveKSat: true, OneSidedAt: kPrice, BPrior: DefaultBPrior}
+	tr := NewTracker()
+	var on Reading
+	ks := []float64{0.85, 0.87, 0.89, 0.91, 0.93, 0.95, 0.96, 0.97}
+	for c := range 12 {
+		rows := cappedRows(ks[c%len(ks)], a, b, start)
+		on = tr.Observe("k", "v", rows, adm, start.Add(time.Duration(c)*15*time.Second))
+	}
+	truth := a*kPrice + b
+	// The line through the mean of every at-cap reading, for contrast.
+	rs := tr.Readings("k")
+	read, _ := pinnedReadings(rs.All, rs.Steady)
+	var sumK, sumITL float64
+	for _, o := range read {
+		sumK, sumITL = sumK+o.K, sumITL+o.ITLSec
+	}
+	kbar, itlbar := sumK/float64(len(read)), sumITL/float64(len(read))
+	b0 := priorCap(read, DefaultBPrior)
+	mean := Model{A: (itlbar - b0) / kbar, B: b0}
+	t.Logf("priced at %.2f: truth %.5f s, on %.5f s, through every reading's mean (kbar %.3f) %.5f s",
+		kPrice, truth, on.Model.ITLAt(kPrice), kbar, mean.ITLAt(kPrice))
+	if !on.PinnedAtBPrior || on.Model.ITLAt(kPrice) < truth*(1-1e-12) {
+		t.Errorf("on: priced %.5f s, under the truth %.5f s (at the prior %v)", on.Model.ITLAt(kPrice), truth, on.PinnedAtBPrior)
+	}
+	if on.PriorBeyondReadings {
+		t.Error("flagged beyond the readings with readings at or past the priced fill")
+	}
+	if !(mean.ITLAt(kPrice) < truth) {
+		t.Errorf("premise: the mean of every reading priced %.5f s, not under the truth %.5f s", mean.ITLAt(kPrice), truth)
+	}
+	if fit := Refit(rs.All, rs.Steady, DefaultBaselineSec, 0, Admission{}).Model; !(fit.ITLAt(kPrice) < truth) {
+		t.Errorf("premise: the fit through the default B priced %.5f s, not under the truth %.5f s", fit.ITLAt(kPrice), truth)
+	}
+}
+
+// Priced past every reading's fill, the line is flagged
+// PriorBeyondReadings: its bound no longer holds there. Past the readings
+// the fit through the default B is the higher line whenever the true B is
+// over the default (its error, (B0 - B)(1 - k/kbar), turns positive past
+// kbar), so the prior's line is chosen there only against a weaker pinned
+// fit: here one of A 0.01, as a fit taught mostly in the band might be.
+func TestBPrior_PricedPastEveryReadingIsFlagged(t *testing.T) {
+	read := make([]Observation, 0, 3)
+	for _, k := range []float64{0.91, 0.92, 0.93} {
+		read = append(read, Observation{K: k, ITLSec: 0.05*k + 0.010})
+	}
+	c := fitChoice{model: Model{A: 0.01, B: DefaultBaselineSec}, tier: TierPinnedB, read: read}
+	past := Admission{OneSidedAboveKSat: true, OneSidedAt: 0.99, BPrior: DefaultBPrior}
+	m, _, raised, beyond := oneSidedLine(c, DefaultBaselineSec, past)
+	if !raised || !beyond || m.B != DefaultBaselineSec {
+		t.Errorf("priced at 0.99, past readings at 0.91 to 0.93: %+v raised %v beyond %v, want raised and beyond", m, raised, beyond)
+	}
+	// Through Observe and Refit, the flag reaches the Reading and the
+	// Refitted. Two replicas at the cap at 0.92 beside one in the band at
+	// 0.65 (close enough for no full fit), on a line flatter there than at
+	// the cap: the pinned fit through the default B, read over all three, is
+	// shallower than the prior's line through the cap, which is chosen at
+	// 0.99, past every reading.
+	adm := Admission{MaxNumSeqs: 64, OneSidedAboveKSat: true, OneSidedAt: 0.99, BPrior: DefaultBPrior}
+	tr := NewTracker()
+	start := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	var on Reading
+	for c := range 12 {
+		rows := cappedRows(0.92, 0.05, 0.010, start)
+		rows[2].KvCacheUsage, rows[2].KvUsageInstant, rows[2].AvgITL = 0.65, 0.65, 0.012
+		on = tr.Observe("k", "v", rows, adm, start.Add(time.Duration(c)*15*time.Second))
+	}
+	if !on.PinnedAtBPrior || !on.PriorBeyondReadings {
+		t.Errorf("Observe at 0.99: at the prior %v, beyond %v, want both", on.PinnedAtBPrior, on.PriorBeyondReadings)
+	}
+	rs := tr.Readings("k")
+	if got := Refit(rs.All, rs.Steady, DefaultBaselineSec, 0, adm); !got.PriorBeyondReadings {
+		t.Errorf("Refit at 0.99: beyond %v, want it", got.PriorBeyondReadings)
+	}
+	under := Admission{OneSidedAboveKSat: true, OneSidedAt: 0.68, BPrior: DefaultBPrior}
+	if _, _, raised, beyond := oneSidedLine(c, DefaultBaselineSec, under); !raised || beyond {
+		t.Errorf("priced at 0.68, under every reading: raised %v beyond %v, want raised and not beyond", raised, beyond)
+	}
+}
+
+// An admission that names no price (OneSidedTarget 0, as the slo line's with
+// no TPOT target, or OneSidedAt out of range) still returns the line through
+// the default B when it states a prior: never the prior's own line, which can
+// be flat (one reading, or the cap's ITL at every reading).
+func TestBPrior_NoPriceStillReturnsALineThroughTheDefaultB(t *testing.T) {
+	for name, adm := range map[string]Admission{
+		"no target":           {MaxNumSeqs: 64, OneSidedAboveKSat: true, BPrior: DefaultBPrior},
+		"OneSidedAt past 1":   {MaxNumSeqs: 64, OneSidedAboveKSat: true, OneSidedAt: 1.5, BPrior: DefaultBPrior},
+		"OneSidedAt negative": {MaxNumSeqs: 64, OneSidedAboveKSat: true, OneSidedAt: -0.5, BPrior: DefaultBPrior},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if adm.namesItsPrice() {
+				t.Fatal("premise: the admission names its price")
+			}
+			// Every ITL at the cap the same: the prior's line is flat.
+			on := capWindow(NewTracker(), adm, 0, 0.040, 0.95, nil)
+			if !on.PinnedAtBPrior {
+				t.Fatalf("premise: not raised (%+v)", on.Model)
+			}
+			if on.Model.B != DefaultBaselineSec || !ValidModel(on.Model.A, on.Model.B) {
+				t.Errorf("the line %+v, want one through the default B that ValidModel takes", on.Model)
+			}
+		})
+	}
+}
+
+// One at-cap reading, and one that is also the least (so the prior's line
+// is flat at it, A 0): the line returned is a valid one through the default
+// B, which whatif.PriceTPOT and ValidModel take.
+func TestBPrior_OneReadingGivesAValidLine(t *testing.T) {
+	start := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	{
+		t.Run("one at-cap reading", func(t *testing.T) {
+			tr := NewTracker()
+			var on Reading
+			for c := range 12 {
+				rs := cappedRows(0.95, 0.05, 0.010, start)
+				// Two replicas in the band, at 0.40 and 0.45; one at the cap.
+				rs[0].KvCacheUsage, rs[0].KvUsageInstant, rs[0].AvgITL = 0.40, 0.40, 0.05*0.40+0.010
+				rs[1].KvCacheUsage, rs[1].KvUsageInstant, rs[1].AvgITL = 0.45, 0.45, 0.05*0.45+0.010
+				if c > 0 {
+					// Only the first cycle's at-cap reading is kept at the cap.
+					rs[2].KvCacheUsage, rs[2].KvUsageInstant, rs[2].AvgITL = 0.50, 0.50, 0.05*0.50+0.010
+				}
+				on = tr.Observe("k", "v", rs, atPrice(), start.Add(time.Duration(c)*15*time.Second))
+			}
+			if on.Tier == "" || !ValidModel(on.Model.A, on.Model.B) {
+				t.Errorf("the line %+v, want a valid one", on.Model)
+			}
+		})
+	}
+	t.Run("the one reading is the least", func(t *testing.T) {
+		obs := []Observation{{K: 0.90, ITLSec: 0.040}}
+		m, _, ok := priorLine(obs, DefaultBPrior, 0.68)
+		if !ok || math.Abs(m.A-(0.040-0.030)/0.90) > 1e-15 || m.B != 0.030 {
+			t.Fatalf("prior line %+v, want B 0.030 through the one reading", m)
+		}
+		flat, _, _ := priorLine(obs, 0.050, 0.68)
+		if flat.A != 0 || flat.B != 0.040 {
+			t.Fatalf("a prior above the one reading: %+v, want flat at its ITL (the cap)", flat)
+		}
+		c := fitChoice{model: Model{A: 0.01, B: DefaultBaselineSec}, tier: TierPinnedB, read: obs}
+		adm := atPrice()
+		adm.BPrior = 0.050
+		got, heldA, raised, _ := oneSidedLine(c, DefaultBaselineSec, adm)
+		if !raised || got.B != DefaultBaselineSec || !ValidModel(got.A, got.B) || got.A != heldA {
+			t.Errorf("returned %+v (held A %g, raised %v), want a valid line through the default B", got, heldA, raised)
+		}
+	})
 }
 
 // BPrior is DefaultBPrior, raised by a learned B above it, never lowered.
@@ -312,23 +487,28 @@ func TestBPrior_TheScopeIsThePhysicsKey(t *testing.T) {
 	args := map[string]string{
 		"ns|m|v1|H200|8": "a1", "ns|m|v2|H200|8": "a1", "ns|m|v3|H200|8": "a2",
 		"ns|m|v4|H100|8": "a1", "ns|m|v5|H200|4": "a1", "ns|m2|v6|H200|8": "a1", "ns|m|p1|H200|8": "a1",
-		"ns2|m|v7|H200|8": "a1",
+		// The namespace alone differs: the same variant name, model,
+		// accelerator, GPUs, arguments and role.
+		"ns2|m|v2|H200|8": "a1",
 	}
 	roles := map[string]string{"v1": "decode", "v2": "decode", "v3": "decode", "v4": "decode", "v5": "decode",
 		"v6": "decode", "p1": "prefill"}
-	s := PriorScope{Key: "ns|m|v1|H200|8", Args: "a1",
-		ArgsOf: func(k string) string { return args[k] }, RoleOf: func(v string) string { return roles[v] }}
+	s := NewPriorScope("ns|m|v1|H200|8", "a1",
+		func(k string) string { return args[k] }, func(v string) string { return roles[v] })
 	for key, want := range map[string]bool{
 		"ns|m|v1|H200|8": true, "ns|m|v2|H200|8": true,
 		"ns|m|v3|H200|8": false, "ns|m|v4|H100|8": false, "ns|m|v5|H200|4": false,
-		"ns|m2|v6|H200|8": false, "ns|m|p1|H200|8": false, "ns2|m|v7|H200|8": false, "bad": false,
+		"ns|m2|v6|H200|8": false, "ns|m|p1|H200|8": false, "ns2|m|v2|H200|8": false, "bad": false,
 	} {
 		if got := s.In(key); got != want {
 			t.Errorf("%s: in scope %v, want %v", key, got, want)
 		}
 	}
-	if (PriorScope{Key: "ns|m|v1|H200|8"}).In("ns|m|v2|H200|8") {
+	if NewPriorScope("ns|m|v1|H200|8", "", nil, nil).In("ns|m|v2|H200|8") {
 		t.Error("no arguments known: a sibling is in scope")
+	}
+	if (PriorScope{}).In("ns|m|v1|H200|8") {
+		t.Error("the zero scope holds a key")
 	}
 	tr := NewTracker()
 	tr.SetBaseline("ns|m|v2|H200|8", 0.040)

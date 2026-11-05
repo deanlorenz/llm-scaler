@@ -306,10 +306,13 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 				// like a fit made this cycle; these say it is an old one.
 				"lineSlopeHeld", d.line.SlopeHeld, "lineSlopeAge", d.line.SlopeAge(now),
 				// Priced one-sided at the cap (SwitchITLOneSidedAtCap): no
-				// learned B, and the line through the least ITL past kSat, with
-				// its intercept the prior on B, met the target at a lower fill
-				// than the fit through the default B.
-				"linePinnedAtBPrior", d.line.PinnedAtBPrior,
+				// learned B, and the prior's line (its intercept the prior on
+				// B, capped at the window's least ITL, through the mean of the
+				// readings past kSat at or past the fill priced) met the target
+				// at a lower fill than the fit through the default B; and
+				// whether that fill was past every such reading, where the
+				// bound no longer holds.
+				"linePinnedAtBPrior", d.line.PinnedAtBPrior, "linePriorBeyondReadings", d.line.PriorBeyondReadings,
 				"considered", d.line.Considered, "held", d.line.Held, "kept", d.line.Offered,
 				"belowBand", d.line.BelowBand,
 				"aboveBand", d.line.AboveBand, "noK", d.line.NoK, "noITL", d.line.NoITL,

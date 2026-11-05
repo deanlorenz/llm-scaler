@@ -97,13 +97,15 @@ type VariantState struct {
 	MinSettled int
 	// OneSided is how the line was priced one-sided
 	// (itl.Admission.OneSidedAboveKSat, issue #467), the zero Admission for
-	// a line that was not: the line through the least ITL of its readings at
-	// the sequence cap, B unlearned and Baseline itl.DefaultBaselineSec. A
-	// refit takes it (whatif.Refit.OneSided) to price the line the
-	// controller priced. oneSided is how the analyzer would price one,
-	// which refit tries.
-	OneSided itl.Admission
-	oneSided itl.Admission
+	// a line that was not: priced at the prior on B, B unlearned and
+	// Baseline itl.DefaultBaselineSec. A refit takes it (whatif.Refit.OneSided)
+	// to price the line the controller priced. analyzerOneSided is the
+	// admission the analyzer last priced the key with, and analyzerRaised
+	// whether that line was priced at the prior: refit takes the admission on
+	// a raised line only.
+	OneSided         itl.Admission
+	analyzerOneSided itl.Admission
+	analyzerRaised   bool
 	// CapacityTokens is C, the replica's whole KV capacity
 	// (whatif.CapacityTokens).
 	CapacityTokens float64
@@ -401,7 +403,7 @@ func (r *replayer) stateOf(in domain.AnalyzerInput, cycle int, now time.Time, sh
 		if rep.PricingKey != "" {
 			vs.PricingKey = rep.PricingKey
 			vs.Readings = r.sat.ITLReadings(rep.PricingKey)
-			vs.oneSided = r.sat.ITLOneSided(rep.PricingKey)
+			vs.analyzerOneSided, vs.analyzerRaised = r.sat.ITLOneSided(rep.PricingKey)
 		}
 		vs.refit()
 		var params *capacity.EngineParams
@@ -446,20 +448,18 @@ func sameLine(a, b itl.Model) bool {
 // marks the line TierAboveBand. A held or borrowed line was fitted from no
 // readings of the variant's own here.
 //
-// A pinned line through the default B is a key with no learned B, which the
-// analyzer prices one-sided at the cap (issue #467): its refit takes the
-// analyzer's one-sided admission, and keeps it for the bands (OneSided), so
-// a resample prices as the controller would, whether or not this cycle's
-// line was raised. A learned B equal to the default to the last bit would
-// be read the same way; the tracker rejects none, and none was ever seen.
+// A pinned line the analyzer priced at the prior on B (issue #467; the
+// recorded itl.Reading.PinnedAtBPrior) is refit with the analyzer's
+// one-sided admission, which the state keeps for the bands (OneSided), so a
+// resample prices as the controller did.
 func (vs *VariantState) refit() {
 	if vs.Tier != whatif.TierOLS && vs.Tier != whatif.TierPinnedB {
 		return
 	}
 	vs.Baseline = vs.Line.B
 	var adm itl.Admission
-	if vs.Tier == whatif.TierPinnedB && vs.oneSided.OneSidedAboveKSat && vs.Line.B == itl.DefaultBaselineSec {
-		adm = vs.oneSided
+	if vs.Tier == whatif.TierPinnedB && vs.analyzerRaised {
+		adm = vs.analyzerOneSided
 	}
 	if got := itl.Refit(vs.Readings.All, vs.Readings.Steady, vs.Baseline, vs.MinSettled, adm); got.Tier != "" && sameLine(got.Model, vs.Line) {
 		vs.Tier, vs.LineReadings, vs.Refitted, vs.OneSided = got.Tier, got.Read, true, adm

@@ -1451,6 +1451,7 @@ lineBorrowedFrom
 lineHeld
 lineKey
 linePinnedAtBPrior
+linePriorBeyondReadings
 lineShapeG
 lineSlopeAge
 lineSlopeHeld
@@ -1949,6 +1950,7 @@ pricedA
 prices
 prior
 prior-live
+priorBeyondReadings
 priority
 priorityClassName
 priork2|

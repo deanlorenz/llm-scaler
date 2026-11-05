@@ -15,9 +15,10 @@ import (
 // whenever the true B' is above the 6 ms default, so the TPOT target is met
 // at a higher fill than the replica reaches, and too few replicas are
 // ordered. On, while B is unlearned and the window holds readings at k >=
-// kSat, the pinned fit is set against the line through the mean of those
-// readings with its intercept an upper prior on B (itl.Admission.BPrior:
-// bPrior, capped at the window's least ITL), each priced at the fill where
+// kSat, the pinned fit is set against the line through the mean of those at
+// or past the fill priced, with its intercept an upper prior on B
+// (itl.Admission.BPrior: bPrior, capped at the window's least ITL; the
+// window's least ITL is a proven bound on B), each priced at the fill where
 // it meets the TPOT target (itl.Admission.OneSidedTarget), and the one with
 // the lower fill is the line. It still abstains (infeasible) where even that
 // line meets the target nowhere in the band. A held slope keeps the A whose
@@ -55,13 +56,11 @@ func (a *Analyzer) priorScope(key, args string, states []domain.VariantReplicaSt
 	for _, vs := range states {
 		roles[vs.VariantName] = domain.CanonicalRole(vs.Role)
 	}
-	a.mu.Lock()
-	argsOf := make(map[string]string, len(a.args))
-	for k, v := range a.args {
-		argsOf[k] = v
-	}
-	a.mu.Unlock()
-	return itl.PriorScope{Key: key, Args: args,
-		ArgsOf: func(k string) string { return argsOf[k] },
-		RoleOf: func(v string) string { return roles[v] }}
+	return itl.NewPriorScope(key, args,
+		func(k string) string {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			return a.args[k]
+		},
+		func(v string) string { return roles[v] })
 }

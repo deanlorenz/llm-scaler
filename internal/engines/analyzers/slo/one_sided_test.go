@@ -89,16 +89,29 @@ func learnedOn(key, args string, b float64) func(*settleRig) {
 // scoped is a learned B b on sib, in agg's physics.
 func scoped(b float64) func(*settleRig) { return learnedOn(sibKey, capParams().ArgsTag(), b) }
 
-// elsewhere is learned Bs b outside agg's physics: another accelerator,
-// another GPU count, another namespace, and sib under other engine
-// arguments. None may move the prior.
-func elsewhere(b float64) func(*settleRig) {
-	return func(r *settleRig) {
-		for _, k := range []string{"ns|m|sib|H200|1", "ns|m|sib|H100|8", "ns2|m|sib|H100|1"} {
-			learnedOn(k, capParams().ArgsTag(), b)(r)
-		}
-		learnedOn(sibKey, "other-args", b)(r)
+// outOfScope is, per dimension, a key that differs from agg's physics in
+// that one dimension alone, and the engine arguments it was fitted under:
+// another accelerator, another GPU count, another namespace, other engine
+// arguments, and another role (pre, a prefill variant of the model).
+var outOfScope = []struct{ name, key, args string }{
+	{"accelerator", "ns|m|sib|H200|1", ""},
+	{"GPU count", "ns|m|sib|H100|8", ""},
+	{"namespace", "ns2|m|sib|H100|1", ""},
+	{"engine args", sibKey, "other-args"},
+	{"role", windowKey("ns", "m", preAgg), ""},
+}
+
+// preAgg is a prefill variant of the model, in agg's hardware.
+var preAgg = domain.VariantReplicaState{VariantName: "pre", Role: domain.RolePrefill,
+	AcceleratorName: "H100", GPUsPerReplica: 1, CurrentReplicas: 1}
+
+// outOfScopePrior is a learned B b on one out-of-scope key, fitted under
+// args (agg's arguments when "").
+func outOfScopePrior(key, args string, b float64) func(*settleRig) {
+	if args == "" {
+		args = capParams().ArgsTag()
 	}
+	return learnedOn(key, args, b)
 }
 
 // capRows is three replicas of agg at their cap on truth l, at k_cap - 0.01,
@@ -142,7 +155,7 @@ func pricedAtTarget(r *settleRig, l sloCapTruth, n int, rows func(c int) []domai
 func (r *settleRig) cycleAt(rows []domain.ReplicaMetrics, target float64) itl.Reading {
 	r.t.Helper()
 	in := domain.AnalyzerInput{Namespace: "ns", ModelID: "m", Config: policy(time.Duration(target*float64(time.Second)), 0),
-		ArrivalRate: 1, VariantStates: []domain.VariantReplicaState{settleAgg, sibAgg}, ReplicaMetrics: rows}
+		ArrivalRate: 1, VariantStates: []domain.VariantReplicaState{settleAgg, sibAgg, preAgg}, ReplicaMetrics: rows}
 	r.tr.Observe(utils.GetNamespacedKey("ns", "m"), settlerow.Of(rows, map[string]string{"agg": domain.RoleBoth}), r.now)
 	core, logs := observer.New(zapcore.Level(-logging.VERBOSE))
 	_, err := r.a.Analyze(logr.NewContext(context.Background(), zapr.NewLogger(zap.New(core))), in)
@@ -182,11 +195,20 @@ func priorFill(l sloCapTruth, bPrior float64) float64 {
 	return p.Fill
 }
 
+// sloResult is one row of the slo bias table.
+type sloResult struct {
+	// off and on are the fills without noise; want the prior's line's
+	// (priorFill); lo and hi the least and most fill over the noisy seeds,
+	// and infeasible how many of them abstained.
+	off, on, want, lo, hi float64
+	infeasible            int
+}
+
 // sloRow measures one truth on and off, with and without noise, prints its
 // row and holds it: off above the truth's fill (the negative control); on
 // at or under the prior's line's fill (priorFill), to the mix of the three
 // fills the fit reads, and infeasible exactly where the prior's line is.
-func sloRow(t *testing.T, label string, l sloCapTruth, prime func(*settleRig), bPrior float64) (on float64) {
+func sloRow(t *testing.T, label string, l sloCapTruth, prime func(*settleRig), bPrior float64) sloResult {
 	t.Helper()
 	const seeds = 20
 	rig := func(switches map[string]bool) *settleRig {
@@ -204,76 +226,136 @@ func sloRow(t *testing.T, label string, l sloCapTruth, prime func(*settleRig), b
 			return capRows(l, [3]float64{n[0][c], n[1][c], n[2][c]})
 		}
 	}
-	_, off := pricedAtTarget(rig(map[string]bool{SwitchITLOneSidedAtCap: false}), l, 24, rowsOf([3][]float64{}))
+	var res sloResult
+	_, res.off = pricedAtTarget(rig(map[string]bool{SwitchITLOneSidedAtCap: false}), l, 24, rowsOf([3][]float64{}))
 	read, on := pricedAtTarget(rig(nil), l, 24, rowsOf([3][]float64{}))
-	lo, hi, infeasible := math.Inf(1), math.Inf(-1), 0
+	res.on = on
+	res.lo, res.hi = math.Inf(1), math.Inf(-1)
 	for seed := uint64(1); seed <= seeds; seed++ {
 		rnd := learnertest.Rand(seed)
 		n := [3][]float64{learnertest.ARNoise(rnd, 24, 0.02, 0.5), learnertest.ARNoise(rnd, 24, 0.02, 0.5),
 			learnertest.ARNoise(rnd, 24, 0.02, 0.5)}
 		_, f := pricedAtTarget(rig(nil), l, 24, rowsOf(n))
 		if math.IsNaN(f) {
-			infeasible++
+			res.infeasible++
 			continue
 		}
-		lo, hi = min(lo, f), max(hi, f)
+		res.lo, res.hi = min(res.lo, f), max(res.hi, f)
 	}
-	want := priorFill(l, bPrior)
+	res.want = priorFill(l, bPrior)
 	t.Logf("| %s | %.2f | %.0f ms | %.2f | %.4f | %.4f | %.4f | [%.4f, %.4f], infeasible %d of %d | %.2f |",
-		label, l.a, 1000*l.b, l.kCap, off, on, want, lo, hi, infeasible, seeds, sloTruthFill)
-	require.Greater(t, off, sloTruthFill, "negative control, %s: off did not price above the truth's fill", l)
+		label, l.a, 1000*l.b, l.kCap, res.off, res.on, res.want, res.lo, res.hi, res.infeasible, seeds, sloTruthFill)
+	require.Greater(t, res.off, sloTruthFill, "negative control, %s: off did not price above the truth's fill", l)
 	require.True(t, read.PinnedAtBPrior, "%s: on, not priced at the prior", l)
-	if math.IsNaN(want) {
-		require.True(t, math.IsNaN(on), "%s: on priced %.4f where the prior's line meets the target nowhere", l, on)
-		return on
+	if math.IsNaN(res.want) {
+		require.True(t, math.IsNaN(res.on), "%s: on priced %.4f where the prior's line meets the target nowhere", l, res.on)
+		return res
 	}
-	require.False(t, math.IsNaN(on), "%s: on abstained where the prior's line meets the target at %.4f", l, want)
-	require.LessOrEqual(t, on, want+0.005, "%s: on over the prior's line's fill", l)
-	return on
+	require.False(t, math.IsNaN(res.on), "%s: on abstained where the prior's line meets the target at %.4f", l, res.want)
+	require.LessOrEqual(t, res.on, res.want+0.005, "%s: on over the prior's line's fill", l)
+	return res
 }
 
 // The bias table at the slo line's price, the fill where it meets the TPOT
 // target, against the truth's (0.5), through Analyze. Off (the negative
 // control) the line through the default B meets the target at a higher
 // fill than the truth, every point of the grid: too few replicas. On, at or
-// under the prior's line's fill, so at or under the truth's while B is at
-// most the prior, without noise; the analyzer abstains (infeasible) only
+// under the prior's line's fill, so not higher than the truth's while B is
+// at most the prior, without noise. The analyzer abstains (infeasible) only
 // where even the prior's line, capped at the window's least ITL, is past
-// the target across the band. Cases, as on the saturation line: the 30 ms
-// floor; a learned 45 ms in agg's physics, which raises it; learned 3 ms Bs
-// outside it, which must not lower it; an 80 ms outlier in it, which the
-// window caps; and a true B above the prior (40 ms), which meets the target
-// above the truth's fill, by the bound. Noise is logged, and its least and
-// most fill held to known truth's 5 % of the band about the truth's.
+// the target across the band, and the table says on which points it does,
+// so a NaN never passes an assertion vacuously. Cases, one subtest each, as
+// on the saturation line: the 30 ms floor, with the noise gate (the least
+// noisy fill at B = prior at most 0.03 over the truth's); a learned 45 ms in
+// agg's physics; a learned 45 ms on a key out of scope in one dimension,
+// which must leave the floor's fill; an 80 ms outlier, capped by the
+// window; and a true B above the prior (40 ms), at the prior's line's fill.
 func TestOneSided_TheBiasTableAtTheTarget(t *testing.T) {
 	t.Log("| prior | A | B | k_cap | fill off | fill on | prior's line | on, 2 % noise: [least, most] | truth |")
-	feasible := 0
-	for _, l := range sloCapTruths {
-		on := sloRow(t, "30 ms", l, nil, itl.DefaultBPrior)
-		if !math.IsNaN(on) {
-			feasible++
-			require.LessOrEqual(t, on, sloTruthFill+1e-9, "%s: on priced a higher fill than the truth", l)
+	// The points each case abstains on, by design: the target under every
+	// ITL the window reads (A 0.01 B 20 ms: 25 ms against at least 29.6
+	// ms), or a raised prior whose line is past the target across the band.
+	infeasible := map[string]map[sloCapTruth]bool{
+		"30 ms":         {{0.01, 0.020, 0.97}: true},
+		"45 ms scoped":  {{0.05, 0.010, 0.97}: true, {0.01, 0.020, 0.97}: true, {0.01, 0.030, 0.97}: true},
+		"80 ms outlier": {{0.05, 0.010, 0.97}: true, {0.05, 0.030, 0.97}: true, {0.01, 0.020, 0.97}: true, {0.01, 0.030, 0.97}: true},
+	}
+	check := func(t *testing.T, label string, l sloCapTruth, r sloResult) {
+		t.Helper()
+		require.Equal(t, infeasible[label][l], math.IsNaN(r.on), "%s, %s: infeasible %v, want %v", label, l,
+			math.IsNaN(r.on), infeasible[label][l])
+		if !math.IsNaN(r.on) {
+			require.LessOrEqual(t, r.on, sloTruthFill+1e-9, "%s, %s: on priced a higher fill than the truth", label, l)
 		}
 	}
-	// Infeasible on one point only, A 0.01 B 20 ms: its readings, all at the
-	// cap, read at least 29.6 ms, above the 25 ms target, so none shows B is
-	// under the target and the cap stays above it.
-	require.Equal(t, len(sloCapTruths)-1, feasible, "infeasible on more than the one point")
+	floor := map[sloCapTruth]sloResult{}
 	for _, l := range sloCapTruths {
-		on := sloRow(t, "45 ms scoped", l, scoped(0.045), 0.045)
-		require.False(t, on > sloTruthFill+1e-9, "scoped prior, %s: on priced a higher fill than the truth", l)
+		t.Run("floor/"+l.String(), func(t *testing.T) {
+			r := sloRow(t, "30 ms", l, nil, itl.DefaultBPrior)
+			floor[l] = r
+			check(t, "30 ms", l, r)
+			if l.b == itl.DefaultBPrior {
+				require.LessOrEqual(t, r.hi, sloTruthFill+0.03, "%s: the noisiest fill past its gate", l)
+			}
+		})
 	}
 	for _, l := range sloCapTruths {
-		far := sloRow(t, "3 ms elsewhere", l, elsewhere(0.003), itl.DefaultBPrior)
-		near := sloRow(t, "30 ms", l, nil, itl.DefaultBPrior)
-		require.True(t, far == near || (math.IsNaN(far) && math.IsNaN(near)), "%s: a B outside the physics moved the prior", l)
+		t.Run("scoped 45 ms/"+l.String(), func(t *testing.T) {
+			check(t, "45 ms scoped", l, sloRow(t, "45 ms scoped", l, scoped(0.045), 0.045))
+		})
+	}
+	for _, d := range outOfScope {
+		for _, l := range sloCapTruths {
+			t.Run("out of scope by "+d.name+"/"+l.String(), func(t *testing.T) {
+				r := sloRow(t, "45 ms, other "+d.name, l, outOfScopePrior(d.key, d.args, 0.045), itl.DefaultBPrior)
+				f := floor[l]
+				require.True(t, r.on == f.on || (math.IsNaN(r.on) && math.IsNaN(f.on)),
+					"%s: a 45 ms B on another %s moved the fill %.4f to %.4f", l, d.name, f.on, r.on)
+			})
+		}
 	}
 	for _, l := range sloCapTruths {
-		on := sloRow(t, "80 ms outlier", l, scoped(0.080), 0.080)
-		require.False(t, on > sloTruthFill+1e-9, "outlier prior, %s: on priced a higher fill than the truth", l)
+		t.Run("outlier 80 ms/"+l.String(), func(t *testing.T) {
+			check(t, "80 ms outlier", l, sloRow(t, "80 ms outlier", l, scoped(0.080), 0.080))
+		})
 	}
-	above := sloRow(t, "30 ms", sloCapTruth{0.01, 0.040, 0.97}, nil, itl.DefaultBPrior)
-	require.False(t, math.IsNaN(above) || above <= sloTruthFill, "B above the prior: %.4f, want a fill above the truth's", above)
+	t.Run("B above the prior", func(t *testing.T) {
+		l := sloCapTruth{0.01, 0.040, 0.97}
+		r := sloRow(t, "30 ms", l, nil, itl.DefaultBPrior)
+		require.False(t, math.IsNaN(r.on), "B above the prior: abstained")
+		require.Greater(t, r.on, sloTruthFill, "B above the prior: not above the truth's fill")
+		require.InDelta(t, priorFill(l, itl.DefaultBPrior), r.on, 0.005, "B above the prior: not the prior's line's fill")
+	})
+}
+
+// The window's cap brings an outlier prior down to a line that meets the
+// target. An 80 ms prior learned in agg's physics, on A 0.01 B 20 ms with a
+// replica in the band reading 22 ms: uncapped, the prior's line is past the
+// 25 ms target across the band and the variant would abstain; capped at the
+// 22 ms reading, it meets the target in the band, at or under the truth's
+// fill. On every cycle priced at the prior, before a full fit learns B.
+func TestOneSided_TheCapBringsAnOutlierPriorToAFeasibleFill(t *testing.T) {
+	l := sloCapTruth{0.01, 0.020, 0.97}
+	band := row("agg", "agg-band", 0.20)
+	band.AvgITL = l.itl(0.20)
+	uncapped := itl.Model{A: max(0, (l.itl(l.kCap)-0.080)/l.kCap), B: 0.080}
+	require.False(t, whatif.PriceTPOT(whatif.DefaultBand(), uncapped, l.target()).Feasible,
+		"premise: the uncapped 80 ms line meets the target")
+	r := capRig(t, nil)
+	scoped(0.080)(r)
+	atPrior := 0
+	for c := range 40 {
+		read := r.cycleAt(append(capRows(l, [3]float64{}), band), l.target())
+		if read.Tier == "" || !read.PinnedAtBPrior {
+			continue
+		}
+		atPrior++
+		p := whatif.PriceTPOT(whatif.DefaultBand(), read.Model, l.target())
+		require.True(t, p.OK && p.Feasible, "cycle %d: the capped outlier line abstained (%+v)", c, read.Model)
+		require.LessOrEqual(t, p.Fill, sloTruthFill+1e-9, "cycle %d: priced a higher fill than the truth", c)
+	}
+	t.Logf("%d cycles priced at the capped 80 ms prior", atPrior)
+	require.Positive(t, atPrior, "premise: no cycle was priced at the prior")
 }
 
 // The window's cap makes a point feasible once a reading shows B is under
@@ -416,4 +498,46 @@ func TestOneSided_TheSwitchPicksTheLine(t *testing.T) {
 	require.True(t, on.PinnedAtBPrior)
 	require.False(t, off.PinnedAtBPrior)
 	require.Equal(t, itl.DefaultBaselineSec, off.Model.B)
+}
+
+// The slo noise gate holds for the analyzer's line and fails for the line
+// through the least at-cap reading (4b-3's rule and the first prior): at B
+// equal to the prior, the least of the noisy readings sits under the true
+// line, so its line meets the target at a higher fill. The least-reading
+// line is worked by hand from the readings the analyzer kept.
+func TestOneSided_TheLeastReadingLineFailsTheNoiseGate(t *testing.T) {
+	const seeds = 20
+	for _, l := range []sloCapTruth{{0.05, 0.030, 0.97}, {0.01, 0.030, 0.97}} {
+		t.Run(l.String(), func(t *testing.T) {
+			hiOn, hiLeast := math.Inf(-1), math.Inf(-1)
+			for seed := uint64(1); seed <= seeds; seed++ {
+				rnd := learnertest.Rand(seed)
+				n := [3][]float64{learnertest.ARNoise(rnd, 24, 0.02, 0.5), learnertest.ARNoise(rnd, 24, 0.02, 0.5),
+					learnertest.ARNoise(rnd, 24, 0.02, 0.5)}
+				r := capRig(t, nil)
+				_, on := pricedAtTarget(r, l, 24, func(c int) []domain.ReplicaMetrics {
+					return capRows(l, [3]float64{n[0][c], n[1][c], n[2][c]})
+				})
+				rs := r.a.lines.Readings(windowKey("ns", "m", settleAgg))
+				least := itl.Observation{ITLSec: math.Inf(1)}
+				for _, o := range rs.All {
+					if o.K >= itl.DefaultKSat && o.ITLSec < least.ITLSec {
+						least = o
+					}
+				}
+				m := itl.Model{A: max(0, (least.ITLSec-itl.DefaultBPrior)/least.K), B: itl.DefaultBPrior}
+				p := whatif.PriceTPOT(whatif.DefaultBand(), m, l.target())
+				if !math.IsNaN(on) {
+					hiOn = max(hiOn, on)
+				}
+				if p.OK && p.Feasible {
+					hiLeast = max(hiLeast, p.Fill)
+				}
+			}
+			t.Logf("%s: the noisiest fill %.4f, through the least reading %.4f (truth %.2f, gate %.2f)",
+				l, hiOn, hiLeast, sloTruthFill, sloTruthFill+0.03)
+			require.LessOrEqual(t, hiOn, sloTruthFill+0.03, "the analyzer's line past the gate")
+			require.Greater(t, hiLeast, sloTruthFill+0.03, "the least-reading line passes the gate: it tests nothing")
+		})
+	}
 }

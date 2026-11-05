@@ -195,6 +195,18 @@ func (a Admission) oneSidedAt() float64 {
 	return a.OneSidedAt
 }
 
+// priceAnchor is the fill the prior's line must be anchored at or past
+// (priorLine): oneSidedAt, or, with a target, the fill where fit, the pinned
+// fit through the default B, meets it. The fit's fill is the higher of the
+// two lines' (the default B is under the prior), so an anchor at or past it
+// is at or past the fill the chosen line is priced at too.
+func (a Admission) priceAnchor(fit Model) float64 {
+	if a.targeted() {
+		return a.pricedFill(fit)
+	}
+	return a.oneSidedAt()
+}
+
 // pricedFill is the fill in the band where line's ITL meets OneSidedTarget,
 // as whatif.PriceTPOT clamps it: the band's top for a line that stays under
 // the target there, its bottom for one at or past it already.
