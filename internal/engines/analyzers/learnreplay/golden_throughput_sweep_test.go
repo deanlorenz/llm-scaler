@@ -20,8 +20,9 @@ import (
 // sweep, the leader controller Pod deleted 20 min in, so the run gives two
 // recordings, throughput-sweep and throughput-sweep-restart
 // (analyzer-learner.md, PR 4b, "Recordings"). They are the only goldens whose
-// throughput line sees a real decode engine: warm-up readings from joiners,
-// readings above the band, and full fits.
+// throughput line sees a real decode engine: settling readings, readings above
+// the band, full fits, and a replica at its sequence cap. The run's policy band
+// is 0.12-0.70, not the default.
 const (
 	throughputSweepFixture        = "throughput-sweep"
 	throughputSweepRestartFixture = "throughput-sweep-restart"
@@ -29,11 +30,18 @@ const (
 
 // throughputSweepFloor is which of the throughput line's paths a recording's
 // own replay must reach. Each must be above zero (2.5's per-path counters):
-// full and pinned fits in both, settling readings in both (joiners, and after
-// the restart every replica already serving), and a held slope in the
-// restart recording, whose light load follows the restart. A floor is a
-// count, not a rate: the fixture's own replay at the commit that adds it
-// states the counts beside it, and a PR that lowers one says why.
+// full and pinned fits and settling readings in both, and readings admitted
+// at the sequence cap in the restart recording, whose load reaches the cap.
+// A floor is a count, not a rate. At the commit that added them the replay
+// counted 18 full, 9 pinned and 5 settling in throughput-sweep, and 10 full,
+// 14 pinned, 8 settling and 20 at the cap in throughput-sweep-restart; a PR
+// that lowers a floor says why.
+//
+// The held slope has no floor here: it ran 0 times in both. The restart
+// recording ends with 35 minutes of light load, and the line stayed silent
+// through them with cause shape-change: a shape change drops the held slope
+// with the window, and the load's shape changed as it went light. The held
+// slope stays synthetic (the engine fixture, and throughput's property cases).
 type throughputSweepFloor struct {
 	fixture string
 	// paths is the fewest runs of each path, by throughput.PathNames.
@@ -44,7 +52,7 @@ var throughputSweepFloors = []throughputSweepFloor{
 	{fixture: throughputSweepFixture, paths: map[string]int64{
 		throughput.PathITLOLS: 1, throughput.PathITLPinned: 1, throughput.PathITLSettling: 1}},
 	{fixture: throughputSweepRestartFixture, paths: map[string]int64{
-		throughput.PathITLOLS: 1, throughput.PathITLPinned: 1, throughput.PathITLHeld: 1, throughput.PathITLSettling: 1}},
+		throughput.PathITLOLS: 1, throughput.PathITLPinned: 1, throughput.PathITLSettling: 1, throughput.PathITLAtCap: 1}},
 }
 
 // throughputFloorProblems names each path of floor a replay's counts fall
@@ -60,37 +68,15 @@ func throughputFloorProblems(f throughputSweepFloor, paths map[string]int64) []s
 	return out
 }
 
-// listedFixture reports whether the committed manifest lists a fixture.
-func listedFixture(t *testing.T, name string) bool {
-	t.Helper()
-	m, err := ReadManifest(goldenDir)
-	require.NoError(t, err)
-	for _, g := range m.Goldens {
-		if g.Name == name {
-			return true
-		}
-	}
-	return false
-}
-
 // Each throughput-sweep recording's own replay reaches every path of its
 // floor: a cluster golden of the throughput line that lost its full fits,
-// its settling stamp or its held slope would still pass the summed path
+// its settling stamp or its cap admission would still pass the summed path
 // check and the row comparison, which make learner-goldens rewrites. The
 // same replay with the line's steady gate off (the parent's line, which
 // counts nothing) is the negative control: every floor fails.
-//
-// Until the recordings land, the test skips: they are taken on a cluster
-// with 4b-0 merged (the recipe in testing.md), and land with base goldens
-// in their own commit.
 func TestGoldens_ThroughputSweepFloors(t *testing.T) {
 	for _, f := range throughputSweepFloors {
 		t.Run(f.fixture, func(t *testing.T) {
-			if !listedFixture(t, f.fixture) {
-				t.Skipf("no %s golden yet: the throughput-sweep cluster run (docs/developer-guide/testing.md, learner goldens; "+
-					"analyzer-learner.md, PR 4b, Recordings) has not landed. Once %s lists it, this test requires the floors %v",
-					f.fixture, ManifestName, f.paths)
-			}
 			rec := readGoldenRecording(t, f.fixture)
 			read, err := learnrec.Read(rec)
 			require.NoError(t, err)

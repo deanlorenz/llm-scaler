@@ -897,7 +897,7 @@ of the older runs does.
 | 2 | flow control off; a P/D run; a pod restarted under the same name | P1-obs admitted, settle refusals per reason, joined refusals with a known ReadySince | restart suite: same-name restart, LWS group with mixed Ready times, bridge lend, node clock 90 s behind, controller restart. 8-GPU DP: `D/dp_ranks_test.go` |
 | 3 | flow control off (mu is written only beside P1-obs) | mu samples written, mu yields | closed-loop probe (lands here) |
 | 4a | a run that reaches OLS: stepped concurrency giving ≥ 10 steady rows spread ≥ 0.30, with the SLO analyzer recorded | OLS cycles, pinned cycles | restart suite (PR 2) and the settle suite's one-missing-row case, both through ITL, for its two named changes; the closed-loop probe through a controller restart; a replica at its sequence cap, admitted above the band |
-| 4b | a throughput-analyzer run with its recorder on: the `ols-sweep` run with throughput listed and a controller restart mid-run, two recordings ([PR 4b](#pr-4b-the-throughput-analyzers-itl-line)) | its OLS and pinned cycles; settling readings; held cycles | negative control on the parent; a non-default policy band; a replica at its sequence cap, for the cap admission; the slope hold through 30 min of light load |
+| 4b | a throughput-analyzer run with its recorder on: the `ols-sweep` run with throughput listed and a controller restart mid-run, two recordings ([PR 4b](#pr-4b-the-throughput-analyzers-itl-line)) | its OLS and pinned cycles; settling readings; at-cap readings (the restart recording) | negative control on the parent; the slope hold through 30 min of light load |
 | 5 | a controller restart with the snapshot on | restored keys, start samples | restart suite plus restore-then-run; a restore under light load that keeps the ITL line; v0.10.0 and v0.10.1 v1 documents |
 
 LWS and SGLang have no recording. Their synthetic suites stand in until one
@@ -1643,29 +1643,46 @@ above-band fallback's one-sided error.
 
 #### Recordings
 
-No throughput recording exists. The in-process goldens carry throughput
-results (`acceptance` 52 rows, 19 `T1-ols`; `engine` 28, 7 `T1-ols`;
-`mu-paths` 192, all `T2-default`), synthetic, so the switches move them but
-the physics is not in them.
+The in-process goldens carry throughput results (`acceptance` 52 rows, 19
+`T1-ols`; `engine` 28, 7 `T1-ols`; `mu-paths` 192, all `T2-default`),
+synthetic, so the switches move them but the physics is not in them.
 
-**Needed:** the `ols-sweep` run of testing.md, with the throughput analyzer
-on, as one run that gives two recordings.
+**Taken:** the `ols-sweep` run of testing.md, with the throughput analyzer
+on, as one run that gave two recordings: `throughput-sweep` and
+`throughput-sweep-restart`, recorded at 59772fce2. As planned, except the
+band and the load's tail, in the table.
 
 | item | value |
 | --- | --- |
 | scenario | `hack/benchmark/scenarios/guides/pd-disaggregation.yaml`, `MODEL_ID=Qwen/Qwen3-0.6B`, EPP flow control off, decode KV 1024 blocks and `VLLM_MAX_NUM_SEQ=64`, decode 1-1, **prefill 1-1** (ols-sweep had 1-2) |
-| analyzer config | the policy lists `saturation` and `throughput`, default `analyzerTuning`. Set it **before** the recorder: the throughput analyzer registers only at controller start (`config/config.go:425-437`) |
+| analyzer config | the policy lists `saturation` and `throughput`, `analyzerTuning.itlBand` 0.12-0.70, the rest default. Set it **before** the recorder: the throughput analyzer registers only at controller start (`config/config.go:425-437`) |
 | recorder | the `learner-recorder` patch as the last change before load; default cap (256Mi) |
-| load | `hack/benchmark/closed_loop_sweep.py`, default schedule (about 55 min) |
+| load | `hack/benchmark/closed_loop_sweep.py`, default schedule, then a 48 s rise to 80 in flight, 8 min at 80 (cap of 64, the rest waiting), 35 min at 2 in flight: 98 min |
 | restart | the leader Pod deleted 90 s into level 5 (1200 s, 20 min in), snapshot off, as for the slo pair. The first recording is `throughput-sweep`, the second `throughput-sweep-restart`. The run is taken at a commit with 4b-0 merged; the recipe is [testing.md](../developer-guide/testing.md#learner-goldens) |
-| GPUs | 2 H200 for about 70 min including setup; torn down on every exit path |
-| counters above zero | throughput OLS and pinned cycles; settling readings; held cycles in the restart recording |
+| GPUs | 2 H200 for 2 h including setup; torn down on every exit path |
+| counters above zero | throughput OLS and pinned cycles and settling readings in both; at-cap readings in the restart recording |
 
 A kind or simulator run is not enough: the simulator's ITL has no warm-up
 and no thrashing above the band, which are the readings this PR removes,
-and only a real decode engine has reached a full fit (2.8). The cap and the
-held slope through 30 min of light load stay synthetic (2.8): the sweep does
-not hold the decode pod at its cap without preempting.
+and only a real decode engine has reached a full fit (2.8).
+
+Measured, by the replay's counters:
+
+| recording | OLS | pinned | settling | at cap | held | above band |
+| --- | --- | --- | --- | --- | --- | --- |
+| `throughput-sweep` | 18 | 9 | 5 | 0 | 0 | 0 |
+| `throughput-sweep-restart` | 10 | 14 | 8 | 20 | 0 | 0 |
+
+The cap was expected to stay synthetic; it did not. 80 in flight held the
+decode pod at 64 running with requests waiting, at k 0.77 to 0.90, and
+the band's top of 0.70 put those readings above it. The raw rows give the
+same 20. The preemption total reached 37 and 4 decode rows of the restart
+recording show preemption, none of them among the 20.
+
+The held slope stays synthetic (2.8): it ran 0 times in both. A shape change
+drops the held slope with the window, and through the 35 min of light load
+the line was silent with cause `shape-change` from 22:23:06Z to the end. A
+recording of the hold probably needs light load of the shape of the last fit.
 
 #### Tests
 
@@ -1724,9 +1741,9 @@ exception section 7 names); the four-PR split.
 #### 4b-1 as built
 
 Status: built on `feat/learner-4b1`, on main after 4b-0 (#455). The
-`throughput-sweep` recordings are not in it; they land in their own commit,
-with base goldens, when the run is taken (`TestGoldens_ThroughputSweepFloors`
-waits for them).
+`throughput-sweep` recordings are not in it; they landed later in their own
+commit, with `TestGoldens_ThroughputSweepFloors` on them (see
+[Recordings](#recordings)).
 
 What each switch moves, measured on the in-process goldens (`acceptance`,
 `engine`, `mu-paths`, the only fixtures that run the throughput analyzer),
@@ -1835,15 +1852,15 @@ What else 4b-1 built:
   at the default or the verbose level.
 - **Per-path counters** (`throughput.PathNames`): `throughput-itl-ols`,
   `throughput-itl-pinned`, `throughput-itl-held`,
-  `throughput-itl-settling` and `throughput-itl-above-band`, the last not
-  required of any golden (a recording reaches it only by starting into
-  saturated load). The golden check requires the first three (the
-  in-process goldens reach each); settling is zero there by construction and
-  is required by `TestGoldens_ThroughputSweepFloors`, which skips, saying
-  so, until the `throughput-sweep` recordings are listed in `goldens.yaml`,
-  and then requires full, pinned and settling counts on both and held
-  counts on the restart recording, with the parent's line (the steady gate
-  off) as its negative control.
+  `throughput-itl-settling`, `throughput-itl-above-band` and
+  `throughput-itl-at-cap`, the above-band path not required of any golden (a
+  recording reaches it only by starting into saturated load). The golden
+  check requires the first three (the in-process goldens reach each);
+  settling and at-cap are zero there by construction and are required by
+  `TestGoldens_ThroughputSweepFloors`: full, pinned and settling counts on
+  both `throughput-sweep` recordings and at-cap counts on the restart
+  recording, with the parent's line (the steady gate off) as its negative
+  control. Held has no floor there: neither recording reaches it.
 
 #### The GPS-mismatch clear: dropped in 4b-1
 
@@ -1982,8 +1999,9 @@ silent 8 cycles (2 min): the restart wait held the above-band fallback too.
 
 **Goldens.** No committed recording gives the throughput analyzer the
 engine's view (the in-process three predate `ThroughputConfig`), so the
-restart wait moves none until `throughput-sweep-restart` lands, and is held
-by its unit tests (`heldBy`). Measured after the round-1 review, each alone
+restart wait moves none, and is held by its unit tests (`heldBy`). It moves
+nothing on `throughput-sweep-restart` either, which has the view (measured
+when that landed). Measured after the round-1 review, each alone
 against all off from main's goldens: none of the six moves a golden, and
 all on reproduces main's goldens byte for byte, so each is held by its unit
 tests. Before the review the move moved `acceptance/variant-capacities.csv`

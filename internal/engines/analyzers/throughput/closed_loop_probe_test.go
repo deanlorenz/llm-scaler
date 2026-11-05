@@ -303,8 +303,8 @@ func TestThroughputProbe_ARestartJustBeforeAStepAboveTheBandSettlesAtNeed(t *tes
 // cap. With the cap admission (learner PR 4b-3,
 // SwitchITLAdmitsAtSequenceCap) its readings are the band's, and the band's
 // line prices the variant from the tenth (T2-default), never the
-// above-band fallback. Synthetic (a sweep does not hold a decode pod at its
-// cap without preempting). With no learned B the line is priced one-sided
+// above-band fallback. Synthetic: throughput-sweep-restart holds its one
+// decode pod at the cap, with no siblings. With no learned B the line is priced one-sided
 // (itl.Admission.OneSidedAboveKSat): at or above the truth at k 0.85. On
 // this case's one fill and no noise the line through the least ITL is flat
 // at the capped replica's ITL, 0.0560 s, where the fit through the default

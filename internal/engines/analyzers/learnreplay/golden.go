@@ -689,10 +689,10 @@ func requiredPaths() []string {
 
 // requiredThroughputPaths is the throughput line's fits the goldens must
 // keep reaching: full, pinned and held (learner PR 4b-1; the in-process
-// goldens reach each, the held slope on the engine fixture alone). Its settling readings are not: no committed golden
-// carries a joiner's warm-up past the line's admission, so the count is zero
-// there by construction. The throughput-sweep recording's floor requires
-// them once it lands (TestGoldens_ThroughputSweepFloors).
+// goldens reach each, the held slope on the engine fixture alone). Its
+// settling readings and its readings at the sequence cap are not: only the
+// throughput-sweep recordings reach them, and their floors require them
+// (TestGoldens_ThroughputSweepFloors).
 func requiredThroughputPaths() []string {
 	return []string{throughput.PathITLOLS, throughput.PathITLPinned, throughput.PathITLHeld}
 }
