@@ -440,9 +440,18 @@ check-doc-comment-owner: ## Fail on a doc comment describing a different declara
 	@python3 hack/check_doc_comment_owner_test.py
 	@python3 hack/check-doc-comment-owner.py
 
+# The per-package limit for make test. go test's default is 10 minutes, and
+# the learnreplay package, which replays every learner golden many times
+# (the golden check and its negative controls, the switch runs), measured
+# 503 s on a GitHub runner before the TTFT goldens: too close to 600. 30
+# minutes is about twice that package's time on a runner with the goldens
+# (CheckGoldens replays them in parallel since). One -timeout covers every
+# package of one go test, so it cannot be scoped to learnreplay alone.
+TEST_TIMEOUT ?= 30m
+
 .PHONY: test
 test: manifests generate fmt vet setup-envtest helm check-import-direction check-doc-comment-owner ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" PATH="$(LOCALBIN):$(PATH)" go test $$(go list ./... | grep -v /e2e | grep -v /benchmark) ./test/e2e/fixtures/ -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" PATH="$(LOCALBIN):$(PATH)" go test -timeout $(TEST_TIMEOUT) $$(go list ./... | grep -v /e2e | grep -v /benchmark) ./test/e2e/fixtures/ -coverprofile cover.out
 	@# The race detector on the packages whose concurrency spec only it can
 	@# check (a few seconds): without -race that spec proves no deadlock and
 	@# nothing more.

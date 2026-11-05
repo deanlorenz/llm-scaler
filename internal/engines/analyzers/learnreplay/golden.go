@@ -16,9 +16,11 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"sigs.k8s.io/yaml"
@@ -752,11 +754,12 @@ func CheckGoldens(ctx context.Context, dir string) (*GoldenCheck, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, g := range m.Goldens {
+	replays := replayFixtures(ctx, dir, m.Goldens)
+	for i, g := range m.Goldens {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		r, err := replayFixture(ctx, dir, g)
+		r, err := replays[i].r, replays[i].err
 		if err != nil {
 			problem("%s: %v", g.Name, err)
 			continue
@@ -814,6 +817,38 @@ func CheckGoldens(ctx context.Context, dir string) (*GoldenCheck, error) {
 		c.Uncovered = pathProblems(c.Paths)
 	}
 	return c, nil
+}
+
+// fixtureReplay is one fixture's replay, or why it failed.
+type fixtureReplay struct {
+	r   replayResult
+	err error
+}
+
+// replayFixtures replays every fixture (replayFixture) on GOMAXPROCS
+// workers, as the switch runs do: each replay builds its own analyzers and
+// touches no state another shares. The results are in the fixtures' order,
+// so what CheckGoldens reports from them does not depend on the schedule.
+func replayFixtures(ctx context.Context, dir string, goldens []ManifestEntry) []fixtureReplay {
+	out := make([]fixtureReplay, len(goldens))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for range min(runtime.GOMAXPROCS(0), len(goldens)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				r, err := replayFixture(ctx, dir, goldens[i])
+				out[i] = fixtureReplay{r: r, err: err}
+			}
+		}()
+	}
+	for i := range goldens {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	return out
 }
 
 // replayFixture replays one fixture as every later commit does (Normal).
@@ -1329,8 +1364,9 @@ func RewriteGoldens(ctx context.Context, dir string) ([]string, error) {
 		return nil, err
 	}
 	var moved []string
+	replays := replayFixtures(ctx, dir, m.Goldens)
 	for i, g := range m.Goldens {
-		r, err := replayFixture(ctx, dir, g)
+		r, err := replays[i].r, replays[i].err
 		if err != nil {
 			return nil, fmt.Errorf("learnreplay: %s: %w", g.Name, err)
 		}
