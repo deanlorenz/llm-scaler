@@ -655,11 +655,185 @@ roles' rates.
 Until P2 and the staircase pass, no TTFT figure drives a replica count. S1
 publishes in shadow only.
 
+## As built (P2)
+
+P2 commits the four prefill-stress runs as learner goldens and prices P3 on
+them. **P3 as built before P2 does not pass.** At the prompt spread the runs
+sent, it under-predicted the router's p90 and p95 TTFT at 11 of 14
+light-load points, by 19% to 49%, and by about 90% at the one saturated
+level it priced. P2 did not tune P3. The three model changes these
+findings led to, and the table after them, are in [As built (P3 after
+P2)](#as-built-p3-after-p2): there 9 of 14 light-load points are still
+under. The tables in this section are P3 before that change; the frozen
+table in `ttft_validation_test.go` is P3 after it.
+
+### The goldens
+
+All four are Qwen3-0.6B at TP 1 on H200, the P/D scenario, replicas pinned,
+flow control off, the recorder on with every R1 field. Each was added at the
+commit that recorded it and carried over; no earlier golden's output moved.
+The [developer guide](../developer-guide/testing.md#learner-goldens) lists
+them.
+
+| Golden | Run | Fleet and load | Compressed |
+| --- | --- | --- | --- |
+| `ttft-three-pods` | 1 | 3 prefill + 3 decode, closed loop at 30k | 1.06 MB, whole |
+| `ttft-saturated` | 2 | 1 prefill + 2 decode, closed loop to prefill saturation | 275 KB |
+| `ttft-open-loop-long` | 3 | 1 + 1, Poisson at light load, 8k, 30k, 37k | 88 KB |
+| `ttft-open-loop-short` | 4 | 1 + 1, Poisson at light load, 1k, 2k, 4k, 16k | 111 KB |
+
+None needed trimming: the largest is a quarter of the 4 MiB limit.
+
+### What P1 learns on main
+
+`TestTTFTValidation_P1OnTheGoldens` replays each golden and reads P1's last
+`prefill-capacity-observed` line.
+
+| Run | `V_P` | `a` | `f` |
+| --- | --- | --- | --- |
+| 2 | **134,775 tok/s**, busy minutes, 28 | refused, `TooFewLowLoadMinutes` | `OnePod` |
+| 3 | refused, `NoPrefillCapacity` | refused, `NoShortPrompts` (shortest prompts 8k) | `OnePod` |
+| 4 | refused, `NoPrefillCapacity` | **11.58 ms**, the curve | `OnePod` |
+| 1 | 115,621 tok/s, peak under a queue (lower bound) | refused, `NoPromptSpread` | **1.00**, 45 minutes |
+
+No run alone gives P3 a fleet it can price: each lacks `V_P` or `a`. The
+validation therefore takes **`V_P` from run 2** for every level, and **`a`
+from run 4** (P1's curve, 11.58 ms) for run 4's levels. P1 refuses `a` on
+runs 3 and 2, so their levels take **`a` = 10.86 ms**, the curve over runs 3
+and 4 pooled (its 7.95 ms intercept plus run 4's least overhead 2.91 ms,
+`TestQuadratic_Runs3And4PooledGiveA`): no golden replays the two runs
+together, so the figure is taken from that test.
+
+Before #475 (the curved `a`) merged, run 4's `a` was the line's 3.74 ms and
+run 3's refusal `NonPositiveIntercept`. The rows priced at run 4's `a` moved
+with it, by its 7.84 ms: 12 of 14 light-load points were under, 7 beyond the
+bucket; now 11, 4 beyond the bucket. No other row moved.
+
+### How it is priced
+
+`TestTTFTValidation_AgainstTheRouter`, in `learnreplay`. For each level:
+
+- **The rate and the prompt** are the means over the level's cycles of the
+  prefill row's request rate and effective prompt (computed tokens over
+  requests), from a minute after the level starts.
+- **The fleet** is one prefill pod at `V_P` and `a`, the KV transfer per
+  token measured from decode's `AvgKVTransferTime`, Poisson arrivals, flow
+  control off, and **no decode side** (`DecodeSideOmitted`). No run fitted a
+  decode ITL line under load: decode's KV stayed near 0.01. This is what S1
+  prices with flow control off.
+- **Two spreads.** `cv` 0.058 is the spread the load generator sent (±10%
+  uniform). `cv` 2 is S1's assumption with no histogram.
+- **The observation** is the router's TTFT histogram over its 300 s window
+  at the level's last cycle, at p90 and p95, read as `histogram_quantile`
+  does. Its buckets are coarse (25 to 50 ms, up to 200 ms wide at 0.4 s), so
+  each verdict says whether it holds wherever in its bucket the true
+  quantile lies ("beyond the bucket").
+- **The mark** is S1's: more than 10% below the observed fails (UNDER), more
+  than 25% above fails (over).
+
+Run 2's first three levels (two in flight, no queue, the pod near
+utilization 1) are not a Poisson queue, and its levels 4 and 5 are shorter
+than the router's window, so only its last three levels are compared.
+
+### The result table
+
+Predicted against the router's TTFT, in seconds. `a` is run 4's own on run 4
+and the pooled curve's on runs 3 and 2.
+
+| Run | Level | Rate r/s | Router p90 | P3 p90, cv 0.058 | | P3 p90, cv 2 | | Router p95 | P3 p95, cv 0.058 | | P3 p95, cv 2 | |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 4 | 1k | 7.74 | 0.047 | 0.024 | **UNDER** | 0.051 | pass | 0.049 | 0.028 | **UNDER** | 0.074 | over\* |
+| 4 | 2k | 5.35 | 0.048 | 0.036 | **UNDER** | 0.091 | over\* | 0.049 | 0.045 | pass | 0.135 | over\* |
+| 4 | 4k | 3.09 | 0.092 | 0.059 | **UNDER** | 0.172 | over\* | 0.096 | 0.077 | **UNDER** | 0.259 | over\* |
+| 4 | 16k | 0.48 | 0.316 | 0.184 | **UNDER** | 0.571 | over\* | 0.358 | 0.248 | **UNDER** | 0.892 | over\* |
+| 3 | 8k | 1.75 | 0.098 | 0.126 | over\* | 0.332 | over\* | 0.110 | 0.142 | over | 0.504 | over\* |
+| 3 | 30k | 0.20 | 0.570 | 0.330 | **UNDER**\* | 1.017 | over\* | 0.585 | 0.347 | **UNDER**\* | 1.603 | over\* |
+| 3 | 37k | 0.19 | 0.795 | 0.413 | **UNDER**\* | 1.300 | over\* | 0.915 | 0.547 | **UNDER**\* | 2.043 | over\* |
+| 2 | 30k, 32 in flight | 4.50 | 7.80 | refused, `Saturated` | | refused | | 7.90 | refused | | refused | |
+| 2 | 30k, 96 in flight | 4.52 | 29.0 | refused, `Saturated` | | refused | | 29.5 | refused | | refused | |
+| 2 | 37k, 64 in flight | 3.14 | 28.9 | 2.57 | **UNDER**\* | 11.39 | **UNDER**\* | 29.5 | 3.22 | **UNDER**\* | 14.90 | **UNDER**\* |
+
+\* beyond the bucket: the verdict holds wherever in the router's bucket the
+true quantile lies.
+
+### Findings
+
+1. **P3 under-predicts at light load, beyond the mark.** At the spread the
+   runs sent, 11 of the 14 light-load points are more than 10% under, 4 of
+   them below even the router bucket's lower bound. The ratio is 0.512 to
+   0.805. **The cause is a term P3 leaves out.** The router's TTFT is close to
+   the two engines' TTFTs added: the prefill engine's (`a` + `I/V_P` + its
+   own overhead) and then the decode engine's (the KV pull and the first
+   step: 12 ms at 1k, 127 ms at 30k, 159 ms at 37k).
+   `TestTTFTValidation_TheResidual` finds the router's median less the two
+   at −7 to +15 ms at 6 of 7 levels and 62 ms at 30k. P3 with no decode
+   side omits the decode engine's part entirely, and the measured transfer
+   (`T_xfer`) is only part of it. So this is the `DecodeSideOmitted` case
+   failing, not the queue model. S1 publishes exactly this case with flow
+   control off.
+2. **`cv` 2 hides it by overcharging.** At S1's assumed spread, 13 of 14
+   light-load points are over the mark, up to 4.6x. They are over only
+   because a gamma at `cv` 2 puts a long tail on a prompt that had none. The
+   1k p90 "pass" is that coincidence. The assumption spends replicas on a
+   spread these runs did not have.
+3. **At saturation, P3 cannot price, or under-predicts by 10x.** At 30k
+   (32 and 96 in flight), the measured rate is 0.3% and 0.5% above the knee
+   P3 computes from run 2's own `V_P`, so it refuses `Saturated`. S1 reads
+   that as "unmet", which is the right side. At 37k the pod serves only
+   116k tok/s, 14% under the `V_P` learned at 30k, so P3 reads utilization
+   0.86 where the pod is saturated: it prices 2.6 s against 28.9 s. This is
+   `V_P` depending on the prompt (open question 4); S1's `VPShapeMoved`
+   (1.23x here, above its 1.2x) would flag it. A closed loop is also not
+   Poisson: its queue is set by the in-flight count, which no M/G/1 model
+   prices.
+4. **8k over-predicts** (1.29x), the safe side. `V_P` learned at 30k
+   charges an 8k prompt 59 ms of prefill where the pod took 28 ms at light
+   load (289k tok/s at 8k), which outweighs the missing decode part there.
+   The same over-charge is in run 4's points, which are under the mark
+   regardless.
+
+### What P2 checks, item by item
+
+| Item | Finding | Test |
+| --- | --- | --- |
+| 1. `V_P` as a throughput | **Holds at the prompt it was learned on, not at another.** At 30k the pod serves 135,122 and 135,451 tok/s under a queue, within 0.5% of busy-minute `V_P`. At 37k it serves 115,953, 14% under | `WhatTheRunsShow` |
+| 2. The wait tail | **Direction only.** At light load no request queued past the engine histogram's first bound (0.3 s), and P3's tail there is 1e-76 to 8e-3: at or above, as it must be. The bound is too coarse to say how far above. Under a queue the per-pod histogram is not comparable to an M/G/1 tail (closed loop) | `WhatTheRunsShow` |
+| 3. The gamma prompt | **Not testable against a histogram:** vLLM's prompt buckets (1-2-5) put a level in one or two buckets, and every prompt above 20k in `+Inf`. The known spread, ±10% uniform, is cv 0.058, and `cv` 2 over-predicts by up to 4.6x (finding 2) | `AgainstTheRouter` |
+| 4. `f` and the worst pod | **`f` = 1.00 at three pods** over 45 minutes. The busiest pod's raw share per cycle has median 1.03 and maximum 1.33 over 197 loaded cycles, so S1's floor of 1.5 holds every cycle and is conservative here. Untestable: an imbalanced fleet, and the router's view of a worst pod (run 1 recorded no busy minute) | `P1OnTheGoldens`, `WhatTheRunsShow` |
+| 5. The mean is the worst pod's | **One pod**, so the worst pod is the pod. Its engine `AvgTTFT` is 0.34 to 0.71 of the router's median: the decode part again | `TheResidual` |
+| 6. `a` at load | **It grows.** The prefill engine's TTFT beyond its queue and service time is 3 to 83 ms at light load (rising with the prompt) and 224 to 277 ms under a queue. P3 adds a constant `a` of 3.7 to 10.9 ms | `WhatTheRunsShow` |
+| 7. The union bound's conservatism | **Not testable:** with no decode side there is no union bound. Needs a decode ITL line, which these runs did not fit | — |
+| 8. Flow-control onsets | **Not testable:** flow control was off in every run (M2's staircase) | — |
+| 9. `T_xfer` | **Measured, and not purely per token.** Decode's KV transfer is 3.9 µs a token at 1k, 3.0 at 4k and flat at 2.4 from 16k: a fixed cost per transfer plus a per-token one. A per-token figure from long prompts reads a short prompt's transfer low. Per request, not per chunk, at these lengths | `WhatTheRunsShow` |
+| S1 item 5. The mean residual | The router's median less both engines' mean TTFTs: −7 to +15 ms at 6 of 7 light levels, +62 ms at 30k (median +7 ms). Within S1's 10 ms budget at the median; above it at 4k (+15 ms) and 30k (+62 ms). The router records no TTFT sum, so the median stands in for its mean | `TheResidual` |
+
+### Open items
+
+- **Price the decode engine's part on a P/D fleet without a decode line.**
+  The measured decode `AvgTTFT` (or `AvgKVTransferTime` plus a first step)
+  is the missing term. Until then, `DecodeSideOmitted` under-promises by
+  19% to 49% here, and S2's no-act list already holds it out. S1 should
+  publish it flagged as it does. *Done in [P3 after P2](#as-built-p3-after-p2),
+  item 1, from the decode engine's mean TTFT.*
+- **`a` under load.** The engine's own overhead grows from milliseconds to
+  about 250 ms under a queue on these pods; P3's constant `a` misses it.
+- **`V_P` by prompt length** (open question 4): 14% lower at 37k than at 30k.
+  *Done in [P3 after P2](#as-built-p3-after-p2), item 2: `V_P` is rescaled
+  along P1's curve to the question's prompt.*
+- **A Poisson run near the knee** at a fixed prompt, to test the wait tail
+  where it matters. A closed loop does not test it.
+- **The decode side and the union bound** need a run that fits a decode ITL
+  line (decode KV above 0.1).
+- **PR #477** (per-pod-count `f`) changes nothing here: every compared level
+  is one pod. P1 still refuses `a` on runs 3 and 2 alone, so their levels
+  rest on the pooled figure.
+
 ## As built (P3 after P2)
 
-P2 (PR #482) priced P3 on the four prefill-stress goldens and found it under
-the router's TTFT at 12 of 14 light-load points, and at a tenth of it at
-run 2's 37k level. This change makes three model changes. Each errs toward
+[P2](#as-built-p2) (PR #482) priced P3 on the four prefill-stress goldens
+and found it under the router's TTFT at 11 of 14 light-load points (12
+before #475 raised run 4's `a`), and at a tenth of it at run 2's 37k
+level. This change makes three model changes. Each errs toward
 more replicas, and none is fitted to those recordings.
 `UnvalidatedTTFT` stays on every figure.
 
@@ -764,7 +938,7 @@ is 9.1% short at `ρ` 0.5, 10% at 0.55, 14% at 0.7 and 25% at 0.85.
 
 ### The validation table after the change
 
-`TestTTFTValidation_AgainstTheRouter` on PR #482, priced as P2 prices it
+`TestTTFTValidation_AgainstTheRouter`, priced as [P2](#how-it-is-priced) prices it
 (`V_P` from run 2, `a` from run 4 or #475, flow control off, no decode
 line), plus three inputs:
 
@@ -791,10 +965,10 @@ The mark is S1's: more than 10% under fails (UNDER), more than 25% over fails
 | 2 | 37k, 64 in flight | 28.9 | refused, `Saturated` | | refused | | 29.5 | refused | | refused | |
 
 At the sent spread (cv 0.058), the light-load points under the mark fall
-from 12 of 14 in P2's table (main at 602054e98) and 11 on main today (run
-4's `a` is 11.58 ms since #475, not 3.74) to 9, and those beyond the bucket
-from 7 and 4 to 2. The ratios
-of the points still under rise from 0.35–0.75 to 0.66–0.79, and the three
+from 11 of 14 in [P2's table](#the-result-table) (12 at 602054e98, before
+#475 raised run 4's `a` from 3.74 to 11.58 ms) to 9, and those beyond the
+bucket from 4 (7) to 2. The ratios of the points still under rise from
+0.51–0.81 (0.35–0.75) to 0.66–0.79, and the three
 that now pass read 0.94 to 1.11. Run 2's 37k level, priced at 2.6 s
 against 28.9 s, is now refused `Saturated`: the rescaled, margined knee is
 below its rate, and S1 reads that as unmet, the right side. At cv 2 nothing
@@ -826,10 +1000,10 @@ Both would add a term fitted from these same recordings, which this change
 does not do. They are open items for S1's recorder-backed inputs (decode's
 TTFT histogram) and for P1 (an overhead that grows with the prompt).
 
-### What the follow-up to #482 changes
+### What #482 took from this change
 
-After #482 merges, a follow-up updates `ttft_validation_test.go` and the
-"As built (P2)" text:
+#482 merged main with this change and updated `ttft_validation_test.go`
+(its frozen table is this section's) and the [P2](#as-built-p2) text:
 
 1. `p1Line` gains `vpPromptTokens`, `aModel`, `aSlope` and `aCurve`, and
    `estimate()` maps them to `VPPromptTokens`, `AModel`, `ASlope` and

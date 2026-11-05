@@ -468,7 +468,7 @@ is made.**
 | D3 | Accessors, the replay function, bands, basis, `cmd/whatif` from a recording or snapshot, footer, exit codes | none | D2 |
 | D4 | Standalone answers from `--prometheus`; no switch (adapter only) | none | D3, R2 |
 | P1 | `internal/signals/prefill`, observing: `V_P`, `a`, `f`; logs only; switch `prefill-capacity-observe`. On `ols-sweep` it fits `a` and refuses `V_P` and `f` | none | — |
-| P2 | The prefill-stress recordings as goldens: runs 1, 2 and 3 ([the recordings](slo-tiers.md#the-p2-recordings)) | adds three | P1, R1, the runs |
+| P2 | The prefill-stress recordings as goldens, and P3 checked against them: runs 1 to 4 ([the recordings](slo-tiers.md#the-p2-recordings)). [As built](slo-capacity-planner-ttft.md#as-built-p2): P3 under-predicts the router's TTFT at light load and at saturation | adds four | P1, R1, the runs |
 | P3 | The TTFT model in `whatif`; UNVALIDATED; no switch. Built before P2, against closed-form and synthetic cases, because the prefill-stress runs were blocked on cluster access: [as built](slo-capacity-planner-ttft.md#as-built-p3) | none | P2 (to validate), D2 |
 | S1, S2 | The SLO analyzer prices TTFT, shadow then enforce, on the same `prefill` and `whatif` library: [SLO tiers, phase 2](slo-tiers.md#phase-2-ttft) | with its switch | S1: P3. S2: S1, Q1, M2 |
 | M1 | Per-bucket and mix answers; aggregated TTFT | none | P3, R1, #276 |

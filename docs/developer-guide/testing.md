@@ -708,6 +708,34 @@ these changes:
    - Write the new counts and times in the comments. The test's own log
      line prints the replay's counts.
 
+The four `ttft-*` goldens are the TTFT track's prefill-stress runs (P2 of
+[the what-if plan](../proposals/slo-capacity-planner.md#pr-plan)): the P/D
+scenario with Qwen3-0.6B at TP 1 on H200, replicas pinned, EPP flow control
+off, the recorder on with every R1 field. Prompts are words of about one
+token each, ±10%.
+
+| Golden | Fleet and load | Recorded at | Compressed |
+| --- | --- | --- | --- |
+| `ttft-three-pods` | 3 prefill + 3 decode; closed loop, 30k tokens in, 250 out, 3 to 72 in flight | 2295aed40 | 1.06 MB |
+| `ttft-saturated` | 1 prefill + 2 decode; closed loop to prefill saturation, 8k to 37k in, 16 out | 2295aed40 | 275 KB |
+| `ttft-open-loop-long` | 1 + 1; Poisson, prefill occupancy under 0.1, 8k, 30k and 37k in | 324b7da97 | 88 KB |
+| `ttft-open-loop-short` | 1 + 1; Poisson, the same, 1k, 2k, 4k and 16k in | 18454b80a | 111 KB |
+
+Each was added whole, at the commit that recorded it, from a worktree of
+that commit, and carried over ([a recording made at another
+commit](#a-recording-made-at-another-commit)); no output of an earlier
+golden moved. Every run lists saturation only, so slo is built and never
+analyzed in each. On main they move under two earlier switches, recorded
+in `earlierSeams`: `k2-first-reading-waits-for-a-second` (one decode cycle
+each in `ttft-saturated` and `ttft-three-pods`) and
+`kv-per-request-output-dispersion` (`ttft-three-pods`, the first golden
+whose output lengths spread). `ttft_validation_test.go` replays them to
+validate the TTFT model ([as built,
+P2](../proposals/slo-capacity-planner-ttft.md#as-built-p2)); its tables are
+frozen, and a change that moves a figure there fails it. The load
+generator, the level windows and the evidence of each run live outside
+the repository; the windows are in the test.
+
 The `throughput-sweep` and `throughput-sweep-restart` goldens are one run
 of the `ols-sweep` scenario with the throughput analyzer listed beside
 saturation, for learner PR 4b (the throughput analyzer's ITL line moving

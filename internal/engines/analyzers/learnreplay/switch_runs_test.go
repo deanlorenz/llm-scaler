@@ -213,6 +213,10 @@ var replaySwitches = map[string][]string{
 		"ols-sweep-slo/composite-results.csv", "ols-sweep-slo/results.csv",
 		"ols-sweep-slo-restart/composite-results.csv", "ols-sweep-slo-restart/results.csv",
 		"pd-restart/composite-results.csv", "pd-restart/results.csv",
+		// P2's ttft-saturated (#482), added before 5c merged: its decode
+		// key holds two Pods, so RoleStartSeconds.decode rises, 98.3 ->
+		// 100.5 on every cycle. No other TTFT golden moves.
+		"ttft-saturated/composite-results.csv", "ttft-saturated/results.csv",
 	},
 }
 
@@ -324,11 +328,17 @@ var earlierSeams = withSeams(learner4b2Seams, withSeams(learner4b1Seams, withSea
 	saturation.SwitchZeroReplicaDataParallel: nil,
 	saturation.SwitchITLAggregatedShapeTerm:  {"acceptance/learned-state.csv", "engine/learned-state.csv"},
 	saturation.SwitchITLAggregatedSizes:      nil,
+	// The prefill-stress goldens (P2) were added after #392 and move under
+	// it too: one decode cycle each in ttft-saturated and ttft-three-pods
+	// takes k2's first reading, at the first queue (P1-obs in place of
+	// P1-obs-unadmitted and P2-hist).
 	saturation.SwitchK2FirstReadingWaits: {
 		"e1-tuned/store-records.csv", "e1-tuned/variant-capacities.csv", "e1/variant-capacities.csv",
 		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
 		"pd-restart/composite-results.csv", "pd-restart/composite-roles.csv", "pd-restart/composite-variants.csv",
 		"pd-restart/store-records.csv", "pd-restart/variant-capacities.csv", "pd-restart/warm-pool-pressure.csv",
+		"ttft-saturated/composite-variants.csv", "ttft-saturated/store-records.csv", "ttft-saturated/variant-capacities.csv",
+		"ttft-three-pods/composite-variants.csv", "ttft-three-pods/store-records.csv", "ttft-three-pods/variant-capacities.csv",
 	},
 	saturation.SwitchK2ReadsSettle:   nil,
 	saturation.SwitchMuKeyBucketHeld: nil,
@@ -352,8 +362,14 @@ var earlierSeams = withSeams(learner4b2Seams, withSeams(learner4b1Seams, withSea
 	saturation.SwitchITLPerToken:          nil,
 	// #427's zero-replica estimate at the declared batch cap.
 	saturation.SwitchBatchCapZeroReplica: nil,
-	// #276's spread of output lengths in the KV per request.
-	saturation.SwitchKVPerRequestOutputDispersion: nil,
+	// #276's spread of output lengths in the KV per request. It moved no
+	// golden until P2's ttft-three-pods, the first whose recorded output
+	// histogram spreads (250 tokens out, three decode pods): there the
+	// decode demand moves by a few parts in 100 million on about 80 cycles.
+	saturation.SwitchKVPerRequestOutputDispersion: {
+		"ttft-three-pods/composite-results.csv", "ttft-three-pods/composite-roles.csv",
+		"ttft-three-pods/results.csv", "ttft-three-pods/variant-capacities.csv",
+	},
 	// Issue #431 routes the forget-learned-state annotation to the slo
 	// analyzer's line, one switch, recorded as an event of its own
 	// (slo.ForgetVariant). It moves no golden, measured: the acceptance and
@@ -770,6 +786,9 @@ var switchBase = map[string]string{
 	"ols-sweep-slo-restart/results.csv":           "49a51c8b1bdbcbfd2401b05b383113727ec51384867dfa49c31e17349d60ae47",
 	"pd-restart/composite-results.csv":            "7cd3bf0237b97c5ec7ec2a26e4c096701275ca79d622ad064c1ce06e3734b3f2",
 	"pd-restart/results.csv":                      "1f7f9e64e4fa1cb7aa467e70358fd74778c45045f7f5460791bd5861e9234637",
+	// ttft-saturated as #482 added it, before 5c (1ffdb6ad8).
+	"ttft-saturated/composite-results.csv": "a94dd5a36fea549888a525795b152e7199969f46319e25d95bf2f5c8211688bd",
+	"ttft-saturated/results.csv":           "4c1da5e9d1ecb5f7c084703c99c1907811de56e7974fc62b6d96ec965f05b7d7",
 }
 
 // The slow tests of this package run in parallel with each other (each
