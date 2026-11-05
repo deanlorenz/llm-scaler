@@ -70,6 +70,7 @@
 :demand
 A
 AMD
+AUncertain
 AboveDecodeOnset
 AboveFlowControlOnset
 AcceleratorNotResolved
@@ -102,6 +103,7 @@ CoarseTPOTBucket
 Collected
 Composite
 CompositeSignal
+ConcaveFit
 ConfigMap
 Configuration
 Conflict
@@ -191,6 +193,7 @@ Learned
 Learner
 Limited
 LineNearGate
+LineOnly
 Loaded
 METRICS_BIND_ADDRESS
 METRICS_CERT_KEY
@@ -209,6 +212,8 @@ NVIDIA
 N_dec
 NaN
 Name
+NarrowPromptClusters
+NegativeSlopeFit
 NewEngine
 NewTypeInventoryWithUsage
 No
@@ -223,6 +228,7 @@ NoPrefillCapacity
 NoPrefillReplicas
 NoPromptSpread
 NoPromptVariance
+NoShortPrompts
 NoTPOTHistogram
 NoTraffic
 NonPositiveIntercept
@@ -328,6 +334,7 @@ Selected
 Set
 SetRecordedValue
 SetUsed
+SingularFit
 Skipping
 StartOptimizeLoop
 StatefulSet
@@ -350,6 +357,7 @@ TierUnstable
 TokenGapPercentile
 TooFewImbalanceMinutes
 TooFewLowLoadMinutes
+TooFewPromptClusters
 TooManySlots
 TransferOmitted
 TriggeredScaleUp
@@ -400,13 +408,21 @@ _
 __name__
 a
 a-zA-Z0-9_
+aClusters
+aCurve
+aExtrapolated
 aIntercept
+aInterceptSE
+aLineReason
+aModel
 aOverhead
 aOverheadKnown
 aPromptMax
 aPromptMin
 aRefused
 aSamples
+aShortestPrompt
+aSlope
 abort
 about
 above
@@ -972,8 +988,11 @@ external
 externalClusterQuotas
 externalNamespaceQuotas
 f
+fAtPods
+fPods
 fRefused
 fSamples
+fSamplesAtPods
 factor
 factory
 failed
@@ -1434,6 +1453,7 @@ lineShapeG
 lineSlopeAge
 lineSlopeHeld
 lineTier
+linear
 lines
 list
 listed
@@ -1888,6 +1908,7 @@ preemption
 preemptions
 preempts
 prefill
+prefill-a-quadratic
 prefill-bound
 prefill-busy-minutes
 prefill-capacity-observe
@@ -1899,6 +1920,7 @@ prefill-throughput-bound-reading
 prefillBounds
 prefillDemandAfter
 prefillDemandBefore
+prefillEstimates
 prefillKnown
 prefillObservations
 prefillRefused
@@ -1950,6 +1972,7 @@ published
 publishes
 python3
 q
+quadratic
 quantile
 quantization
 quarter
@@ -2690,6 +2713,7 @@ vp
 vpAboveSlopeBound
 vpLowerBound
 vpLowerBoundReason
+vpPromptTokens
 vpRefused
 vpSamples
 vpSource

@@ -56,8 +56,9 @@ const (
 	// under a queue, the back-pressure bound): the answer under-promises,
 	// up to the noise of a one-minute rate.
 	VPLowerBound Flag = "VPLowerBound"
-	// VPAboveSlopeBound is a V_P above 1/slope of the low-load fit, which
-	// is an upper bound on it: one of the two readings is wrong.
+	// VPAboveSlopeBound is a V_P above the low-load fit's bound on it (1/slope
+	// of the line, or the curve's 1/(b + c*I) at V_P's prompt length,
+	// prefill.Estimate.SlopeBound): one of the two readings is wrong.
 	VPAboveSlopeBound Flag = "VPAboveSlopeBound"
 	// AssumedImbalance is f supplied by the caller rather than learned.
 	AssumedImbalance Flag = "AssumedImbalance"
