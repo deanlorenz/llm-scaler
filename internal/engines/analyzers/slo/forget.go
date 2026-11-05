@@ -33,7 +33,9 @@ import (
 // ownSettle), when each replica was last seen, which the line reads its
 // settle from and the engine's tracker keeps alike; paths, the replay's
 // counters over every fit. The rest is configuration or plumbing (router,
-// store, now, mu, rec, settle). A test holds every field that is not a
+// store, now, mu, rec, settle, prefillEstimates: the last is a handle to the
+// saturation analyzer's stash, whose forget deletes the variant's entry
+// there). A test holds every field that is not a
 // plain value to one of the three lists (TestForget_EveryFieldIsClassified).
 
 // SwitchITLForgetReachesTheLine is the replay switch for the forget: on, the

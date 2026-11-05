@@ -20,13 +20,13 @@ type rateAnswer struct {
 // runSLOToRate answers question 1 (docs/proposals/slo-capacity-planner.md,
 // "Question 1: from an SLO to a rate") for decode: the largest rate the
 // replicas carry at the TPOT target, capped at the operating point.
-func runSLOToRate(ctx context.Context, args []string, out io.Writer) error {
-	return asJSONError("slo-to-rate", args, out, sloToRate(ctx, args, out))
+func runSLOToRate(ctx context.Context, args []string, out, warn io.Writer) error {
+	return asJSONError("slo-to-rate", args, out, sloToRate(ctx, args, out, warn))
 }
 
-func sloToRate(ctx context.Context, args []string, out io.Writer) error {
+func sloToRate(ctx context.Context, args []string, out, warn io.Writer) error {
 	fs := newAnswerFlags("slo-to-rate", args, out)
-	var f answerFlags
+	f := answerFlags{question: "slo-to-rate", warn: warn}
 	f.register(fs)
 	tpot := fs.String("tpot", "", "the TPOT target: a mean (4ms) or a per-request percentile (4ms@p90) (required)")
 	if ok, err := parse(fs, args); !ok {
@@ -102,6 +102,8 @@ func sloToRate(ctx context.Context, args []string, out io.Writer) error {
 		if err := writeJSON(out, w); err != nil {
 			return err
 		}
+	} else if _, err := io.WriteString(out, f.sourceLine(st)); err != nil {
+		return err
 	} else if err := writeRateText(out, st, variants, answers, none); err != nil {
 		return err
 	}

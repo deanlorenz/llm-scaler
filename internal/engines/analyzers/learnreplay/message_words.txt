@@ -988,8 +988,11 @@ external
 externalClusterQuotas
 externalNamespaceQuotas
 f
+fAtPods
+fPods
 fRefused
 fSamples
+fSamplesAtPods
 factor
 factory
 failed
@@ -1919,6 +1922,7 @@ prefill-throughput-bound-reading
 prefillBounds
 prefillDemandAfter
 prefillDemandBefore
+prefillEstimates
 prefillKnown
 prefillObservations
 prefillRefused

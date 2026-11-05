@@ -126,6 +126,11 @@ func (a *SaturationAnalyzer) learnedMapsLocked() []learnedMap {
 		// The back-pressure bound each prefill variant read this cycle, handed
 		// to the prefill observation and emptied by it (prefill_observe.go).
 		registered("prefillBounds", scopeShared, a.prefillBounds),
+		// Each prefill variant's latest estimate, for the slo analyzer
+		// (prefill_observe.go). Its own rule: keyed namespace|model|variant
+		// with no trailing separator, so forgetVariant deletes the one key;
+		// a flush takes it with the observation it came from.
+		registered("prefillEstimates", scopeOwnRule, a.prefillEstimates),
 	}
 }
 

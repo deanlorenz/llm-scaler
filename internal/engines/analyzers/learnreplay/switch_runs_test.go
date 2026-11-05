@@ -125,8 +125,9 @@ import (
 // The what-if PR P1 (docs/proposals/slo-capacity-planner.md, the PR plan)
 // adds one: the saturation analyzer's prefill observation
 // (saturation.SwitchPrefillCapacityObserve), on 4b-1's base. It moves no
-// golden: it only logs (prefill-capacity-observed), and writes no state an
-// output reads. Its unit tests hold it (heldBy).
+// golden in S1a: it only logs (prefill-capacity-observed), and writes no
+// state an output reads there; S1b's TTFT pricing reads the estimate it
+// stashes. Its unit tests hold it (heldBy).
 var replaySwitches = map[string][]string{
 	saturation.SwitchPrefillCapacityObserve: nil,
 	throughput.SwitchITLAdmitsAtSequenceCap: nil,
