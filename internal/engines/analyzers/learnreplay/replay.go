@@ -61,6 +61,7 @@ const (
 	PackageSLO        = "slo"
 	PackageThroughput = "throughput"
 	PackageCapacity   = "capacity"
+	PackageSettle     = "settle"
 )
 
 // Options configure a replay.
@@ -165,6 +166,8 @@ func (r *replayer) setSwitches() error {
 			err = r.tp.SetSwitchesForReplay(sw)
 		case PackageCapacity:
 			err = r.store.SetSwitchesForReplay(sw)
+		case PackageSettle:
+			err = r.settle.tracker.SetSwitchesForReplay(sw)
 		default:
 			return fmt.Errorf("learnreplay: no package %q has replay switches", pkg)
 		}

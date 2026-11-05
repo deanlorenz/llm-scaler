@@ -250,21 +250,30 @@ unseen long enough to be forgotten). It says what the learners begin with:
 - `restoredKeys`: learned keys restored from the snapshot, per learner (`k2`,
   `mu`).
 - `coldVariants`: variants with none, per learner.
+- `startKeys`: replica start estimates restored from the snapshot.
+- `sightings`: replicas whose first sight came back from the snapshot, so
+  they do not wait again. Always 0 with the snapshot off.
 - `oldestAdmittedAgeSeconds`: the oldest restored key's last admitted
   reading, `-1` when none.
-- `settleUntil`: when the wait every replica starts ends, at the latest.
-  Until then a saturated replica's reading is `P1-obs-unsettled`, and with
-  the snapshot off a variant with no k2 is priced at k1.
-- `reason`: one of two. "...each replica waits its settle, k2 and the mu
+- `settleUntil`: when the wait of the replicas that wait ends, at the latest.
+  With the snapshot off that is every replica, a rate window from this cycle.
+  With it on, a replica with a restored sighting has no new wait, so when no
+  replica is cold `settleUntil` is this cycle, or the end of a wait already
+  under way before the restart. Until then a saturated replica that waits
+  reads `P1-obs-unsettled`, and with the snapshot off a variant with no k2 is
+  priced at k1.
+- `reason`: one of three. "...each replica waits its settle, k2 and the mu
   written beside it a rate window from the controller's first sight of it,
-  so by settleUntil at the latest" is the default. "...replicas already
-  Ready keep their settle" appears only when a replay turns the
-  controller-restart wait off; then `settleUntil` is the cycle itself.
+  so by settleUntil at the latest" is the default. "...a replica whose first
+  sight the snapshot restored keeps its settle, and each other replica waits
+  ..." appears when `sightings` is above 0. "...replicas already Ready keep
+  their settle" appears only when a replay turns the controller-restart wait
+  off; then `settleUntil` is the cycle itself.
 
 ```text
 2026-11-01T09:00:00.020Z  INFO  learner-start  {"modelID": "my-model",
   "namespace": "default", "restoredKeys": {"k2": 0, "mu": 0},
-  "coldVariants": {"k2": 1, "mu": 1},
+  "coldVariants": {"k2": 1, "mu": 1}, "startKeys": 0, "sightings": 0,
   "oldestAdmittedAgeSeconds": -1, "settleUntil": "2026-11-01T09:01:00Z",
   "reason": "the analyzer's first cycle for this model, after a controller start or as the model first appears: each replica waits its settle, k2 and the mu written beside it a rate window from the controller's first sight of it, so by settleUntil at the latest"}
 ```

@@ -66,7 +66,7 @@ func TestTheTrimIsMinimalAndDeterministic(t *testing.T) {
 	full := sizeAfterDropping(t, s, now, 0)
 	for cut := 1; cut < full/2; cut += 37 {
 		budget := full - cut
-		raw, dropped, err := encodeLearnedState(s, now, budget)
+		raw, dropped, err := encodeLearnedState(s, nil, now, budget)
 		require.NoError(t, err)
 		require.LessOrEqual(t, len(raw), budget)
 		if dropped > 0 {
@@ -74,10 +74,10 @@ func TestTheTrimIsMinimalAndDeterministic(t *testing.T) {
 				"budget %d: %d entries left out where %d would fit", budget, dropped, dropped-1)
 		}
 	}
-	first, _, err := encodeLearnedState(s, now, full*2/3)
+	first, _, err := encodeLearnedState(s, nil, now, full*2/3)
 	require.NoError(t, err)
 	for range 10 {
-		again, _, err := encodeLearnedState(s, now, full*2/3)
+		again, _, err := encodeLearnedState(s, nil, now, full*2/3)
 		require.NoError(t, err)
 		require.Equal(t, first, again, "the trim left out different entries on another call")
 	}

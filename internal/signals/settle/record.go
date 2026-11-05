@@ -18,6 +18,28 @@ const KindObserve = "settle.Observe"
 // model: a cycle that read no rows of it. Its data is an ObserveEvent.
 const KindHold = "settle.Hold"
 
+// KindRestore is the learner recording's event for the engine handing the
+// tracker the sightings a learned-state snapshot held
+// (Tracker.Restore). Its data is a RestoreEvent.
+const KindRestore = "settle.Restore"
+
+// RestoreEvent is KindRestore's data: the snapshot's sightings, model by
+// model, and the interval the engine observes at, which sets how long an
+// unclaimed one is kept. The model is named by its parts, not the engine's
+// namespaced key: a recording's export renames a namespace and a model ID
+// each whole.
+type RestoreEvent struct {
+	Models   []RestoredModel
+	Interval time.Duration
+}
+
+// RestoredModel is one model's sightings in a RestoreEvent.
+type RestoredModel struct {
+	Namespace string
+	ModelID   string
+	Sightings []Sighting
+}
+
 // ObserveEvent is KindObserve's and KindHold's data: the model, and the
 // interval the engine observes at, which sets the tracker's tolerance
 // (Tracker.SetInterval).

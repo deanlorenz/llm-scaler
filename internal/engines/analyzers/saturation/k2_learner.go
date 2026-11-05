@@ -11,9 +11,11 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
 )
 
 // k2 as a learner on the shared rules (docs/proposals/analyzer-learner.md,
@@ -422,13 +424,38 @@ func (a *SaturationAnalyzer) noteForgottenLocked(namespace, modelID, variant str
 	}
 }
 
+// restoredSightings reads the first sight of each Ready replica in rows: how
+// many came from the snapshot (settle.Tracker.Restore), when the last of
+// those ends its wait, and how many are cold, first seen by this controller.
+func (a *SaturationAnalyzer) restoredSightings(namespace, modelID string, rows []domain.ReplicaMetrics) (restored int, until time.Time, cold int) {
+	view := a.settleView()
+	model := settleModel(namespace, modelID)
+	for _, rm := range rows {
+		if !rm.Ready {
+			continue
+		}
+		r, ok := view.Replica(model, settlerow.Key(rm))
+		if !ok || !r.Restored {
+			cold++
+			continue
+		}
+		restored++
+		if end := r.ReadyFrom().Add(JoinedReplicaWindow); end.After(until) {
+			until = end
+		}
+	}
+	return restored, until, cold
+}
+
 // logLearnerStart logs the learner-start line for a model on the analyzer's
 // first cycle for it, at the default level, and only then: how many k2 keys
-// of the model were restored and how many of its variants start cold, the
-// oldest restored key's last admitted reading, and settleUntil, when the
-// fleet-wide wait a controller start begins with ends. It is the line that
-// says every replica waits again.
-func (a *SaturationAnalyzer) logLearnerStart(ctx context.Context, namespace, modelID string, variants []string) {
+// of the model were restored and how many of its variants start cold, how
+// many start keys and replica sightings came back with them, the oldest
+// restored key's last admitted reading, and settleUntil, when the wait a
+// controller start begins with ends. It is the line that says which replicas
+// wait again.
+func (a *SaturationAnalyzer) logLearnerStart(ctx context.Context, namespace, modelID string, variants []string,
+	rows []domain.ReplicaMetrics) {
 	now := a.now()
 	model := namespace + "|" + modelID
 	a.mu.Lock()
@@ -460,6 +487,13 @@ func (a *SaturationAnalyzer) logLearnerStart(ctx context.Context, namespace, mod
 	// The prefill bound's windows share mu's map and are not mu.
 	restoredMu, warmMu := count(a.saturatedThroughput, isPrefillBoundKey)
 	waits := a.k2ReadsSettle && a.k2WaitsAfterRestart
+	startKeys := 0
+	startPrefix := namespace + "|" + modelID + "|"
+	for key := range a.startSeconds {
+		if _, restoredKey := a.startRestored[key]; restoredKey && strings.HasPrefix(key, startPrefix) {
+			startKeys++
+		}
+	}
 	a.mu.Unlock()
 	cold, coldMu := 0, 0
 	for _, v := range variants {
@@ -472,9 +506,19 @@ func (a *SaturationAnalyzer) logLearnerStart(ctx context.Context, namespace, mod
 	}
 	settleUntil := now
 	reason := "the analyzer's first cycle for this model, after a controller start or as the model first appears: replicas already Ready keep their settle"
+	sightings, sightedUntil, coldReplicas := a.restoredSightings(namespace, modelID, rows)
 	if waits {
 		settleUntil = now.Add(JoinedReplicaWindow)
 		reason = "the analyzer's first cycle for this model, after a controller start or as the model first appears: each replica waits its settle, k2 and the mu written beside it a rate window from the controller's first sight of it, so by settleUntil at the latest"
+		if sightings > 0 {
+			reason = "the analyzer's first cycle for this model after a controller start: a replica whose first sight the snapshot restored keeps its settle, and each other replica waits its settle, k2 and the mu written beside it a rate window from the controller's first sight of it, so by settleUntil at the latest"
+			if coldReplicas == 0 {
+				settleUntil = sightedUntil
+				if settleUntil.Before(now) {
+					settleUntil = now
+				}
+			}
+		}
 	}
 	oldestSeconds := -1.0
 	if oldest >= 0 {
@@ -484,6 +528,7 @@ func (a *SaturationAnalyzer) logLearnerStart(ctx context.Context, namespace, mod
 		"modelID", modelID, "namespace", namespace,
 		"restoredKeys", map[string]int{learn.K2: restored, learn.Mu: restoredMu},
 		"coldVariants", map[string]int{learn.K2: cold, learn.Mu: coldMu},
+		"startKeys", startKeys, "sightings", sightings,
 		"oldestAdmittedAgeSeconds", oldestSeconds, "settleUntil", settleUntil.UTC().Format(time.RFC3339),
 		"reason", reason)
 }

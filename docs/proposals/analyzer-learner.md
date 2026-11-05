@@ -1353,8 +1353,9 @@ operator who lowers that under about 3 min, or whose load rises during the
 gap, gets an under-order. PR 4a runs the closed-loop probe through a
 controller restart and pastes the result.
 
-So: with the snapshot on, first sight is persisted (PR 5) and the wait applies
-only to replicas with no record. With it off, the wait is accepted, logged on
+So: with the snapshot on, first sight is persisted (PR 5d) and the wait applies
+only to replicas with no record, or whose Ready time moved. With it off, the
+wait is accepted, logged on
 the `learner-start` line ([6.1](#61-logs)), and named in the operator column of
 PRs 2, 3 and 4a.
 
@@ -2224,8 +2225,9 @@ of load during the restart is missed, as today.
 - Effect, snapshot on only: after a controller restart only replicas with no
   record wait (k2 1 min, ITL `steadyFor`, mu behind them). The k1 pricing
   after a restart (4.4) ends sooner, so the fleet is sized **lower** than on
-  the parent during that window. `learner-start` counts restored sightings,
-  and `settleUntil` covers only the cold replicas.
+  the parent during that window. (Measured, that is one of two cases, and
+  with no k2 on record it sizes higher: see "5d as built".) `learner-start`
+  counts restored sightings, and `settleUntil` covers only the cold replicas.
 - Negative control: four replicas Ready for 1 h, controller restart with the
   snapshot on. The parent refuses every k2 reading (`P1-obs-unsettled`) for
   1 min; the PR admits them on the first cycle.
@@ -2325,7 +2327,7 @@ shared cluster, torn down on every exit path. No PR waits for it.
 | (recording) | the run above, from 5a, base goldens committed first | — |
 | 5b | B | down on a pod that blips, and on a real slowdown until N distinct slow pods; up to the new level once they confirm |
 | 5c | A and C together: the seed's bound is part of the blend, and the property cases need both. The gauge's source rename with its prometheus.md and upgrade notes. `startSamples`, `startAdmittedAt`, learner `start` | up only: during a variant's first N starts, and for a seeded, unmeasured role |
-| 5d | D and E, snapshot on only. `startCounted`, `settle` | lower during the minutes after a restart |
+| 5d | D and E, snapshot on only. `startCounted`, `settle` | for about a minute after a restart: higher with no k2 on record, lower with a stale low one ("5d as built") |
 | later, optional | the GPU witness | — |
 
 5c carries the most change, all of it on the cost side: sizing reads
@@ -3094,7 +3096,7 @@ both on from the constructor: `saturation.SwitchStartReadsSeed`
   and reports each key forgotten.
 - **Not built here.** `learner-start` does not count start keys yet, and
   the "Learned state: snapshot restored" line does not gain `startKeys`; both
-  are 5d's, with `sightings`.
+  are 5d's, with `sightings` (see "5d as built").
 - **`replica-start-measured`** gains `pods`, `prior`, `priorSource` and
   `sizedSeconds` with the blend on. Off, it is the parent's line byte for byte.
 - **Goldens.** Measured alone against all off, the seed switch moves nothing:
@@ -3106,6 +3108,128 @@ both on from the constructor: `saturation.SwitchStartReadsSeed`
   per key per export. No `TotalDemand` and no variant capacity moves. The
   property case `first-sample/start-time/between-sample-and-default` passes
   and leaves the known failures; `seed-bounds` is new.
+
+#### 5d as built
+
+Built on main 59772fce2 (5c and #482 merged). Changes D and E, snapshot on only,
+behind two switches, both on from the constructor:
+`saturation.SwitchStartCountedPodsRestored` (`start-counted-pods-restored`) and
+`settle.SwitchFirstSightRestored` (`settle-first-sight-restored`), the settle
+package's first switch, with its own hook (`Tracker.SetSwitchesForReplay`,
+`learnreplay.PackageSettle`).
+
+- **D, counted Pods.** The analyzer keeps each counted Pod's latest Ready time
+  (`startCountedReady`, working state), and the snapshot stores it as
+  `startCounted`, keyed `key|namespace|pod`. The latest, not the first: a counted
+  Pod that blipped stays counted live, so the document holds the time it will
+  report after a restart. On restore the times are installed beside an installed
+  estimate only (`startCountedRestored`): a Pod counted into an estimate that was
+  not installed has to be measured again. A row with the stored Ready time is
+  counted and not folded. Another Ready time, or none with a start, is folded as
+  today. A row with neither a Ready time nor a start says nothing, and the stored
+  time waits for the next row. A refused Pod is not counted, so not stored.
+- **E, first sight.** The engine owns the tracker, so `settle` sits in
+  `learnedStateDoc` beside `state`: per model, each replica's Pod and variant and
+  its `firstSeen`, `readySince` and `readySeen` (`settle.Sighting`).
+  `Tracker.Restore` holds them until the replica's first row claims one. Only a
+  Ready row with the same non-zero Ready time takes it. Any other first row loses
+  it and the replica waits as one first seen. A sighting installed starts no
+  settle and counts no verdict. Its settle is dated from the later of `firstSeen`
+  and `readySeen`, all three times can say.
+- **A departure from the design: a bridge is never kept.** The design says a new
+  lend changes the Ready time. It does not: a lend keeps the Ready time the Pod
+  had in the pool, and a Pod lent again to the same variant keeps its key
+  (`settle.Key`, #283). The three stored times cannot tell a new lend from the old
+  one, so every bridge waits after a restart, as with the snapshot off. That costs
+  a bridge that was not re-lent one wait, on the SLO side
+  (`TestRestore_ABridgeIsNotKeptSoANewLendStartsAgain`,
+  `TestFirstSight_ANewLendIsABridgeFirstSeen`).
+- **Unclaimed sightings.** One no row has claimed is written back with the next
+  document, so a second restart inside the first loses nothing, and goes after
+  the forget horizon (5 min, or the tolerance if longer). `Retain` leaves it,
+  because the first cycles after a restart can see no active model. A replica
+  this process already observed keeps what it saw: a read that succeeds late
+  overwrites nothing. Deleting the snapshot drops the unclaimed ones.
+- **Spare entries.** Both fields are spare at the size bound, oldest first: a
+  dropped sighting costs one replica one wait, a dropped count one more fold.
+  Measured with 64 Pods in each field and realistic names: 135 B an entry.
+  The sightings are in the digest, and their times do not move, so a steady fleet
+  does not rewrite the document (tested).
+- **Recording.** `settle.KindRestore` carries the sightings with the namespace
+  and model ID apart, not the engine's key, because a recording's export renames
+  each whole. A counted Pod's key gets its own layout in the export (seven parts).
+  A replay counts installed sightings as `settle-restored` in its paths, only when
+  above zero, so no existing golden moves.
+- **Logs.** `learner-start` gains `startKeys` and `sightings`.
+  `settleUntil` covers the replicas that wait: a window from this cycle while any
+  is cold, else the end of a restored wait under way, else this cycle. Its
+  `reason` says when sightings came back. "Learned state: snapshot restored" gains
+  `startKeys` and `sightings`.
+- **What bounds the lower fleet.** E only ends a wait early, by at most k2's 1 min
+  and ITL's `steadyFor` (2 min by default). It reaches only a replica with the same
+  non-zero Ready time, so one that really restarted waits: an engine restart under
+  the same name, an LWS group recreated with names kept, and a worker restarted
+  alone (the group's row carries the latest Ready time) each wait
+  (`TestFirstSight_AnEngineRestartUnderTheSameNameStillWaits`,
+  `TestFirstSight_AnLWSGroupRestartStillWaits`). A wait in progress keeps its end
+  (`TestFirstSight_AWaitInProgressKeepsItsEnd`). A reading past the wait still has
+  to pass k2's admission: a queue deeper than the batch needs the rate or settled
+  test, whose memo starts empty. With the snapshot off nothing is written or read
+  (`TestLearnedStateSettle_SnapshotOffMovesNothing`).
+- **What does not bound it.** The idle run is not stored, so load that returned
+  during the restart is missed where the parent's blanket wait covered it. A
+  rollout under a Pod's own name with no new Ready time is not told apart (the
+  tracker's `Since` for it is not stored). An engine that restarts so fast that
+  the Pod's Ready condition never moves cannot be seen live either, but the
+  parent's wait covered it after a controller restart.
+- **Which way the fleet moves: both, not only lower.** The design says E sizes
+  the fleet lower, and that is half of it. Measured on four saturated replicas
+  (`first_sight_price_test.go`), the same rows and document, on against off:
+
+  | case | on | off (the parent) | meet |
+  | --- | --- | --- | --- |
+  | no k2 on record | capacity 260000, 9.05 replicas from the first cycle | 301184 (k1), 7.81 replicas for 4 cycles | cycle 4 |
+  | stored k2 200000 is stale, readings 260000 | 10.94, 9.84, then 9.05 replicas | 11.76 replicas for 4 cycles, then 10.94, 9.84, 9.05 | cycle 6 |
+
+  With no k2 the wait holds k1, the high figure, so E orders **more**: that is the
+  SLO side 4.4 names, ended sooner. With a stale low k2 the readings the wait
+  refused raise the window sooner, so E orders **less**, by at most 2.72 of 11.76
+  replicas here, for 90 s at a 15 s cycle. That gap is the stored figure's error,
+  not a figure of the change: a wider gap between the stored k2 and the readings
+  moves it further. It is a figure the parent reaches 1 min later from the same
+  readings. The default 300 s scale-down stabilization should hold the fleet over
+  it, as 4.4 says of the wait; that is assumed here, not run.
+- **The closed-loop probe sees neither.** Through a restart and a step, and through
+  a restart under steady load, E moves no cycle of the probe's fleet (0 of the
+  run's cycles differ, sightings restored 4 of 4): restored windows and the held
+  line already price it. So the probe holds the outcome (need 17, final 17, under
+  need 15 s, as with the snapshot alone) and is not the evidence for the bound.
+- **The scripted engine run** does move: its restart keeps first sight, so the slo
+  line prices 21 variants (was 6), the throughput line 19 (was 8), and pd-d moves
+  from the one-sided fallback to its own fit (`T1-ols` 8, was `T2-above-band` 4 and
+  `T2-default` 1). That is `engine-run-event-counts.txt` and the pins in
+  `learner_recording_test.go`, a generator's run and no golden's.
+- **Goldens.** Measured alone against all off, D adds rows to three
+  `learned-state.csv` (acceptance 103, engine 99, mu-paths 180), changes none,
+  and moves no other output: no recorded document holds `startCounted`. E moves
+  nothing: no recording holds a `settle.Restore` event. The kind recording with
+  restarts, on its own branch, re-measures `startKeys`, `sightings` and
+  `settle-restored`, none of which any committed golden reaches.
+- **Back-compat.** The document stays v1 and additive. v0.10.1's frozen decoder
+  reads a document with both new fields with every field it knows intact
+  (`TestLearnedStateSettle_V0101ReadsADocumentWithSightings`). The v0.10.1 fixture
+  restored under light load runs on its held slope, and the v0.10.0 one, with no
+  slope, restores and has no line, as that release did
+  (`TestFrozenDocuments_ALightLoadRestoreRunsOnTheHeldSlope`, the restore-then-run
+  5a left here).
+- **Tests.** The design's negative controls, each asserted both ways: restored 70
+  and four Pods at 90 s stays 70 on and reaches 85.2 off; four replicas Ready 1 h
+  are admitted on the first cycle on, and refused `P1-obs-unsettled` for 1 min off.
+  The per-Pod entries cost 135 B each. Fifty-six mutants, each killed, among them
+  the Ready check, the Ready-time equality, a bridge kept, the first row not
+  claiming, the switch-off paths, and each `settleUntil` branch. A mutant that
+  survived showed an export filter was dead, and it was removed; two more showed
+  the claim and the spare order were not reached, and tests now reach them.
 
 ## 8. Risks and limits
 

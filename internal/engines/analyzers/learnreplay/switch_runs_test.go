@@ -22,6 +22,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 )
 
 // The switch runs of the golden rule (analyzer-learner.md 2.5), over every
@@ -218,6 +219,23 @@ var replaySwitches = map[string][]string{
 		// 100.5 on every cycle. No other TTFT golden moves.
 		"ttft-saturated/composite-results.csv", "ttft-saturated/results.csv",
 	},
+
+	// Learner PR 5d, on main after 5c and #482 (59772fce2). Measured, each
+	// alone against all off:
+	//
+	//   - SwitchStartCountedPodsRestored moves the three learned-state.csv
+	//     below, rows added and none changed: each export gains a
+	//     StartCounted row per counted Pod (103, 99 and 180 rows). No
+	//     recorded document holds the field, so no restore in any recording
+	//     reads it, and no figure moves. Its unit tests hold what it does
+	//     after a restart (start_counted_test.go).
+	//   - settle.SwitchFirstSightRestored moves nothing: no committed
+	//     recording holds a settle.Restore event. Its unit tests hold it
+	//     (heldBy), and a kind recording with restarts re-measures it.
+	saturation.SwitchStartCountedPodsRestored: {
+		"acceptance/learned-state.csv", "engine/learned-state.csv", "mu-paths/learned-state.csv",
+	},
+	settle.SwitchFirstSightRestored: nil,
 }
 
 // learner4b2Seams is learner PR 4b-2's switches, earlier seams now (merged
@@ -311,6 +329,9 @@ func switchPackage(name string) string {
 	}
 	if slices.Contains(throughput.ReplaySwitchNames(), name) {
 		return PackageThroughput
+	}
+	if slices.Contains(settle.ReplaySwitchNames(), name) {
+		return PackageSettle
 	}
 	return PackageSaturation
 }
@@ -673,6 +694,16 @@ var heldBy = map[string][]heldTest{
 		{"../slo", "TestOneSided_TheHeldSlopeKeepsThePriceAndEndsWithTheHold"},
 		{"../slo", "TestOneSided_TheSwitchPicksTheLine"},
 	},
+	// Learner PR 5d's first sight through a restart: no committed recording
+	// holds a settle.Restore event, so no golden moves. The settle tests run
+	// the tracker on and off; the saturation ones are the design's negative
+	// control and the line's wait, each asserted on and off.
+	settle.SwitchFirstSightRestored: {
+		{"../../../signals/settle", "TestFirstSightSwitch_OffIsTheParent"},
+		{"../saturation", "TestFirstSight_ARestartWithTheSnapshotDoesNotWait"},
+		{"../saturation", "TestFirstSight_TheITLLineDoesNotWaitAgain"},
+		{"../saturation", "TestFirstSight_TheLearnerStartLine"},
+	},
 	// Learner PR 5c's seed as the prior: each runs the switch on and off
 	// and asserts both (the floor projects over the seed and share pacing
 	// reads it on; nothing is projected off).
@@ -690,6 +721,7 @@ var heldBy = map[string][]heldTest{
 // run drives.
 func TestGoldens_EverySwitchHasARow(t *testing.T) {
 	names := append(append(saturation.ReplaySwitchNames(), slo.ReplaySwitchNames()...), throughput.ReplaySwitchNames()...)
+	names = append(names, settle.ReplaySwitchNames()...)
 	for _, name := range names {
 		_, mine := replaySwitches[name]
 		_, earlier := earlierSeams[name]

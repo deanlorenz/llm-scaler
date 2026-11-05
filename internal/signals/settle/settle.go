@@ -239,6 +239,9 @@ type Replica struct {
 	// Tolerance is the absence tolerance the tracker judged the replica by
 	// (Tolerance, at the tracker's interval).
 	Tolerance time.Duration
+	// Restored says the sighting came from the snapshot (Tracker.Restore)
+	// and no settle has begun since.
+	Restored bool
 }
 
 // ReadyFrom is the later of the Pod's Ready time and the first cycle that
@@ -308,13 +311,24 @@ type Tracker struct {
 	models    map[string]*modelState
 	verdicts  map[Reason]int64
 	tolerance time.Duration
+
+	// restored is, per model, the sightings a snapshot held and no row has
+	// claimed yet (Restore), and restoredUntil when the ones left go.
+	restored      map[string]map[Key]Sighting
+	restoredUntil time.Time
+	// restoredCount is how many sightings were installed (RestoredCount).
+	restoredCount int64
+	// firstSightRestored is SwitchFirstSightRestored: on from the
+	// constructor; a replay turns it off (SetSwitchesForReplay).
+	firstSightRestored bool
 }
 
 var _ View = (*Tracker)(nil)
 
 // NewTracker returns an empty tracker at the least tolerance, Period.
 func NewTracker() *Tracker {
-	return &Tracker{models: map[string]*modelState{}, verdicts: map[Reason]int64{}, tolerance: Period}
+	return &Tracker{models: map[string]*modelState{}, verdicts: map[Reason]int64{}, tolerance: Period,
+		restored: map[string]map[Key]Sighting{}, firstSightRestored: true}
 }
 
 // SetInterval sets the interval the tracker is observed at, and so its
@@ -365,13 +379,16 @@ func (t *Tracker) Observe(name string, rows []Row, now time.Time) {
 		t.models[name] = m
 	}
 	m.observed, m.last = now, now
+	t.expireRestored(now)
 	for _, row := range rows {
 		r, ok := m.replicas[row.Key]
 		switch {
 		case !ok:
 			r = &replica{}
 			m.replicas[row.Key] = r
-			t.start(r, row, firstReason(row, Joined), now)
+			if !t.installRestored(r, name, row) {
+				t.start(r, row, firstReason(row, Joined), now)
+			}
 		case !now.After(r.LastSeen):
 			continue
 		case now.Sub(r.LastSeen) > t.tolerance:
@@ -475,6 +492,7 @@ func (t *Tracker) note(r *replica, row Row, now time.Time) {
 // longer say anything about the replica.
 func (t *Tracker) settle(r *replica, reason Reason, now time.Time) {
 	r.Since, r.Reason = now, reason
+	r.Restored = false
 	r.IdleRows, r.IdleFrom, r.IdleLast = 0, time.Time{}, time.Time{}
 	r.Returns = nil
 	t.verdicts[reason]++
@@ -565,11 +583,13 @@ func (t *Tracker) Verdicts() map[Reason]int64 {
 	return out
 }
 
-// Forget drops what the tracker knows of model.
+// Forget drops what the tracker knows of model, a restored sighting no row
+// has claimed included.
 func (t *Tracker) Forget(model string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.models, model)
+	delete(t.restored, model)
 }
 
 // Retain forgets every model not in active; an empty set forgets them all.

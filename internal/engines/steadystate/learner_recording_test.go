@@ -526,14 +526,15 @@ func TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult(t *testing
 		// are fitted and published, a decode line and, since #432, an
 		// aggregated one under its own |both key, and each is borrowed on
 		// three cycles.
-		saturation.KindPublishLine:  2,
-		saturation.KindBorrowLine:   6,
+		saturation.KindPublishLine:  17,
+		saturation.KindBorrowLine:   21,
 		slo.KindBeginCycle:          12,
 		slo.KindEvictStale:          12,
 		slo.KindNoteVariantsPresent: 28,
 		// The forget reaches the slo line too (#431), on the same token.
 		slo.KindForgetVariant: 1,
 		settle.KindObserve:    28,
+		settle.KindRestore:    1,
 	}, kinds, "the events the scripted run records")
 	t.Logf("recorded %d bytes: %v", len(recording), kinds)
 	assertResultsPriced(t, recording)
@@ -627,6 +628,7 @@ func TestLearnerRecording_EveryEventRoundTripsByteForByte(t *testing.T) {
 		capacity.KindEvictStale:             func() any { return &capacity.EvictStaleEvent{} },
 		settle.KindObserve:                  func() any { return &settle.ObserveEvent{} },
 		settle.KindHold:                     func() any { return &settle.ObserveEvent{} },
+		settle.KindRestore:                  func() any { return &settle.RestoreEvent{} },
 	}
 	checked := map[string]int{}
 	for _, ev := range events {
@@ -1044,11 +1046,16 @@ func assertResultsPriced(t *testing.T, recording []byte) {
 	// after the controller start and after each day the clock jumps
 	// (throughput.SwitchITLWaitsAfterRestart and the tracker's absence
 	// tolerance). Its above-band fallback does not wait after the restart
-	// (it is one-sided): it prices 8, 4 of them pd-d from above the band
+	// (it is one-sided): it priced 8, 4 of them pd-d from above the band
 	// (T2-above-band), which the wait kept silent before 4b-2's review.
-	assert.Equal(t, map[string]int{saturation.KindAnalyze: 64, slo.KindAnalyze: 6, throughput.KindAnalyze: 8}, priced,
+	//
+	// Since learner PR 5d the run's mid-run restart restores first sight
+	// (settle.SwitchFirstSightRestored): the replicas Ready across it do not
+	// wait, so the lines fit through it. slo prices 21 (was 6), throughput 19
+	// (was 8), and pd-d moves from the one-sided fallback to its own fit.
+	assert.Equal(t, map[string]int{saturation.KindAnalyze: 64, slo.KindAnalyze: 21, throughput.KindAnalyze: 19}, priced,
 		"variants priced per analyzer")
-	assert.Equal(t, map[string]int{"agg-a T1-ols": 1, "agg-a T2-held": 2, "pd-d T2-above-band": 4, "pd-d T2-default": 1},
+	assert.Equal(t, map[string]int{"agg-a T1-ols": 9, "agg-a T2-held": 2, "pd-d T1-ols": 8},
 		throughputPriced, "the throughput analyzer's priced variants, by reason")
 }
 

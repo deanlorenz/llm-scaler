@@ -279,6 +279,7 @@ func TestSwitchHooks_AcceptTheEmptySetAndRefuseUnknownNames(t *testing.T) {
 		PackageSLO:        f.slo.SetSwitchesForReplay,
 		PackageThroughput: f.tp.SetSwitchesForReplay,
 		PackageCapacity:   f.store.SetSwitchesForReplay,
+		PackageSettle:     settle.NewTracker().SetSwitchesForReplay,
 	}
 	for pkg, hook := range hooks {
 		assert.NoError(t, hook(nil), pkg)
@@ -345,11 +346,11 @@ func TestSwitchHooks_NoProductionPathCallsThem(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	// The walk reached the four hooks themselves, so it read the packages
+	// The walk reached the five hooks themselves, so it read the packages
 	// that define them, and the rest of the tree with them.
-	require.Equal(t, 4, defined, "the walk found %d SetSwitchesForReplay definitions in %d files", defined, files)
-	// ReplaySwitchNames: saturation's, slo's and throughput's.
-	require.Equal(t, 3, namesDefined, "the walk found %d ReplaySwitchNames definitions", namesDefined)
+	require.Equal(t, 5, defined, "the walk found %d SetSwitchesForReplay definitions in %d files", defined, files)
+	// ReplaySwitchNames: saturation's, slo's, throughput's and settle's.
+	require.Equal(t, 4, namesDefined, "the walk found %d ReplaySwitchNames definitions", namesDefined)
 	assert.Empty(t, callers, "a production path calls a replay switch hook")
 }
 

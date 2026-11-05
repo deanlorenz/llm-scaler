@@ -169,6 +169,9 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		SwitchStartReadsSeed:          &a.startReadsSeed,
 		SwitchStartBlendsFirstSamples: &a.startBlends,
 
+		// Learner PR 5d: counted Pods survive a restart (start_est.go).
+		SwitchStartCountedPodsRestored: &a.startCountsRestored,
+
 		// #276: the spread of output lengths in the KV per request.
 		SwitchKVPerRequestOutputDispersion: &a.kvOutputDispersion,
 

@@ -1,6 +1,9 @@
 package steadystate
 
 import (
+	"maps"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
@@ -48,6 +51,24 @@ func (e *Engine) holdSettle(namespace, modelID string, now time.Time) {
 	e.learnRec.Record(settle.KindHold, now, settle.ObserveEvent{Namespace: namespace, ModelID: modelID,
 		Interval: e.sloMissedAfter()})
 	e.settleTracker().Hold(utils.GetNamespacedKey(namespace, modelID), now)
+}
+
+// restoreSettle hands the settle tracker the sightings a restored document
+// held, read at now, records them when a learner recording is open, and
+// returns how many the tracker took. Only the snapshot's restore calls it,
+// so with the snapshot off nothing is restored (SwitchFirstSightRestored).
+func (e *Engine) restoreSettle(sightings map[string][]settle.Sighting, now time.Time) int {
+	if len(sightings) == 0 {
+		return 0
+	}
+	ev := settle.RestoreEvent{Interval: e.sloMissedAfter()}
+	for _, model := range slices.Sorted(maps.Keys(sightings)) {
+		// A namespace holds no slash; a model ID may.
+		namespace, modelID, _ := strings.Cut(model, "/")
+		ev.Models = append(ev.Models, settle.RestoredModel{Namespace: namespace, ModelID: modelID, Sightings: sightings[model]})
+	}
+	e.learnRec.Record(settle.KindRestore, now, ev)
+	return e.settleTracker().Restore(sightings, now)
 }
 
 // modelCollectionFailed is what a cycle whose collection failed for the

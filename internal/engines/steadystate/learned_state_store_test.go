@@ -480,9 +480,9 @@ func TestTheSizeBoundLeavesOutTheLeastRecentlyUsedFirst(t *testing.T) {
 			Values: []float64{4000, 4100, 4200}, LastUsed: at, LastWritten: at,
 		}
 	}
-	full, _, err := encodeLearnedState(s, now, 1<<30)
+	full, _, err := encodeLearnedState(s, nil, now, 1<<30)
 	require.NoError(t, err)
-	raw, dropped, err := encodeLearnedState(s, now, len(full)/2)
+	raw, dropped, err := encodeLearnedState(s, nil, now, len(full)/2)
 	require.NoError(t, err)
 	assert.LessOrEqual(t, len(raw), len(full)/2)
 	assert.Greater(t, dropped, 0)

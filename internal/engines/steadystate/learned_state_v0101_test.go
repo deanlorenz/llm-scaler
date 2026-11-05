@@ -252,7 +252,7 @@ func TestV0101Decoder_ReadsTheCurrentDocument(t *testing.T) {
 	n := 0
 	fillNonZeroValue(t, reflect.ValueOf(&s).Elem(), "LearnedState", &n)
 	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
-	raw, dropped, err := encodeLearnedState(s, now, learnedStateMaxBytes)
+	raw, dropped, err := encodeLearnedState(s, nil, now, learnedStateMaxBytes)
 	require.NoError(t, err)
 	require.Zero(t, dropped, "precondition: the whole state fits")
 
@@ -351,14 +351,14 @@ func TestV0101Decoder_ANewFieldIsLeftOutWhileEmpty(t *testing.T) {
 	}
 	require.Equal(t, len(known), filled, "every map v0.10.1 knows is still in the document")
 
-	raw, _, err := encodeLearnedState(s, time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC), learnedStateMaxBytes)
+	raw, _, err := encodeLearnedState(s, nil, time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC), learnedStateMaxBytes)
 	require.NoError(t, err)
 	var doc any
 	require.NoError(t, json.Unmarshal([]byte(raw), &doc))
 	assertKnownTo(t, doc, reflect.TypeFor[v0101LearnedStateDoc](), "doc")
 
 	// And an empty state writes nothing v0.10.1 does not know.
-	raw, _, err = encodeLearnedState(saturation.LearnedState{}, time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC), learnedStateMaxBytes)
+	raw, _, err = encodeLearnedState(saturation.LearnedState{}, nil, time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC), learnedStateMaxBytes)
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal([]byte(raw), &doc))
 	assertKnownTo(t, doc, reflect.TypeFor[v0101LearnedStateDoc](), "doc")

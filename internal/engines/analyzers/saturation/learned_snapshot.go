@@ -125,7 +125,13 @@ type LearnedState struct {
 	// StartAdmittedAt is, keyed like StartSeconds, when each estimate last
 	// admitted a start; an estimate it does not name is as old as can be.
 	StartAdmittedAt map[string]time.Time `json:"startAdmittedAt,omitempty"`
-	VariantSeenAt   map[string]time.Time `json:"variantSeenAt,omitempty"`
+	// StartCounted is the Ready time of each Pod counted into a start
+	// estimate, keyed key|namespace|pod (startPodKey). After a restart a Pod
+	// reporting the same Ready time is not folded again
+	// (SwitchStartCountedPodsRestored); a document without it folds every
+	// running Pod again, as before.
+	StartCounted  map[string]time.Time `json:"startCounted,omitempty"`
+	VariantSeenAt map[string]time.Time `json:"variantSeenAt,omitempty"`
 	// Accelerators is keyed namespace/variant: a per-variant entry like the
 	// rest, checked against the variant's configuration before it is used.
 	Accelerators map[string]AcceleratorSnapshot `json:"accelerators,omitempty"`
@@ -345,6 +351,9 @@ type RestoreReport struct {
 	// arguments it was written under, and only a variant running them takes
 	// it back.
 	Stashed int
+	// StartKeys is how many start estimates the document held for variants
+	// it can name, pending with their variant's other entries.
+	StartKeys int
 }
 
 // maxClockSkew is how far ahead of now a restored clock may be and still be
@@ -641,6 +650,7 @@ func (a *SaturationAnalyzer) exportLearnedState() LearnedState {
 		}
 		s.StartAdmittedAt[k] = v
 	}
+	a.exportStartCountedLocked(&s)
 	for k, v := range a.variantSeenAt {
 		s.VariantSeenAt[k] = v
 	}
@@ -784,6 +794,7 @@ func (a *SaturationAnalyzer) exportLearnedState() LearnedState {
 				}
 				s.StartAdmittedAt[k] = v
 			}
+			copyStartCounted(&s, p.state, k)
 		}
 		mergeAbsent(s.K2Args, p.state.K2Args)
 		mergeAbsent(s.ThroughputArgs, p.state.ThroughputArgs)
@@ -904,6 +915,10 @@ func dropVariant(s *LearnedState, v string) {
 	maps.DeleteFunc(s.StartSeconds, func(k string, _ float64) bool { return of(k) })
 	maps.DeleteFunc(s.StartSamples, func(k string, _ StartSampleSnapshot) bool { return of(k) })
 	maps.DeleteFunc(s.StartAdmittedAt, func(k string, _ time.Time) bool { return of(k) })
+	maps.DeleteFunc(s.StartCounted, func(k string, _ time.Time) bool {
+		base, ok := startCountedKeyOf(k)
+		return ok && of(base)
+	})
 	maps.DeleteFunc(s.K2Args, func(k, _ string) bool { return of(k) })
 	maps.DeleteFunc(s.ThroughputArgs, func(k, _ string) bool { return of(k) })
 	// Lower bounds stay: they are restored without a configuration to check
@@ -1082,6 +1097,8 @@ func (a *SaturationAnalyzer) restoreLearnedState(s LearnedState) RestoreReport {
 				}
 				p.state.StartAdmittedAt[k] = v
 			}
+			copyStartCounted(&p.state, s, k)
+			rep.StartKeys++
 		}
 	}
 	// Lower bounds are installed now, with no configuration check: a bound
@@ -1482,6 +1499,7 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState, windowsUnder string, 
 			if _, have := a.startSeconds[k]; !have {
 				a.startSeconds[k] = t
 				a.installStartLearnerLocked(k, s, now)
+				a.installStartCountedLocked(k, s, now)
 			}
 		}
 	}
