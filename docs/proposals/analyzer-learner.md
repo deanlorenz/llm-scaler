@@ -2703,31 +2703,41 @@ calls `ThroughputAnalyzer.ForgetVariant` on the token the saturation analyzer
 acts on, after the slo analyzer's, found among the built-ins because only the
 saturation config registers it. The forget log line gains `throughputEntries`.
 
-- **What goes.** Everything the tracker holds of the key, through
-  `itl.Tracker.ForgetKeys`: the window, the steady window, both above-band
-  windows, the traces, B and the held slope. The settling stamps and the
+- **What goes.** What the tracker learned of the key, through
+  `itl.Tracker.ForgetKeysKeepingTraces`: the window, the steady window, both
+  above-band windows, B and the held slope. The settling stamps and the
   readings at the cap go with the windows. Also `itlLogged`, the parent's
   window and B, this cycle's reading and the figures priced from the line.
-- **What stays.** The settle (`ownSettle`, `ownSettled`), so a replica inside
-  its settle at a forget stays inside it
-  (`TestForget_AReplicaSettlingAtAForgetStillSettles`); the shape, the traffic
-  now; the log lines' memories. Two tests hold every field to a list
+- **What stays.** The replicas' traces, which fit nothing. Unlike the
+  saturation and slo forgets, which drop theirs and were left alone. Dropped,
+  the steady gate went blind for the first cycle after a forget (a step of k
+  +0.25 and ITL x3 read `unsteady` 0, where 3 with no forget;
+  `TestForget_TheSteadyGateSeesTheFirstCycleAfter`). The settle holds through
+  the trace, not through `ownSettle`, as this section first said: with the
+  traces dropped it held only through the engine's view and the `waits` path,
+  and was lost with no view. With the traces kept a replica inside its settle
+  stays inside it on all three paths
+  (`TestForget_AReplicaSettlingAtAForgetStillSettles`,
+  `TestForget_AReplicaSettlingAtAForgetStillSettlesOnEveryPath`). Also the
+  shape, the traffic now, and the log lines' memories. Two tests hold every
+  field to a list
   (`TestForget_EveryFieldIsClassified`,
   `TestForget_EveryVariantStateFieldIsClassified`). The cap is read from the
   store each cycle, so with B gone a line at the cap prices one-sided again
   (`TestForget_AtTheCapALineIsPricedOneSidedAgain`).
-- **Nothing refills it.** This analyzer has no snapshot and no restore: a
-  test fails if a method named like one appears
-  (`TestForget_NothingHereRestoresALine`). It borrows no line, and a key is
-  one variant's. A lent replica's rows are dropped by `ownReplicasOnly` and
-  refused by the tracker
+- **Nothing refills it.** This analyzer has no snapshot and no restore, read
+  from the code. `TestForget_NothingHereRestoresALine` checks method names
+  only, as a tripwire. It borrows no line, and a key is one variant's. The
+  tracker refuses a lent replica's rows; `ownReplicasOnly` drops them first on
+  the `Analyze` path, as defence in depth, and that mutant survives alone
   (`TestForget_NoSiblingOrLentReplicaRefillsTheLine`, 16 cycles of a
   sibling's and lent rows leave the key empty).
 - **Reuse.** `itl.Tracker.ForgetKeys` is the sweep and sorted key list that
   the saturation and slo forgets each wrote out, and now call.
   `logging.ForgottenKeys` is slo's per-key log line, moved: `learn` logs
   nothing and imports only the standard library, so it could not go there. It
-  writes a key's NUL separators as `|`. Which learners an analyzer keeps
+  takes plain key strings, so `logging` stays a leaf (`learn.Keys` converts),
+  and writes a key's NUL separators as `|`. Which learners an analyzer keeps
   stays each analyzer's own code, as `learn.Learners` says it should.
 - **Learner series.** `learn.Report` has no consumer for this line and no
   learner series exists, so the deferred clause "when no key remains, the
@@ -2742,10 +2752,22 @@ saturation config registers it. The forget log line gains `throughputEntries`.
   `TestReplay_TheThroughputForgetIsApplied`. Taking those two recordings again
   moves 9 outputs on main with no change at all; that drift is not this
   change's, and they were not retaken here.
+- **After a forget.** `itl.DefaultMinSamples` readings are necessary and not
+  a recovery time. Capacity returned on cycle 4 with 3 replicas and cycle 10
+  with 1 (`TestForget_TheLineIsBackOnTheCycleItHoldsTenReadings`). A fleet
+  offering no reading stays silent: over 40 cycles on three replicas, k 0.82
+  with no stated cap priced 40/40 without a forget and 0/40 after
+  (`all-above-band-below-ksat`), and k 0.10 likewise (`too-few-readings`;
+  `TestForget_AFleetOfferingNoReadingStaysSilent`). So a policy listing
+  throughput without saturation cannot scale up after a forget at k 0.80 to
+  0.85 until k leaves that range. Once B is gone a balanced fleet pins
+  `DefaultBaselineSec`, as a new variant does, and in the band that is not
+  one-sided: capacity 1.20x the truth at true B 2 ms and k 0.30, 0.71x at
+  20 ms (`TestForget_ABalancedFleetPricesEitherSideOfTheTruth`). The behaviour
+  is left as it is: it is the new-variant state. `troubleshooting.md` states
+  the holds and metrics an operator sees meanwhile.
 - **Measured versus assumed.** The tests above are unit and replay tests on
-  synthetic rows. It has not been run on a cluster. That the line is silent
-  until 10 new readings comes from `itl.DefaultMinSamples`, on three replicas
-  in the tests: four cycles.
+  synthetic rows. It has not been run on a cluster.
 
 #### 4b-3's follow-up: the saturation and slo lines at the cap (#467)
 

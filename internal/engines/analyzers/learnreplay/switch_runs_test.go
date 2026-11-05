@@ -138,7 +138,9 @@ var replaySwitches = map[string][]string{
 	// recording carries the event, and the acceptance and engine runs, taken
 	// again, carry one each (Dropped 1: a window, no intercept) and give all
 	// 19 outputs byte for byte with the event and without it. No cluster
-	// recording forgets. Its unit tests hold it (heldBy).
+	// recording forgets. Its unit tests hold it (heldBy). The steadystate
+	// package's engine-run-event-counts.txt gains the event: that file is a
+	// pin on the events the engine run records, not a replay output.
 	throughput.SwitchITLForgetReachesTheLine: nil,
 
 	// Learner PR 5b, on main after 5a (0fec87b18): the start guard opens on

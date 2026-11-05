@@ -37,6 +37,20 @@ var _ = Describe("Tracker.ForgetKeys", func() {
 		Expect(t.Slopes()).NotTo(HaveKey("d"))
 	})
 
+	It("keeps the replicas' traces when asked to, and only then", func() {
+		step := func(forget func(*Tracker)) int {
+			t := NewTracker()
+			t.Observe("a", "v", rows, adm, at)
+			forget(t)
+			moved := []domain.ReplicaMetrics{rows[0]}
+			moved[0].KvCacheUsage, moved[0].KvUsageInstant = 0.75, 0.75
+			return t.Observe("a", "v", moved, adm, at.Add(15*time.Second)).Unsteady
+		}
+		match := func(string) bool { return true }
+		Expect(step(func(t *Tracker) { t.ForgetKeysKeepingTraces(at, learn.ByOperator, match) })).To(Equal(1))
+		Expect(step(func(t *Tracker) { t.ForgetKeys(at, learn.ByOperator, match) })).To(BeZero())
+	})
+
 	It("reports nothing when nothing matches", func() {
 		t := NewTracker()
 		t.Observe("a", "v", rows, adm, at)

@@ -17,36 +17,46 @@ import (
 // Before, the line went on pricing from the readings taken before a forget,
 // and held the slope fitted from them for up to the slope hold.
 //
-// What a forget takes, per field of ThroughputAnalyzer: everything the line's
-// tracker holds of the key (lines: the window, the steady window, the
-// readings above the band and their steady ones, the replicas' traces, the
-// intercept and the held slope, and with the windows every settling stamp
-// and every reading taken at the sequence cap), and what learner-write last
-// logged of it (itlLogged). Of a variant's state (variantStates, forgetLine),
-// the parent's window and B, and the figures last priced from the line. The
-// sequence cap is not learned: the admission reads it from the store each
-// cycle, and with B gone a line at the cap prices one-sided again.
+// What a forget takes, per field of ThroughputAnalyzer: what the line's
+// tracker has learned of the key (lines: the window, the steady window, the
+// readings above the band and their steady ones, the intercept and the held
+// slope, and with the windows every settling stamp and every reading taken
+// at the sequence cap), and what learner-write last logged of it (itlLogged).
+// Of a variant's state (variantStates, forgetLine), the parent's window and
+// B, and the figures last priced from the line. The sequence cap is not
+// learned: the admission reads it from the store each cycle, and with B gone
+// a line at the cap prices one-sided again.
 //
-// What it keeps: ownSettle and ownSettled, when each replica was last seen,
-// which the line reads its settle from and the engine's tracker keeps alike,
-// so a replica inside its settle at a forget stays inside it; the shape, the
-// traffic now, which no line is learned from; the role, and the log lines'
-// memories of what they last said; paths, the replay's counters over every
-// fit. The rest is configuration or plumbing. Two tests hold every field to
-// one of those lists (TestForget_EveryFieldIsClassified,
+// What it keeps: the replicas' traces in lines
+// (itl.Tracker.ForgetKeysKeepingTraces), which say what each replica is doing
+// now and fit nothing. The saturation and slo forgets drop theirs. Here a
+// trace dropped would blind the steady gate for a cycle: a step in load on
+// the first cycle after a forget would read as steady
+// (TestForget_TheSteadyGateSeesTheFirstCycleAfter). And a replica's settle is
+// read through its trace on every path, so one inside its settle stays
+// inside it: with the engine's view, on the analyzer's own tracker, and on
+// the key's own trace; with no trace, only the engine's view with its wait
+// would keep it (TestForget_AReplicaSettlingAtAForgetStillSettlesOnEveryPath).
+// Also kept: ownSettle and ownSettled, when each replica was last seen, which
+// the engine's tracker keeps alike; the shape, the traffic now, which no line
+// is learned from; the role, and the log lines' memories of what they last
+// said; paths, the replay's counters over every fit. The rest is
+// configuration or plumbing. Two tests hold every field to one of those lists
+// (TestForget_EveryFieldIsClassified,
 // TestForget_EveryVariantStateFieldIsClassified).
 //
-// Nothing can bring a forgotten line back. This analyzer restores nothing:
+// Nothing here brings a forgotten line back. This analyzer restores nothing:
 // the learned-state snapshot holds the saturation analyzer's line, under
-// keys of another shape, and no method here reads one in
+// keys of another shape, and no method here is named as a restore
 // (TestForget_NothingHereRestoresALine). It borrows no line: a key is one
-// variant's, so a sibling's readings are filed under the sibling, and a lent
-// replica's are refused twice (ownReplicasOnly, itl.Tracker refuses
-// FromWarmPool; TestForget_NoSiblingOrLentReplicaRefillsTheLine).
+// variant's, so a sibling's readings are filed under the sibling. A lent
+// replica's rows are refused by itl.Tracker (FromWarmPool), and ownReplicasOnly
+// drops them before Analyze reaches it, as defence in depth
+// (TestForget_NoSiblingOrLentReplicaRefillsTheLine).
 
 // SwitchITLForgetReachesTheLine is the replay switch for the forget: on, the
 // annotation forgets the variant's ITL line here too -- what its tracker
-// holds of the key, the parent's window and B, and the figures priced from
+// learned of the key, the parent's window and B, and the figures priced from
 // the line; off, as before, it forgets nothing here.
 const SwitchITLForgetReachesTheLine = "throughput-itl-forget-reaches-the-line"
 
@@ -97,15 +107,16 @@ func (a *ThroughputAnalyzer) forgetLearnerLocked(name, namespace, modelID, varia
 	return 0, nil, false
 }
 
-// forgetLineLocked forgets the variant's ITL line: what the tracker holds of
+// forgetLineLocked forgets the variant's ITL line: what the tracker learned of
 // its one key (windows and intercepts are counted, as itl.Tracker.Sweep
-// counts them), what learner-write last logged of it, and what the variant's
-// state holds (forgetLine, counted with them). It returns the count and the
-// key, if anything of it was held, as forgotten by the operator. Callers hold
-// a.mu; the tracker's lock is taken under it, as observe's sweep takes it.
+// counts them; the traces stay), what learner-write last logged of it, and
+// what the variant's state holds (forgetLine, counted with them). It returns
+// the count and the key, if anything of it was held, as forgotten by the
+// operator. Callers hold a.mu; the tracker's lock is taken under it, as
+// observe's sweep takes it.
 func (a *ThroughputAnalyzer) forgetLineLocked(namespace, modelID, variant string) (int, []learn.Forgotten) {
 	key := variantKey(namespace, modelID, variant)
-	windows, baselines, forgotten := a.lines.ForgetKeys(a.clock.Now(), learn.ByOperator, func(k string) bool { return k == key })
+	windows, baselines, forgotten := a.lines.ForgetKeysKeepingTraces(a.clock.Now(), learn.ByOperator, func(k string) bool { return k == key })
 	delete(a.itlLogged, key)
 	n := windows + baselines
 	if state, ok := a.variantStates[key]; ok {

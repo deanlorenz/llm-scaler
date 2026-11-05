@@ -11,9 +11,9 @@ import (
 // Forgetting one variant's learned state, on an operator's request (issue
 // #431). The forget-learned-state annotation is read by the engine, which
 // acts on a token once, through the saturation analyzer's mark
-// (saturation.ForgottenToken), and then forgets the variant in both
-// analyzers. This analyzer keeps no token of its own: it forgets when the
-// engine asks.
+// (saturation.ForgottenToken), and then forgets the variant in every
+// analyzer that keeps a line. This analyzer keeps no token of its own: it
+// forgets when the engine asks.
 //
 // Before, the annotation reached the saturation analyzer alone. This
 // analyzer fits its own ITL line with its own itl.Tracker, so after a forget

@@ -206,7 +206,7 @@ func (a *Analyzer) NoteVariantsPresent(namespace, modelID string, variantNames [
 func (a *Analyzer) ForgetVariant(ctx context.Context, namespace, modelID, variant string) int {
 	now := a.now()
 	n, forgotten := a.forgetVariant(namespace, modelID, variant)
-	logging.ForgottenKeys(ctrl.LoggerFrom(ctx), domain.SLOAnalyzerName, learn.ITL, namespace, modelID, variant, forgotten)
+	logging.ForgottenKeys(ctrl.LoggerFrom(ctx), domain.SLOAnalyzerName, learn.ITL, namespace, modelID, variant, learn.Keys(forgotten))
 	if a.rec.Active() {
 		a.rec.Record(KindForgetVariant, now, ForgetVariantEvent{Namespace: namespace, ModelID: modelID,
 			Variant: variant, Dropped: n})

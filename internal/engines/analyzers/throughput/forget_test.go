@@ -107,7 +107,8 @@ func TestForget_TheAnnotationForgetsTheLine(t *testing.T) {
 
 // A line with no readings left prices from its held slope, for up to the
 // hold. A forget takes that slope, so nothing fitted before it prices after
-// it. The key holds the slope alone here: the forget still reports it.
+// it. ClearWindow empties the windows and keeps B, so the key's readings are
+// gone here and its slope is what would have priced.
 func TestForget_TakesTheHeldSlope(t *testing.T) {
 	key := variantKey("ns", "m", "v1")
 	for _, on := range []bool{true, false} {
@@ -258,9 +259,10 @@ func TestForget_OnlyTheNamedVariant(t *testing.T) {
 
 // Nothing refills a forgotten line but the variant's own replicas: not the
 // readings of a sibling that keeps its line, and not those of a warm pool
-// Pod lent to the variant, which report under its name. Both ways in: through
-// Analyze, which drops a lent row, and through Observe, where the tracker
-// does.
+// Pod lent to the variant, which report under its name. Observe is what
+// discriminates: it hands the tracker the lent row, and the tracker refuses
+// it. Through Analyze, ownReplicasOnly drops the row first, which is defence
+// in depth: with it removed this test still passes, on the tracker's refusal.
 func TestForget_NoSiblingOrLentReplicaRefillsTheLine(t *testing.T) {
 	key := variantKey("ns", "m", "v1")
 	sibling := func() []domain.ReplicaMetrics {
@@ -301,9 +303,10 @@ func TestForget_NoSiblingOrLentReplicaRefillsTheLine(t *testing.T) {
 	assert.Positive(t, a.lines.WindowLen(key))
 }
 
-// This analyzer reads no learned state in. The learned-state snapshot is the
-// saturation analyzer's, so a restore cannot bring a forgotten line back; a
-// method that restored one here would have to state how a forget stops it.
+// No exported method of the analyzer is named as a restore. That is all this
+// checks: a name, not what a method does. It is a tripwire for a restore added
+// later, which would have to say how a forget stops it; that nothing restores
+// a line today is read from the code (forget.go).
 func TestForget_NothingHereRestoresALine(t *testing.T) {
 	typ := reflect.TypeFor[*ThroughputAnalyzer]()
 	require.Positive(t, typ.NumMethod(), "premise: the reflection found the analyzer's methods")

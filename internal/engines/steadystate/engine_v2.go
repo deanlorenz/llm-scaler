@@ -440,8 +440,9 @@ func (e *Engine) forgetOnRequest(ctx context.Context, namespace, modelID, varian
 }
 
 // forgetThroughputLine forgets the variant's ITL line in the throughput
-// analyzer, and returns how many entries it dropped: 0 when the analyzer is
-// not registered, which the saturation config decides.
+// analyzer, and returns how many entries it dropped, windows and intercepts,
+// not lines: a line with a learned intercept is 2. It is 0 when the analyzer
+// is not registered, which the saturation config decides.
 func (e *Engine) forgetThroughputLine(ctx context.Context, namespace, modelID, variant string) int {
 	for _, entry := range e.analyzers.builtins() {
 		if a, ok := entry.analyzer.(*throughput.ThroughputAnalyzer); ok {
