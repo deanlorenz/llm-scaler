@@ -90,6 +90,14 @@ const (
 	// NonPositiveIntercept is a low-load fit whose fixed cost is not above
 	// zero.
 	NonPositiveIntercept Refusal = "NonPositiveIntercept"
+	// NoShortPrompts is a low-load fit whose shortest prompts are longer
+	// than MaxAShortestPrompt, so its intercept is an extrapolation that
+	// reads low (Estimate.AExtrapolated).
+	NoShortPrompts Refusal = "NoShortPrompts"
+	// AUncertain is a curve whose intercept's standard error is above
+	// MaxAInterceptRelSE of it: a positive intercept noise could have put
+	// at zero.
+	AUncertain Refusal = "AUncertain"
 	// OnePod is f on a variant with fewer than two prefill pods: there is no
 	// share to compare.
 	OnePod Refusal = "OnePod"
@@ -169,6 +177,9 @@ type Cycle struct {
 	// Settle is the settle tracker; nil admits every Ready replica as
 	// settled (a caller with no tracker, a test).
 	Settle *Settle
+	// ALineOnly fits a from the straight line alone, as P1 shipped: the
+	// quadratic off (saturation.SwitchPrefillAQuadratic).
+	ALineOnly bool
 	// Now is the cycle's time.
 	Now time.Time
 }
@@ -210,11 +221,17 @@ type Estimate struct {
 	VPQueuedMinutes    int
 	VPLongestQueuedRun int
 	VPBusyMinutes      int
-	// SlopeBound is 1/slope of the low-load fit of service time against
-	// prompt length: an upper bound on V_P, a validation signal only. Zero
-	// with no fit. VPAboveSlopeBound flags a V_P above it.
+	// SlopeBound is an upper bound on V_P from the low-load fit of service
+	// time against prompt length, a validation signal only: 1/slope of the
+	// line, or, with the curve, 1/(b + c*I) at VPPromptTokens, the prompt
+	// length V_P was read at (fixed.go). Zero with no fit, or with the curve
+	// and no such length. VPAboveSlopeBound flags a V_P above it.
 	SlopeBound        float64
 	VPAboveSlopeBound bool
+	// VPPromptTokens is the mean effective prompt length of the minutes V_P
+	// rests on, zero when V_P is refused or the length is unknown (the
+	// back-pressure bound records none).
+	VPPromptTokens float64
 
 	// A is the fixed latency in seconds: the low-load fit's intercept plus
 	// the least overhead (AvgTTFT - AvgServiceTime) seen at low load. Zero
@@ -230,12 +247,46 @@ type Estimate struct {
 	// spans.
 	APromptMin float64
 	APromptMax float64
+	// AModel is the curve the intercept was taken from (fixed.go): the
+	// quadratic where the minutes carry three parameters, the line
+	// otherwise, and ALineReason why the line (empty with the quadratic).
+	// ASlope is the curve's per-token term b and ACurve its c, zero on the
+	// line; AClusters is how many prompt-length clusters of
+	// MinQuadraticClusterMinutes minutes the minutes held. AInterceptSE is
+	// the curve's intercept's standard error, zero on the line.
+	// AShortestPrompt is the shortest prompt the fit's intercept is
+	// extrapolated from (the curve's shortest counted cluster's median, the
+	// line's second shortest minute), and AExtrapolated says it is longer
+	// than MaxAShortestPrompt, and a refused (NoShortPrompts). Set whenever
+	// a curve was fitted with the quadratic on, the intercept refused or
+	// not.
+	AModel          AModel
+	ALineReason     LineReason
+	ASlope          float64
+	ACurve          float64
+	AClusters       int
+	AInterceptSE    float64
+	AShortestPrompt float64
+	AExtrapolated   bool
 
-	// F is the de-biased imbalance, at least 1; zero when refused.
+	// F is the de-biased imbalance, at least 1; zero when refused. It is
+	// the median over every minute kept, whatever the pod count of each:
+	// the figure the log reads.
 	F         float64
 	FRefused  Refusal
 	FSamples  int
 	FPodsLast int
+	// FByPods is the de-biased imbalance at each pod count, the median of
+	// the minutes taken at that count only, for a count with at least
+	// MinImbalanceMinutes of them; FSamplesByPods is how many minutes each
+	// count kept, whether or not it gives an f. An f learned at one count
+	// is not an f at another (docs/proposals/slo-tiers.md, decision 1).
+	// Nil when no minute was kept (one pod never keeps one). A reader looks
+	// up its count (FByPods[n], ok) and never tests FByPods == nil: an empty
+	// map (minutes kept, none at a count with enough) and nil both mean no
+	// learned f at any count.
+	FByPods        map[int]float64
+	FSamplesByPods map[int]int
 
 	// Admitted is how many rows were admitted this cycle, and Refused how
 	// many were not, by reason.
@@ -257,6 +308,9 @@ type sample struct {
 	// multiRank: the pod runs more than one data-parallel rank, so its
 	// queue minimum is the ranks' summed and one rank may have idled.
 	multiRank bool
+	// prompt is the minute's effective prompt length, zero when not read:
+	// what VPPromptTokens averages over the minutes V_P rests on.
+	prompt float64
 	// lowLoad: admitted to the fit of a, at ieff and svc, with the
 	// overhead when overheadOK.
 	lowLoad    bool
@@ -279,10 +333,12 @@ type podState struct {
 	lastSeen time.Time
 }
 
-// fSample is one minute's de-biased imbalance.
+// fSample is one minute's de-biased imbalance, and how many pods it was
+// read over.
 type fSample struct {
-	at time.Time
-	f  float64
+	at   time.Time
+	f    float64
+	pods int
 }
 
 // keyState is what one key keeps.
@@ -357,13 +413,8 @@ func (o *Observer) Observe(c Cycle) Estimate {
 	var shares []share
 	allAdmitted, serving := true, 0
 	for _, rm := range c.Rows {
-		if !rm.Ready {
-			est.Refused[rowNotReady]++
-			continue
-		}
-		if rm.FromWarmPool {
-			// A bridge serves the variant's load on another engine.
-			est.Refused[rowBridge]++
+		if reason := refusalFor(rm); reason != "" {
+			est.Refused[reason]++
 			continue
 		}
 		serving++
@@ -385,6 +436,9 @@ func (o *Observer) Observe(c Cycle) Estimate {
 		}
 		est.Admitted++
 		s := sample{at: c.Now}
+		if ieffOK {
+			s.prompt = ieff
+		}
 		s.rate, s.rateOK = computedRate(rm, sglang)
 		s.queued = rm.QueueLength > 0
 		// A pod QueueMin does not name reads zero, which is not busy.
@@ -407,12 +461,32 @@ func (o *Observer) Observe(c Cycle) Estimate {
 
 	ks.noteImbalance(shares, allAdmitted, c.Now)
 	est.capacity(ks, c, sglang)
-	est.fixed(ks, c.Disaggregated)
+	est.fixed(ks, c.Disaggregated, c.ALineOnly)
+	est.curveBound()
 	est.imbalance(ks, shares, serving)
-	if est.VP > 0 && est.SlopeBound > 0 && est.VP > est.SlopeBound {
-		est.VPAboveSlopeBound = true
-	}
 	return est
+}
+
+// Serving reports whether rm is one of the variant's serving pods: Ready,
+// and not a warm-pool bridge, which serves the variant's load on another
+// engine. It is the pod rule behind every per-count figure (FPodsLast,
+// FByPods), so a caller that reads f at a pod count (the slo analyzer's
+// N_p, docs/proposals/slo-tiers.md decision 3) counts pods by it too.
+func Serving(rm domain.ReplicaMetrics) bool {
+	return refusalFor(rm) == ""
+}
+
+// refusalFor is why rm is not a serving pod, "" when it is: the one rule
+// Serving and Observe both read, so the two cannot drift.
+func refusalFor(rm domain.ReplicaMetrics) string {
+	switch {
+	case !rm.Ready:
+		return rowNotReady
+	case rm.FromWarmPool:
+		// A bridge serves the variant's load on another engine.
+		return rowBridge
+	}
+	return ""
 }
 
 // sweep forgets the keys with no cycle for Retention, and returns how many.

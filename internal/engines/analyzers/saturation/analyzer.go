@@ -416,13 +416,19 @@ type SaturationAnalyzer struct {
 	// constructor; a replay turns it off (SetSwitchesForReplay).
 	// prefillObserver is what each prefill variant has taught it
 	// (prefill_observe.go), and prefillBounds the back-pressure bound each
-	// variant read in the cycle in progress, for it.
-	prefillObserve  bool
-	prefillObserver *prefill.Observer
-	prefillBounds   map[string]stashedBound
+	// variant read in the cycle in progress, for it. prefillEstimates is
+	// each prefill variant's latest estimate, keyed like prefillBounds and
+	// stamped with the cycle, for the slo analyzer (PrefillEstimate).
+	prefillObserve   bool
+	prefillObserver  *prefill.Observer
+	prefillBounds    map[string]stashedBound
+	prefillEstimates map[string]stashedEstimate
 	// prefillBusyMinutes is SwitchPrefillBusyMinutes (P1's busy minutes): on
 	// from the constructor; a replay turns it off (SetSwitchesForReplay).
 	prefillBusyMinutes bool
+	// prefillAQuadratic is SwitchPrefillAQuadratic (a's curved fit): on
+	// from the constructor; a replay turns it off (SetSwitchesForReplay).
+	prefillAQuadratic bool
 }
 
 // Evicted is what one sweep of the analyzer's learned state removed, counted
@@ -494,9 +500,12 @@ type Evicted struct {
 	// PrefillObservations is the prefill observation's keys with no cycle
 	// for prefill.Retention, and PrefillBounds the back-pressure bounds
 	// stashed for a cycle that never took them (prefill_observe.go).
+	// PrefillEstimates is the stashed estimates of variants with none
+	// stashed for the variant timeout (evictPrefillObservationLocked).
 	// Omitted when zero, as BatchCaps is.
 	PrefillObservations int `json:",omitempty"`
 	PrefillBounds       int `json:",omitempty"`
+	PrefillEstimates    int `json:",omitempty"`
 }
 
 // Any reports whether the sweep evicted anything at all.
@@ -505,7 +514,7 @@ func (e Evicted) Any() bool {
 		e.ITLBaselines > 0 || e.StartEstimates > 0 || e.StartOutliers > 0 ||
 		e.Pods > 0 || e.ITLLines > 0 || e.Accelerators > 0 || e.DecodeSaturation > 0 ||
 		e.HotRankHolds > 0 || e.K2Settle > 0 || e.FleetShapes > 0 || e.VariantStamps > 0 || e.ForgetMarks > 0 || e.StashedWindows > 0 || e.BatchCaps > 0 ||
-		e.PrefillObservations > 0 || e.PrefillBounds > 0
+		e.PrefillObservations > 0 || e.PrefillBounds > 0 || e.PrefillEstimates > 0
 }
 
 // learnedLine is one measured ITL(k) line, with who measured it and when.
@@ -625,8 +634,10 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		k2Pending:              make(map[string]*k2PendingReadings),
 		prefillObserve:         true,
 		prefillBusyMinutes:     true,
+		prefillAQuadratic:      true,
 		prefillObserver:        prefill.NewObserver(),
 		prefillBounds:          make(map[string]stashedBound),
+		prefillEstimates:       make(map[string]stashedEstimate),
 	}
 }
 
@@ -835,7 +846,8 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 		}
 	}
 	a.sweepK2PendingLocked(now)
-	evicted.PrefillObservations, evicted.PrefillBounds = a.evictPrefillObservationLocked(now)
+	evicted.PrefillObservations, evicted.PrefillBounds, evicted.PrefillEstimates =
+		a.evictPrefillObservationLocked(now, variantTimeout)
 	evicted.BatchCaps += a.sweepBatchCapsLocked(now, bucketRetention)
 	// A window's arguments go with the window.
 	maps.DeleteFunc(a.k2WindowArgs, func(key, _ string) bool {

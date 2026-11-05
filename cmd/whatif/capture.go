@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -60,31 +61,16 @@ type captureFlags struct {
 func runCapture(ctx context.Context, args []string, out, warn io.Writer) error {
 	fs := newFlags("capture", out)
 	var f captureFlags
-	fs.StringVar(&f.prometheus, "prometheus", "", "the Prometheus base URL (required)")
-	fs.StringVar(&f.tokenFile, "bearer-token-file", "", "a file holding a bearer token, sent to an https Prometheus only, and to its host only")
-	fs.StringVar(&f.caFile, "ca-file", "", "a PEM file of the CAs that sign an https Prometheus' certificate, trusted in place of the system's")
-	fs.BoolVar(&f.insecure, "insecure-skip-verify", false, "do not verify Prometheus' certificate (warned about on stderr)")
-	fs.DurationVar(&f.timeout, "timeout", defaultTimeout, "how long one HTTP request to Prometheus may take")
+	f.registerWindow(fs)
 	fs.StringVar(&f.namespace, "namespace", "", "the namespace whose models to capture (required)")
-	fs.BoolVar(&f.ksm, "kube-state-metrics", false, "read Pods, owners, readiness, GPUs and nodes from kube-state-metrics in the same Prometheus")
-	fs.Var(&f.roleOf, "role-of", "ROLE=SELECTOR: the Pods the label selector picks serve ROLE (prefill, decode, both), as one variant; repeat per variant")
-	fs.StringVar(&f.from, "from", "", "the window's start: RFC 3339 or Unix seconds, to the millisecond (required)")
-	fs.StringVar(&f.to, "to", "", "the window's end: RFC 3339 or Unix seconds, to the millisecond (required)")
-	fs.DurationVar(&f.step, "step", 15*time.Second, "the interval between cycles, taken as the run's optimize interval")
-	fs.StringVar(&f.policy, "policy", "", "a scaling-policy entry (YAML), applied as the default entry; the defaults when absent")
-	fs.StringVar(&f.engine, "engine", "vllm", "the inference engine the variants run: vllm or sglang")
-	fs.StringVar(&f.engineArgs, "engine-args", "", "the engine's arguments, space-separated, for its parameters (kube-state-metrics has none)")
 	fs.IntVar(&f.batchCap, "batch-cap", 0, "the engine's batch cap (--max-num-seqs); 0 leaves the engine's default")
-	fs.IntVar(&f.gpus, "gpus-per-replica", 1, "GPUs per replica, where kube-state-metrics gives none")
-	fs.StringVar(&f.accelerator, "accelerator", "", "the accelerator, where kube-state-metrics gives none")
-	fs.BoolVar(&f.force, "force", false, fmt.Sprintf("capture past %d steps times queries, or %d samples held in memory", whatifsource.MaxStepQueries, whatifsource.MaxSamples))
 	fs.StringVar(&f.out, "o", "", "where to write the capture, gzipped JSON lines (required)")
 	if ok, err := parse(fs, args); !ok {
 		return err
 	}
-	opts, err := f.options(warn)
+	opts, err := f.options("capture", warn)
 	if err != nil {
-		return err
+		return redactedError(err, f.prometheus)
 	}
 	// Written beside -o and renamed over it once whole: a failed or
 	// cancelled capture leaves the file that was there.
@@ -94,15 +80,8 @@ func runCapture(ctx context.Context, args []string, out, warn io.Writer) error {
 		sum, err = whatifsource.Capture(ctx, opts, w)
 		return err
 	})
-	var u usageError
-	switch {
-	case err == nil:
-	case whatifsource.IsInputError(err):
-		return usageError{fmt.Errorf("capture: %w", err)}
-	case errors.As(err, &u):
-		return usageError{fmt.Errorf("capture: %w", u.error)}
-	default:
-		return fmt.Errorf("capture: %w", err)
+	if err != nil {
+		return redactedError(captureError(err), f.prometheus)
 	}
 	fmt.Fprintf(out, "captured %d steps of %s from %s to %s every %s: %d cycles, %d rows, %d variants, %d range queries, %d samples\n",
 		sum.Steps, opts.Namespace, opts.From.Format(time.RFC3339), opts.To.Format(time.RFC3339), opts.Step,
@@ -121,18 +100,72 @@ func runCapture(ctx context.Context, args []string, out, warn io.Writer) error {
 	return nil
 }
 
-// options checks the flags and turns them into whatifsource.Options,
-// writing what it warns about to warn.
-func (f captureFlags) options(warn io.Writer) (whatifsource.Options, error) {
+// captureError is a failed capture's error with capture's exit code: 2 for
+// the caller's input (whatifsource.IsInputError, or a usage error such as
+// an output that cannot be created), 1 for anything else, a failed query
+// included.
+func captureError(err error) error {
+	var u usageError
+	switch {
+	case whatifsource.IsInputError(err):
+		return usageError{fmt.Errorf("capture: %w", err)}
+	case errors.As(err, &u):
+		return usageError{fmt.Errorf("capture: %w", u.error)}
+	}
+	return fmt.Errorf("capture: %w", err)
+}
+
+// windowFlags is the flags registerWindow registers but --prometheus, by
+// name, read from the flag set it fills so that the two cannot disagree:
+// the answer commands take them only with --prometheus.
+func windowFlags() []string {
+	fs := flag.NewFlagSet("", flag.ContinueOnError)
+	var f captureFlags
+	f.registerWindow(fs)
+	var names []string
+	fs.VisitAll(func(fl *flag.Flag) {
+		if fl.Name != "prometheus" {
+			names = append(names, fl.Name)
+		}
+	})
+	return names
+}
+
+// registerWindow registers the flags that say which window to read from
+// Prometheus, and how: every capture flag but --namespace, --batch-cap and
+// -o, which the answer commands register as flags of their own.
+func (f *captureFlags) registerWindow(fs *flag.FlagSet) {
+	fs.StringVar(&f.prometheus, "prometheus", "", "the Prometheus base URL (required)")
+	fs.StringVar(&f.tokenFile, "bearer-token-file", "", "a file holding a bearer token, sent to an https Prometheus only, and to its host only")
+	fs.StringVar(&f.caFile, "ca-file", "", "a PEM file of the CAs that sign an https Prometheus' certificate, trusted in place of the system's")
+	fs.BoolVar(&f.insecure, "insecure-skip-verify", false, "do not verify Prometheus' certificate (warned about on stderr)")
+	fs.DurationVar(&f.timeout, "timeout", defaultTimeout, "how long one HTTP request to Prometheus may take")
+	fs.BoolVar(&f.ksm, "kube-state-metrics", false, "read Pods, owners, readiness, GPUs and nodes from kube-state-metrics in the same Prometheus")
+	fs.Var(&f.roleOf, "role-of", "ROLE=SELECTOR: the Pods the label selector picks serve ROLE (prefill, decode, both), as one variant; repeat per variant")
+	fs.StringVar(&f.from, "from", "", "the window's start: RFC 3339 or Unix seconds, to the millisecond (required)")
+	fs.StringVar(&f.to, "to", "", "the window's end: RFC 3339 or Unix seconds, to the millisecond (required)")
+	fs.DurationVar(&f.step, "step", 15*time.Second, "the interval between cycles, taken as the run's optimize interval")
+	fs.StringVar(&f.policy, "policy", "", "a scaling-policy entry (YAML), applied as the default entry; the defaults when absent")
+	fs.StringVar(&f.engine, "engine", "vllm", "the inference engine the variants run: vllm or sglang")
+	fs.StringVar(&f.engineArgs, "engine-args", "", "the engine's arguments, space-separated, for its parameters (kube-state-metrics has none)")
+	fs.IntVar(&f.gpus, "gpus-per-replica", 1, "GPUs per replica, where kube-state-metrics gives none")
+	fs.StringVar(&f.accelerator, "accelerator", "", "the accelerator, where kube-state-metrics gives none")
+	fs.BoolVar(&f.force, "force", false, fmt.Sprintf("capture past %d steps times queries, or %d samples held in memory", whatifsource.MaxStepQueries, whatifsource.MaxSamples))
+}
+
+// options checks the flags and turns them into whatifsource.Options for
+// the command cmd, writing what it warns about to warn. A capture also
+// needs -o, which only capture has.
+func (f captureFlags) options(cmd string, warn io.Writer) (whatifsource.Options, error) {
 	var opts whatifsource.Options
 	switch {
 	case f.prometheus == "":
-		return opts, usagef("capture needs --prometheus")
+		return opts, usagef("%s needs --prometheus", cmd)
 	case f.namespace == "":
-		return opts, usagef("capture needs --namespace")
+		return opts, usagef("%s needs --namespace", cmd)
 	case f.from == "" || f.to == "":
-		return opts, usagef("capture needs --from and --to")
-	case f.out == "":
+		return opts, usagef("%s needs --from and --to", cmd)
+	case cmd == "capture" && f.out == "":
 		return opts, usagef("capture needs -o")
 	case f.step <= 0:
 		return opts, usagef("--step %v is not positive", f.step)

@@ -128,6 +128,10 @@ type Analyzer struct {
 	// (WithOptimizationInterval), zero until set: what the line's own trace
 	// judges an absence by (settle.Tolerance), as the saturation analyzer's.
 	settleInterval time.Duration
+
+	// prefillEstimates is where P1's prefill estimates are read
+	// (WithPrefillEstimates, prefill_estimates.go); nil when none was given.
+	prefillEstimates PrefillEstimates
 }
 
 // The batch cap's readers in this analyzer (issue #420). Each took the cap

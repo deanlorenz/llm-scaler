@@ -625,6 +625,7 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 			"batchCaps", history.BatchCaps,
 			"prefillObservations", history.PrefillObservations,
 			"prefillBounds", history.PrefillBounds,
+			"prefillEstimates", history.PrefillEstimates,
 			"capacityRecords", records,
 
 			"recordTimeout", capacity.EvictionTimeout)

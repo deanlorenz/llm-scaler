@@ -71,17 +71,18 @@ func (est *Estimate) capacity(ks *keyState, c Cycle, sglang bool) {
 		return
 	}
 	est.VPQueuedMinutes, est.VPLongestQueuedRun = queuedRuns(ks)
-	v, n, multiRank := busyMedian(ks, c.Now)
-	est.VPBusyMinutes = n
-	if n >= MinBusyMinutes {
-		est.VP, est.VPSource, est.VPSamples = v, SourceBusyMinutes, n
-		if multiRank {
+	bm := busyMedian(ks, c.Now)
+	est.VPBusyMinutes = bm.n
+	if bm.n >= MinBusyMinutes {
+		est.VP, est.VPSource, est.VPSamples, est.VPPromptTokens = bm.rate, SourceBusyMinutes, bm.n, bm.prompt
+		if bm.multiRank {
 			est.VPLowerBound, est.VPLowerBoundReason = true, DataParallelRanks
 		}
 		return
 	}
-	if v, ok := peakUnderQueue(ks); ok {
+	if v, prompt, ok := peakUnderQueue(ks); ok {
 		est.VP, est.VPSource, est.VPLowerBound, est.VPSamples = v, SourcePeakUnderQueue, true, PeakRun
+		est.VPPromptTokens = prompt
 		return
 	}
 	if b := c.Bound; finitePositive(b.Tokens) && b.Samples >= MinBoundSamples {
@@ -91,54 +92,79 @@ func (est *Estimate) capacity(ks *keyState, c Cycle, sglang bool) {
 	est.VPRefused = NoPrefillCapacity
 }
 
-// busyMedian is the median rate over every replica's busy minutes no older
-// than BusyWindow at now, how many there are, and whether any came from a
-// pod with more than one data-parallel rank.
-func busyMedian(ks *keyState, now time.Time) (float64, int, bool) {
+// busy is the busy minutes' reading: the median rate, how many minutes,
+// whether any came from a pod with more than one data-parallel rank, and
+// their mean prompt length (zero when one of them read none).
+type busy struct {
+	rate      float64
+	n         int
+	multiRank bool
+	prompt    float64
+}
+
+// busyMedian is the busy reading over every replica's busy minutes no older
+// than BusyWindow at now; zero with none.
+func busyMedian(ks *keyState, now time.Time) busy {
 	cutoff := now.Add(-BusyWindow)
-	var rates []float64
-	multiRank := false
+	var rates, prompts []float64
+	var out busy
 	for _, name := range ks.podNames() {
 		for _, s := range ks.pods[name].samples {
 			if s.busy && s.rateOK && s.rate > 0 && !s.at.Before(cutoff) {
-				rates = append(rates, s.rate)
-				multiRank = multiRank || s.multiRank
+				rates, prompts = append(rates, s.rate), append(prompts, s.prompt)
+				out.multiRank = out.multiRank || s.multiRank
 			}
 		}
 	}
 	if len(rates) == 0 {
-		return 0, 0, false
+		return busy{}
 	}
-	return median(rates), len(rates), multiRank
+	out.rate, out.n, out.prompt = median(rates), len(rates), meanPrompt(prompts)
+	return out
+}
+
+// meanPrompt is the mean of prompts, zero when one of them is zero (not
+// read): a mean that left a minute out would not be the mean of the
+// minutes V_P rests on.
+func meanPrompt(prompts []float64) float64 {
+	sum := 0.0
+	for _, p := range prompts {
+		if !(p > 0) {
+			return 0
+		}
+		sum += p
+	}
+	return sum / float64(len(prompts))
 }
 
 // peakUnderQueue is the highest rate any replica sustained over PeakRun
-// queued minutes in a row: the least rate of the run, the highest run.
-func peakUnderQueue(ks *keyState) (float64, bool) {
-	best, found := 0.0, false
+// queued minutes in a row: the least rate of the run, the highest run; and
+// the mean prompt length of that run's PeakRun minutes.
+func peakUnderQueue(ks *keyState) (float64, float64, bool) {
+	best, prompt, found := 0.0, 0.0, false
 	for _, name := range ks.podNames() {
-		run := []float64{}
+		run, prompts := []float64{}, []float64{}
 		var last time.Time
 		for _, s := range ks.pods[name].samples {
 			if !s.queued || !s.rateOK || !(s.rate > 0) {
-				run = run[:0]
+				run, prompts = run[:0], prompts[:0]
 				continue
 			}
 			if len(run) > 0 && s.at.Sub(last) > MaxRunGap {
-				run = run[:0]
+				run, prompts = run[:0], prompts[:0]
 			}
-			run = append(run, s.rate)
+			run, prompts = append(run, s.rate), append(prompts, s.prompt)
 			last = s.at
 			if len(run) < PeakRun {
 				continue
 			}
 			sustained := slices.Min(run[len(run)-PeakRun:])
 			if sustained > best {
-				best, found = sustained, true
+				best, prompt, found = sustained, meanPrompt(prompts[len(prompts)-PeakRun:]), true
 			}
 		}
 	}
-	return best, found
+	return best, prompt, found
 }
 
 // queuedRuns is how many samples of the key's replicas held a queue with a
