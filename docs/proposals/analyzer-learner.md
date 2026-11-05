@@ -3251,10 +3251,26 @@ package's first switch, with its own hook (`Tracker.SetSwitchesForReplay`,
   `learner_recording_test.go`, a generator's run and no golden's.
 - **Goldens.** Measured alone against all off, D adds rows to three
   `learned-state.csv` (acceptance 103, engine 99, mu-paths 180), changes none,
-  and moves no other output: no recorded document holds `startCounted`. E moves
-  nothing: no recording holds a `settle.Restore` event. The kind recording with
-  restarts, on its own branch, re-measures `startKeys`, `sightings` and
-  `settle-restored`, none of which any committed golden reaches.
+  and moves no other output: no recorded document holds `startCounted`. The
+  three start-seed goldens gain the same rows (38, 80 and 51). E moves nothing:
+  no recording holds a `settle.Restore` event.
+- **On the recorded fleet.** The start-seed goldens were recorded before 5d, so
+  their restores hold neither field, and replayed as committed they still fold
+  the running Pods. `TestGoldens_StartSeedChainRestoresCountsAndFirstSight` runs
+  5d on their real rows: each restart restores its recorded document plus what
+  the replay of the run before it stored on this build, Pods carried across by
+  variant and Ready time. It is a replay with spliced documents, not a cluster
+  run on a 5d build; one is still to be recorded.
+
+  | restart | slow variant, D on | D off | the cluster measured | `startKeys` | `sightings` | k2 refused as joined, E on / off |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | first | 241.4599 | 241.6593 | 241.66 | 2 | 10 | 0 / 12 |
+  | second | 241.6593 | 241.7678 | 241.77 | 2 | 10 | 0 / 0 |
+
+  With D on, `learner-write` says `restored: true` (2 lines at each restart), and
+  with D off it never does: the fold ends the mark on the first cycle. At the
+  second restart no replica saturated in the first minute, so E has no reading to
+  admit there.
 - **Back-compat.** The document stays v1 and additive. v0.10.1's frozen decoder
   reads a document with both new fields with every field it knows intact
   (`TestLearnedStateSettle_V0101ReadsADocumentWithSightings`). The v0.10.1 fixture

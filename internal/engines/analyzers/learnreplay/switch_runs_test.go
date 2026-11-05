@@ -234,17 +234,23 @@ var replaySwitches = map[string][]string{
 	// Learner PR 5d, on main after 5c and #482 (59772fce2). Measured, each
 	// alone against all off:
 	//
-	//   - SwitchStartCountedPodsRestored moves the three learned-state.csv
+	//   - SwitchStartCountedPodsRestored moves the six learned-state.csv
 	//     below, rows added and none changed: each export gains a
-	//     StartCounted row per counted Pod (103, 99 and 180 rows). No
-	//     recorded document holds the field, so no restore in any recording
-	//     reads it, and no figure moves. Its unit tests hold what it does
+	//     StartCounted row per counted Pod (103, 99, 180, 38, 80 and 51
+	//     rows). No recorded document holds the field, so no restore in any
+	//     recording reads it, and no figure moves. Its unit tests hold what it does
 	//     after a restart (start_counted_test.go).
 	//   - settle.SwitchFirstSightRestored moves nothing: no committed
-	//     recording holds a settle.Restore event. Its unit tests hold it
-	//     (heldBy), and a kind recording with restarts re-measures it.
+	//     recording holds a settle.Restore event, the start-seed goldens
+	//     included. Its unit tests hold it (heldBy), and
+	//     TestGoldens_StartSeedChainRestoresCountsAndFirstSight runs both
+	//     switches on the start-seed rows.
 	saturation.SwitchStartCountedPodsRestored: {
 		"acceptance/learned-state.csv", "engine/learned-state.csv", "mu-paths/learned-state.csv",
+		// The start-seed goldens the same way. They predate 5d, so their
+		// restores hold no startCounted and these replays still fold the
+		// running Pods: golden_start_seed_chain_test.go shows the fold stop.
+		"start-seed/learned-state.csv", "start-seed-restart/learned-state.csv", "start-seed-restart-2/learned-state.csv",
 	},
 	settle.SwitchFirstSightRestored: nil,
 }

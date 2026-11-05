@@ -1004,7 +1004,10 @@ a readiness delay gives real samples and needs no GPUs. Measured:
 [analyzer-learner, recording as run](../proposals/analyzer-learner.md#recording-as-run).
 `TestGoldens_StartSeedHoldsTheSeedAndTheMeasuredStart` and
 `TestGoldens_StartSeedRestartsRestoreBothStartKeys` hold them to what the run
-was for.
+was for. They were recorded before learner PR 5d, so their restores hold no
+`startCounted` and no sightings, and replayed as committed they show neither.
+`TestGoldens_StartSeedChainRestoresCountsAndFirstSight` splices in what each
+run stored on this build, and holds 5d to their rows.
 
 To take it again at a new commit:
 
