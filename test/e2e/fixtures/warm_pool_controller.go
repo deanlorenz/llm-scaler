@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
@@ -118,7 +119,7 @@ func NewestControllerPod(ctx context.Context, clientset kubernetes.Interface, c 
 // Writing them all means the expected value wins whatever the precedence is,
 // which keeps the test about the property it names: the accelerator the pool
 // reports is the one its Pods' NODE declares.
-func LabelNodeAccelerator(ctx context.Context, clientset *kubernetes.Clientset, node, product string) (func(context.Context) error, error) {
+func LabelNodeAccelerator(ctx context.Context, clientset kubernetes.Interface, node, product string) (func(context.Context) error, error) {
 	before, err := clientset.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("read node %s: %w", node, err)
@@ -156,20 +157,30 @@ func acceleratorProductLabels() []string {
 	return keys
 }
 
-func patchNodeLabel(ctx context.Context, clientset *kubernetes.Clientset, node, key string, value *string) error {
-	n, err := clientset.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+// patchNodeLabel sets one label on a node, or removes it when value is nil.
+//
+// The read-modify-write is retried on a Conflict, re-reading the node each
+// time. A Node is written constantly -- the kubelet heartbeats its status, the
+// node controllers patch conditions -- so an Update built from a read a moment
+// old loses to one of them often enough to fail a BeforeAll in CI.
+func patchNodeLabel(ctx context.Context, clientset kubernetes.Interface, node, key string, value *string) error {
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		n, err := clientset.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("read node %s: %w", node, err)
+		}
+		if n.Labels == nil {
+			n.Labels = map[string]string{}
+		}
+		if value == nil {
+			delete(n.Labels, key)
+		} else {
+			n.Labels[key] = *value
+		}
+		_, err = clientset.CoreV1().Nodes().Update(ctx, n, metav1.UpdateOptions{})
+		return err
+	})
 	if err != nil {
-		return fmt.Errorf("read node %s: %w", node, err)
-	}
-	if n.Labels == nil {
-		n.Labels = map[string]string{}
-	}
-	if value == nil {
-		delete(n.Labels, key)
-	} else {
-		n.Labels[key] = *value
-	}
-	if _, err := clientset.CoreV1().Nodes().Update(ctx, n, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("label node %s: %w", node, err)
 	}
 	return nil
