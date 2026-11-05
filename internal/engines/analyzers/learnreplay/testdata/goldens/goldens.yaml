@@ -160,6 +160,52 @@ goldens:
   recording: pd-restart/recording.jsonl.gz
   source: P/D benchmark scenario, flow control off, saturated load, one decode engine
     restarted in its own pod, recorder on
+- name: throughput-sweep
+  notRun:
+  - slo
+  outputs:
+  - throughput-sweep/learned-state.csv
+  - throughput-sweep/lines.csv
+  - throughput-sweep/results.csv
+  - throughput-sweep/slo-published.csv
+  - throughput-sweep/store-records.csv
+  - throughput-sweep/variant-capacities.csv
+  - throughput-sweep/composite-holds.csv
+  - throughput-sweep/composite-release.csv
+  - throughput-sweep/composite-results.csv
+  - throughput-sweep/composite-roles.csv
+  - throughput-sweep/composite-variants.csv
+  - throughput-sweep/warm-pool-pressure.csv
+  - throughput-sweep/warm-pool-supply.csv
+  recording: throughput-sweep/recording.jsonl.gz
+  source: P/D benchmark scenario, flow control off, decode KV of 1024 blocks and 64
+    sequences on one decode replica, one prefill replica, load sweeps of concurrency
+    and shape, then 80 in flight at the sequence cap and 35 minutes of 2 in flight,
+    saturation and throughput listed, analyzerTuning KV band 0.12 to 0.70; up to a
+    controller restart
+- name: throughput-sweep-restart
+  notRun:
+  - slo
+  outputs:
+  - throughput-sweep-restart/learned-state.csv
+  - throughput-sweep-restart/lines.csv
+  - throughput-sweep-restart/results.csv
+  - throughput-sweep-restart/slo-published.csv
+  - throughput-sweep-restart/store-records.csv
+  - throughput-sweep-restart/variant-capacities.csv
+  - throughput-sweep-restart/composite-holds.csv
+  - throughput-sweep-restart/composite-release.csv
+  - throughput-sweep-restart/composite-results.csv
+  - throughput-sweep-restart/composite-roles.csv
+  - throughput-sweep-restart/composite-variants.csv
+  - throughput-sweep-restart/warm-pool-pressure.csv
+  - throughput-sweep-restart/warm-pool-supply.csv
+  recording: throughput-sweep-restart/recording.jsonl.gz
+  source: P/D benchmark scenario, flow control off, decode KV of 1024 blocks and 64
+    sequences on one decode replica, one prefill replica, load sweeps of concurrency
+    and shape, then 80 in flight at the sequence cap and 35 minutes of 2 in flight,
+    saturation and throughput listed, analyzerTuning KV band 0.12 to 0.70; after a
+    controller restart under load, snapshot off
 - name: ttft-open-loop-long
   notRun:
   - slo
