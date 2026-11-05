@@ -147,10 +147,12 @@ var replaySwitches = map[string][]string{
 
 	// P1's curved fit of a (saturation.SwitchPrefillAQuadratic), on main
 	// after P1's busy minutes (c192d49a7): a is the intercept of the convex
-	// curve through the low-load minutes' prompt clusters where three of
-	// them span 3x, and of the line otherwise. It moves no golden: the
-	// observation only logs, and no output reads a. Its unit tests hold it
-	// (heldBy).
+	// curve through the low-load minutes' prompt clusters where four of
+	// them span 3x, and of the line otherwise; an intercept extrapolated
+	// from prompts all over 2500 tokens, or whose standard error is over
+	// half of it, is refused. It moves no golden: the observation only
+	// logs, and no output reads a (P3's adapter reads it, and no golden
+	// runs P3). Its unit tests hold it (heldBy).
 	saturation.SwitchPrefillAQuadratic: nil,
 }
 

@@ -24,8 +24,8 @@ type Reason string
 
 // The reasons this package refuses with. The CLI reference's table lists the
 // planner's full set; each later PR adds the reasons its own terms can raise
-// (NoPrefillCapacity, NoRoleMap, FlowControlUnknown), so every reason defined
-// here has a case that produces it.
+// (NoRoleMap), so every reason defined here has a case that produces it. The
+// TTFT model's are in ttft_result.go.
 const (
 	// NoLine is no ITL line, or one the planner cannot price from: a slope
 	// or intercept that is not positive and finite, or a line that predicts no
@@ -86,9 +86,10 @@ const (
 
 // Reasons lists every Reason this package can return, in a fixed order.
 func Reasons() []Reason {
-	return []Reason{NoLine, PinnedDefaultB, NoCapacity, NoBatchCap, NoTraffic, TokenGapPercentile,
+	r := []Reason{NoLine, PinnedDefaultB, NoCapacity, NoBatchCap, NoTraffic, TokenGapPercentile,
 		NoTPOTHistogram, TPOTQuantileUnbounded, TargetBelowFloor, Saturated,
 		NoDecodeReplicas, MalformedHistogram, TooManySlots, InvalidInput}
+	return append(r, ttftReasons()...)
 }
 
 // Unanswerable is a refused question: the Reason, and a Detail naming the
@@ -224,6 +225,13 @@ type Basis struct {
 	// Tier is the ITL line's tier (TierOLS, TierPinnedB, TierHeld,
 	// TierBorrowed), as Decode.Tier gave it; "" when the caller named none.
 	Tier string
+	// TTFT is the basis of a TTFT answer (RateForTTFT, PrefillKnee); nil on
+	// every decode answer. A TTFT answer leaves the TPOT fields above
+	// (KneeRate, Floor, Uncapped) at 0, so none of them changes meaning.
+	// Basis carries no JSON tags and none is needed: cmd/whatif writes its
+	// own wire types (wireBasis), field by field, so this field reaches the
+	// wire only when the CLI maps it (TestJSONSchemaIsPinned holds it out).
+	TTFT *TTFTBasis
 }
 
 // Answer is a priced figure: Value in the question's unit (requests per
