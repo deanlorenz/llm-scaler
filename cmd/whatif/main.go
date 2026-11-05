@@ -11,13 +11,17 @@
 //	                       [--headroom H | --rate R] [--tpot-percentile P [--assume-tpot-ratio R]] [-o json]
 //	whatif slo-to-rate     --recording FILE [--cycle N|last] [--model M] [--decode N]
 //	                       --tpot 4ms[@p90] [--assume-tpot-ratio R] [--headroom H] [-o json]
+//	whatif replicas-to-slo|slo-to-rate --prometheus URL --namespace NS (--kube-state-metrics | --role-of ROLE=SELECTOR ...)
+//	                       --from T0 --to T1 [capture's flags] [the question's flags]
 //
 // capture writes the window's cycle inputs (internal/whatifsource);
 // generate plays them through the analyzers in the engine's order
 // (learnreplay, Generate mode) and writes the recording, which
 // learnergolden export pseudonymises and learnergolden add accepts at the
 // commit that generated it. replicas-to-slo and slo-to-rate read a
-// recording (learnreplay.StateAt).
+// recording (learnreplay.StateAt): a file, or with --prometheus the
+// recording capture and generate would write for the window, made in
+// memory along the same path, so that the answer is the files' answer.
 //
 // Exit codes: 0 done, and every role answered; 3 a role refused (the
 // output is still printed); 2 a usage or input error (a bad flag, an
@@ -89,16 +93,8 @@ type command func(ctx context.Context, args []string, out, warn io.Writer) error
 var commands = map[string]command{
 	"capture":         runCapture,
 	"generate":        runGenerate,
-	"replicas-to-slo": noWarnings(runReplicasToSLO),
-	"slo-to-rate":     noWarnings(runSLOToRate),
-}
-
-// noWarnings is a command that writes no warnings: everything it reports,
-// a JSON error included, goes to out.
-func noWarnings(cmd func(ctx context.Context, args []string, out io.Writer) error) command {
-	return func(ctx context.Context, args []string, out, _ io.Writer) error {
-		return cmd(ctx, args, out)
-	}
+	"replicas-to-slo": runReplicasToSLO,
+	"slo-to-rate":     runSLOToRate,
 }
 
 // run runs one command. Asking for help is not an error.

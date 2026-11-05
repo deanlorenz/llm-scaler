@@ -704,6 +704,92 @@ are not supported in this build: `--ttft`, `--ttft-percentile`,
   the recording does not hold. A recording that fails inside the analyzers,
   or a cancelled run, is exit `1`.
 
+### Prometheus mode, as built (D4)
+
+`whatif replicas-to-slo` and `whatif slo-to-rate` also answer from a window of
+Prometheus, in place of `--recording`:
+
+```
+whatif replicas-to-slo|slo-to-rate --prometheus URL --namespace NS
+    (--kube-state-metrics | --role-of ROLE=SELECTOR ...) --from T0 --to T1
+    [--step 15s] [--policy FILE] [--engine vllm|sglang] [--engine-args "ARGS"]
+    [--batch-cap N] [--gpus-per-replica 1] [--accelerator NAME]
+    [--bearer-token-file FILE] [--ca-file FILE] [--insecure-skip-verify]
+    [--timeout 2m30s] [--force]
+    [the question's flags: --cycle, --model, --decode, --tpot, -o json, ...]
+```
+
+- **What it is.** An adapter, with no switch and no pricing of its own. It
+  captures the window into memory with `whatifsource.Capture`, the same call
+  `whatif capture` makes, then plays the capture through the analyzers with
+  the same `Generate` call `whatif generate` makes, then answers from that
+  recording as `--recording` does (`learnreplay.StateAt` at `--cycle`, the
+  last by default). The answer is the one the three commands give on files:
+
+  ```
+  whatif capture --prometheus URL --namespace NS --role-of ... --from T0 --to T1 -o w.capture.jsonl.gz
+  whatif generate -in w.capture.jsonl.gz -o w.jsonl
+  whatif slo-to-rate --recording w.jsonl --namespace NS --tpot 4ms
+  ```
+
+  `TestPrometheus_TheAnswerIsTheFilesAnswer` holds the two to the same
+  output, byte for byte in text and in JSON, but for `source`, which names
+  where the answer was read from.
+- **The window's flags are capture's**, with the same meaning, defaults and
+  checks: [What-if capture](../developer-guide/whatif-capture.md) lists
+  them, and its safety holds here too (the timeout, the token sent over https
+  to Prometheus' own host only, the CA file, the window and sample bounds
+  that `--force` lifts, every sample on the step grid). Without
+  `--prometheus` each of them is a usage error; `--recording` and
+  `--prometheus` together are one too.
+- **Memory.** Nothing is written to disk, so this mode holds more at once
+  than `capture` does: the range queries' samples (as capture holds them,
+  bounded by `whatifsource.MaxSamples` unless `--force`), then the gzipped
+  capture, the capture unzipped, and the generated recording, all in RAM.
+  `--force` lifts the bound on the first only; for a window near the bound,
+  capture and generate to files instead.
+- **`--namespace`** is required, and is both the namespace captured and the
+  one answered for.
+- **`--batch-cap`** is the engine's batch cap the window is captured with, as
+  `capture --batch-cap`: the engine then prices at it, as a controller would
+  have. It is not a second cap to price at. To price another cap, capture
+  and generate the window once, then ask `--recording` with `--batch-cap`.
+- **The standalone flags above that are not built yet** (`--kubeconfig`,
+  `--lookback`, `--flow-control` and the `--fc-*` settings) are not in this
+  mode. The role map is `--kube-state-metrics` or `--role-of`, as for
+  capture.
+- **Warnings** (`--insecure-skip-verify`, a batch cap given twice) and
+  the capture's caveats, as `generate` prints them (`whatif: caveat: ...`),
+  go to stderr, so that `-o json` is still one object.
+- **The text answer** opens with the window it was answered from:
+  `answered for NS/MODEL from URL, T0 to T1 every STEP (captured and
+  generated in memory)`. The rest, the footer included, is the text
+  `--recording` prints on the files.
+- **Secrets in the URL.** The URL is printed, in the source line and in
+  `source.window`, as its scheme and host alone. Its userinfo (a user and
+  password), path (a gateway's `/t/TOKEN/`), query (`?token=...`) and
+  fragment are dropped, not redacted value by value, since any of them can
+  carry a secret. In an error message (capture's too, in text and in the
+  `-o json` error object), they are replaced by `REDACTED`, in one pass,
+  since the HTTP client quotes a request's whole URL when it cannot send it.
+  The userinfo, the whole query and each `key=value` pair are replaced at
+  any length. The path, the password and each query value on its own are
+  replaced only when at least 4 characters long, so that a short value
+  (`x=1`) does not rewrite every `1` in the message. Each is matched as
+  written and in both escapings of a space (`+` and `%20`). The
+  `--bearer-token-file` token is never printed: it travels in the
+  `Authorization` header, over https, to Prometheus' own host only.
+- **Exit codes** are capture's and the question's. `2`: a usage error, a
+  window too large without `--force`, a role map that attributes no Pod, a
+  model or cycle the window does not hold. `1`: a failed range query
+  (`whatifsource.ErrQueryFailed`), or a replay that fails inside the
+  analyzers. `3`: a role refused. With `-o json`, an error is one JSON error
+  object, as in recording mode.
+- **The JSON** names the window in `source.window` (`prometheus`, the URL's
+  scheme and host alone, `from`, `to`, `stepSeconds` and `roles`), and
+  `source.recording` is empty. The field is new and optional, absent in
+  recording mode, so `schemaVersion` stays `1`.
+
 ### JSON output
 
 `-o json` (or `--output json`) writes one object. Abridged from the worked
@@ -815,7 +901,7 @@ four results only `meanTPOT` is kept here):
 | --- | --- |
 | `schemaVersion` | The schema below; a change to any key is a new version. |
 | `question` | `replicas-to-slo` or `slo-to-rate`. |
-| `source` | The recording, the model, `firstCycle` (1), `lastCycle` (the cycle answered at) and `totalCycles` (the recording's), with their clocks. Absent on an error object. |
+| `source` | The recording, the model, `firstCycle` (1), `lastCycle` (the cycle answered at) and `totalCycles` (the recording's), with their clocks. With `--prometheus`, `recording` is empty and `window` names the window: `prometheus` (the URL's scheme and host alone), `from`, `to`, `stepSeconds`, and `roles` (`kube-state-metrics` or `role-of`); absent in recording mode. Absent on an error object. |
 | `bands` | How the bands were drawn: block bootstrap, `blockCycles`, `resamples`, `seed`, the percentiles. Absent on an error object. |
 | `roles[]` | One per decode variant priced: `inputs` (what it was priced from) and `results`. |
 | `inputs.line` | The ITL line (`a` in seconds per unit of fill, `b` in seconds), its `tier`, the `readings` it was fitted from, their `observedFill` range and `fromCycle`-`toCycle`, and of the bootstrap's `resamples` how many (`tierChanges`) landed at another tier. |
@@ -1007,6 +1093,12 @@ source.model string
 source.namespace string
 source.recording string
 source.totalCycles number
+source.window object
+source.window.from string
+source.window.prometheus string
+source.window.roles string
+source.window.stepSeconds number
+source.window.to string
 ```
 <!-- whatif-json-schema-v1: end -->
 
