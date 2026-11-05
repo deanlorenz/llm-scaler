@@ -418,9 +418,22 @@ func ttftInput() domain.AnalyzerInput {
 	}
 }
 
+// The kind start-time recording, one golden per controller start (learner PR
+// 5, "Recording" in analyzer-learner.md): the first golden in which a variant
+// sets replicaStartSeconds, and the first recorded with the snapshot on.
+const (
+	startSeedFixture         = "start-seed"
+	startSeedRestartFixture  = "start-seed-restart"
+	startSeedRestart2Fixture = "start-seed-restart-2"
+)
+
+// startSeedFixtures is the three start-seed goldens, in the order they ran.
+var startSeedFixtures = []string{startSeedFixture, startSeedRestartFixture, startSeedRestart2Fixture}
+
 // r1Goldens is the goldens recorded with the R1 fields: the TTFT track's
-// prefill-stress runs (P2).
-var r1Goldens = []string{ttftThreePodsFixture, ttftSaturatedFixture, ttftOpenLongFixture, ttftOpenShortFixture}
+// prefill-stress runs (P2), and the start-seed runs.
+var r1Goldens = []string{ttftThreePodsFixture, ttftSaturatedFixture, ttftOpenLongFixture, ttftOpenShortFixture,
+	startSeedFixture, startSeedRestartFixture, startSeedRestart2Fixture}
 
 // ttftFieldNames are the R1 field names as a recording writes them.
 var ttftFieldNames = []string{"QueueLengthKnown", "AvgServiceTimeKnown", "AvgTTFTKnown", "PromptTokensBuckets",
