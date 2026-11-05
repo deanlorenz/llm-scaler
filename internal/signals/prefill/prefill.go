@@ -231,11 +231,21 @@ type Estimate struct {
 	APromptMin float64
 	APromptMax float64
 
-	// F is the de-biased imbalance, at least 1; zero when refused.
+	// F is the de-biased imbalance, at least 1; zero when refused. It is
+	// the median over every minute kept, whatever the pod count of each:
+	// the figure the log reads.
 	F         float64
 	FRefused  Refusal
 	FSamples  int
 	FPodsLast int
+	// FByPods is the de-biased imbalance at each pod count, the median of
+	// the minutes taken at that count only, for a count with at least
+	// MinImbalanceMinutes of them; FSamplesByPods is how many minutes each
+	// count kept, whether or not it gives an f. An f learned at one count
+	// is not an f at another (docs/proposals/slo-tiers.md, decision 1).
+	// Nil when no minute was kept.
+	FByPods        map[int]float64
+	FSamplesByPods map[int]int
 
 	// Admitted is how many rows were admitted this cycle, and Refused how
 	// many were not, by reason.
@@ -279,10 +289,12 @@ type podState struct {
 	lastSeen time.Time
 }
 
-// fSample is one minute's de-biased imbalance.
+// fSample is one minute's de-biased imbalance, and how many pods it was
+// read over.
 type fSample struct {
-	at time.Time
-	f  float64
+	at   time.Time
+	f    float64
+	pods int
 }
 
 // keyState is what one key keeps.
