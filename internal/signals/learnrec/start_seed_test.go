@@ -66,26 +66,29 @@ const goldenDir = "../../engines/analyzers/learnreplay/testdata/goldens"
 // Every variant state in every golden recording reads back and is written
 // again byte for byte. In those recorded before the seed, none names a seed
 // field: a field added to the state without omitzero fails here on its first
-// state. The start-seed goldens were recorded after it, and a state there that
-// carries the seed comes back byte for byte too.
+// state. The start-seed goldens were recorded after it: each holds states
+// that carry the seed, and those come back byte for byte too.
 func TestStartSeed_APre5aRecordingIsWrittenAgainByteForByte(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join(goldenDir, "*", "recording.jsonl.gz"))
 	require.NoError(t, err)
 	require.NotEmpty(t, files, "no golden recordings found under %s", goldenDir)
 
-	total, seeded := 0, 0
+	total := 0
+	seeded := map[string]int{}
 	for _, f := range files {
 		n := 0
-		afterSeed := strings.HasPrefix(filepath.Base(filepath.Dir(f)), "start-seed")
+		golden := filepath.Base(filepath.Dir(f))
+		afterSeed := strings.HasPrefix(golden, "start-seed")
 		eachRecordedState(t, f, func(raw json.RawMessage) {
 			n++
 			if !afterSeed {
 				assert.NotContains(t, string(raw), "StartSeed", "%s: a pre-5a state names a seed field", f)
-			} else if strings.Contains(string(raw), "StartSeed") {
-				seeded++
 			}
 			var st domain.VariantReplicaState
 			require.NoError(t, Unmarshal(raw, &st), f)
+			if st.StartSeedSet {
+				seeded[golden]++
+			}
 			again, err := Marshal(st)
 			require.NoError(t, err, f)
 			require.Equal(t, string(raw), string(again), "%s: a recorded state is not written again byte for byte", f)
@@ -94,8 +97,10 @@ func TestStartSeed_APre5aRecordingIsWrittenAgainByteForByte(t *testing.T) {
 	}
 	// Not an empty pass: the goldens hold states, and the walk read them.
 	require.Greater(t, total, 100, "the walk read only %d states", total)
-	require.Positive(t, seeded, "no state of the start-seed goldens carries the seed")
-	t.Logf("%d states across %d recordings, %d with a seed", total, len(files), seeded)
+	for _, golden := range []string{"start-seed", "start-seed-restart", "start-seed-restart-2"} {
+		require.Positive(t, seeded[golden], "no state of %s carries the seed", golden)
+	}
+	t.Logf("%d states across %d recordings, with a seed per golden: %v", total, len(files), seeded)
 }
 
 // eachRecordedState calls fn with the raw bytes of every variant state an
