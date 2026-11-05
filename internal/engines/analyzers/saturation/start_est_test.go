@@ -36,7 +36,7 @@ func TestReplicaStartEstimate(t *testing.T) {
 		// Not averaged with it. The seed is a guess and the measurement is not,
 		// so blending them would keep a wrong number in force for several starts.
 		a := NewSaturationAnalyzer(capacity.NewStore())
-		a.noteReplicaStart(key, "ns", variant,
+		a.noteReplicaStartFor(startNote{key: key, namespace: "ns", variant: variant},
 			[]domain.ReplicaMetrics{replica("d0", 82, false)},
 			logr.Discard())
 		if got := a.startSeconds[key]; got != 82 {
@@ -46,10 +46,10 @@ func TestReplicaStartEstimate(t *testing.T) {
 
 	t.Run("later measurements move it slowly", func(t *testing.T) {
 		a := NewSaturationAnalyzer(capacity.NewStore())
-		a.noteReplicaStart(key, "ns", variant,
+		a.noteReplicaStartFor(startNote{key: key, namespace: "ns", variant: variant},
 			[]domain.ReplicaMetrics{replica("d0", 67, false)},
 			logr.Discard())
-		a.noteReplicaStart(key, "ns", variant,
+		a.noteReplicaStartFor(startNote{key: key, namespace: "ns", variant: variant},
 			[]domain.ReplicaMetrics{replica("d1", 82, false)},
 			logr.Discard())
 		// 67 then 82 at alpha 0.3 -> 71.5. Run T's own spread, and the point is
@@ -65,11 +65,11 @@ func TestReplicaStartEstimate(t *testing.T) {
 		// Folding it in repeatedly would walk the estimate to that one figure and
 		// turn the histogram into a count of cycles.
 		a := NewSaturationAnalyzer(capacity.NewStore())
-		a.noteReplicaStart(key, "ns", variant,
+		a.noteReplicaStartFor(startNote{key: key, namespace: "ns", variant: variant},
 			[]domain.ReplicaMetrics{replica("d0", 67, false)},
 			logr.Discard())
 		for i := 0; i < 20; i++ {
-			a.noteReplicaStart(key, "ns", variant,
+			a.noteReplicaStartFor(startNote{key: key, namespace: "ns", variant: variant},
 				[]domain.ReplicaMetrics{replica("d0", 82, false)},
 				logr.Discard())
 		}
@@ -83,7 +83,7 @@ func TestReplicaStartEstimate(t *testing.T) {
 		// tell the projection replicas arrive almost instantly, and the fleet
 		// would size for a backlog that never stops growing.
 		a := NewSaturationAnalyzer(capacity.NewStore())
-		a.noteReplicaStart(key, "ns", variant,
+		a.noteReplicaStartFor(startNote{key: key, namespace: "ns", variant: variant},
 			[]domain.ReplicaMetrics{replica("bridge-0", 1, true)},
 			logr.Discard())
 		if _, stored := a.startSeconds[key]; stored {
@@ -93,7 +93,7 @@ func TestReplicaStartEstimate(t *testing.T) {
 
 	t.Run("an unmeasured replica contributes nothing", func(t *testing.T) {
 		a := NewSaturationAnalyzer(capacity.NewStore())
-		a.noteReplicaStart(key, "ns", variant,
+		a.noteReplicaStartFor(startNote{key: key, namespace: "ns", variant: variant},
 			[]domain.ReplicaMetrics{replica("d0", 0, false)},
 			logr.Discard())
 		if _, stored := a.startSeconds[key]; stored {
@@ -106,7 +106,7 @@ func TestReplicaStartEstimate(t *testing.T) {
 		other := makeReplicaMetrics("o0", "other-v", 400_000, tracedKv, 10, 1000, 6000)
 		other.Ready = true
 		other.StartSeconds = 300
-		a.noteReplicaStart(key, "ns", variant,
+		a.noteReplicaStartFor(startNote{key: key, namespace: "ns", variant: variant},
 			[]domain.ReplicaMetrics{other}, logr.Discard())
 		if _, stored := a.startSeconds[key]; stored {
 			t.Fatalf("an estimate is stored from a replica that measured nothing")
@@ -115,7 +115,7 @@ func TestReplicaStartEstimate(t *testing.T) {
 
 	t.Run("the seen set is swept, and the estimate dies with its window", func(t *testing.T) {
 		a := NewSaturationAnalyzer(capacity.NewStore())
-		a.noteReplicaStart(key, "ns", variant,
+		a.noteReplicaStartFor(startNote{key: key, namespace: "ns", variant: variant},
 			[]domain.ReplicaMetrics{replica("d0", 67, false)},
 			logr.Discard())
 		if len(a.startSeenPods) != 1 {
@@ -137,7 +137,7 @@ func TestReplicaStartEstimate(t *testing.T) {
 		for i := 0; i < 4; i++ {
 			rms = append(rms, replica(fmt.Sprintf("d%d", i), 70, false))
 		}
-		a.noteReplicaStart(key, "ns", variant, rms, logr.Discard())
+		a.noteReplicaStartFor(startNote{key: key, namespace: "ns", variant: variant}, rms, logr.Discard())
 		if len(a.startSeenPods) != 4 {
 			t.Fatalf("seen pods = %d, want 4", len(a.startSeenPods))
 		}
@@ -164,9 +164,9 @@ func TestReplicaStartEstimateIdentityAndOutliers(t *testing.T) {
 		// first recorded it and the other never measured at all -- while the
 		// first namespace looked correct, so nothing appeared wrong.
 		a := NewSaturationAnalyzer(capacity.NewStore())
-		a.noteReplicaStart(key, "ns-a", variant,
+		a.noteReplicaStartFor(startNote{key: key, namespace: "ns-a", variant: variant},
 			[]domain.ReplicaMetrics{replica("ns-a", "rel-decode-0", 67)}, logr.Discard())
-		a.noteReplicaStart("ns-b|model|"+variant, "ns-b", variant,
+		a.noteReplicaStartFor(startNote{key: "ns-b|model|" + variant, namespace: "ns-b", variant: variant},
 			[]domain.ReplicaMetrics{replica("ns-b", "rel-decode-0", 300)}, logr.Discard())
 		if got := a.startSeconds[key]; got != 67 {
 			t.Fatalf("ns-a estimate = %v, want 67", got)
@@ -182,14 +182,14 @@ func TestReplicaStartEstimateIdentityAndOutliers(t *testing.T) {
 		// variant that disappears entirely -- a set keyed per pod cannot be
 		// left to that.
 		a := NewSaturationAnalyzer(capacity.NewStore())
-		a.noteReplicaStart(key, "ns", variant,
+		a.noteReplicaStartFor(startNote{key: key, namespace: "ns", variant: variant},
 			[]domain.ReplicaMetrics{replica("ns", "d0", 67), replica("ns", "d1", 70)},
 			logr.Discard())
 		if len(a.startSeenPods) != 2 {
 			t.Fatalf("seen = %d, want 2", len(a.startSeenPods))
 		}
 		// d1 goes away; the fleet scaled down.
-		a.noteReplicaStart(key, "ns", variant,
+		a.noteReplicaStartFor(startNote{key: key, namespace: "ns", variant: variant},
 			[]domain.ReplicaMetrics{replica("ns", "d0", 67)}, logr.Discard())
 		if len(a.startSeenPods) != 1 {
 			t.Fatalf("seen = %d after d1 left, want 1", len(a.startSeenPods))
@@ -199,13 +199,13 @@ func TestReplicaStartEstimateIdentityAndOutliers(t *testing.T) {
 	t.Run("one variant's cycle does not forget another's pods", func(t *testing.T) {
 		a := NewSaturationAnalyzer(capacity.NewStore())
 		other := "ns|model|other-v"
-		a.noteReplicaStart(key, "ns", variant,
+		a.noteReplicaStartFor(startNote{key: key, namespace: "ns", variant: variant},
 			[]domain.ReplicaMetrics{replica("ns", "d0", 67)}, logr.Discard())
 		rm := makeReplicaMetrics("o0", "other-v", 400_000, tracedKv, 10, 1000, 6000)
 		rm.Ready = true
 		rm.Namespace = "ns"
 		rm.StartSeconds = 80
-		a.noteReplicaStart(other, "ns", "other-v", []domain.ReplicaMetrics{rm}, logr.Discard())
+		a.noteReplicaStartFor(startNote{key: other, namespace: "ns", variant: "other-v"}, []domain.ReplicaMetrics{rm}, logr.Discard())
 		if len(a.startSeenPods) != 2 {
 			t.Fatalf("seen = %d, want 2 -- the prune is scoped by key prefix", len(a.startSeenPods))
 		}
@@ -216,9 +216,9 @@ func TestReplicaStartEstimateIdentityAndOutliers(t *testing.T) {
 		// False->True transition. A probe blip 45 minutes in reports 2700 s,
 		// which at alpha 0.3 would move a 67 s estimate to about 857 s.
 		a := NewSaturationAnalyzer(capacity.NewStore())
-		a.noteReplicaStart(key, "ns", variant,
+		a.noteReplicaStartFor(startNote{key: key, namespace: "ns", variant: variant},
 			[]domain.ReplicaMetrics{replica("ns", "d0", 67)}, logr.Discard())
-		a.noteReplicaStart(key, "ns", variant,
+		a.noteReplicaStartFor(startNote{key: key, namespace: "ns", variant: variant},
 			[]domain.ReplicaMetrics{replica("ns", "d1", 2700)}, logr.Discard())
 		if got := a.startSeconds[key]; got != 67 {
 			t.Fatalf("estimate = %v, want it unmoved at 67", got)
@@ -236,11 +236,11 @@ func TestReplicaStartEstimateIdentityAndOutliers(t *testing.T) {
 		// (start_confirm_test.go).
 		a := NewSaturationAnalyzer(capacity.NewStore())
 		a.startConfirmsByPod = false
-		a.noteReplicaStart(key, "ns", variant,
+		a.noteReplicaStartFor(startNote{key: key, namespace: "ns", variant: variant},
 			[]domain.ReplicaMetrics{replica("ns", "d0", 67)}, logr.Discard())
 		// N rejections, then admitted on the sighting after them.
 		for i := 0; i <= maxConsecutiveStartOutliers; i++ {
-			a.noteReplicaStart(key, "ns", variant,
+			a.noteReplicaStartFor(startNote{key: key, namespace: "ns", variant: variant},
 				[]domain.ReplicaMetrics{replica("ns", "slow", 300)}, logr.Discard())
 		}
 		if got := a.startSeconds[key]; got <= 67 {

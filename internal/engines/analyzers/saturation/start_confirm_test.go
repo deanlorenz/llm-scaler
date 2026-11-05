@@ -49,18 +49,18 @@ func confirmAnalyzer(t *testing.T, on bool) *SaturationAnalyzer {
 	if err := a.SetSwitchesForReplay(map[string]bool{SwitchStartConfirmsByDistinctPod: on}); err != nil {
 		t.Fatal(err)
 	}
-	a.noteReplicaStart(confirmKey, "ns", confirmVariant, confirmRows(confirmReplica("d0", 70)), logr.Discard())
+	a.noteReplicaStartFor(startNote{key: confirmKey, namespace: "ns", variant: confirmVariant}, confirmRows(confirmReplica("d0", 70)), logr.Discard())
 	if got := a.startSeconds[confirmKey]; got != 70 {
 		t.Fatalf("precondition: estimate = %v, want 70", got)
 	}
 	return a
 }
 
-// confirmCycle is one noteReplicaStart for confirmKey, the clock 30 s on.
+// confirmCycle is one noteReplicaStartFor for confirmKey, the clock 30 s on.
 func confirmCycle(a *SaturationAnalyzer, logger logr.Logger, rows ...domain.ReplicaMetrics) {
 	at := a.now().Add(30 * time.Second)
 	a.now = func() time.Time { return at }
-	a.noteReplicaStart(confirmKey, "ns", confirmVariant, rows, logger)
+	a.noteReplicaStartFor(startNote{key: confirmKey, namespace: "ns", variant: confirmVariant}, rows, logger)
 }
 
 func near(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
@@ -200,7 +200,7 @@ func TestStartConfirm_TheMedianOfTheRun(t *testing.T) {
 		{"even", []float64{400, 100, 300, 200}, 250},
 	} {
 		a := NewSaturationAnalyzer(capacity.NewStore())
-		a.noteReplicaStart(confirmKey, "ns", confirmVariant, confirmRows(confirmReplica("d0", 30)), logr.Discard())
+		a.noteReplicaStartFor(startNote{key: confirmKey, namespace: "ns", variant: confirmVariant}, confirmRows(confirmReplica("d0", 30)), logr.Discard())
 		rows := make([]domain.ReplicaMetrics, 0, len(c.samples))
 		for i, s := range c.samples {
 			rows = append(rows, confirmReplica(fmt.Sprintf("p%d", i), s))
@@ -242,7 +242,7 @@ func TestStartConfirm_TheRelogIsAtExactlyItsInterval(t *testing.T) {
 	step := func(d time.Duration) {
 		at := first.Add(d)
 		a.now = func() time.Time { return at }
-		a.noteReplicaStart(confirmKey, "ns", confirmVariant, confirmRows(confirmReplica("s1", 300)), logger)
+		a.noteReplicaStartFor(startNote{key: confirmKey, namespace: "ns", variant: confirmVariant}, confirmRows(confirmReplica("s1", 300)), logger)
 	}
 	step(startOutlierRelog - time.Nanosecond)
 	if lines != 1 {
@@ -267,7 +267,7 @@ func TestStartConfirm_ARunEndedThisCycleIsLoggedAsEmpty(t *testing.T) {
 	confirmCycle(a, logr.Discard(), confirmReplica("s1", 300), confirmReplica("s2", 300))
 	at := a.now().Add(startOutlierRelog)
 	a.now = func() time.Time { return at }
-	a.noteReplicaStart(confirmKey, "ns", confirmVariant,
+	a.noteReplicaStartFor(startNote{key: confirmKey, namespace: "ns", variant: confirmVariant},
 		confirmRows(confirmReplica("n1", 70), confirmReplica("s1", 300), confirmReplica("s2", 300)), logger)
 	if len(lines) != 2 {
 		t.Fatalf("%d lines, want s1 and s2 logged again: %v", len(lines), lines)
@@ -326,7 +326,7 @@ func TestStartConfirm_ARestartDropsTheRun(t *testing.T) {
 }
 
 // (b) through Analyze: the wiring (analyze.go hands each variant's rows to
-// noteReplicaStart under its window key) and the switch, end to end. Three
+// noteReplicaStartFor under its window key) and the switch, end to end. Three
 // rollouts of a one-replica variant to a 300 s image.
 func TestStartConfirm_ThroughAnalyze(t *testing.T) {
 	run := func(on bool) []float64 {
@@ -470,10 +470,10 @@ func TestStartConfirm_TheRunIsBounded(t *testing.T) {
 func TestStartConfirm_KeysAreIsolated(t *testing.T) {
 	a := confirmAnalyzer(t, true)
 	other := "ns|model|" + confirmVariant + "|H200|1"
-	a.noteReplicaStart(other, "ns", confirmVariant, confirmRows(confirmReplica("d0", 70)), logr.Discard())
-	a.noteReplicaStart(confirmKey, "ns", confirmVariant,
+	a.noteReplicaStartFor(startNote{key: other, namespace: "ns", variant: confirmVariant}, confirmRows(confirmReplica("d0", 70)), logr.Discard())
+	a.noteReplicaStartFor(startNote{key: confirmKey, namespace: "ns", variant: confirmVariant},
 		confirmRows(confirmReplica("p1", 300), confirmReplica("p2", 300)), logr.Discard())
-	a.noteReplicaStart(other, "ns", confirmVariant, confirmRows(confirmReplica("q1", 300)), logr.Discard())
+	a.noteReplicaStartFor(startNote{key: other, namespace: "ns", variant: confirmVariant}, confirmRows(confirmReplica("q1", 300)), logr.Discard())
 	if got := a.startSeconds[other]; got != 70 {
 		t.Fatalf("other key = %v: it opened on the first key's refusals", got)
 	}
@@ -551,8 +551,8 @@ func TestStartConfirm_TheRefusedPodsGoWithTheVariant(t *testing.T) {
 	base := time.Now()
 	a := NewSaturationAnalyzer(capacity.NewStore())
 	a.now = func() time.Time { return base }
-	a.noteReplicaStart(confirmKey, "ns", confirmVariant, confirmRows(confirmReplica("d0", 70)), logr.Discard())
-	a.noteReplicaStart(confirmKey, "ns", confirmVariant,
+	a.noteReplicaStartFor(startNote{key: confirmKey, namespace: "ns", variant: confirmVariant}, confirmRows(confirmReplica("d0", 70)), logr.Discard())
+	a.noteReplicaStartFor(startNote{key: confirmKey, namespace: "ns", variant: confirmVariant},
 		confirmRows(confirmReplica("d0", 70), confirmReplica("s1", 300)), logr.Discard())
 	if len(a.startOutlierPods[confirmKey]) != 1 {
 		t.Fatalf("precondition: s1 was refused")
@@ -570,7 +570,7 @@ func TestStartConfirm_TheRefusedPodsGoWithTheVariant(t *testing.T) {
 	}
 
 	f := NewSaturationAnalyzer(capacity.NewStore())
-	f.noteReplicaStart(confirmKey, "ns", confirmVariant,
+	f.noteReplicaStartFor(startNote{key: confirmKey, namespace: "ns", variant: confirmVariant},
 		confirmRows(confirmReplica("d0", 70), confirmReplica("s1", 300)), logr.Discard())
 	if len(f.startOutlierPods[confirmKey]) != 1 {
 		t.Fatalf("precondition: s1 was refused")

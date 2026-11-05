@@ -192,6 +192,11 @@ type AnalyzerResult struct {
 	// fastest the throughput floor projects on: a consumer pacing work that
 	// is not done until the replica serves must not count on the fastest.
 	RoleStartSeconds map[string]float64
+	// RoleStartSeeded names each role whose RoleStartSeconds is a
+	// ScaledObject's replicaStartSeconds seed, no variant of it measured; a
+	// role it does not name was measured. Left out of a recording while nil
+	// (omitzero), so a recording made before it reads back unchanged.
+	RoleStartSeeded map[string]bool `learnrec:"omitzero"`
 
 	// VariantBusiestQueueLoad is, for each decode or aggregated variant with
 	// a Ready replica reading, the deepest waiting queue on any one of its

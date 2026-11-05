@@ -244,11 +244,13 @@ var keyRules = map[string]rule{
 	"K2BorrowedSince": {class: classComposite}, "K2Stash": {class: classComposite},
 	"LowerBounds": {class: classComposite}, "PriorK2": {class: classComposite},
 	"StartSeconds": {class: classComposite}, "Throughput": {class: classComposite},
+	"StartSamples": {class: classComposite}, "StartAdmittedAt": {class: classComposite},
 	"ThroughputArgs": {class: classComposite}, "ThroughputStash": {class: classComposite},
 	"VariantSeenAt": {class: classComposite}, "Reports": {class: classComposite},
 
 	"HeldRoleDemand": {class: classVocab}, "HotRankDemand": {class: classVocab},
 	"RoleDemand": {class: classVocab}, "RoleStartSeconds": {class: classVocab},
+	"RoleStartSeeded":     {class: classVocab},
 	"AnalyzerDefinitions": {class: classVocab}, "Engines": {class: classVocab},
 	"Parameters": {class: classVocab},
 	// The composite's per-role maps, keyed by role.

@@ -516,15 +516,17 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	// and the projection becomes a pure subtraction that under-orders. Better no
 	// projection than one built on two different rates. Read before the
 	// backlog, whose engine queues are capped over the same drain horizon.
-	var startSeconds map[string]float64
+	var starts roleStarts
 	if input.ArrivalRate > 0 {
-		startSeconds = a.startSecondsByRole(input, roleOf)
+		starts = a.startSecondsByRole(input, roleOf)
 	}
 	// Per role: the requests waiting in the engines' own queues, and the
 	// residency charge on them. Own replicas only -- a bridge's queue is
 	// counted toward the variant's demand by aggregation, but it is not this
-	// variant's backlog to size for.
-	backlog := make(map[string]float64)
+	// variant's backlog to size for. The engine queues are capped over a
+	// drain horizon the start time sets, so the capped backlog is built per
+	// set of start times (backlogFor, below).
+	//
 	// queued is the same backlog uncapped: what noteBacklogGrowth compares.
 	queued := make(map[string]float64)
 	residency := make(map[string]float64)
@@ -533,29 +535,39 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 			continue
 		}
 		role := roleOf[rc.VariantName]
-		// Every queue counts, whichever replica it stands on. The backlog is
-		// requests to drain at mu, and a sibling's KV room says nothing about
-		// whether the fleet has the throughput to drain them: in the floor's
-		// own model a replica's mu is already spent on its share of lambda.
-		// Leaving out the share an idle sibling had room for read three
-		// replicas queued 60 each beside a fourth never routed to at 5.88
-		// replicas, against the 9.41 the fleet needed with perfect routing.
-		//
-		// But a request waiting in one engine's queue can only be served by
-		// that engine: replicas added take new arrivals and nothing else. So a
-		// replica's own queue counts for at most what the replica itself
-		// drains in the floor's drain time, mu x T (localQueueBacklog), which
-		// is one replica's worth: the floor then asks for lambda / mu plus the
-		// replicas that are queued. Charged in full, in review, a queue of
-		// 1000 pinned on one of four replicas (mu 1, lambda 2) ordered 21.96
-		// replicas where at most 3.53 can help, and three replicas each queued
-		// 600 at lambda 5 ordered 41.2 against the 9.41 of use. A queue each
-		// replica drains inside T is untouched, so the short fleet above still
-		// reads 9.41. The router's queue (eppQueued, below) is not capped: the
-		// router can send it to any replica, new ones included.
-		backlog[role] += localQueueBacklog(rc, floor.DrainHorizon(floor.BacklogDrainSeconds, startSeconds[role]))
 		queued[role] += float64(rc.QueueLength)
 		residency[role] += float64(rc.LocalQueueDemand)
+	}
+	localBacklog := func(startSeconds map[string]float64) map[string]float64 {
+		backlog := make(map[string]float64)
+		for _, rc := range replicas {
+			if rc.FromWarmPool {
+				continue
+			}
+			role := roleOf[rc.VariantName]
+			// Every queue counts, whichever replica it stands on. The backlog is
+			// requests to drain at mu, and a sibling's KV room says nothing about
+			// whether the fleet has the throughput to drain them: in the floor's
+			// own model a replica's mu is already spent on its share of lambda.
+			// Leaving out the share an idle sibling had room for read three
+			// replicas queued 60 each beside a fourth never routed to at 5.88
+			// replicas, against the 9.41 the fleet needed with perfect routing.
+			//
+			// But a request waiting in one engine's queue can only be served by
+			// that engine: replicas added take new arrivals and nothing else. So a
+			// replica's own queue counts for at most what the replica itself
+			// drains in the floor's drain time, mu x T (localQueueBacklog), which
+			// is one replica's worth: the floor then asks for lambda / mu plus the
+			// replicas that are queued. Charged in full, in review, a queue of
+			// 1000 pinned on one of four replicas (mu 1, lambda 2) ordered 21.96
+			// replicas where at most 3.53 can help, and three replicas each queued
+			// 600 at lambda 5 ordered 41.2 against the 9.41 of use. A queue each
+			// replica drains inside T is untouched, so the short fleet above still
+			// reads 9.41. The router's queue (eppQueued, below) is not capped: the
+			// router can send it to any replica, new ones included.
+			backlog[role] += localQueueBacklog(rc, floor.DrainHorizon(floor.BacklogDrainSeconds, startSeconds[role]))
+		}
+		return backlog
 	}
 	// The residency charge is per role -- estimateSchedulerQueueDemand already
 	// splits the queue's tokens by the role that serves them.
@@ -587,7 +599,6 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	}
 	for role, tokens := range eppByRole {
 		if queueOwner == "" || role == queueOwner {
-			backlog[role] += eppQueued
 			queued[role] += eppQueued
 		}
 		residency[role] += tokens
@@ -612,10 +623,19 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	// read 23.53 by 30 s and by 120 s. grew lingers for up to
 	// BacklogGrowthLookback after the growth stops, so the full charge
 	// outlives it by up to a minute: an over-order, the cheap direction.
-	for role, q := range queued {
-		if grew[role] {
-			backlog[role] = q
+	backlogFor := func(startSeconds map[string]float64) map[string]float64 {
+		backlog := localBacklog(startSeconds)
+		for role := range eppByRole {
+			if queueOwner == "" || role == queueOwner {
+				backlog[role] += eppQueued
+			}
 		}
+		for role, q := range queued {
+			if grew[role] {
+				backlog[role] = q
+			}
+		}
+		return backlog
 	}
 
 	// The hold cap is measured against the threshold the ENGINE sizes RC
@@ -623,8 +643,21 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	// a cap drawn at the policy-level figure while the engine divides by a
 	// per-analyzer override would leave a gap that orders a replica.
 	scaleUp, _ := cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
-	tf := floor.Estimate(offeredArrivalRate(input), replicas, variants, backlog,
-		floor.BacklogDrainSeconds, scaleUp, staleShape, eppQueued, startSeconds)
+	estimate := func(startSeconds map[string]float64) floor.Floor {
+		return floor.Estimate(offeredArrivalRate(input), replicas, variants, backlogFor(startSeconds),
+			floor.BacklogDrainSeconds, scaleUp, staleShape, eppQueued, startSeconds)
+	}
+	// Priced at the start learner PR 5c sizes at (the seed, or the larger of
+	// the blend and the measurement), and, where that differs, at the start
+	// 5b sized at; each role keeps the larger floor. A longer start projects
+	// more arrivals, but also more drain from the Ready replicas, and past
+	// the drain time it spreads the backlog over a longer horizon, so on its
+	// own it can order less. 5c is to err toward more replicas only.
+	tf := estimate(starts.sized)
+	startSeconds, startSources := starts.sized, starts.source
+	if !maps.Equal(starts.sized, starts.parent) {
+		tf, startSeconds, startSources = pickLargerFloor(tf, estimate(starts.parent), starts)
+	}
 
 	// Prefill with no mu: the scheduler queue's prompts are not resident work
 	// for prefill (file header). Only the disaggregated case has a prefill
@@ -737,7 +770,7 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 		startEst, startKnown := startSeconds[role]
 		startFrom := "none"
 		if startKnown {
-			startFrom = startSource(true)
+			startFrom = startSources[role]
 		}
 		logger.Info("throughput-demand-floor",
 			"modelID", input.ModelID, "namespace", input.Namespace, "role", role,
@@ -795,6 +828,36 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 			"roles", roles)
 	}
 	return totalDemand
+}
+
+// pickLargerFloor is, per role, the larger of the floor priced at 5c's
+// start (sized) and at 5b's (parent), with the start each role was priced at
+// and its source: a role parent orders more for takes parent's term and the
+// measured start 5b used, or no start where 5b projected none. Neither input
+// is changed.
+func pickLargerFloor(sized, parent floor.Floor, starts roleStarts) (floor.Floor, map[string]float64, map[string]string) {
+	out := sized
+	out.ByRole, out.Terms = maps.Clone(sized.ByRole), maps.Clone(sized.Terms)
+	startSeconds, startSources := maps.Clone(starts.sized), maps.Clone(starts.source)
+	if startSeconds == nil {
+		startSeconds, startSources = map[string]float64{}, map[string]string{}
+	}
+	for role, tokens := range parent.ByRole {
+		if have, ok := out.ByRole[role]; ok && !(tokens > have) {
+			continue
+		}
+		if out.ByRole == nil {
+			out.ByRole, out.Terms = map[string]float64{}, map[string]floor.Term{}
+		}
+		out.ByRole[role], out.Terms[role] = tokens, parent.Terms[role]
+		if s, ok := starts.parent[role]; ok {
+			startSeconds[role], startSources[role] = s, startSourceMeasured
+		} else {
+			delete(startSeconds, role)
+			delete(startSources, role)
+		}
+	}
+	return out, startSeconds, startSources
 }
 
 // A NOTE ON WHAT THE MODEL TOTAL HOLDS, and why there is no correction here.

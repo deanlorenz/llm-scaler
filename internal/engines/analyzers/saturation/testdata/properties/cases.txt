@@ -101,6 +101,7 @@ first-sample/mu/low-first-reading
 first-sample/shape-hold/first-shape-no-change
 first-sample/slo-itl/one-reading
 first-sample/start-time/between-sample-and-default
+first-sample/start-time/seed-bounds
 known-truth/batch-cap/declared-engine-queue-0
 known-truth/batch-cap/seq-bound-flow-control
 known-truth/borrowed-k2/lower-only

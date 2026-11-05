@@ -101,8 +101,7 @@ const (
 	ScalerAddressKey = "scalerAddress"
 
 	// ReplicaStartSecondsKey seeds how long one replica of this variant takes to
-	// become Ready. Parsed and recorded, NOT READ YET -- see the note at the
-	// end of this comment.
+	// become Ready.
 	//
 	// The demand floor projects the arriving queue forward over that time, so
 	// the figure decides how much backlog a scale-up is sized for. A 0.6B model
@@ -110,19 +109,20 @@ const (
 	// with a cold JIT cache -- which is too wide a range for any built-in
 	// default to serve both.
 	//
-	// It is a SEED, not a setting: the first replica observed starting replaces
-	// it with a measurement, and wva_replica_start_seconds_estimate carries a
-	// source label saying which is in force.
+	// It is a SEED, not a setting: the saturation analyzer sizes a variant
+	// with no start measured at it, blends it with the first starts measured,
+	// and from the third distinct Pod uses the measurement alone
+	// (saturation/start_est.go, learner PR 5c);
+	// wva_replica_start_seconds_estimate carries a source label saying which
+	// is in force.
 	//
 	// ParseMeta reads it as a plain decimal number of seconds in
 	// [MinReplicaStartSeconds, MaxReplicaStartSeconds], 1 to 3600. Any other
 	// value is ignored, as if unset, and never rejects the trigger: before it
 	// was parsed any value was accepted, and a rejected trigger freezes the
 	// model. The engine puts it on the analyzer input
-	// (domain.VariantReplicaState.StartSeedSeconds), so a learner recording
-	// carries it, but no analyzer reads it yet: the start-time learner does
-	// from step 5c of docs/proposals/analyzer-learner.md. Until then the
-	// analyzer uses its own default, replaced by the first measurement.
+	// (domain.VariantReplicaState.StartSeedSeconds), where the saturation
+	// analyzer reads it, and a learner recording carries it.
 	ReplicaStartSecondsKey = "replicaStartSeconds"
 
 	// DefaultOutputTokensKey seeds how many tokens one request of this model

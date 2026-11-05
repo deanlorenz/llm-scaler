@@ -105,6 +105,7 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 	a.beginK2Cycle(input.Namespace, input.ModelID)
 	a.beginMuCycle(input.Namespace, input.ModelID)
 	a.beginITLCycle(input.Namespace, input.ModelID)
+	a.beginStartCycle(input.Namespace, input.ModelID)
 
 	c := a.newCycle(ctx, input, satConfig)
 	c.observeFleetShape()
@@ -123,6 +124,7 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 	a.closeK2Cycle(ctx, input.Namespace, input.ModelID)
 	a.closeMuCycle(ctx, input.Namespace, input.ModelID, caps)
 	a.closeITLCycle(input.Namespace, input.ModelID, c.rolesByVariant)
+	a.closeStartCycle(input.Namespace, input.ModelID, c.rolesByVariant)
 	// Prefill capacity, observed and logged; nothing below reads it
 	// (prefill_observe.go).
 	c.observePrefill()
@@ -136,6 +138,7 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 		roleOf[variant] = domain.CanonicalRole(role)
 	}
 
+	roleStart, roleSeeded := a.slowestStartSecondsByRole(input, roleOf)
 	return &domain.AnalyzerResult{
 		AnalyzerName:      a.Name(),
 		ModelID:           input.ModelID,
@@ -146,7 +149,8 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 		RoleDemand:        d.roleDemand,
 		HeldRoleDemand:    held,
 		HotRankDemand:     hotRank,
-		RoleStartSeconds:  a.slowestStartSecondsByRole(input, roleOf),
+		RoleStartSeconds:  roleStart,
+		RoleStartSeeded:   roleSeeded,
 		// The raw rows, deferred requests included: a queue read too deep
 		// here only keeps a replica (decodeCapacityView says which readers
 		// take the view).
@@ -182,10 +186,13 @@ type cycle struct {
 	logger logr.Logger
 
 	// newCycle: variant-level identity, and whether decode is saturated.
-	gpusByVariant   map[string]int
-	rolesByVariant  map[string]string
-	accelByVariant  map[string]string
-	decodeSaturated bool
+	gpusByVariant  map[string]int
+	rolesByVariant map[string]string
+	accelByVariant map[string]string
+	// startSeedByVariant is each seeded variant's replicaStartSeconds
+	// (domain.VariantReplicaState.StartSeedSeconds); nil when none is.
+	startSeedByVariant map[string]float64
+	decodeSaturated    bool
 	// busyNowRoles is the roles with a Ready replica busy NOW by its
 	// instant KV (rolesBusyNow). A sibling idle now is charged its instant
 	// KV, not its one-minute peak, while its role is in it.
@@ -296,6 +303,12 @@ func (a *SaturationAnalyzer) newCycle(
 		c.gpusByVariant[vs.VariantName] = vs.GPUsPerReplica
 		c.rolesByVariant[vs.VariantName] = vs.Role
 		c.accelByVariant[vs.VariantName] = vs.AcceleratorName
+		if vs.StartSeedSet {
+			if c.startSeedByVariant == nil {
+				c.startSeedByVariant = map[string]float64{}
+			}
+			c.startSeedByVariant[vs.VariantName] = vs.StartSeedSeconds
+		}
 		// Resolved once per cycle, here, because the ITL window is keyed by
 		// it and reading the store per replica would take its lock on every
 		// row. An empty fingerprint is a usable answer: itlPhysicsKey falls
@@ -500,10 +513,11 @@ func (c *cycle) fitLines() {
 		// be reviewed for it.
 		variantKey := c.a.itlWindowKey(c.input.Namespace, c.input.ModelID, variant,
 			c.accelByVariant[variant], c.gpusByVariant[variant])
-		c.a.noteReplicaStart(variantKey,
-			c.input.Namespace, variant, c.input.ReplicaMetrics, c.logger)
-
 		role := c.rolesByVariant[variant]
+		c.a.noteReplicaStartFor(startNote{key: variantKey, namespace: c.input.Namespace,
+			modelID: c.input.ModelID, variant: variant, role: domain.CanonicalRole(role),
+			seed: c.startSeedByVariant[variant]}, c.input.ReplicaMetrics, c.logger)
+
 		if !c.a.itlLineRole(role) {
 			continue
 		}

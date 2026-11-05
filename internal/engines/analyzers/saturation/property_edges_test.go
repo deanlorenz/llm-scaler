@@ -753,7 +753,7 @@ func probeStartConfirm(_ *rand.Rand, n float64) (bool, error) {
 	s.add(100)
 	est := s.add(500)
 	for range int(n) - 1 {
-		s.a.noteReplicaStart(s.key, "test-ns", "v", s.pods, logr.Discard())
+		s.a.noteReplicaStartFor(startNote{key: s.key, namespace: "test-ns", variant: "v"}, s.pods, logr.Discard())
 		est = s.a.startSeconds[s.key]
 	}
 	return est != 100, nil

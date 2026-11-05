@@ -35,6 +35,10 @@ type ShareTimingInputs struct {
 	// ReplicaStart is the measured time a new replica of the group takes to
 	// become Ready (ShareReplicaStart), zero when none is measured.
 	ReplicaStart time.Duration
+	// ReplicaStartSeeded says ReplicaStart is a ScaledObject's
+	// replicaStartSeconds seed, no role it came from measured
+	// (ShareReplicaStart); the start's source is then "seed".
+	ReplicaStartSeeded bool
 }
 
 // ShareReplicaStart is the slowest measured replica start among a group's
@@ -46,21 +50,39 @@ type ShareTimingInputs struct {
 // is not a positive number (NaN included) is ignored, and one beyond the bound
 // is taken at the bound -- compared in seconds, before it becomes a Duration
 // it may not fit.
-func ShareReplicaStart(startSeconds map[string]float64) time.Duration {
+//
+// seeded says the slowest role's start is a seed (seededRoles names it); a
+// tie with a measured role is measured.
+func ShareReplicaStart(startSeconds map[string]float64, seededRoles map[string]bool) (start time.Duration, seeded bool) {
 	slowest := 0.0
-	for _, s := range startSeconds {
-		if s > slowest {
-			slowest = s
+	for role, s := range startSeconds {
+		switch {
+		case s > slowest:
+			slowest, seeded = s, seededRoles[role]
+		case s == slowest && !seededRoles[role]:
+			seeded = false
 		}
 	}
 	switch {
 	case !(slowest > 0):
-		return 0
+		return 0, false
 	case slowest >= shareMaxReplicaStart.Seconds():
-		return shareMaxReplicaStart
+		return shareMaxReplicaStart, seeded
 	}
-	return time.Duration(slowest * float64(time.Second))
+	return time.Duration(slowest * float64(time.Second)), seeded
 }
+
+// The values of a ShareTimingSource: the group's own measurement, the
+// ScaledObject, the pod template, the cluster's default for an unset value,
+// or a ScaledObject's replicaStartSeconds seed for the start (published as
+// ShareTimingFromScaledObject).
+const (
+	ShareTimingMeasured         = "measured"
+	ShareTimingFromScaledObject = "scaledobject"
+	ShareTimingFromPod          = "pod"
+	ShareTimingDefault          = "default"
+	ShareTimingSeed             = "seed"
+)
 
 // ShareTimingSource says where each derived value came from, for the log line
 // and the effective-timing gauge (§8.4): measured, scaledobject, pod, default.
@@ -88,12 +110,12 @@ func DeriveShareTimings(in ShareTimingInputs, l *ShareLedger) (ShareTimings, Sha
 			src[name] = from
 			return *v
 		}
-		src[name] = "default"
+		src[name] = ShareTimingDefault
 		return def
 	}
-	window := pick("window", in.ScaleDownWindow, hpaDefaultScaleDownWindow, "scaledobject")
-	polling := pick("polling", in.PollingInterval, kedaDefaultPolling, "scaledobject")
-	grace := pick("grace", in.TerminationGrace, k8sDefaultTerminationGrace, "pod")
+	window := pick("window", in.ScaleDownWindow, hpaDefaultScaleDownWindow, ShareTimingFromScaledObject)
+	polling := pick("polling", in.PollingInterval, kedaDefaultPolling, ShareTimingFromScaledObject)
+	grace := pick("grace", in.TerminationGrace, k8sDefaultTerminationGrace, ShareTimingFromPod)
 
 	bound := window + hpaSyncPeriod + polling + grace
 	release := bound
@@ -101,7 +123,7 @@ func DeriveShareTimings(in ShareTimingInputs, l *ShareLedger) (ShareTimings, Sha
 	if l != nil {
 		if m, ok := l.MeasuredRelease(); ok {
 			release = m
-			src["release"] = "measured"
+			src["release"] = ShareTimingMeasured
 		}
 	}
 	scheduling := shareSchedulingAllowance
@@ -109,10 +131,15 @@ func DeriveShareTimings(in ShareTimingInputs, l *ShareLedger) (ShareTimings, Sha
 		scheduling *= 2
 	}
 	start := shareModelLoadEstimate
-	src["start"] = "default"
+	src["start"] = ShareTimingDefault
 	if in.ReplicaStart > 0 {
 		start = min(in.ReplicaStart, shareMaxReplicaStart)
-		src["start"] = "measured"
+		src["start"] = ShareTimingMeasured
+		if in.ReplicaStartSeeded {
+			// A ScaledObject's seed, which can be under the 5 min default
+			// as well as over it (learner PR 5c).
+			src["start"] = ShareTimingSeed
+		}
 	}
 	latency := release + start + 3*in.Cycle
 	return ShareTimings{

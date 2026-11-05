@@ -19,7 +19,7 @@ func TestLearnersNamesEachLearnerOnce(t *testing.T) {
 		}
 		seen[n] = true
 	}
-	for _, want := range []string{K2, ITL} {
+	for _, want := range []string{K2, ITL, Start} {
 		if !seen[want] {
 			t.Fatalf("Learners() = %v, want %s on it", Learners(), want)
 		}

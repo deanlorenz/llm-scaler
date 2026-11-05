@@ -603,8 +603,8 @@ func (e *Engine) shareOverrides(g allocation.ShareGroup, variantKey func(string,
 // slowest measured replica start among its roles (ShareReplicaStart).
 func (e *Engine) shareTimingInputs(g allocation.ShareGroup,
 	accessor func(role, variant string) scaletarget.ScaleTargetAccessor) allocation.ShareTimingInputs {
-	in := allocation.ShareTimingInputs{Cycle: e.optimizeInterval(),
-		ReplicaStart: allocation.ShareReplicaStart(g.StartSeconds)}
+	in := allocation.ShareTimingInputs{Cycle: e.optimizeInterval()}
+	in.ReplicaStart, in.ReplicaStartSeeded = allocation.ShareReplicaStart(g.StartSeconds, g.StartSeeded)
 	maxDur := func(cur **time.Duration, d time.Duration) {
 		if *cur == nil || d > **cur {
 			v := d
