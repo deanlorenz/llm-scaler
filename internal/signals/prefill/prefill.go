@@ -169,6 +169,9 @@ type Cycle struct {
 	// Settle is the settle tracker; nil admits every Ready replica as
 	// settled (a caller with no tracker, a test).
 	Settle *Settle
+	// ALineOnly fits a from the straight line alone, as P1 shipped: the
+	// quadratic off (saturation.SwitchPrefillAQuadratic).
+	ALineOnly bool
 	// Now is the cycle's time.
 	Now time.Time
 }
@@ -230,6 +233,18 @@ type Estimate struct {
 	// spans.
 	APromptMin float64
 	APromptMax float64
+	// AModel is the curve the intercept was taken from (fixed.go): the
+	// quadratic where the minutes carry three parameters, the line
+	// otherwise, and ALineReason why the line (empty with the quadratic).
+	// ASlope is the curve's per-token term b and ACurve its c, zero on the
+	// line; AClusters is how many prompt-length clusters of
+	// MinQuadraticClusterMinutes minutes the minutes held. Set whenever a
+	// curve was fitted, the intercept refused or not.
+	AModel      AModel
+	ALineReason LineReason
+	ASlope      float64
+	ACurve      float64
+	AClusters   int
 
 	// F is the de-biased imbalance, at least 1; zero when refused.
 	F         float64
@@ -407,7 +422,7 @@ func (o *Observer) Observe(c Cycle) Estimate {
 
 	ks.noteImbalance(shares, allAdmitted, c.Now)
 	est.capacity(ks, c, sglang)
-	est.fixed(ks, c.Disaggregated)
+	est.fixed(ks, c.Disaggregated, c.ALineOnly)
 	est.imbalance(ks, shares, serving)
 	if est.VP > 0 && est.SlopeBound > 0 && est.VP > est.SlopeBound {
 		est.VPAboveSlopeBound = true

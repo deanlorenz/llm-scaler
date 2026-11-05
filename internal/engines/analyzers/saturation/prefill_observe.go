@@ -45,6 +45,15 @@ const SwitchPrefillCapacityObserve = "prefill-capacity-observe"
 // stay V_P's source for prefill.BusyWindow.
 const SwitchPrefillBusyMinutes = "prefill-busy-minutes"
 
+// SwitchPrefillAQuadratic is the replay switch for the curved fit of the
+// fixed latency a (prefill/fixed.go). On, a is the intercept of the convex
+// curve s0 + b*I + c*I*I through the low-load minutes' prompt-length
+// clusters where at least prefill.MinQuadraticClusters of them span
+// prefill.MinQuadraticSpread, and of the straight line otherwise. Off, a is
+// always the line's intercept, as P1 shipped. It moves no golden output: the
+// observation writes no state any output reads.
+const SwitchPrefillAQuadratic = "prefill-a-quadratic"
+
 // prefillKVFull is the pods of rows whose KV cache is full (kvFull at
 // kvCacheThreshold), nil when none is. A full prefill pod can hold a queue
 // it cannot schedule, so its minute is not a busy one.
@@ -196,7 +205,7 @@ func (c *cycle) observePrefill() {
 		est := a.prefillObserver.Observe(prefill.Cycle{
 			Key: key, Engine: engine, Disaggregated: true, Rows: rows[variant],
 			QueueMin: queueMin, KVFull: kvFullPods, DownstreamSaturated: c.decodeSaturated,
-			Bound: bounds[variant], Settle: view, Now: a.now(),
+			Bound: bounds[variant], Settle: view, ALineOnly: !a.prefillAQuadratic, Now: a.now(),
 		})
 		c.logger.V(perReplicaLogLevel).Info("prefill-capacity-observed",
 			"modelID", c.input.ModelID, "namespace", c.input.Namespace, "variant", variant, "key", key,
@@ -208,6 +217,8 @@ func (c *cycle) observePrefill() {
 			"a", est.A, "aIntercept", est.AIntercept, "aOverhead", est.AOverhead,
 			"aOverheadKnown", est.AOverheadKnown, "aRefused", string(est.ARefused), "aSamples", est.ASamples,
 			"aPromptMin", est.APromptMin, "aPromptMax", est.APromptMax,
+			"aModel", string(est.AModel), "aLineReason", string(est.ALineReason),
+			"aSlope", est.ASlope, "aCurve", est.ACurve, "aClusters", est.AClusters,
 			"queuedMinutes", est.VPQueuedMinutes, "longestQueuedRun", est.VPLongestQueuedRun,
 			"busyMinutes", est.VPBusyMinutes, "busyMinutesOn", a.prefillBusyMinutes,
 			"queueMinPods", queueMinPods, "kvFullPods", len(kvFullPods),

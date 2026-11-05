@@ -96,6 +96,7 @@ CoarseTPOTBucket
 Collected
 Composite
 CompositeSignal
+ConcaveFit
 ConfigMap
 Configuration
 Conflict
@@ -180,6 +181,7 @@ Learned
 Learner
 Limited
 LineNearGate
+LineOnly
 Loaded
 METRICS_BIND_ADDRESS
 METRICS_CERT_KEY
@@ -198,6 +200,7 @@ NVIDIA
 N_dec
 NaN
 Name
+NarrowPromptClusters
 NewEngine
 NewTypeInventoryWithUsage
 No
@@ -333,6 +336,7 @@ TierUnstable
 TokenGapPercentile
 TooFewImbalanceMinutes
 TooFewLowLoadMinutes
+TooFewPromptClusters
 TooManySlots
 TriggeredScaleUp
 UP
@@ -378,13 +382,18 @@ _
 __name__
 a
 a-zA-Z0-9_
+aClusters
+aCurve
 aIntercept
+aLineReason
+aModel
 aOverhead
 aOverheadKnown
 aPromptMax
 aPromptMin
 aRefused
 aSamples
+aSlope
 abort
 about
 above
@@ -1410,6 +1419,7 @@ lineShapeG
 lineSlopeAge
 lineSlopeHeld
 lineTier
+linear
 lines
 list
 listed
@@ -1861,6 +1871,7 @@ preemption
 preemptions
 preempts
 prefill
+prefill-a-quadratic
 prefill-bound
 prefill-busy-minutes
 prefill-capacity-observe
@@ -1921,6 +1932,7 @@ published
 publishes
 python3
 q
+quadratic
 quantile
 quantization
 quarter

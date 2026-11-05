@@ -64,6 +64,30 @@ Three derivations matter here:
   revision said 10.1 ms: that was an intercept fitted against
   `AvgInputTokens`, the long-window prompt mean, not the minute the service
   time covers, and it left the overhead out.
+- **Long prompts bend the line.** The per-token prefill cost rises with the
+  prompt, from attention. On the TTFT track's run 3 (Qwen3-0.6B at TP1 on an
+  H200, low load at 8k, 30k and 37k prompts) the medians cost 8.3e-6 s a
+  token from 8k to 30k and 1.33e-5 from 30k to 37k. A straight line through
+  the 86 low-load rows meets the axis at −52 ms, and P1 refused `a`
+  (`NonPositiveIntercept`). So `a` is the intercept of a convex curve
+  `s0 + b·I + c·I²` (`c > 0`) where the minutes can carry three parameters,
+  and of the line otherwise (`prefill/fixed.go`, `Estimate.AModel`). The
+  minutes are grouped into prompt clusters: sorted by length, a minute
+  within 10% (`MaxPromptDrift`) of the one before it joins its cluster. The
+  curve is fitted when at least 3 clusters of at least 3 minutes each are
+  left, and the longest cluster's median prompt is at least 3x the
+  shortest's. It is fitted through each cluster's median prompt and median
+  service time, not through the minutes: the intercept is extrapolated from
+  the shortest cluster, and one slow minute (run 3's 0.375 s at 38k, against
+  0.30 s for the other minutes at that length) moves an untrimmed curve's
+  intercept from 3.7 ms to 21.5 ms. A fitted `c` that is not above zero
+  falls back to the line. A curve whose intercept is not above zero is
+  refused. Through P1's 15 admitted minutes of run 3, the curve gives `s0`
+  3.69 ms, `b` 1.59e-6 s a token and `c` 1.77e-10 s a token², so `a` is
+  16.3 ms with the least overhead of 12.6 ms. Through the medians of all 86
+  rows it gives 2.8 ms. `ols-sweep` (1k and 6k) is two clusters and keeps
+  the line. The 1/slope validation bound is always the line's. The replay
+  switch is `prefill-a-quadratic`.
 
 ## Prefill capacity
 
@@ -104,6 +128,23 @@ The **low-load slope** of service time against prompt length is an upper bound,
 not a source. A lone prompt runs as `T(I) = s0 + c·I`, and a busy pod's steps of
 `B` tokens run at `B/(s0 + c·B) < 1/c`, so `1/slope ≥ V_P`: on `ols-sweep` about
 520k tok/s against an offered peak of 30k. It is a validation signal only.
+On long prompts the curve is convex, and the line's slope is its chord, so
+the bound is looser there, not wrong.
+
+**What the curve means for `own_prefill`.** P3 prices a request's own
+prefill as `a + I/V_P`, which is linear in `I`. With a convex curve, the
+time per token at the current length is
+`b + c·I`, above the line's slope at a short length. The curve is used for
+`a` only, and `own_prefill` stays linear. That holds as long as `V_P` comes
+from the current prompt length: a busy pod's steps cost what that length
+costs, so a `V_P` measured there already includes the attention cost, and
+`I/V_P` at that length is consistent with it. A `V_P` measured on shorter
+prompts would read high on long ones and over-promise. S1's `VPShapeMoved`
+rule prevents that: it flags a `V_P` whose prompt length differs from the
+current mean by more than 1.2x either way
+([S1 decisions, 2](slo-tiers.md#2-v_p-in-production)). The curve gives no
+reason to change P3. The intercept it supplies is a positive fixed cost
+where the line gave none.
 `--assume-vp` supplies `V_P` by hand for an illustration or for hardware not yet
 measured; every answer built on it is flagged ASSUMED.
 
@@ -343,8 +384,11 @@ in all its repeats ([S1 decisions](slo-tiers.md#s1-decisions)):
    [SLO tiers](slo-tiers.md) open question 4). `T_xfer` as a per-request term
    depends on it. *Recommend:* settle it on the staircase's P/D run before
    `T_xfer` leaves "omitted".
-4. **Does `V_P` vary with prompt length?** *Recommend:* key it by input bucket;
-   add a term only if bucket B misses by more than 15%.
+4. **Does `V_P` vary with prompt length?** It does: run 3's low-load medians
+   cost about 60% more per token from 30k to 37k than from 8k to 30k. `a`
+   takes the curve (above), and S1 flags a `V_P` learned at another length
+   (`VPShapeMoved`). *Recommend:* key `V_P` by input bucket; add a term to
+   `own_prefill` only if bucket B misses by more than 15%.
 5. **Burstiness.** *Recommend:* estimate `Ca²` from the arrival rate's variance,
    cap that estimate at 4; the sticky-routing term is not capped.
 6. **Several priority bands.** *Recommend:* the highest band only, flagged.

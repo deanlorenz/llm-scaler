@@ -144,6 +144,14 @@ var replaySwitches = map[string][]string{
 	// moves no golden: no committed recording carries a queue minimum, and
 	// the observation only logs. Its unit tests hold it (heldBy).
 	saturation.SwitchPrefillBusyMinutes: nil,
+
+	// P1's curved fit of a (saturation.SwitchPrefillAQuadratic), on main
+	// after P1's busy minutes (c192d49a7): a is the intercept of the convex
+	// curve through the low-load minutes' prompt clusters where three of
+	// them span 3x, and of the line otherwise. It moves no golden: the
+	// observation only logs, and no output reads a. Its unit tests hold it
+	// (heldBy).
+	saturation.SwitchPrefillAQuadratic: nil,
 }
 
 // learner4b2Seams is learner PR 4b-2's switches, earlier seams now (merged
@@ -369,6 +377,11 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestPrefillBusy_AnEmptiedOrUnreadMinuteIsNotBusy"},
 		{"../saturation", "TestPrefillBusy_AKVFullMinuteIsNotBusy"},
 		{"../saturation", "TestPrefillBusy_ADataParallelPodIsALowerBound"},
+	},
+	// P1's curved fit of a: it runs the switch on and off through Analyze
+	// and asserts both (the curve's 2.8 ms on, the line's refusal off).
+	saturation.SwitchPrefillAQuadratic: {
+		{"../saturation", "TestPrefillAQuad_TheSwitchFitsTheCurve"},
 	},
 	// Issue #275's lift: an aggregated figure sizes once the GPS check has
 	// agreed. Both run the switch on and fail with it off: the first checks
