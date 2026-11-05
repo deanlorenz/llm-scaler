@@ -8,7 +8,27 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
+
+// Every rate source the code defines is a word the export keeps. Before
+// "neighbour" and "lower-bound" were in the vocabulary, a recording whose
+// variant priced from a neighbouring bucket's measured rate was refused
+// ("ServiceRate.RateSource in saturation.Analyze holds a value that is not
+// allowed after the export"), the kind start-time recording among them.
+func TestVocabulary_HoldsEveryServiceRateSource(t *testing.T) {
+	for _, source := range []string{
+		domain.ServiceRateSourceDerived,
+		domain.ServiceRateSourceBorrowedLine,
+		domain.ServiceRateSourceMeasured,
+		domain.ServiceRateSourceNeighbour,
+		domain.ServiceRateSourceLowerBound,
+		domain.ServiceRateSourceReportOnly,
+		domain.ServiceRateSourceDerivedAggregated,
+	} {
+		assert.True(t, vocabulary[source], "%q is not in the export's vocabulary", source)
+	}
+}
 
 // A run under the utilization-share optimizer records the policy's optimizer
 // type, config.OptimizerTypeUtilizationShare, in every saturation Analyze.
