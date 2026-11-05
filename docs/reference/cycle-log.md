@@ -203,6 +203,15 @@ stays between S/2 and 2S. `sizedSeconds` is never shorter than a measured
 start, so the blend can only make the controller order more. From the third
 pod on, both are the measured estimate.
 
+`A variant's replicaStartSeconds is contradicted by its measured starts` is
+logged once per variant and seed, and again after a controller restart, while
+the mean of the measured starts is outside half to twice the seed:
+`replicaStartSeconds`, `measuredSeconds`, `pods`, `lowSeconds`, `highSeconds`,
+`publishedSeconds`, `sizedSeconds` and `podsNeeded` (3). Until three pods have
+started, the seed holds the estimate within those bounds, and sizing at no less
+than half the seed. For a variant with one replica that can take days. Correct
+or remove the seed on the ScaledObject.
+
 `replica-start-outlier-rejected` is logged when one replica's start is more
 than `factor` (3) times the estimate and is left out: `namespace`, `variant`,
 `pod`, `sampleSeconds`, `estimateSeconds`, `factor`, `distinctPods` (how many

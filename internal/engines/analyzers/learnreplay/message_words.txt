@@ -109,6 +109,7 @@ Configuration
 Conflict
 Consider
 Context
+Correct
 Cost-aware
 Could
 CrashLoopBackOff
@@ -758,6 +759,7 @@ contains
 contamination-heterogeneity
 context_length
 continues
+contradicted
 contributors
 control
 controller
@@ -1150,6 +1152,7 @@ hi
 hicache_size
 hierarchical
 high
+highSeconds
 highest
 highestGroup
 hint
@@ -1479,6 +1482,7 @@ lose
 lost
 low-confirmed
 lowHoldFor
+lowSeconds
 lower
 lower-bound
 lower-only
@@ -1886,6 +1890,7 @@ pod/
 podGPUs
 pod_name
 pods
+podsNeeded
 podsOmitted
 point
 pointer
@@ -1969,6 +1974,7 @@ provided
 provider
 providersSkipped
 published
+publishedSeconds
 publishes
 python3
 q
@@ -2092,6 +2098,7 @@ replica-start-measured
 replica-start-outlier-rejected
 replicaDemand
 replicaKvTokens
+replicaStartSeconds
 replicas
 replicasByVariant
 replicasImplied
@@ -2423,6 +2430,7 @@ startOutliers
 startRestored
 startSamples
 startSeconds
+startSeedWarned
 startSeenPods
 startSource
 started
@@ -2514,6 +2522,7 @@ they
 this
 thisControllerGPUs
 those
+three
 threshold
 thresholdPct
 throughput

@@ -294,12 +294,13 @@ func (e *wholeNodeEnv) waitReady(want map[string]int32, timeout time.Duration) {
 // register creates a model's ScaledObject on WVA's metric and waits until KEDA
 // wired it; it goes in cleanup. kind is the scale target's kind, "" for a
 // Deployment.
-func (e *wholeNodeEnv) register(so, target, modelID string, minR, maxR int32, kind string) {
+func (e *wholeNodeEnv) register(so, target, modelID string, minR, maxR int32, kind string,
+	extra ...fixtures.ScaledObjectOption) {
 	GinkgoHelper()
-	opts := []fixtures.ScaledObjectOption{
+	opts := append([]fixtures.ScaledObjectOption{
 		fixtures.WithWVATriggerMetadata(modelID, "10.0"),
 		fixtures.WithScaledObjectScaleDownStabilizationWindow(wholeNodeWindow),
-	}
+	}, extra...)
 	if kind != "" {
 		opts = append(opts, fixtures.WithScaledObjectScaleTargetKind(kind))
 	}

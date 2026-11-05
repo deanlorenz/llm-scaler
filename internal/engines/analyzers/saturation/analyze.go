@@ -138,6 +138,7 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 		roleOf[variant] = domain.CanonicalRole(role)
 	}
 
+	roleStart, roleSeeded := a.slowestStartSecondsByRole(input, roleOf)
 	return &domain.AnalyzerResult{
 		AnalyzerName:      a.Name(),
 		ModelID:           input.ModelID,
@@ -148,7 +149,8 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 		RoleDemand:        d.roleDemand,
 		HeldRoleDemand:    held,
 		HotRankDemand:     hotRank,
-		RoleStartSeconds:  a.slowestStartSecondsByRole(input, roleOf),
+		RoleStartSeconds:  roleStart,
+		RoleStartSeeded:   roleSeeded,
 		// The raw rows, deferred requests included: a queue read too deep
 		// here only keeps a replica (decodeCapacityView says which readers
 		// take the view).

@@ -251,6 +251,11 @@ type SaturationAnalyzer struct {
 	startSamples    map[string]startSample
 	startAdmittedAt map[string]time.Time
 	startRestored   map[string]struct{}
+	// startSeedWarned is, per start key, the seed its first measured start
+	// was logged as contradicting (StartSeedContradictedMessage), so the
+	// warning is once per key and seed. Working state: a restart may log it
+	// again.
+	startSeedWarned map[string]float64
 	// Start time as a learner (start_learner.go): its reports of the cycle
 	// in progress per namespace|model, what learner-write last logged per
 	// start key, and the keys forgotten per namespace|model and variant
@@ -606,6 +611,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		startSamples:           make(map[string]startSample),
 		startAdmittedAt:        make(map[string]time.Time),
 		startRestored:          make(map[string]struct{}),
+		startSeedWarned:        make(map[string]float64),
 		startCycles:            make(map[string][]learn.Report),
 		startLogged:            make(map[string]startLogged),
 		startForgotten:         make(map[string]map[string][]learn.Forgotten),
@@ -968,6 +974,11 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 	for key := range a.startLogged {
 		if a.variantIsStale(key, now, variantTimeout) {
 			delete(a.startLogged, key)
+		}
+	}
+	for key := range a.startSeedWarned {
+		if a.variantIsStale(key, now, variantTimeout) {
+			delete(a.startSeedWarned, key)
 		}
 	}
 	// The arguments the ITL state was learned under, and the baselines put

@@ -136,6 +136,10 @@ type ShareGroup struct {
 	// replica of its slowest measured variant takes to become Ready
 	// (domain.AnalyzerResult.RoleStartSeconds); a role not measured is absent.
 	StartSeconds map[string]float64
+	// StartSeeded names each role of StartSeconds whose start is its
+	// ScaledObject's replicaStartSeconds seed, nothing of it measured
+	// (domain.AnalyzerResult.RoleStartSeeded).
+	StartSeeded map[string]bool
 	// BusiestQueueLoad is, for each role with a reading above zero, the
 	// deepest per-pod waiting queue over its variants on this group's
 	// accelerator, as a fraction of the saturation queue
@@ -250,6 +254,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 				Thresholds:       map[string]float64{},
 				DownThresholds:   map[string]float64{},
 				StartSeconds:     map[string]float64{},
+				StartSeeded:      map[string]bool{},
 				BusiestQueueLoad: map[string]float64{},
 				Origins:          map[string]ShareRoleOrigin{},
 			}
@@ -320,6 +325,9 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 			g.DownThresholds[r.Key] = req.CompositeSignal.ScaleDownBoundary
 			if r.startSeconds > 0 {
 				g.StartSeconds[r.Key] = r.startSeconds
+				if r.startSeeded {
+					g.StartSeeded[r.Key] = true
+				}
 			}
 			if r.busiestQueueLoad > 0 {
 				g.BusiestQueueLoad[r.Key] = r.busiestQueueLoad
@@ -781,6 +789,9 @@ type shareRoleInput struct {
 	// startSeconds is the role's measured replica start, 0 when not measured
 	// (domain.AnalyzerResult.RoleStartSeconds).
 	startSeconds float64
+	// startSeeded says startSeconds is a seed, not a measurement
+	// (domain.AnalyzerResult.RoleStartSeeded).
+	startSeeded bool
 	// busiestQueueLoad is the deepest per-pod queue over the role's variants
 	// on the group's accelerator, as a fraction of the saturation queue
 	// (domain.AnalyzerResult.VariantBusiestQueueLoad).
@@ -906,6 +917,7 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 			},
 			role:             role,
 			startSeconds:     sig.Result.RoleStartSeconds[role],
+			startSeeded:      sig.Result.RoleStartSeeded[role],
 			busiestQueueLoad: busy,
 		})
 	}

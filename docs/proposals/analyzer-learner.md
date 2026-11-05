@@ -2828,20 +2828,36 @@ both on from the constructor: `saturation.SwitchStartReadsSeed`
   Where the two start maps are equal, it prices once.
 - **The seed (A).** A role with no measured variant is sized at its
   fastest variant's seed: projected by the floor (`startSource: seed`) and
-  read by share pacing. Beside a measured sibling, a seed never shortens the
+  read by share pacing. Pacing is the one reader a seed can move *down*: a
+  seed under `shareModelLoadEstimate` (5 min) paces moves faster than main
+  did. The timing source says `seed` (published as `scaledobject`), not
+  `measured`, through `AnalyzerResult.RoleStartSeeded` (omitzero, so no
+  recording changes). Beside a measured sibling, a seed never shortens the
   floor's start: the fastest *measured* variant wins. Share pacing takes the
   slowest variant as sized, seeds included. An unseeded, unmeasured role stays
   unprojected. A seed of 0 or less is no prior.
 - **The gauge.** `wva_replica_start_seconds_estimate` publishes the published
-  figure, with `source` `default`, `seed` or `measured`, and deletes the other
-  two children. With the seed switch off, the labels are the parent's
-  (`seed` for the default).
+  figure, with `source` `default`, `seed`, `blended` (fewer than three Pods
+  measured, with a prior) or `measured`, and deletes the other children. With
+  the seed switch off, the labels are the parent's (`seed` for the default,
+  `measured` for a blend). Round 1 added `blended`: published as
+  `measured`, a seed of 3600 s contradicted by a 70 s start read as a
+  measurement while sizing held at 1800 s or more.
+- **A contradicted seed warns.** While the measured mean lies outside
+  [S/2, 2S], `A variant's replicaStartSeconds is contradicted by its
+  measured starts` is logged at the default level, once per key and seed
+  (working state, so again after a restart). It is the analyzer's line, not
+  the engine's ignored-seed report: only the analyzer knows the measurement.
+  A one-replica variant can stay there for days, and the count survives a
+  restart.
 - **Persistence.** Two new `omitempty` fields: `startSamples` (per key, pods
   and mean, only while fewer than N) and `startAdmittedAt`. The design had n
   and m in one field; it holds both. An estimate with no count has full
   authority, so an older document moves no fleet. A count no live key could
   hold (no Pods, N or more, a mean that is not a positive number) is not
-  installed. Both are exported beside a pending restore's estimate, dropped
+  installed, and a restored mean over 3600 s (the collector's
+  `maxCredibleStartSeconds`) is clamped to it. Both are exported beside a
+  pending restore's estimate, dropped
   with the variant, and trimmed with its liveness in the store.
 - **Learner `start`.** It is on `learn.Learners` (the slo analyzer holds
   none of it). Each cycle it files a `learn.Report` per variant, with

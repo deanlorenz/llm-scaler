@@ -22,11 +22,15 @@ func TestReplicaStartSecondsEstimateKeepsOneSource(t *testing.T) {
 	}{
 		{ReplicaStartSourceDefault, 70},
 		{ReplicaStartSourceSeed, 120},
-		{ReplicaStartSourceMeasured, 233.3},
+		{ReplicaStartSourceBlended, 233.3},
+		{ReplicaStartSourceMeasured, 460},
 		{ReplicaStartSourceDefault, 70},
 	} {
 		SetReplicaStartSecondsEstimate("ns", "v", step.seconds, step.source)
-		for _, s := range replicaStartSources {
+		// Every source, listed here rather than read from replicaStartSources:
+		// a source left off that list is a child never deleted.
+		for _, s := range []string{ReplicaStartSourceDefault, ReplicaStartSourceSeed,
+			ReplicaStartSourceBlended, ReplicaStartSourceMeasured} {
 			v, ok := series(s)
 			if s == step.source {
 				if !ok || v != step.seconds {

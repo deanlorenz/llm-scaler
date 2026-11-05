@@ -1211,17 +1211,20 @@ func ObserveReplicaStartSeconds(namespace, variantName string, seconds float64) 
 }
 
 // The values of the source label on wva_replica_start_seconds_estimate: the
-// controller's 70 s default, the ScaledObject's replicaStartSeconds seed, or a
-// start measured on the variant's Pods.
+// controller's 70 s default, the ScaledObject's replicaStartSeconds seed, a
+// blend of either with fewer than three of the variant's measured starts, or
+// a start measured on three or more of the variant's Pods.
 const (
 	ReplicaStartSourceDefault  = "default"
 	ReplicaStartSourceSeed     = "seed"
+	ReplicaStartSourceBlended  = "blended"
 	ReplicaStartSourceMeasured = "measured"
 )
 
 // replicaStartSources is every source a variant's estimate is published
 // under, the one SetReplicaStartSecondsEstimate deletes the others of.
-var replicaStartSources = []string{ReplicaStartSourceDefault, ReplicaStartSourceSeed, ReplicaStartSourceMeasured}
+var replicaStartSources = []string{ReplicaStartSourceDefault, ReplicaStartSourceSeed,
+	ReplicaStartSourceBlended, ReplicaStartSourceMeasured}
 
 // SetReplicaStartSecondsEstimate publishes the start time the controller
 // estimates for a variant, and where it came from (source, one of the

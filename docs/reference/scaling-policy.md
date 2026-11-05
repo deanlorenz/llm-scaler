@@ -993,8 +993,9 @@ a cluster, and none of them is fixed by a setting other than a floor:
   estimated as the donor's release, the receiver's start, and three
   cycles. The start is the one the controller measures for the group's
   slowest model (`wva_replica_start_seconds_estimate`; the ScaledObject's
-  `replicaStartSeconds`, or 5 minutes, until a replica has started), so a
-  whole-node model's 10 minutes counts as 10. Being one
+  `replicaStartSeconds`, or 5 minutes, until a replica has started; a seed
+  under 5 minutes paces faster than the default), so a whole-node model's
+  10 minutes counts as 10. Being one
   figure per group, a small model beside a whole-node one is paced on the
   whole-node start.
 - **A dip in a slow-draining model's demand, right after the group starts.**

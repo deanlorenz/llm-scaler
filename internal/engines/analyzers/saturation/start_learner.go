@@ -141,7 +141,9 @@ func (a *SaturationAnalyzer) installStartLearnerLocked(key string, s LearnedStat
 	}
 	a.startRestored[key] = struct{}{}
 	if v, ok := s.StartSamples[key]; ok && v.Pods > 0 && v.Pods < startConfirmPods && finitePositive(v.MeanSeconds) {
-		a.startSamples[key] = startSample{pods: v.Pods, mean: v.MeanSeconds}
+		// Clamped at the longest start the collector reports: a mean over
+		// it is no live key's, and would size every start at it.
+		a.startSamples[key] = startSample{pods: v.Pods, mean: min(v.MeanSeconds, maxRestoredStartSeconds)}
 	}
 	if at, ok := s.StartAdmittedAt[key]; ok && !at.IsZero() {
 		if at, inTime := notFuture(at, now); inTime {

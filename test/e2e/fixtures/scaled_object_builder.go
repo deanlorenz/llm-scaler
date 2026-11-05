@@ -103,6 +103,18 @@ func WithScalingPolicy(policy string) ScaledObjectOption {
 	}
 }
 
+// WithReplicaStartSeconds seeds how long one replica of this workload takes
+// to become Ready (the trigger's replicaStartSeconds), as a real workload
+// with a known long start does. Deferred like WithWVATriggerMetadata.
+func WithReplicaStartSeconds(seconds string) ScaledObjectOption {
+	return func(so *kedav1alpha1.ScaledObject) {
+		if so.Annotations == nil {
+			so.Annotations = make(map[string]string)
+		}
+		so.Annotations[pendingReplicaStartKey] = seconds
+	}
+}
+
 // externalScalerAddr is the WVA external-scaler service every fixture points KEDA
 // at by default. Set once from the suite (SetExternalScalerAddress).
 var externalScalerAddr string
@@ -181,6 +193,7 @@ const (
 	pendingWarmPoolKey      = "e2e.llm-d.ai/pending-warm-pool"
 	pendingBorrowPoolKey    = "e2e.llm-d.ai/pending-borrow-pool"
 	pendingWarmCopiesKey    = "e2e.llm-d.ai/pending-warm-copies"
+	pendingReplicaStartKey  = "e2e.llm-d.ai/pending-replica-start-seconds"
 )
 
 // WithWarmPoolSelection names the pool this MODEL may borrow from.
@@ -273,11 +286,13 @@ func applyWVATriggerMetadata(so *kedav1alpha1.ScaledObject) {
 	policy := so.Annotations[pendingScalingPolicyKey]
 	borrowFrom := so.Annotations[pendingBorrowPoolKey]
 	warmCopies := so.Annotations[pendingWarmCopiesKey]
+	replicaStart := so.Annotations[pendingReplicaStartKey]
 	delete(so.Annotations, pendingModelIDKey)
 	delete(so.Annotations, pendingVariantCostKey)
 	delete(so.Annotations, pendingScalingPolicyKey)
 	delete(so.Annotations, pendingBorrowPoolKey)
 	delete(so.Annotations, pendingWarmCopiesKey)
+	delete(so.Annotations, pendingReplicaStartKey)
 
 	for i := range so.Spec.Triggers {
 		if so.Spec.Triggers[i].Metadata == nil {
@@ -295,6 +310,9 @@ func applyWVATriggerMetadata(so *kedav1alpha1.ScaledObject) {
 		}
 		if warmCopies != "" {
 			so.Spec.Triggers[i].Metadata[registry.WarmPoolCopiesKey] = warmCopies
+		}
+		if replicaStart != "" {
+			so.Spec.Triggers[i].Metadata[registry.ReplicaStartSecondsKey] = replicaStart
 		}
 	}
 }

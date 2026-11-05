@@ -144,6 +144,7 @@ func composeSignal(
 	result.HeldRoleDemand = maps.Clone(sat.Result.HeldRoleDemand)
 	result.HotRankDemand = maps.Clone(sat.Result.HotRankDemand)
 	result.RoleStartSeconds = maps.Clone(sat.Result.RoleStartSeconds)
+	result.RoleStartSeeded = maps.Clone(sat.Result.RoleStartSeeded)
 	result.VariantBusiestQueueLoad = maps.Clone(sat.Result.VariantBusiestQueueLoad)
 	roles := rolesPresent(sat.Result.VariantCapacities)
 	sized := make(map[string]bool, len(byRole))

@@ -73,7 +73,9 @@ var _ = Describe("DeriveShareTimings", func() {
 
 	DescribeTable("ShareReplicaStart: the slowest measured role, bounded, bad readings ignored",
 		func(seconds map[string]float64, want time.Duration) {
-			Expect(ShareReplicaStart(seconds)).To(Equal(want))
+			got, seeded := ShareReplicaStart(seconds, nil)
+			Expect(got).To(Equal(want))
+			Expect(seeded).To(BeFalse())
 		},
 		Entry("none measured", map[string]float64(nil), time.Duration(0)),
 		Entry("the slowest of a group's roles", map[string]float64{"a": 120, "b": 600}, 10*time.Minute),
@@ -83,6 +85,28 @@ var _ = Describe("DeriveShareTimings", func() {
 		Entry("too large for a Duration", map[string]float64{"a": 1e300}, 30*time.Minute),
 		Entry("infinite", map[string]float64{"a": math.Inf(1)}, 30*time.Minute),
 	)
+
+	DescribeTable("ShareReplicaStart: a seed is named as one only when it is the slowest role's",
+		func(seconds map[string]float64, seededRoles map[string]bool, want time.Duration, wantSeeded bool) {
+			got, seeded := ShareReplicaStart(seconds, seededRoles)
+			Expect(got).To(Equal(want))
+			Expect(seeded).To(Equal(wantSeeded))
+		},
+		Entry("the slowest role seeded", map[string]float64{"a": 120, "b": 600}, map[string]bool{"b": true}, 10*time.Minute, true),
+		Entry("a faster role seeded", map[string]float64{"a": 120, "b": 600}, map[string]bool{"a": true}, 10*time.Minute, false),
+		Entry("a tie with a measured role", map[string]float64{"a": 600, "b": 600}, map[string]bool{"a": true}, 10*time.Minute, false),
+		Entry("a low seed alone", map[string]float64{"a": 60}, map[string]bool{"a": true}, time.Minute, true),
+	)
+
+	It("names a seeded start as seed, under the 5 min default as well as over it", func() {
+		for _, start := range []time.Duration{time.Minute, 20 * time.Minute} {
+			tm, src := DeriveShareTimings(ShareTimingInputs{Cycle: cycle, ReplicaStart: start, ReplicaStartSeeded: true}, nil)
+			Expect(src["start"]).To(Equal("seed"))
+			unseeded, src2 := DeriveShareTimings(ShareTimingInputs{Cycle: cycle, ReplicaStart: start}, nil)
+			Expect(src2["start"]).To(Equal("measured"))
+			Expect(tm.MoveLatency).To(Equal(unseeded.MoveLatency), "the source names the start; it does not change it")
+		}
+	})
 
 	It("gives a gang-scheduled LWS more time to schedule", func() {
 		plain, _ := DeriveShareTimings(ShareTimingInputs{Cycle: cycle}, nil)

@@ -250,6 +250,7 @@ var keyRules = map[string]rule{
 
 	"HeldRoleDemand": {class: classVocab}, "HotRankDemand": {class: classVocab},
 	"RoleDemand": {class: classVocab}, "RoleStartSeconds": {class: classVocab},
+	"RoleStartSeeded":     {class: classVocab},
 	"AnalyzerDefinitions": {class: classVocab}, "Engines": {class: classVocab},
 	"Parameters": {class: classVocab},
 	// The composite's per-role maps, keyed by role.

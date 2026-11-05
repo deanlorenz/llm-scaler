@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -206,7 +207,12 @@ var _ = Describe("Utilization share with a whole-node model: funded by small mod
 		packed = layOutPacked(e, msG, modelG, msS1, modelS1, msS2, modelS2, fixtures.WithStartDelay(startDelay))
 
 		By("Registering all three; S1 and S2 are held at five until G reads short")
-		e.register(soG, depG, modelG, 1, 2, "")
+		// G's long start is seeded, as a real whole-node model's is: until
+		// three of its pods have started, the published estimate blends
+		// the seed with the measurement (learner PR 5c), and one replica
+		// unseeded would publish (2 x 70 + 180) / 3 = 107 s.
+		e.register(soG, depG, modelG, 1, 2, "",
+			fixtures.WithReplicaStartSeconds(strconv.Itoa(int(startDelay.Seconds()))))
 		e.register(soS1, depS1, modelS1, 5, 5, "")
 		e.register(soS2, depS2, modelS2, 5, 5, "")
 		e.load(loadG, msG, modelG, 16)

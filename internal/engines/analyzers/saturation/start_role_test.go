@@ -33,7 +33,7 @@ func TestStartSecondsByRoleFastestAndSlowest(t *testing.T) {
 	}
 
 	fastest := a.startSecondsByRole(input, roleOf).sized
-	slowest := a.slowestStartSecondsByRole(input, roleOf)
+	slowest, _ := a.slowestStartSecondsByRole(input, roleOf)
 	if fastest[domain.RoleDecode] != 70 || slowest[domain.RoleDecode] != 600 {
 		t.Fatalf("decode: fastest %v, slowest %v; want 70 and 600", fastest[domain.RoleDecode], slowest[domain.RoleDecode])
 	}

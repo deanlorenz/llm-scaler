@@ -135,6 +135,9 @@ const (
 	startSourceDefault  = metrics.ReplicaStartSourceDefault
 	startSourceSeed     = metrics.ReplicaStartSourceSeed
 	startSourceMeasured = metrics.ReplicaStartSourceMeasured
+	// startSourceBlended is the gauge's alone: a blend of the prior with
+	// fewer than startConfirmPods measured Pods.
+	startSourceBlended = metrics.ReplicaStartSourceBlended
 )
 
 // startNote names what a cycle's start samples are noted for: the start key,
@@ -172,7 +175,13 @@ type startFigures struct {
 	prior       float64
 	priorSource string
 	// source is startSourceMeasured, startSourceSeed or startSourceDefault.
+	// A blended estimate's source is measured: a measured variant still wins
+	// the floor's start over a seed (startSecondsPerRole).
 	source string
+	// blended says published is a blend of the prior with fewer than
+	// startConfirmPods measured Pods; the gauge then says so
+	// (startGaugeSourceLocked).
+	blended bool
 }
 
 // startFiguresLocked is the start estimate of key, a variant seeded with
@@ -218,7 +227,7 @@ func (a *SaturationAnalyzer) startFiguresLocked(key string, seed float64) startF
 	if seed > 0 {
 		blend = min(max(blend, startSeedLowFactor*seed), startSeedHighFactor*seed)
 	}
-	f.published = blend
+	f.published, f.blended = blend, true
 	f.sized = max(blend, s.mean, e)
 	return f
 }
@@ -258,14 +267,23 @@ func (a *SaturationAnalyzer) noteStartSampleLocked(key string, sample float64, w
 }
 
 // startGaugeSourceLocked is the estimate gauge's source for f: default,
-// seed or measured with SwitchStartReadsSeed on; off, the parent's, which
-// labels the 70 s default "seed". Callers hold a.mu.
+// seed, blended or measured with SwitchStartReadsSeed on; off, the
+// parent's, which labels the 70 s default "seed" (and, the blend on, a
+// blend "measured"). Callers hold a.mu.
 func (a *SaturationAnalyzer) startGaugeSourceLocked(f startFigures) string {
-	if a.startReadsSeed {
-		return f.source
+	switch {
+	case !a.startReadsSeed:
+		return startSource(f.source == startSourceMeasured)
+	case f.blended:
+		return startSourceBlended
 	}
-	return startSource(f.source == startSourceMeasured)
+	return f.source
 }
+
+// maxRestoredStartSeconds bounds a restored mean start
+// (installStartLearnerLocked): the collector reports no start over an hour
+// (collector.maxCredibleStartSeconds), so no live mean exceeds it.
+const maxRestoredStartSeconds = 3600.0
 
 // noteReplicaStart folds this cycle's observed start times into the per-variant
 // estimate, publishes both the observation and the estimate, and forgets the
@@ -450,6 +468,7 @@ func (a *SaturationAnalyzer) noteReplicaStartFor(
 		}
 	}
 	f := a.startFiguresLocked(key, note.seed)
+	contradicted := a.noteSeedContradictionLocked(key, f)
 	gaugeSource := a.startGaugeSourceLocked(f)
 	blends := a.startBlends
 	write := a.noteStartLearnerLocked(note, f, observed, now)
@@ -489,6 +508,46 @@ func (a *SaturationAnalyzer) noteReplicaStartFor(
 		logger.V(logging.DEFAULT).Info("replica-start-measured", kv...)
 	}
 	write.log(logger)
+	if contradicted {
+		// The seed holds the published estimate in [S/2, 2S], and so sizing
+		// at no less than half the seed, until startConfirmPods Pods are
+		// measured, which for a one-replica variant can take days and
+		// survives a restart (the count is in the snapshot).
+		logger.V(logging.DEFAULT).Info(StartSeedContradictedMessage,
+			"namespace", namespace, "variant", variantName,
+			"replicaStartSeconds", f.prior, "measuredSeconds", f.mean, "pods", f.pods,
+			"lowSeconds", startSeedLowFactor*f.prior, "highSeconds", startSeedHighFactor*f.prior,
+			"publishedSeconds", f.published, "sizedSeconds", f.sized, "podsNeeded", startConfirmPods)
+	}
+}
+
+// StartSeedContradictedMessage is logged once per variant key and seed, and
+// again after a controller restart, while the mean of the variant's measured
+// replica starts lies outside [S/2, 2S] of its replicaStartSeconds seed S and
+// fewer than startConfirmPods Pods are measured: the seed is wrong, and
+// holds the estimate until they are.
+const StartSeedContradictedMessage = "WARNING: A variant's replicaStartSeconds is contradicted by its measured starts: " +
+	"the start estimate is held between half and twice the seed until three of its pods have started. " +
+	"Correct or remove the seed on the ScaledObject"
+
+// noteSeedContradictionLocked says whether f is a blend whose measured mean
+// lies outside [S/2, 2S] of its seed S, and records that it said so for that
+// seed, so the warning is logged once per key and seed (and again with a new
+// seed, or after a restart: startSeedWarned is working state). With either
+// 5c switch off there is no blend and nothing to warn of. Callers hold a.mu.
+func (a *SaturationAnalyzer) noteSeedContradictionLocked(key string, f startFigures) bool {
+	if !f.blended || f.priorSource != startSourceSeed {
+		return false
+	}
+	s := f.prior
+	if f.mean >= startSeedLowFactor*s && f.mean <= startSeedHighFactor*s {
+		return false
+	}
+	if warned, ok := a.startSeedWarned[key]; ok && warned == s {
+		return false
+	}
+	a.startSeedWarned[key] = s
+	return true
 }
 
 // startPodKey is the key a replica's start is counted under
@@ -659,11 +718,25 @@ type roleStarts struct {
 // to land, and erring short there moves GPUs for a burst that ends before
 // they serve. A seed longer than a measured sibling lengthens it; a shorter
 // one cannot be the maximum.
+//
+// seeded names each role whose figure is a seed, none of its variants
+// measured (domain.AnalyzerResult.RoleStartSeeded), so share pacing can say
+// its start came from the ScaledObject, not a measurement. A role with a
+// measured variant is never named, even when a slower seed is its maximum:
+// the figure is then the seed only in part of the role.
 func (a *SaturationAnalyzer) slowestStartSecondsByRole(
 	input domain.AnalyzerInput, roleOf map[string]string,
-) map[string]float64 {
-	out, _, _ := a.startSecondsPerRole(input, roleOf, true)
-	return out
+) (out map[string]float64, seeded map[string]bool) {
+	out, sources, parent := a.startSecondsPerRole(input, roleOf, true)
+	for role, src := range sources {
+		if _, measured := parent[role]; src == startSourceSeed && !measured {
+			if seeded == nil {
+				seeded = map[string]bool{}
+			}
+			seeded[role] = true
+		}
+	}
+	return out, seeded
 }
 
 // startSecondsPerRole folds the per-variant estimates as sized into one per

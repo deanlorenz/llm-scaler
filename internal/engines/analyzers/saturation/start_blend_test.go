@@ -167,7 +167,12 @@ func TestStartSeed_AnUnmeasuredSeededVariantIsSizedAtTheSeed(t *testing.T) {
 		a := blendAnalyzer(t, on, true)
 		starts := a.startSecondsByRole(input, roleOf)
 		fastest, sources := starts.sized, starts.source
-		slowest := a.slowestStartSecondsByRole(input, roleOf)
+		slowest, seeded := a.slowestStartSecondsByRole(input, roleOf)
+		if on {
+			assert.Equal(t, map[string]bool{domain.RoleDecode: true}, seeded, "pacing says the start is a seed")
+		} else {
+			assert.Empty(t, seeded)
+		}
 		assert.Empty(t, starts.parent, "5b sized no seed")
 		if on {
 			assert.Equal(t, 120.0, fastest[domain.RoleDecode])
@@ -200,7 +205,9 @@ func TestStartSeed_AMeasuredSiblingWinsTheFloorAndASlowerSeedThePacing(t *testin
 	assert.Equal(t, 90.0, fastest[domain.RoleDecode], "the 30 s seed does not shorten the projection")
 	assert.Equal(t, 90.0, starts.parent[domain.RoleDecode])
 	assert.Equal(t, startSourceMeasured, sources[domain.RoleDecode])
-	assert.Equal(t, 900.0, a.slowestStartSecondsByRole(input, roleOf)[domain.RoleDecode])
+	slowest, seeded := a.slowestStartSecondsByRole(input, roleOf)
+	assert.Equal(t, 900.0, slowest[domain.RoleDecode])
+	assert.Empty(t, seeded, "a role with a measured variant is not named seeded, though a seed is its maximum")
 }
 
 // A bad seed reaches nothing: 5a hands the analyzer only a seed it parsed,
@@ -220,25 +227,71 @@ func TestStartSeed_ANonPositiveSeedIsNoPrior(t *testing.T) {
 // The gauge's source: default, seed or measured with the seed read; off, the
 // parent's, which labels the 70 s default "seed".
 func TestStartSeed_TheGaugeNamesTheSource(t *testing.T) {
-	source := func(on bool, seed float64, measured bool) string {
+	source := func(on bool, seed float64, measured bool, pods int) string {
 		a := blendAnalyzer(t, on, true)
 		if measured {
 			a.startSeconds[confirmKey] = 90
+			if pods < startConfirmPods {
+				a.startSamples[confirmKey] = startSample{pods: pods, mean: 90}
+			}
 		}
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		return a.startGaugeSourceLocked(a.startFiguresLocked(confirmKey, seed))
 	}
-	assert.Equal(t, startSourceDefault, source(true, 0, false))
-	assert.Equal(t, startSourceSeed, source(true, 120, false))
-	assert.Equal(t, startSourceMeasured, source(true, 120, true))
-	assert.Equal(t, "seed", source(false, 0, false), "off: the 70 s default is labelled seed, as before")
-	assert.Equal(t, "seed", source(false, 120, false))
-	assert.Equal(t, startSourceMeasured, source(false, 120, true))
+	assert.Equal(t, startSourceDefault, source(true, 0, false, 0))
+	assert.Equal(t, startSourceSeed, source(true, 120, false, 0))
+	assert.Equal(t, startSourceBlended, source(true, 120, true, 1), "one Pod and a seed: a blend")
+	assert.Equal(t, startSourceBlended, source(true, 0, true, 2), "two Pods and the default: a blend")
+	assert.Equal(t, startSourceMeasured, source(true, 120, true, startConfirmPods))
+	assert.Equal(t, "seed", source(false, 0, false, 0), "off: the 70 s default is labelled seed, as before")
+	assert.Equal(t, "seed", source(false, 120, false, 0))
+	assert.Equal(t, startSourceMeasured, source(false, 120, true, 1), "off: the parent's, measured")
+	assert.Equal(t, startSourceMeasured, source(false, 120, true, startConfirmPods))
+}
+
+// A seed its first measured start contradicts -- outside [S/2, 2S] -- is
+// warned of, once per key and seed, naming both; one inside the bounds, or
+// with no seed, is not. A changed seed warns again. With the 5c switches off
+// nothing warns.
+func TestStartSeed_AContradictedSeedIsWarnedOfOnce(t *testing.T) {
+	warnings := func(on bool, seeds []float64, samples ...float64) []map[string]any {
+		var out []map[string]any
+		logger := funcr.NewJSON(func(obj string) {
+			var m map[string]any
+			if json.Unmarshal([]byte(obj), &m) == nil && m["msg"] == StartSeedContradictedMessage {
+				out = append(out, m)
+			}
+		}, funcr.Options{Verbosity: 10})
+		a := blendAnalyzer(t, on, on)
+		rows := make([]domain.ReplicaMetrics, 0, len(samples))
+		for i, s := range samples {
+			rows = append(rows, confirmReplica(fmt.Sprintf("p%d", i), s))
+			at := a.now().Add(30 * time.Second)
+			a.now = func() time.Time { return at }
+			a.noteReplicaStartFor(startNote{key: confirmKey, namespace: "ns", modelID: "model",
+				variant: confirmVariant, role: domain.RoleDecode, seed: seeds[min(i, len(seeds)-1)]}, rows, logger)
+		}
+		return out
+	}
+	got := warnings(true, []float64{3600}, 70, 70)
+	require.Len(t, got, 1, "once, though two cycles blend toward a contradicted seed")
+	assert.Equal(t, float64(3600), got[0]["replicaStartSeconds"])
+	assert.Equal(t, float64(70), got[0]["measuredSeconds"])
+	assert.Equal(t, float64(1800), got[0]["lowSeconds"])
+	assert.InDelta(t, (2*3600+70)/3.0, got[0]["sizedSeconds"], 1e-9, "sized at the blend toward the seed, the warning says so")
+	assert.GreaterOrEqual(t, got[0]["sizedSeconds"], float64(1800), "and never under the seed's half")
+	assert.Len(t, warnings(true, []float64{30}, 70), 1, "under the bound too: 70 > 2 x 30")
+	assert.Empty(t, warnings(true, []float64{120}, 70), "inside [60, 240]: no warning")
+	assert.Empty(t, warnings(true, []float64{120}, 60), "at the bound S/2: no warning")
+	assert.Empty(t, warnings(true, []float64{0}, 3000), "no seed, nothing to contradict")
+	assert.Len(t, warnings(true, []float64{3600, 2000}, 70, 70), 2, "a changed seed warns again")
+	assert.Empty(t, warnings(false, []float64{3600}, 70), "off: the seed bounds nothing")
+	assert.Len(t, warnings(true, []float64{3600}, 70, 70, 70, 70), 1, "still once, and none after three Pods give full authority")
 }
 
 // The gauge carries the published figure, not the sized one: a first start
-// of 460 s with no seed publishes 200 s under source measured, though sizing
+// of 460 s with no seed publishes 200 s under source blended, though sizing
 // reads 460 s.
 func TestStartBlend_GaugeMutantProbe(t *testing.T) {
 	registry := prometheus.NewRegistry()
@@ -259,7 +312,7 @@ func TestStartBlend_GaugeMutantProbe(t *testing.T) {
 				labels[lp.GetName()] = lp.GetValue()
 			}
 			if labels[constants.LabelVariantName] == confirmVariant {
-				assert.Equal(t, startSourceMeasured, labels[constants.LabelStartSource])
+				assert.Equal(t, startSourceBlended, labels[constants.LabelStartSource])
 				got = append(got, m.GetGauge().GetValue())
 			}
 		}
@@ -462,6 +515,13 @@ func TestStartBlend_TheCountSurvivesARestart(t *testing.T) {
 	assert.InDelta(t, 0.7*460+0.3*400, f.published, 1e-9, "full authority after a new start")
 	assert.Equal(t, startConfirmPods, f.pods)
 
+	// A mean over the longest start the collector reports is clamped to it.
+	big := s
+	big.StartSamples = map[string]StartSampleSnapshot{confirmKey: {Pods: 1, MeanSeconds: 1e6}}
+	clamped := restored(big, true)
+	assert.Equal(t, maxRestoredStartSeconds, clamped.mean)
+	assert.Equal(t, maxRestoredStartSeconds, clamped.sized, "sized at the clamp, not at 1e6 s")
+
 	for _, bad := range []StartSampleSnapshot{{Pods: startConfirmPods, MeanSeconds: 460}, {Pods: 0, MeanSeconds: 460},
 		{Pods: 1, MeanSeconds: 0}, {Pods: 1, MeanSeconds: math.NaN()}} {
 		st := s
@@ -567,6 +627,8 @@ func TestStartSeed_ThroughAnalyzeTheFloorProjectsOverTheSeed(t *testing.T) {
 	assert.Equal(t, 50.0, on["startEstimateSeconds"])
 	assert.Equal(t, startSourceSeed, on["startSource"])
 	assert.Equal(t, 50.0, onRes.RoleStartSeconds[domain.RoleBoth], "share pacing reads the seed")
+	assert.Equal(t, map[string]bool{domain.RoleBoth: true}, onRes.RoleStartSeeded, "and is told it is a seed")
+	assert.Nil(t, offRes.RoleStartSeeded)
 	assert.Equal(t, "none", off["startSource"], "the parent: nothing projected")
 	assert.NotContains(t, offRes.RoleStartSeconds, domain.RoleBoth)
 	assert.Greater(t, onRes.TotalDemand, offRes.TotalDemand, "projected over the seed, the floor orders more")
