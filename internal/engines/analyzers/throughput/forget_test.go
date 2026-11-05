@@ -465,8 +465,8 @@ func TestForget_EveryVariantStateFieldIsClassified(t *testing.T) {
 	// them. batchCap and its source are read again each cycle.
 	kept := []string{"shapeTracker", "role", "lastSanityReport", "lastObservedAt", "shapeChanged", "everLive",
 		"gpsMismatched", "lineSilent", "batchCap", "batchCapSource", "summaryLogged", "loggedAtCap", "loggedCapSource"}
-	var fields []string
 	typ := reflect.TypeFor[variantState]()
+	fields := make([]string, 0, typ.NumField())
 	for i := range typ.NumField() {
 		fields = append(fields, typ.Field(i).Name)
 	}
