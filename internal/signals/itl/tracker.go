@@ -3,11 +3,13 @@ package itl
 import (
 	"maps"
 	"math"
+	"slices"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 )
 
 // The tiers a Tracker's line comes from.
@@ -980,6 +982,25 @@ func (t *Tracker) Sweep(now time.Time, stale func(key string) bool) (windows, ba
 		}
 	}
 	return windows, baselines
+}
+
+// ForgetKeys is Sweep for a learner's forget: it forgets every key match
+// reports true for, and returns how many windows and intercepts that was and
+// each key the tracker held anything of, sorted, as forgotten by by. match
+// runs under the tracker's lock, as Sweep's stale does.
+func (t *Tracker) ForgetKeys(now time.Time, by learn.By, match func(key string) bool) (windows, baselines int, forgotten []learn.Forgotten) {
+	keys := map[string]bool{}
+	windows, baselines = t.Sweep(now, func(k string) bool {
+		if match(k) {
+			keys[k] = true
+			return true
+		}
+		return false
+	})
+	for _, k := range slices.Sorted(maps.Keys(keys)) {
+		forgotten = append(forgotten, learn.Forgotten{Key: k, By: by})
+	}
+	return windows, baselines, forgotten
 }
 
 // ClearWindow drops the readings filed under key, the steady ones and those

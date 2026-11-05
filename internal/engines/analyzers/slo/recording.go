@@ -9,8 +9,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 )
 
@@ -204,7 +206,7 @@ func (a *Analyzer) NoteVariantsPresent(namespace, modelID string, variantNames [
 func (a *Analyzer) ForgetVariant(ctx context.Context, namespace, modelID, variant string) int {
 	now := a.now()
 	n, forgotten := a.forgetVariant(namespace, modelID, variant)
-	logForgotten(ctrl.LoggerFrom(ctx), namespace, modelID, variant, forgotten)
+	logging.ForgottenKeys(ctrl.LoggerFrom(ctx), domain.SLOAnalyzerName, learn.ITL, namespace, modelID, variant, forgotten)
 	if a.rec.Active() {
 		a.rec.Record(KindForgetVariant, now, ForgetVariantEvent{Namespace: namespace, ModelID: modelID,
 			Variant: variant, Dropped: n})
