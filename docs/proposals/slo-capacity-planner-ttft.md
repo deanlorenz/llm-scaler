@@ -1,6 +1,8 @@
 # What-if capacity: end-to-end TTFT
 
-**Status:** proposal, 2026-11-02. Nothing here is built. The companion to
+**Status:** proposal, 2026-11-02. The model is built as a library (P3,
+2026-11-04: [as built](#as-built-p3)), UNVALIDATED and on no switch; nothing
+calls it yet. The companion to
 [what-if capacity](slo-capacity-planner.md), which owns the questions, the
 decode model, the CLI and the PR plan. This page owns the TTFT model: what it
 is made of, the router's flow-control queue, how the parts combine into a
@@ -271,7 +273,10 @@ that is itself wrong (the exponential tail, Poisson arrivals, an omitted
 
 | Limit | Direction |
 | --- | --- |
-| Exponential wait tail with heavy-tailed prompts | Over-promises |
+| Wait tail at prompt cv above 1: `ρ_w·e^(−γt)`, `γ` the Cramér-Lundberg root ([as built](#the-model-as-built)) | Under-promises against a Lindley simulation (cv 2 and 3, `ρ` 0.3 and 0.6): by 3–28% at p90, 4–16% at p99 and 3–12% at p999; not a proven bound. Kingman's `1/θ` alone over-promised by up to 10% here |
+| Wait tail at prompt cv below 1: Taylor's bound `min(ρ_w, C·e^(−γt))` | Under-promises, provably: by 8–18% at p90, 4–12% at p99 and 4–10% at p999 against a simulation (cv 0 and 0.5), and 1–17% against Erlang's exact M/D/1 wait. The exponential body it replaced read an M/D/1 p90 sojourn 10% short at `ρ` 0.2 |
+| Prompt cv above 3 | Either way, and not monotone: the gamma's p90 can fall as cv rises at very low load, since most of its mass sits below the mean. S1 passes no cv above 3, assumed or measured (it assumes 2); nothing here is tested above it |
+| Wait tail with bursty arrivals (`Ca²` ≠ 1): Kingman's `1/θ`, never above the work's own tail rate | Not checked against a simulation; burstiness lengthens the tail, and Kingman's decay is taken as its conservative side |
 | Poisson arrivals on bursty traffic | Over-promises |
 | Per-pod model above the flow-control onset | Either way; the pooled bound printed beside it over-promises |
 | Dispatch-gate delays (scores up to 200 ms stale, a 50 ms candidate cache) | Over-promises, slightly, near the onset |
@@ -284,6 +289,8 @@ that is itself wrong (the exponential tail, Poisson arrivals, an omitted
 | `f` de-biased for Poisson arrivals, on a real imbalance | Over-promises: the busiest pod's share holds little chance excess, but the equal pods' excess is subtracted anyway. Four pods at 2:1:1:1 (`f` 1.6) read about 1.50 at 100 requests a pod (6% low) and about 1.57 at 1500 |
 | `f` from computed-token shares with variable prompts | Under-promises: a pod's token count varies about `√(1+Cs²)` times its request count, and only the request count's excess is subtracted. Four equal pods with `Cs²` = 1 read about 1.03 at 100 requests a pod |
 | Worst-pod percentile | Under-promises |
+| The mean TTFT is the worst pod's mean | Under-promises the fleet's mean, which mixes in the quieter pods |
+| Question 1 capped at the decode onset | Over-promises: the onset is where the mean score reaches 1, and the gate reads the current score; `E[max] ≥ max E`, so the gate already closes for part of the time below it |
 | The union bound | Under-promises against the true combination of the modelled parts; the independent figure beside it over-promises |
 
 ## Ground truth and the staircase
@@ -332,6 +339,198 @@ in all its repeats ([S1 decisions](slo-tiers.md#s1-decisions)):
 | `AssumedPoissonArrivals` | Bucket C, flow control off and on, predicted at the measured `Ca²` |
 | `AboveFlowControlOnset` (on a rate answer) | Buckets B and C with flow control on, with steps above the prefill onset |
 | `FlowControlInferredOff` | Never by the staircase: it is a missing series, fixed by scraping it |
+
+## As built (P3)
+
+`internal/signals/whatif`, files `ttft.go`, `ttft_queue.go`, `ttft_result.go`
+and `ttft_prefill.go`. Library only: no switch, no caller in the controller,
+no CLI wiring (that follows D3), no golden moves.
+
+**Built before its validation.** The plan has P3 depend on P2, the
+prefill-stress recordings kept as goldens. Those runs were blocked on cluster
+access when P3 was built, so P3 was built against known truth and synthetic
+fleets instead.
+Every TTFT figure carries the flag `UnvalidatedTTFT`, and nothing here has
+been compared with a measured TTFT.
+
+### The API
+
+| Call | Answers |
+| --- | --- |
+| `TTFTAt(fleet, rate, q)` | Question 2's TTFT at a rate, at percentile `q`, or the mean for `q` = 0. Returns a `TTFT`: the union bound (`Seconds`), the independent figure, the pooled optimistic figure, the floor, the decode share `β`, the parts' means, `ρ_w`, `θ`, both knees and the onsets |
+| `RateForTTFT(fleet, target)` | Question 1: the largest rate whose TTFT meets the target. An `Answer` whose `Basis.TTFT` carries the lower knee, the TTFT floor and the prefill side's own rate (`PrefillOnlyRate`); `BoundBy` says what set the rate. The TPOT fields of `Basis` (`KneeRate`, `Floor`, `Uncapped`) stay 0 |
+| `PrefillKnee(prefill)` | `N_p·V_P/(f·E[I_eff])`, in `Basis.TTFT.KneeRate` |
+| `FlowControlOnsets(fleet)` | Each stage's onset; zero with flow control off |
+| `PrefillFromEstimate(est)` | Maps P1's `prefill.Estimate` to `V_P`, `a` and `f`, and carries P1's refusals |
+
+A `TTFTFleet` is a `Prefill`, an optional `*Decode` and a `FlowControl`.
+With no decode role, the prefill side is priced alone and flagged
+`DecodeSideOmitted`. This is the shape S1 needs to price one prefill variant
+in shadow; the rate per replica is the answer over `N_p`, priced at the
+actual `N_p` with `f` held. With flow control on and no decode role, the
+decode onset cannot be placed: the answer is flagged `DecodeOnsetUnchecked`,
+not refused, and may stand above the onset. The operating-point cap is not
+applied: as on the decode side, the caller applies it to the smaller of the
+roles' rates.
+
+### The model as built
+
+    ρ_w   = f·λ·E[I]/(N_p·V_P)
+    θ     = (E[I]/V_P)·(Ca² + Cs²) / (2(1 − ρ_w))          Cs² = cv²
+    γ     : λ_w·(M_S(γ) − 1) = γ        (Cramér-Lundberg root; M_S the work's MGF)
+    P(W_engine > t) = ρ_w·e^(−rt),  r = min(1/θ, γ)          Poisson arrivals, cv ≥ 1
+                    = min(ρ_w, C·e^(−γt)),  C = 1 − γ·cv²·E[S]  Poisson arrivals, cv < 1 (Taylor's bound)
+                    = ρ_w·e^(−rt),  r = min(1/θ, 1/(cv²·E[S]))  bursty arrivals (Kingman)
+    own   = a + I·(1/V_P + κ/BW),   I ~ Gamma(mean E[I], cv); constant below cv 1e-4
+    block 1 = W_engine + own        (convolved exactly, closed form via the incomplete gamma)
+    TTFT_q = min over β of  Q_{1−(1−q−β)}(block 1) + Q_{1−β}(W_decode) + ITL(k_d)
+    mean  = ρ_w·θ + a + E[I]·(1/V_P + κ/BW) + E[W_decode] + ITL(k_d)
+    floor = a + I_q·(1/V_P + κ/BW) + ITL(band.lo)
+
+- **The wait tail errs only toward more replicas.** At cv 1 the two decays
+  agree and the tail is exact (M/M/1). Above 1, the Cramér-Lundberg root is
+  the slower decay: Kingman's `1/θ` alone read a p99 6–11% short of a
+  Lindley simulation (cv 2, 3), and the root now reads it 4–16% long. Below 1,
+  an exponential body behind the atom under-states the wait just past it.
+  The tail there is Taylor's bound on an M/G/1 wait,
+  `C = sup_x P(S > x)/E[e^(γ(S−x)); S > x]`. For gamma work at cv ≤ 1 (an
+  increasing failure rate) the sup is the limit, `C = 1 − γ/b`. That is 1
+  for constant work, which is the Lundberg inequality, and `ρ` at cv 1, so
+  the tail meets the exact M/M/1 one there and TTFT does not jump as cv
+  crosses 1. For bursty arrivals there is no root without the arrival
+  law, so the tail keeps Kingman's decay and never decays faster than one
+  request's work. The mean wait stays Pollaczek-Khinchine's (Kingman's)
+  `ρ_w·θ`, exact for M/G/1, rather than the tail's own mean.
+- **The mean is the worst pod's**, like every figure here: the mean TTFT a
+  request on the busiest pod sees, not the fleet's.
+- A prompt cv below 1e-4 is priced as constant: the gamma's shape is then
+  above 1e8, where the incomplete gamma cancels (cv 1e-7 read 8% high).
+- `W_decode` is D2's admission chain (`DecodeAdmission`), bounded at 1e6
+  slots. `ITL(k_d)` is the line at the closed-form decode fill, read at the
+  band's bottom below it.
+- The search over `β` is a log grid on `(0, min(P_wait, 1 − q)]` followed by
+  a golden-section refinement. The even split is a candidate as well, so the
+  answer is never above it.
+- The independent figure convolves block 1 with `W_decode` (a two-rate
+  hypoexponential). The pooled figure is Allen-Cunneen M/G/`N_p` with no
+  imbalance. It describes a router that holds requests and dispatches each
+  to the first free pod, which flow control does only above the prefill
+  onset. Below the onset each pod queues for itself, and the pooled figure
+  is an optimistic bound, not an estimate.
+- **Flow control.** The prefill onset assumes the worst pod is at `f` and the
+  rest split the remainder evenly. Each pod scores `Lq/threshold`, with
+  `Lq = ρ²(Ca² + Cs²)/(2(1 − ρ))`, and the onset is where the mean score
+  reaches 1. Prefill KV is not scored. The decode onset is where a balanced
+  decode pod's `max(Lq/threshold, fill/KVthreshold)` reaches 1, with `Lq`
+  and the fill taken from the chain. At or above the decode onset TTFT is
+  refused (`AboveDecodeOnset`), and question 1 caps at it. At or above the
+  prefill onset the answer is flagged `AboveFlowControlOnset`. Below both,
+  flow control changes nothing. The gate's closed fraction `P(score ≥ 1)` is
+  **not built**.
+- **The question-1 cap at the decode onset is not conservative.** The onset
+  is where the mean endpoint score reaches 1, while the gate acts on the
+  current score. Since `E[max] ≥ max E`, the gate already closes for part of
+  the time below the onset.
+- **The gate rule** (the mean over endpoints of
+  `max(queue/threshold, kv/KVthreshold)`) is the newer llm-d router's
+  utilization detector, not GIE v1.2.1's. On a v1.2.1 EPP the onsets are not
+  these.
+- **Refusals**: `NoPrefillCapacity`, `NoFixedLatency`, `NoImbalance` (more
+  than one pod with no `f`; `f` = 1 is never assumed silently),
+  `NoPrefillReplicas`, `FlowControlUnknown` and `AboveDecodeOnset`, plus
+  `Saturated` at the prefill knee, and `NoTraffic`, `TargetBelowFloor` and
+  `InvalidInput` as on decode.
+- **Flags**: `UnvalidatedTTFT` (always), `AssumedVP`, `VPLowerBound`,
+  `VPAboveSlopeBound`, `AssumedImbalance`, `AssumedPromptSpread`,
+  `TransferOmitted`, `DecodeSideOmitted`, `FlowControlInferredOff`,
+  `AboveFlowControlOnset`, `HeldByDecodeAdmission` and
+  `DecodeOnsetUnchecked`. When decode
+  admission holds the TTFT rate below what the prefill side alone allows,
+  the answer is bound by `TTFT` and then `decode admission`. The worked
+  example's 11.10 r/s at p95 is such a case: decode takes `β` ≈ 0.03 of the
+  tail.
+
+### What the tests check
+
+- **Known truth.** M/M/1 sojourn (exact at cv 1, `f` = 1, one pod), the
+  Pollaczek-Khinchine mean, Allen-Cunneen against an independent Erlang C,
+  the Cramér-Lundberg root against its equation, and the incomplete gamma
+  against its closed forms.
+- **Never below the truth.**
+  - At cv 0 the wait's quantiles are compared with Erlang's exact M/D/1
+    waiting-time distribution, summed in 1024-bit floats. The model is at
+    or above it at every `ρ` from 0.1 to 0.95 and `q` of 0.9, 0.99 and 0.999.
+  - The sojourn at p90, p99 and p999 is compared with frozen figures from a
+    Lindley simulation outside the code (numpy; 3M arrivals; seeds 20261104,
+    7, 99 and 4242). Each figure is the least of the four seeds, and the
+    model must reach it less 1%. The seeds spread up to 1.8% at p99 and
+    6.5% at p999 (cv 3, `ρ` 0.6). The cases are cv 0, 0.5, 1, 2 and 3 at
+    several `ρ`.
+  - The model over the least seed:
+
+    | cv | `ρ` | p90 | p99 | p999 |
+    | --- | --- | --- | --- | --- |
+    | 2 | 0.3 | 1.150 | 1.099 | 1.083 |
+    | 2 | 0.6 | 1.076 | 1.039 | 1.048 |
+    | 3 | 0.3 | 1.278 | 1.159 | 1.118 |
+    | 3 | 0.6 | 1.102 | 1.050 | 1.032 |
+    | 1 | 0.6 | 1.002 | 1.003 | 1.004 |
+    | 0.5 | 0.2 | 1.106 | 1.089 | 1.069 |
+    | 0.5 | 0.3 | 1.115 | 1.080 | 1.057 |
+    | 0.5 | 0.6 | 1.076 | 1.042 | 1.037 |
+    | 0 | 0.2 | 1.175 | 1.124 | 1.100 |
+    | 0 | 0.3 | 1.152 | 1.120 | 1.085 |
+    | 0 | 0.6 | 1.109 | 1.063 | 1.056 |
+
+    The pre-round-1 tail read the cv 2 / 3 p99s at 0.937 / 0.944 and
+    0.895 / 0.907, and fails this test.
+  - TTFT never falls as the prompt cv rises from 0 to 3 (p90, p95 and p99,
+    at 0.3 to 0.85 of the knee), across the change of form at cv 1.
+- **The worked example** is reproduced to 1e-6: 160 / 154 ms at p90, 231 / 210 ms at p95, floor
+  91.6 ms, 11.64 / 11.10 r/s for 200 ms, onsets 12.50 and 25.6 r/s. Six
+  cases with no closed form (cv 0.5 and 2, bursty arrivals with `f` 1.5
+  over four pods, a transfer term, prefill alone, constant prompts) are
+  checked against a scipy reference that integrates a different form of the
+  convolution.
+- **Properties** on seeded random fleets. TTFT rises with the rate and with
+  the prompt, and falls with either role's replicas. Question 1's rate
+  rises with the target and the prefill pods, and round-trips to 1e-6. The
+  model refuses at the knees and at the decode onset. The union bound is
+  never below the independent figure or above the even split, and the
+  pooled figure is never above the per-pod one. NaN and infinite inputs are
+  refused.
+- **Mutants.** Each mutant listed in the P3 commit messages is killed by a
+  named test, including one that reverts each part of the tail rule.
+
+### What is UNVALIDATED, and what P2 must check
+
+1. **`V_P` as a throughput.** Does a pod under a queue serve prompt tokens
+   at the busy-minute `V_P`, and does it stay constant with prompt length
+   (open question 4)?
+2. **The wait tail.** How far above per-pod `request_queue_time_seconds`
+   (R1's histograms) does the tail rule sit, at the real prompt spread? It
+   is conservative against queueing theory. A real pod's chunked
+   prefill is not the M/G/1 server it assumes.
+3. **The gamma prompt.** Is a gamma with the measured cv a fair stand-in for
+   the prompt histogram? P2 should compare the floor and the low-load
+   quantiles.
+4. **`f` and the worst pod.** P1's `f` is biased both ways
+   ([where it is most wrong](#where-it-is-most-wrong)). P2 must show
+   whether the worst-pod quantile, the per-pod mixture or the pooled figure
+   tracks the router's histogram.
+5. **The mean is the worst pod's.** Compare it with the busiest pod's
+   `AvgTTFT`, not the router's mean.
+6. **`a` at load.** `a` is measured at low load and added to every request.
+   Check whether it grows under a queue.
+7. **The union bound's conservatism.** Compare the end-to-end p90 and p95
+   against `llm_d_epp_request_ttft_seconds` across the step rates.
+8. **Flow-control onsets.** Do `pool_saturation` per stage and the router
+   queue start where the onsets say? This is the staircase's flow-control-on
+   phase (M2), not P2.
+9. **`T_xfer`**, once `nixl_xfer_time_seconds` is collected (open question 3).
+
+Until P2 and the staircase pass, no TTFT figure drives a replica count. S1
+publishes in shadow only.
 
 ## Open questions
 
