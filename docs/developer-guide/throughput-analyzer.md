@@ -49,6 +49,7 @@ operating point, and scales before demand exceeds that supply.
 - [Architecture](#architecture)
   - [Package Structure](#package-structure)
   - [Components](#components)
+  - [Forgetting a Variant](#forgetting-a-variant)
   - [Data Flow](#data-flow)
 - [ITL Model Calibration](#itl-model-calibration)
   - [Tier 1 — OLS Fit](#tier-1--ols-fit)
@@ -357,6 +358,44 @@ On leader failover the incoming leader starts with an empty analyzer. During war
 
 **No external state store is needed.** State loss on failover is equivalent to a workload shape change (which already clears the window by design). The gap is bounded and temporary; adding a ConfigMap or lease annotation to persist calibration state would not be worth the added complexity at this stage.
 
+
+### Forgetting a Variant
+
+The `llm-d.ai/forget-learned-state` annotation reaches this analyzer through
+`forgetOnRequest` (`internal/engines/steadystate/engine_v2.go`). The token is the
+saturation analyzer's: the engine finds this analyzer among the built-ins and
+calls `ForgetVariant` when saturation acts on a token. The code is `forget.go`; the replay switch is
+`throughput-itl-forget-reaches-the-line`, and off forgets nothing here. The call
+is recorded as `throughput.ForgetVariant` and replayed.
+
+`ForgetVariant` walks `learn.Learners` and forgets `learn.ITL`, this analyzer's
+own instance of the line. It holds nothing of the other learners.
+
+| Forgotten | Kept |
+|---|---|
+| `lines`: windows, steady window, above-band windows, B, held slope (`itl.Tracker.ForgetKeysKeepingTraces`) | `lines`: the replicas' traces |
+| Settling stamps and readings at the cap, with the windows | `ownSettle`, `ownSettled` |
+| `itlLogged` | Shape, role, log memories (`lineSilent`, `gpsMismatched` and the rest) |
+| `variantState`: parent window and B, this cycle's reading, figures priced from the line | `paths` |
+
+The traces stay because they fit nothing and they carry the steady gate and the
+settle. Dropped, as the saturation and slo forgets drop theirs, a step in load on
+the first cycle after a forget reads as steady, and on the no-view path a replica
+inside its settle would leave it. `TestForget_EveryFieldIsClassified` and
+`TestForget_EveryVariantStateFieldIsClassified` hold each field to a list.
+
+The analyzer has no snapshot or restore and borrows no line, so nothing fills the
+key but the variant's own rows. `itl.Tracker` refuses a lent row, and
+`ownReplicasOnly` drops it earlier on the `Analyze` path as defence in depth.
+
+Each key is logged (`logging.ForgottenKeys`, with `|` for the key's NUL
+separators), and the engine logs `throughputEntries`. That counts entries,
+windows and intercepts, not lines: a line with a learned intercept is 2.
+
+The line is silent afterwards, and when it returns a balanced fleet pins
+`DefaultBaselineSec`, so in-band pricing can err either way. Both are the
+new-variant state, by design:
+[what an operator sees](../reference/troubleshooting.md#reset-one-variants-learned-state).
 
 ### Analysis Pipeline
 

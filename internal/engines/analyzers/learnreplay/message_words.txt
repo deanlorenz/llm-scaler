@@ -2544,6 +2544,7 @@ throughput-demand-floor
 throughput-demand-floor-total
 throughput-itl-above-band
 throughput-itl-admits-at-sequence-cap
+throughput-itl-forget-reaches-the-line
 throughput-itl-held
 throughput-itl-idle-needs-evidence
 throughput-itl-keeps-the-settle-through-a-missing-row
@@ -2557,7 +2558,9 @@ throughput-itl-settling
 throughput-itl-steady-gate
 throughput-itl-waits-after-controller-restart
 throughput.Analyze
+throughput.ForgetVariant
 throughput.Observe
+throughputEntries
 throughputHeld
 throughputLastRead
 throughputMuChoice

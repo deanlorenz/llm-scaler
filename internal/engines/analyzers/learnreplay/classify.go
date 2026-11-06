@@ -50,6 +50,7 @@ var recordedTypes = []reflect.Type{
 
 	reflect.TypeFor[throughput.AnalyzeEvent](),
 	reflect.TypeFor[throughput.ObserveEvent](),
+	reflect.TypeFor[throughput.ForgetVariantEvent](),
 
 	reflect.TypeFor[capacity.FileScaleTargetEvent](),
 	reflect.TypeFor[capacity.EvictStaleEvent](),

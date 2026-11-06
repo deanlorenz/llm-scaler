@@ -132,6 +132,17 @@ var replaySwitches = map[string][]string{
 	saturation.SwitchPrefillCapacityObserve: nil,
 	throughput.SwitchITLAdmitsAtSequenceCap: nil,
 
+	// The forget-learned-state annotation reaches the throughput analyzer's
+	// line, one switch, recorded as an event of its own
+	// (throughput.ForgetVariant). It moves no golden, measured: no committed
+	// recording carries the event, and the acceptance and engine runs, taken
+	// again, carry one each (Dropped 1: a window, no intercept) and give all
+	// 19 outputs byte for byte with the event and without it. No cluster
+	// recording forgets. Its unit tests hold it (heldBy). The steadystate
+	// package's engine-run-event-counts.txt gains the event: that file is a
+	// pin on the events the engine run records, not a replay output.
+	throughput.SwitchITLForgetReachesTheLine: nil,
+
 	// Learner PR 5b, on main after 5a (0fec87b18): the start guard opens on
 	// distinct Pods. Measured alone against all off, it moves nothing: it
 	// changes only when a start over three times the estimate is admitted,
@@ -480,6 +491,14 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestZeroReplicaDataParallel_AGroupIsPricedAtItsLeadersRanks"},
 		{"../saturation", "TestZeroReplicaDataParallel_TheColdStartBudgetIsEveryRanks"},
 		{"../saturation", "TestZeroReplicaDataParallel_UnknownPodsNeedTheGPUsToMatch"},
+	},
+	// The forget of the throughput line.
+	throughput.SwitchITLForgetReachesTheLine: {
+		{"../throughput", "TestForget_TheAnnotationForgetsTheLine"},
+		{"../throughput", "TestForget_TakesTheHeldSlope"},
+		{"../throughput", "TestForget_TakesTheAboveBandFallback"},
+		{"../throughput", "TestForget_AtTheCapALineIsPricedOneSidedAgain"},
+		{"../throughput", "TestForget_ReportsEachForgottenKey"},
 	},
 	// Issue #431's forget of the slo line.
 	slo.SwitchITLForgetReachesTheLine: {

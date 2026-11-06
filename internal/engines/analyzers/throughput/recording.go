@@ -7,7 +7,11 @@ import (
 	"strings"
 	"time"
 
+	ctrl "sigs.k8s.io/controller-runtime"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 )
 
@@ -19,8 +23,9 @@ import (
 
 // The kinds of event this analyzer records.
 const (
-	KindAnalyze = "throughput.Analyze"
-	KindObserve = "throughput.Observe"
+	KindAnalyze       = "throughput.Analyze"
+	KindObserve       = "throughput.Observe"
+	KindForgetVariant = "throughput.ForgetVariant"
 )
 
 // AnalyzeEvent is one Analyze: its input and what it returned. Written
@@ -39,6 +44,12 @@ type ObserveEvent struct {
 	// Metrics is a []domain.ReplicaMetrics, encoded before the call.
 	Metrics learnrec.Raw
 	Reports map[string]SanityReport
+}
+
+// ForgetVariantEvent is ForgetVariant's arguments and what it dropped.
+type ForgetVariantEvent struct {
+	Namespace, ModelID, Variant string
+	Dropped                     int
 }
 
 // WithRecorder records the analyzer's calls to rec; nil turns recording off.
@@ -96,6 +107,23 @@ func (a *ThroughputAnalyzer) Observe(
 	a.rec.Record(KindObserve, a.clock.Now(), ObserveEvent{Now: now, ModelID: modelID, Namespace: namespace,
 		Metrics: rows, Reports: sortedReports(reports)})
 	return reports
+}
+
+// ForgetVariant forgets one variant's ITL line on an operator's request
+// (forgetVariant), logs each key it forgot on ctx's logger, and records the
+// call. The engine calls it when the saturation analyzer acts on a forget
+// token, after that analyzer's own ForgetVariant. It returns how many
+// entries it dropped. One path for recording on and off, which differ only
+// in the event: a forget is rare, so the clock is read either way.
+func (a *ThroughputAnalyzer) ForgetVariant(ctx context.Context, namespace, modelID, variant string) int {
+	now := a.clock.Now()
+	n, forgotten := a.forgetVariant(namespace, modelID, variant)
+	logging.ForgottenKeys(ctrl.LoggerFrom(ctx), AnalyzerName, learn.ITL, namespace, modelID, variant, learn.Keys(forgotten))
+	if a.rec.Active() {
+		a.rec.Record(KindForgetVariant, now, ForgetVariantEvent{Namespace: namespace, ModelID: modelID,
+			Variant: variant, Dropped: n})
+	}
+	return n
 }
 
 // byVariantName is r with its variant capacities sorted by variant name, on

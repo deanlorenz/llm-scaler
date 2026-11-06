@@ -104,7 +104,7 @@ var reviewed = map[reflect.Type]buckets{
 		seams: []string{"SetSwitchesForReplay"},
 	},
 	reflect.TypeFor[*throughput.ThroughputAnalyzer](): {
-		recorded: []string{"Analyze", "Observe"},
+		recorded: []string{"Analyze", "Observe", "ForgetVariant"},
 		// StartConfig states what the builders set, for the recording's
 		// first line; it changes nothing. PathCounts reads the per-path
 		// counters of the ITL line's fits (2.5), which only a replay reads.
@@ -184,6 +184,7 @@ func TestCoverage_EachRecordedCallWritesOneEvent(t *testing.T) {
 		{"slo.BeginCycle", slo.KindBeginCycle, func(f *fixture) { f.slo.BeginCycle() }},
 		{"slo.NoteVariantsPresent", slo.KindNoteVariantsPresent, func(f *fixture) { f.slo.NoteVariantsPresent("ns", "m", []string{"v"}) }},
 		{"slo.ForgetVariant", slo.KindForgetVariant, func(f *fixture) { f.slo.ForgetVariant(ctx, "ns", "m", "v") }},
+		{"throughput.ForgetVariant", throughput.KindForgetVariant, func(f *fixture) { f.tp.ForgetVariant(ctx, "ns", "m", "v") }},
 		{"throughput.Analyze", throughput.KindAnalyze, func(f *fixture) { _, _ = f.tp.Analyze(ctx, input) }},
 		{"throughput.Observe", throughput.KindObserve, func(f *fixture) { f.tp.Observe(ctx, at, "m", "ns", input.ReplicaMetrics) }},
 		{"store.FileScaleTarget", capacity.KindFileScaleTarget, func(f *fixture) {
