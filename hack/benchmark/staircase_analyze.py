@@ -3,11 +3,13 @@
 
   staircase_analyze.py steps  <run dir> <phase> [--discard 180]
   staircase_analyze.py report <run dir> <frozen.json> <spec.json> [--redo frozen-at-measured-ca2.json]
+  staircase_analyze.py gate   <run dir> <frozen.json> <spec.json> --repeat 1
+  staircase_analyze.py ca2    <run dir>
 
 steps writes phases/<phase>/analysis.jsonl, one row a step. Client figures are
-over requests DUE in the step's judged window: its hold less the discard, cut
-at the moment the driver stopped. A failed or unfinished request counts as
-infinitely slow. Router figures are the delta of the EPP's cumulative histogram
+over the step's requests (the level column) due in its judged window: its hold less
+the discard from its first request, cut at the moment the driver stopped. A failed
+or cancelled request, which the driver writes a row for, counts as infinitely slow. Router figures are the delta of the EPP's cumulative histogram
 across the window: the raw scrape when there is one, else Prometheus rates
 integrated over it. Every row carries stopped_by, the rule that ended the phase
 on that step, "" on a step no rule ended.
@@ -16,7 +18,12 @@ report writes report.md into the run directory. The client is the witness: the
 mark is read from it, at the operating point only. The router is a cross-check
 and never decides a mark. The knee is reported apart, with no mark. A rate is
 compared over the median of a bucket's repeats, and a verdict stands for the
-bucket only if every repeat agrees.
+bucket only if every repeat agrees. A phase with no `done` file crashed: it is
+excluded and named, and a bucket with a repeat missing has no pass.
+
+gate scores the gate buckets' TTFT at one repeat, and exits 1 on a fail or a missing
+phase: staircase.sh stops the run on it. ca2 prints BUCKET=CA2 for each bursty bucket,
+the mean Ca2 sent over its whole steps, for whatif freeze --ca2.
 
 Standard library only.
 """
@@ -90,6 +97,24 @@ def read_prom(path):
         if o.get("data"):
             out[o["name"]] = o["data"]["result"]
     return out
+
+
+def read_replicas(path):
+    """{role: [(t, spec, ready)]} of the capture's replica samples."""
+    out = {"decode": [], "prefill": []}
+    for line in read_lines(path):
+        p = line.split()
+        if len(p) == 4:
+            role = "decode" if p[1].endswith("-decode") else "prefill" if p[1].endswith("-prefill") else None
+            if role:
+                out[role].append((lib.ts(p[0]), p[2], p[3]))
+    return out
+
+
+def replicas_seen(samples, a, b):
+    """{role: sorted distinct counts, spec and ready} over the window."""
+    return {role: sorted({int(c) for t, spec, ready in rows if a <= t < b for c in (spec, ready)})
+            for role, rows in samples.items()}
 
 
 def read_engine(path):
@@ -224,11 +249,19 @@ def analyze_steps(run, phase, discard):
     pods = read_pod_map(d + "/pod-map.csv")
     raw, prom = read_raw_epp(run + "/epp-metrics.log"), read_prom(d + "/prom.jsonl")
     engine = read_engine(run + "/vllm-metrics.log")
+    replicas = read_replicas(run + "/replicas.log")
+    by_level = collections.defaultdict(list)
+    for r in rows:
+        by_level[int(r[1])].append(r)
     out = []
     for level in levels:
+        # The log's stamp drifts from the plan by seconds; the first request does not.
+        mine = by_level.get(level["n"], [])
+        if mine:
+            level["start"] = min(float(r[2]) for r in mine)
         a, b = lib.judged_window(level, stop, discard)
         span = b - a
-        win = [r for r in rows if a <= float(r[2]) < b]
+        win = [r for r in mine if a <= float(r[2]) < b]
         if not win or span <= 0:
             continue
         row = dict(phase=phase, level=level["n"], rate=level["rate"], ca2_asked=level["ca2"], window_s=span,
@@ -241,6 +274,7 @@ def analyze_steps(run, phase, discard):
         if pre is not None and dec is not None and row["client_ttft_mean"] == row["client_ttft_mean"]:
             row["engine_prefill_mean"], row["engine_decode_mean"] = pre, dec
             row["hop_mean"] = row["client_ttft_mean"] - pre - dec
+        row["replicas"] = replicas_seen(replicas, a, b)
         row["fc_saturation"] = series_mean(prom, "fc_saturation", a, b)
         row["fc_queue"] = series_mean(prom, "fc_queue", a, b)
         row["waiting"] = series_mean(prom, "waiting", a, b)
@@ -267,36 +301,52 @@ def load_steps(run, phase):
     return sorted(rows, key=lambda r: r["level"])
 
 
-def flag_noise(rows, bucket, prompt_cv):
-    """Set noise_flag and need_s on each row. A flagged crossing is a bound."""
+def flag_steps(rows, bucket, prompt_cv):
+    """Set what voids a step, given what the bucket asked for: the noise floor, a fleet that moved, a Ca2 to rerun."""
+    fleet = {"decode": bucket["decode"], "prefill": bucket["prefill"]}
     for r in rows:
         need, rho_p, rho_d = lib.noise_floor(r["rate"], bucket, prompt_cv, r["ca2_sent"] if bucket["ca2"] != 1 else 1.0)
         r["need_s"], r["rho_prefill"], r["rho_decode"] = need, rho_p, rho_d
         r["noise_flag"] = r["window_s"] < need
+        r["replica_change"] = any(seen and seen != [fleet[role]] for role, seen in r.get("replicas", {}).items())
+        r["ca2_rerun"] = lib.ca2_out_of_band(r["ca2_sent"], bucket["ca2"])
 
 
 def phases_of(run):
-    """{(bucket, fc): {repeat: phase}} of the phases analyzed."""
-    out = collections.defaultdict(dict)
+    """({(bucket, fc): {repeat: phase}} of the finished phases, [the phases that crashed]).
+
+    A phase is finished when it has a done file and an analysis. Anything else under
+    phases/ crashed: its rows are not a result.
+    """
+    out, crashed = collections.defaultdict(dict), []
     root = os.path.join(run, "phases")
     for name in sorted(os.listdir(root)):
         m = PHASE.match(name)
-        if m and os.path.exists(os.path.join(root, name, "analysis.jsonl")):
+        if not m:
+            continue
+        if os.path.exists(os.path.join(root, name, "done")) and os.path.exists(os.path.join(root, name, "analysis.jsonl")):
             out[m[1], m[2]][int(m[3] or 1)] = name
-    return out
+        else:
+            crashed.append(name)
+    return out, crashed
 
 
 def fail(verdict):
     return verdict.startswith("FAIL")
 
 
-def judge(predicted, per_repeat):
+def judge(predicted, per_repeat, missing=()):
     """(median measured text, ratio, verdict) over the repeats' measured() results.
 
     A bucket passes only if every repeat does. A repeat with no figure of its own
-    leaves the bucket with no mark. The median is of the figures that exist.
+    leaves the bucket with no mark, and so does a repeat missing altogether: "every
+    repeat agrees" cannot be judged on what is left. The median is of the figures that
+    exist. A fail stands whatever is missing.
     """
     verdicts = [lib.mark(predicted, k, v)[1] for k, v in per_repeat]
+    if missing and not any(fail(v) for v in verdicts):
+        text = lib.show(*per_repeat[0]) if per_repeat else "none finished"
+        return text, "n/a", "no mark, repeat %s missing" % ",".join(str(n) for n in missing)
     values = [(v[0] + v[1]) / 2 if k == "bound" else v for k, v in per_repeat if v is not None]
     centre = lib.median(values) if values else None
     if any(fail(v) for v in verdicts):
@@ -356,20 +406,46 @@ def falsifiers(data, frozen, spec, out):
     return results
 
 
-def report(run, frozen_file, spec, redo_file, out):
-    """The report; returns the verdicts by (bucket, fc, reading), for the selftest."""
+def expected_phases(spec, finished, frozen, only_gate, repeats):
+    """{(bucket, fc): [the repeats a verdict needs]}, from the spec; from what ran without one."""
+    if "buckets" not in spec or not any("fc" in b for b in spec["buckets"]):
+        return {key: sorted(found) for key, found in finished.items() if key[0] in frozen}
+    out = {}
+    for b in spec["buckets"]:
+        if b["name"] in frozen and (b.get("gate") or not only_gate):
+            for fc in b["fc"]:
+                out[b["name"], fc] = list(repeats)
+    return out
+
+
+def report(run, frozen_file, spec, redo_file, out, repeats=None, only_gate=False):
+    """The report; returns the verdicts by (bucket, fc, reading). repeats and only_gate narrow it to a gate."""
     frozen = {b["name"]: b for b in frozen_file["buckets"]}
     redo = {b["name"]: b for b in redo_file["buckets"]} if redo_file else {}
     ratio_q = {r["percentile"]: r.get("value") for r in frozen_file.get("tpotRatio", [])}
-    data = {}
-    for (bucket, fc), repeats in phases_of(run).items():
-        if bucket not in frozen:
-            continue
-        data[bucket, fc] = {n: load_steps(run, name) for n, name in repeats.items()}
-        for rows in data[bucket, fc].values():
-            flag_noise(rows, frozen[bucket], spec["promptCV"])
+    finished, crashed = phases_of(run)
+    expected = expected_phases(spec, finished, frozen, only_gate, repeats or range(1, spec.get("repeats", 1) + 1))
+    data, missing = {}, {}
+    for key, wanted in sorted(expected.items()):
+        found = finished.get(key, {})
+        data[key] = {n: load_steps(run, found[n]) for n in wanted if n in found}
+        missing[key] = [n for n in wanted if n not in found]
+        for rows in data[key].values():
+            flag_steps(rows, frozen[key[0]], spec["promptCV"])
 
     print("# Staircase report\n", file=out)
+    if crashed:
+        print("**Phases that did not finish, excluded: %s.**\n" % ", ".join(crashed), file=out)
+    print("## What the prediction rests on\n", file=out)
+    print("| Bucket | Ca2 priced | Flags | Assumed | Transfer priced, s per token | Every row's transfer, s | Warm-up prefix hit rate, not priced |", file=out)
+    print("| --- | --- | --- | --- | --- | --- | --- |", file=out)
+    for name, b in sorted(frozen.items()):
+        shown = redo.get(name, b)
+        print("| %s | %g%s | %s | %s | %.3g | %.3f | %.3f |" % (
+            name, shown["ca2"], ", measured" if name in redo and redo[name]["ca2"] != b["ca2"] else ", as frozen",
+            ", ".join(b.get("flags") or []) or "none", "; ".join(b.get("assumed") or []) or "nothing",
+            b.get("transferSecondsPerToken", 0), b.get("allRowsTransferSeconds", 0), b.get("recordedPrefixHitRate", 0)), file=out)
+    print(file=out)
     print("The client is the witness and the router a cross-check. The mark is at the operating point; "
           "the knee has none.\n", file=out)
     print("## How each phase ended\n", file=out)
@@ -384,6 +460,21 @@ def report(run, frozen_file, spec, redo_file, out):
                 "%d" % last["window_s"] if last else "", "yes" if last and last["truncated"] else "no",
                 ",".join(str(r["level"]) for r in rows if r["noise_flag"]) or "none"), file=out)
 
+    print("\n## Steps that are void\n", file=out)
+    print("A crossing on one of these is a bound. A step marked rerun did not send what it asked for.\n", file=out)
+    print("| Phase | Step | Why |", file=out)
+    print("| --- | --- | --- |", file=out)
+    void = 0
+    for (bucket, fc), repeats in sorted(data.items()):
+        for n, rows in sorted(repeats.items()):
+            for r in rows:
+                why = lib.validity(r)
+                if why:
+                    void += 1
+                    print("| %s %s r%d | %d | %s |" % (bucket, fc, n, r["level"], "; ".join(why)), file=out)
+    if not void:
+        print("| none | | |", file=out)
+
     print("\n## TTFT at the operating point\n", file=out)
     print("| Bucket | Flow control | q | Target | Predicted r/s | Measured r/s, client | Ratio | Mark | Router, cross-check |", file=out)
     print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |", file=out)
@@ -395,8 +486,8 @@ def report(run, frozen_file, spec, redo_file, out):
             predicted = t["predictedOff"] if fc == "off" else t["predictedOn"]
             client = [lib.measured(rows, "client_ttft_p%d" % q, t["seconds"]) for _, rows in sorted(repeats.items())]
             router = [lib.measured(rows, "router_ttft_p%d" % q, t["seconds"]) for _, rows in sorted(repeats.items())]
-            text, ratio, verdict = judge(predicted, client)
-            rtext, rratio, _ = judge(predicted, router)
+            text, ratio, verdict = judge(predicted, client, missing[bucket, fc])
+            rtext, rratio, _ = judge(predicted, router, missing[bucket, fc])
             verdicts[bucket, fc, "ttft", q] = verdict
             print("| %s | %s | p%d | %.1f ms | %.1f | %s | %s | %s | %s, %s |" % (
                 bucket, fc, q, t["seconds"] * 1000, predicted, text, ratio, verdict, rtext, rratio), file=out)
@@ -415,8 +506,8 @@ def report(run, frozen_file, spec, redo_file, out):
                 continue
             client = [lib.measured(rows, client_key, target) for _, rows in sorted(repeats.items())]
             router = [lib.measured(rows, router_key, target) for _, rows in sorted(repeats.items())]
-            text, ratio, verdict = judge(b["operatingRate"], client)
-            rtext, rratio, _ = judge(b["operatingRate"], router)
+            text, ratio, verdict = judge(b["operatingRate"], client, missing[bucket, fc])
+            rtext, rratio, _ = judge(b["operatingRate"], router, missing[bucket, fc])
             verdicts[bucket, fc, "tpot", name] = verdict
             print("| %s | %s | %s | %.1f ms | %.1f | %s | %s | %s | %s, %s |" % (
                 bucket, fc, name, target * 1000, b["operatingRate"], text, ratio, verdict, rtext, rratio), file=out)
@@ -483,6 +574,31 @@ def report(run, frozen_file, spec, redo_file, out):
     return verdicts
 
 
+def measured_ca2(run):
+    """{bucket: mean Ca2 sent over the finished phases' whole steps}, bursty buckets only."""
+    sent = collections.defaultdict(list)
+    for (bucket, _), repeats in phases_of(run)[0].items():
+        for name in repeats.values():
+            for r in load_steps(run, name):
+                if r["ca2_asked"] != 1 and abs(r["achieved"] / r["rate"] - 1) < 0.2:
+                    sent[bucket].append(r["ca2_sent"])
+    return {bucket: sum(v) / len(v) for bucket, v in sent.items()}
+
+
+def gate(run, frozen, spec, repeat, out):
+    """Score one repeat of the gate buckets: 0 to go on, 1 to stop. Written beside the report."""
+    with open(os.path.join(run, "gate-r%d.md" % repeat), "w", encoding="utf8") as f:
+        verdicts = report(run, frozen, spec, None, f, repeats=[repeat], only_gate=True)
+    bad = {k: v for k, v in verdicts.items() if k[2] == "ttft" and (fail(v) or "missing" in v)}
+    if not verdicts:
+        print("gate repeat %d: no gate bucket to score" % repeat, file=out)
+        return 1
+    print("gate repeat %d: %d readings, %d stop the run%s" % (
+        repeat, sum(1 for k in verdicts if k[2] == "ttft"), len(bad),
+        ": " + "; ".join("%s %s p%s %s" % (k[0], k[1], k[3], v) for k, v in sorted(bad.items())) if bad else ""), file=out)
+    return 1 if bad else 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="verb", required=True)
@@ -495,7 +611,18 @@ def main():
     rep.add_argument("frozen")
     rep.add_argument("spec")
     rep.add_argument("--redo", default="")
+    gt = sub.add_parser("gate")
+    gt.add_argument("run")
+    gt.add_argument("frozen")
+    gt.add_argument("spec")
+    gt.add_argument("--repeat", type=int, default=1)
+    ca2 = sub.add_parser("ca2")
+    ca2.add_argument("run")
     a = ap.parse_args()
+    if a.verb == "ca2":
+        for bucket, value in sorted(measured_ca2(a.run).items()):
+            print("%s=%.4f" % (bucket, value))
+        return
     if a.verb == "steps":
         rows, stop = analyze_steps(a.run, a.phase, a.discard)
         if not rows:
@@ -511,6 +638,8 @@ def main():
         frozen = json.load(f)
     with open(a.spec, encoding="utf8") as f:
         spec = json.load(f)
+    if a.verb == "gate":
+        sys.exit(gate(a.run, frozen, spec, a.repeat, sys.stdout))
     redo = None
     if a.redo:
         with open(a.redo, encoding="utf8") as f:

@@ -9,7 +9,8 @@
 
     name fc schedule runaway seed prefill decode
 
-and refuses a frozen file with a refused bucket, an unpriced target, or a spec
+with one `gate-check 1` line after repeat 1 of the gate buckets: staircase.sh scores
+them there, and a fail stops the run. It refuses a frozen file with a refused bucket, an unpriced target, or a spec
 other than the one it was frozen from. plan prints, per bucket, the steps with
 their noise floor, and the GPU-hours. A step's hold is lengthened until its
 window holds four relaxation times, up to maxHoldSeconds; a step past that is
@@ -44,16 +45,18 @@ def ladder_steps(bucket, spec):
 
 
 def phases(frozen, spec):
-    """Every phase of the run, in order: repeat 1 of everything, then 2, then 3."""
+    """Every phase of the run, in order: repeat 1 of the gate buckets, the rest of repeat 1, then 2, then 3."""
     by_name = {b["name"]: b for b in spec["buckets"]}
-    out, seed = [], spec["seedBase"]
+    out = []
     for repeat in range(1, spec["repeats"] + 1):
         for bucket in frozen["buckets"]:
             sent = by_name[bucket["name"]]
             for fc in sent["fc"]:
-                seed += 1
                 out.append({"name": "%s-%s-r%d" % (bucket["name"], fc, repeat), "fc": fc, "repeat": repeat,
-                            "bucket": bucket, "seed": seed, "gate": bool(sent.get("gate"))})
+                            "bucket": bucket, "gate": bool(sent.get("gate"))})
+    out.sort(key=lambda p: (p["repeat"], not p["gate"]) if p["repeat"] == 1 else (p["repeat"], False))
+    for i, phase in enumerate(out, 1):
+        phase["seed"] = spec["seedBase"] + i
     return out
 
 
@@ -90,12 +93,17 @@ def refusals(frozen, spec_sha):
 
 def write_ladder(frozen, spec, path):
     """Write the ladder; a file that exists is never replaced."""
-    lines = []
+    lines, gated = [], False
     for ph in phases(frozen, spec):
+        if gated is False and not (ph["repeat"] == 1 and ph["gate"]):
+            lines.append("gate-check 1\n")
+            gated = True
         b = ph["bucket"]
         lines.append("%s %s %s %.4f %d %d %d\n" % (ph["name"], ph["fc"], schedule(b, spec),
                                                    spec["runawayFactor"] * p90_target(b), ph["seed"],
                                                    b["prefill"], b["decode"]))
+    if not gated:
+        lines.append("gate-check 1\n")
     with open(path, "x", encoding="utf8") as f:
         f.writelines(lines)
     return len(lines)
@@ -124,6 +132,10 @@ def plan(frozen, spec, out=sys.stdout):
         got[0], got[1], got[2] = got[0] + 1, got[1] + hours, got[2] + hours * pods
     for key, (n, hours, gpu) in sorted(rows.items()):
         print("| %s, %d repeats | %d | %.1f | %.0f |" % (key, spec["repeats"], n, hours, gpu), file=out)
+    print("\nWhat the prediction assumes. Read this before the first step: `router hop` here means R was not learned.\n", file=out)
+    for b in frozen["buckets"]:
+        print("- %s: flags %s; assumed: %s" % (b["name"], ", ".join(b.get("flags") or []) or "none",
+                                               "; ".join(b.get("assumed") or []) or "nothing"), file=out)
     return rows
 
 

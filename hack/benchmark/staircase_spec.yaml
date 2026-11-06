@@ -50,9 +50,11 @@ buckets:
 - {name: H-low, prompt: 8000, output: 200, ca2: 1, prefill: 2, decode: 2, fc: ["off"], rates: [2, 4, 6, 8, 10]}
 # Set before results. The report says of each whether it held.
 falsifiers:
-  # Slope of the decode engine's TTFT on the client's TPOT, per bucket. M2: 6.44 to 8.09.
+  # Slope of the decode engine's TTFT on the client's TPOT, per bucket. M2, read by the
+  # report's code: 6.36 to 7.79.
   itlSlope: [5.5, 9.0]
   # The router hop, ms per 1000 prompt tokens, from the buckets' means. M2: about 1.
   hopPerKiloToken: [0.5, 1.5]
-  # Client p90 of C over B at one step. M2: 1.14 to 1.80, against 2.40 priced.
+  # Client p90 of C over B, median over the steps. M2: 1.33 off and on, each step 1.14
+  # to 1.80, against 2.40 priced.
   burstRatio: [1.0, 2.1]

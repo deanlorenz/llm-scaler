@@ -18,9 +18,12 @@ Everything this plan freezes is in
 1. Stand up a fresh namespace with `slo` listed from the first cycle.
 2. Warm up with a prompt sweep.
 3. `make benchmark-staircase-freeze`: the prediction, the ladder and their hashes.
-4. Repeat 1 of everything. Repeats 2 and 3 only if the gate buckets pass repeat 1: a
-   fail cannot be undone by a later repeat.
-5. `make benchmark-staircase-analyze`: the report, with each falsifier's verdict.
+4. Repeat 1 of the gate buckets. The run scores it in the loop: a fail, or a phase that
+   did not finish, stops the run and frees the GPUs, since a later repeat cannot undo
+   it. C is scored here at the frozen `Ca²`.
+5. Repeat 1 of the held-out buckets, then repeats 2 and 3.
+6. `make benchmark-staircase-redo`, then `make benchmark-staircase-analyze`: the report,
+   with each falsifier's verdict.
 
 Nothing in the spec, the ladder or the targets changes after step 2 starts. A later
 note goes in a new dated section and edits nothing above it.
@@ -46,7 +49,7 @@ note goes in a new dated section and edits nothing above it.
 | Hold | 10 minutes, first 3 discarded, lengthened to fit 4 relaxation times, at most 25 minutes | Page, with a cap |
 | Stop | Client p90 above twice the p90 target over the whole window | Page |
 | Safety stop | 4000 in flight. It is not a judgement: a step it cuts is a bound. The report names which rule ended each phase, which M2's log did not | Fixes an M2 deviation |
-| Validity | Achieved rate within 3%, failures under 1% (above, a miss), send lag p99 under 100 ms, Ready counts held, no engine error | From M2 |
+| Validity | Achieved rate within 3%, failures at most 1%, send lag p99 at most 100 ms, `replicas.log` at the bucket's fleet, `Ca²` sent within 0.75 to 1.25 of asked, at the noise floor. A step past any of these is void: a crossing on it is a bound, and the report lists it. No engine error, or the run stops | M2's, enforced |
 | Seeds | From 3001, a new one per phase. None of M2's 201 to 206 | |
 | Repeats | 3, and the statistic is the median. A verdict stands only if every repeat agrees | Page |
 
@@ -70,15 +73,18 @@ no recording held `V_P`, `a`, `slo` and a decode line on one cycle.
   them longer is an assumption the run checks.
 - **`slo` is listed before the recorder starts**, and the freeze refuses a warm-up whose
   last cycle fails the gate.
-- **A freeze that still prints `router hop 20 ms` means `R` was not learned.** No build
-  has learned it on a cluster. Stop and look before the first step: the run can go on,
-  but then it scores the assumed hop.
+- **Read what the freeze prints.** Its last lines list each bucket's flags and
+  assumptions, and `report.md` repeats them. `router hop 20 ms` there means `R` was not
+  learned, which no build has yet done on a cluster. The run can go on, but then it
+  scores the assumed hop: `make benchmark-staircase-abort` if that is not wanted.
 
 ## What is held out
 
 A, B and C are the gate buckets the page names, and the warm-up has seen their shapes.
-The prompts, outputs, fleets, `Ca²` and rates of the `H-` buckets appear nowhere in it.
-`H-16k` prices `a`'s curve past the longest prompt it was fitted on, which is the test.
+Each `H-` bucket holds out one thing the warm-up never ran: a prompt or an output in
+`H-3k` and `H-16k`, the fleet in `H-pods`, `Ca²` in `H-ca2` and `H-ca8`, and in `H-low`
+only the rates, on B's shape. `H-16k` prices `a`'s curve past the longest prompt it was
+fitted on, which is the test.
 
 | Bucket | Prompt / output | `N_p` + `N_d` | `Ca²` | Flow control | Tests |
 | --- | --- | --- | --- | --- | --- |

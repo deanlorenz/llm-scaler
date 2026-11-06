@@ -4,11 +4,13 @@
 Run by hack/check-staircase.sh. A failed line prints what it read; the count is
 asserted, so a section that stops running does not read as green.
 """
+import asyncio
 import gzip
 import importlib.util
 import io
 import json
 import math
+import multiprocessing
 import os
 import random
 import sys
@@ -26,7 +28,7 @@ spec_load = importlib.util.spec_from_file_location("staircase_load", os.path.joi
 load = importlib.util.module_from_spec(spec_load)
 spec_load.loader.exec_module(load)
 
-EXPECTED = 80
+EXPECTED = 96
 checks = fails = 0
 
 
@@ -152,13 +154,60 @@ ok("the knee, held then not", lib.knee_bracket([
     dict(rate=30, failed=0, completion_rate=20, achieved=30), dict(rate=40, failed=0, completion_rate=40, achieved=40)]) == (20, 30))
 ok("a failure is not held", not lib.held(dict(failed=1, completion_rate=10, achieved=10)))
 
+# --- what voids a step ------------------------------------------------------------------
+GOOD = dict(rate=10, achieved=10, lag_p99=0.01, failed=0, due=1000)
+ok("a good step", not lib.invalid(GOOD))
+ok("send lag voids", lib.invalid(dict(GOOD, lag_p99=0.2)))
+ok("1% failed is not void", not lib.invalid(dict(GOOD, failed=10)))
+ok("over 1% failed voids", lib.invalid(dict(GOOD, failed=11)))
+ok("a fleet that moved voids", lib.invalid(dict(GOOD, replica_change=True)))
+ok("a Ca2 to rerun voids", lib.invalid(dict(GOOD, ca2_rerun=True, ca2_sent=6, ca2_asked=4)))
+ok("3 to 5 around 4 stands", not lib.ca2_out_of_band(3.0, 4) and not lib.ca2_out_of_band(5.0, 4))
+ok("outside 3 to 5 reruns", lib.ca2_out_of_band(2.9, 4) and lib.ca2_out_of_band(5.1, 4))
+ok("Poisson has no band", not lib.ca2_out_of_band(1.4, 1))
+FLEET = dict(prompt=8000.0, vp=288288.0, imbalance=1.19, prefill=2, decode=2, decodeKnee=44.0, ca2=1)
+FLAGGED = [dict(GOOD, rate=20, achieved=20, ca2_sent=1.0, window_s=420, replicas=dict(decode=[2, 3], prefill=[2])),
+           dict(GOOD, rate=20, achieved=20, ca2_sent=1.0, window_s=420, replicas=dict(decode=[2], prefill=[2]))]
+analyze.flag_steps(FLAGGED, FLEET, 0.0577)
+ok("replica samples other than the fleet's", FLAGGED[0]["replica_change"] and not FLAGGED[1]["replica_change"])
+ok("a repeat missing is no pass", "missing" in analyze.judge(10, [("=", 10)], [2])[2])
+ok("a fail stands with a repeat missing", analyze.judge(10, [("=", 5)], [2])[2].startswith("FAIL"))
+ok("no repeat finished is no pass", "missing" in analyze.judge(10, [], [1])[2])
+
+
+class CancelledPost:
+    """A session whose request is cut while running, as the drain cuts it."""
+
+    def post(self, *args, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        raise asyncio.CancelledError()
+
+    async def __aexit__(self, *args):
+        return False
+
+
+async def cancelled_row():
+    rows = []
+    shared = {k: multiprocessing.Value("q", 0) for k in ("ok", "err", "inflight")}
+    await load.fire(CancelledPost(), "u", "m", "t", (7, (1.0, 2, 10, 5)), 100.0, rows, shared)
+    return rows, shared
+
+
+ROWS, SHARED = asyncio.run(cancelled_row())
+ok("a cancelled request still writes a row", len(ROWS) == 1 and "cancelled" in ROWS[0] and ROWS[0].startswith("7,2,"), ROWS)
+ok("and leaves nothing in flight", SHARED["inflight"].value == 0 and SHARED["err"].value == 1)
+
 # --- a phase from its files -------------------------------------------------------------
 with tempfile.TemporaryDirectory() as run:
     d = os.path.join(run, "phases", "B-off")
     os.makedirs(d)
     base = lib.ts("2026-11-06T02:00:00Z")
     with open(d + "/sweep.log", "w", encoding="utf8") as f:
-        f.writelines(LOG + ["2026-11-06T02:15:30Z RUNAWAY level=2 rule=max-inflight inflight=4535\n"])
+        # Level 2's stamp is 6 s late, as a log's can be: the rows say when it began.
+        f.writelines([LOG[0], "2026-11-06T02:10:06Z LEVEL 2 rate=20 in=8000 out=200 ca2=1 hold=600s\n",
+                      "2026-11-06T02:15:30Z RUNAWAY level=2 rule=max-inflight inflight=4535\n"])
     with gzip.open(d + "/requests.csv.gz", "wt") as f:
         f.write("index,level,scheduled,sent,first,last,status,prompt_tokens,tokens,error,pod\n")
         for i in range(600):  # step 1: one a second, every 2 s to each of two pods
@@ -166,6 +215,8 @@ with tempfile.TemporaryDirectory() as run:
             f.write("%d,1,%.4f,%.4f,%.4f,%.4f,200,8000,101,,pod-%d\n" % (i, t, t, t + 0.1, t + 1.1, i % 2))
         for i in range(300):  # step 2, up to the stop and past it: 10% never finish
             t = base + 600 + i
+            if i == 30:  # a row of level 1 due late must not land in level 2's window
+                f.write("9,1,%.4f,%.4f,%.4f,%.4f,200,8000,101,,pod-0\n" % (t + 200, t + 200, t + 200.1, t + 201))
             bad = i % 10 == 0
             f.write("%d,2,%.4f,%.4f,%.4f,%.4f,%d,8000,101,%s,pod-0\n" % (
                 1000 + i, t, t, 0 if bad else t + 0.2, 0 if bad else t + 1.2, 429 if bad else 200, "x" if bad else ""))
@@ -180,8 +231,9 @@ with tempfile.TemporaryDirectory() as run:
     near("step 1 completions", one["completion_rate"], 1, 1e-9)
     near("step 1 evenly spaced on each pod", one["ca2_by_pod"]["pod-1"], 0, 1e-3)
     ok("step 2 says what stopped it", two["stopped_by"] == lib.RULE_INFLIGHT and two["truncated"])
-    near("step 2 window is the 150 s to the stop", two["window_s"], 150)
+    near("step 2 window is the 150 s to the stop, from its first row", two["window_s"], 150)
     near("step 2 achieved is over that window", two["achieved"], 120 / 150, 1e-9)
+    near("step 2 reads its own level's rows", two["due"], 120)
     ok("step 2 failures count as infinitely slow", two["client_ttft_p95"] == math.inf and two["failed"] == 12, two["failed"])
 
 print("%d checks, %d failed" % (checks, fails))
@@ -209,6 +261,11 @@ if steps[3][1] != 1500 or not steps[3][2]:
 names = [p["name"] for p in freeze.phases(FROZEN, SPEC)]
 if names != ["B-off-r1", "B-on-r1", "B-off-r2", "B-on-r2", "B-off-r3", "B-on-r3"]:
     extra.append(("phase order", names))
+HELD = json.loads(json.dumps(FROZEN))
+HELD["buckets"].insert(0, dict(HELD["buckets"][0], name="H"))
+HELD_SPEC = dict(SPEC, repeats=1, buckets=SPEC["buckets"] + [dict(name="H", fc=["off"])])
+if [p["name"] for p in freeze.phases(HELD, HELD_SPEC)] != ["B-off-r1", "B-on-r1", "H-off-r1"]:
+    extra.append(("gate buckets go first in repeat 1", ""))
 seeds = [p["seed"] for p in freeze.phases(FROZEN, SPEC)]
 if len(set(seeds)) != len(seeds):
     extra.append(("seeds repeat", seeds))
@@ -230,7 +287,10 @@ with tempfile.TemporaryDirectory() as td:
     path = os.path.join(td, "ladder.txt")
     freeze.write_ladder(FROZEN, SPEC, path)
     with open(path, encoding="utf8") as f:
-        first = f.readline().split()
+        LINES = f.read().splitlines()
+    first = LINES[0].split()
+    if LINES[2] != "gate-check 1" or len(LINES) != 7:
+        extra.append(("the gate check follows repeat 1 of the gate buckets", LINES))
     if first[0] != "B-off-r1" or first[3] != "0.4000" or first[5:] != ["2", "2"]:
         extra.append(("ladder line", first))
     try:

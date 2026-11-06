@@ -1525,17 +1525,18 @@ must hold out and freeze is in
 | `staircase_spec.yaml` | The buckets, steps, warm-up, stop rule and falsifiers, hashed into the frozen file |
 | `staircase_freeze.py` | The ladder, with each step's hold lengthened until its window holds 4 relaxation times, and the GPU-hours. It refuses a warm-up that fails S2's gate |
 | `staircase_load.py` | The open-loop driver. A `RUNAWAY` line names its rule, `client-p90` or `max-inflight` |
-| `staircase_analyze.py` | One row a step, then `report.md`. The judged window is cut at the stop, and each row carries `stopped_by` |
-| `staircase.sh` | The run: deadline, standup, warm-up, phases, captures, teardown |
-| `hack/check-staircase.sh` | From `make lint-deploy-scripts`: every exit path against a stub kubectl, and the arithmetic against hand-worked figures |
+| `staircase_analyze.py` | One row a step, then `report.md`. The judged window is cut at the stop, and each row carries `stopped_by`. A void step reads as a bound, and a phase that did not finish is excluded and named, so a bucket with a repeat missing cannot pass |
+| `staircase.sh` | The run: deadline, standup, warm-up, phases, the gate check after repeat 1, captures, teardown |
+| `hack/check-staircase.sh` | From `make lint-deploy-scripts`: the exit paths it lists against a stub kubectl, on a PATH with no other kubectl, and the arithmetic against hand-worked figures |
 
-**Checked against M2.** Run over M2's files, the analysis reproduces every TTFT and
-TPOT row of the tables above, marks included, and the knee table's holds and
-collapses. Of 646 per-step figures compared with the run's own analysis, 614 are
-identical. The other 32 are the two steps the in-flight cap stopped, which the old
-analysis read over a window past the stop. On M2's warm-up `whatif freeze` gives the
-knees, onsets, `R_q` and mean TPOT of the frozen file. Its targets differ, as they
-should: the frozen file predates the decode term.
+**Checked against M2.** Run over M2's files, the analysis gives every mark of the
+tables above, and the knee table's holds and collapses. A step's window now starts at
+its first request, not at the log's stamp, and is cut at the stop, so five client
+figures move in their last digit (B off p95 1.74 to 1.73, B on p95 19.8 to 19.9 r/s,
+and three mean TPOT rates by 0.1 r/s). No mark moves. The two steps the in-flight cap
+cut short, step 7 of B off and C off, used to be read over a window past the stop. On
+M2's warm-up `whatif freeze` gives the knees, onsets, `R_q` and mean TPOT of the frozen
+file. Its targets differ, as they should: the frozen file predates the decode term.
 
 **A saturated transfer no longer floors the price.** S1 and the CLI read `T_xfer` from
 decode rows with an empty queue (`slo.SwitchTTFTQuietTransfer`), and hold that figure
@@ -1548,8 +1549,8 @@ restart, when nothing is held. Before this, M2's warm-up, which ends saturated, 
 spread, the arrivals and the flow-control state are the spec's, and the prefix hit
 rate is 0, since the driver's prompts share no prefix.
 
-**Not checked.** `staircase.sh` has run only against stubs: no cluster has run this
-tree. M2 ran its scratch form, and changing replicas between phases, which M2 never
+**Not checked.** `staircase.sh` has run only against stubs and a local fake API: no
+cluster has run this tree. M2 ran its scratch form, and changing replicas between phases, which M2 never
 did, has not run at all.
 
 ## Open questions

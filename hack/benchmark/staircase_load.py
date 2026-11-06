@@ -206,6 +206,10 @@ async def fire(sess, url, model, text, row, t0, rows, shared, pod_header=""):
                 first, last, n_in, n_out, error = await read_stream(r)
             else:
                 error = (await r.text())[:100]
+    except asyncio.CancelledError:
+        # Cut at the drain's end: it still gets a row, or a request that ran away would
+        # leave the analysis, which reads rows, as if it had never been sent.
+        error = "cancelled"
     except Exception as e:  # noqa: BLE001 -- counted and shown; the load goes on
         error = type(e).__name__
     with shared["inflight"].get_lock():
@@ -253,8 +257,11 @@ async def run_worker(i, n, a, plan, t0, shared):
                 task.add_done_callback(tasks.discard)
             if tasks:
                 await asyncio.wait(tasks, timeout=a.drain)
-            for task in list(tasks):
+            left = list(tasks)
+            for task in left:
                 task.cancel()
+            if left:
+                await asyncio.gather(*left, return_exceptions=True)
         flush.cancel()
         f.writelines(rows)
 

@@ -18,6 +18,12 @@ MARK_HIGH = 1.10
 MARK_LOW = 0.75
 # A step holds when completions over its window come within this of its rate.
 HOLD_TOLERANCE = 0.03
+# A step is void past any of these: the driver's send lag p99, seconds; the share of
+# requests that failed; and how far Ca^2 sent may sit from Ca^2 asked. The page's 3 to
+# 5 around 4 is 0.75 to 1.25 of it.
+MAX_LAG_P99 = 0.1
+MAX_FAILED_SHARE = 0.01
+CA2_BAND = (0.75, 1.25)
 # The stop rules a phase can end on.
 RULE_P90 = "client-p90"
 RULE_INFLIGHT = "max-inflight"
@@ -152,9 +158,32 @@ def judged_window(level, stop, discard):
     return start, max(start, end)
 
 
+def validity(row):
+    """Why a step is void: a crossing on it is a bound, not a figure. Empty on a good step."""
+    why = []
+    if abs(row["achieved"] / row["rate"] - 1) > HOLD_TOLERANCE:
+        why.append("achieved %.2f of %.2f" % (row["achieved"], row["rate"]))
+    if row.get("noise_flag"):
+        why.append("under the noise floor")
+    if row.get("lag_p99", 0) > MAX_LAG_P99:
+        why.append("send lag p99 %.3f s" % row["lag_p99"])
+    if row.get("failed", 0) > MAX_FAILED_SHARE * max(row.get("due", 0), 1):
+        why.append("failed %d of %d" % (row["failed"], row["due"]))
+    if row.get("replica_change"):
+        why.append("replicas changed")
+    if row.get("ca2_rerun"):
+        why.append("Ca2 sent %.2f of %g asked: rerun" % (row["ca2_sent"], row["ca2_asked"]))
+    return why
+
+
 def invalid(row):
-    """A step whose crossing is a bound, not a figure: short of its rate, or under the noise floor."""
-    return abs(row["achieved"] / row["rate"] - 1) > HOLD_TOLERANCE or bool(row.get("noise_flag"))
+    """Whether a crossing on this step is a bound."""
+    return bool(validity(row))
+
+
+def ca2_out_of_band(sent, asked):
+    """Whether a bursty step's sent Ca^2 sits outside the band around what it asked for."""
+    return asked != 1 and not asked * CA2_BAND[0] <= sent <= asked * CA2_BAND[1]
 
 
 def measured(rows, key, target, x="rate", bounds=True):

@@ -3,18 +3,68 @@
 # arithmetic self-test.
 #
 # A run holds GPUs on a shared cluster for days, and what protects them is exit paths,
-# which `bash -n` does not see. So every way out is taken here: the teardown must run on
-# each, the deadline must be armed before anything holds a GPU, and no step may run on a
-# prediction that moved. The count is asserted at the end.
+# which `bash -n` does not see. Each exit path listed under "exit paths" is taken here.
+# This proves the script's control flow, nothing about a real API server.
+#
+# This check must itself be safe. A run it left behind once outlived its stub directory,
+# and from then on `kubectl` would have meant the real binary. So:
+#   - runs see a PATH of the stubs and a directory of named tools, and no kubectl but the
+#     stub: with the stub gone, kubectl is not found. The check refuses to start if any
+#     directory on that PATH offers another one.
+#   - KUBECONFIG points at nothing, for the same reason.
+#   - every run leads its own session, and on any exit of this script, by a signal too,
+#     every session is killed. A watcher does it if this script is killed with -9.
+#   - the last check is that no process names the work directory.
+#
+# The count is asserted at the end.
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 B="$ROOT/hack/benchmark"
 PY="$(command -v python3 || command -v python)" || { echo "FAIL: python3 not found"; exit 1; }
-EXPECTED_CHECKS=32
+EXPECTED_CHECKS=65
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+STUB="$WORK/bin"
+TOOLS="$WORK/tools"
+mkdir -p "$STUB" "$TOOLS"
+export KUBECONFIG=/dev/null
+unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
+
+PIDS=""
+reap() {
+    local p
+    for p in $PIDS; do kill -TERM "-$p" 2>/dev/null; done
+    sleep 0.3
+    for p in $PIDS; do kill -KILL "-$p" 2>/dev/null; done
+    pkill -KILL -f "$WORK" 2>/dev/null
+    rm -rf "$WORK"
+}
+trap 'reap' EXIT
+trap 'exit 143' INT TERM HUP
+
+# If this script dies with -9, no trap runs: this does it.
+(
+    trap '' TERM INT HUP
+    parent=$$
+    while kill -0 "$parent" 2>/dev/null; do sleep 2; done
+    pkill -KILL -f "$WORK" 2>/dev/null
+    rm -rf "$WORK"
+) > /dev/null 2>&1 &
+disown
+
+for tool in bash sh env python3 jq yq timeout sleep date touch cat grep sed awk tr cut head tail wc ls cp mv rm mkdir seq \
+    sha256sum gzip dirname basename mktemp tee sort; do
+    found="$(command -v "$tool")" || { echo "FAIL: $tool not found"; exit 1; }
+    ln -s "$found" "$TOOLS/$tool"
+done
+RUN_PATH="$STUB:$TOOLS"
+for dir in ${RUN_PATH//:/ }; do
+    if [ "$dir" != "$STUB" ] && [ -e "$dir/kubectl" ]; then
+        echo "FAIL: refusing to run: $dir offers a kubectl behind the stub"
+        exit 1
+    fi
+done
 
 fails=0
 checks=0
@@ -37,19 +87,18 @@ else
     bad "the driver prints the Ca2 it will send"
 fi
 
-mkdir -p "$WORK/bin"
-STUB="$WORK/bin"
-
 cat > "$STUB/make" <<'STUB'
 #!/usr/bin/env bash
 echo "make $*" >> "$LOG"
-case "$*" in *benchmark-standup*)
-    if [ -n "${MAKE_SLEEP:-}" ]; then
-        sleep "$MAKE_SLEEP" &
-        echo $! > "$STATE/standup-sleep"
-        wait
-    fi
-    [ -n "${MAKE_FAIL:-}" ] && exit 2 ;;
+case "$*" in
+    *benchmark-standup*)
+        if [ -n "${MAKE_SLEEP:-}" ]; then
+            sleep "$MAKE_SLEEP" &
+            echo $! > "$STATE/standup-sleep"
+            wait
+        fi
+        [ -n "${MAKE_FAIL:-}" ] && exit 2 ;;
+    *benchmark-teardown*) touch "$STATE/tearing" ;;
 esac
 exit 0
 STUB
@@ -61,6 +110,7 @@ while [ $# -gt 0 ]; do
     case $1 in -o) out=$2; shift ;; --spec) spec=$2; shift ;; esac
     shift
 done
+[ -n "${WHATIF_REFUSE:-}" ] && exit 3
 [ -e "$out" ] && exit 2
 sum=$(sha256sum "$spec" | cut -d' ' -f1)
 sed "s/__SPEC__/$sum/" "$FROZEN_FIXTURE" > "$out"
@@ -69,7 +119,11 @@ STUB
 cat > "$WORK/frozen.json" <<'JSON'
 {"specSha256":"__SPEC__","gate":{"vp":true,"a":true,"decodeLine":true,"sloListed":true},"buckets":[
 {"name":"B","prompt":8000,"output":200,"ca2":1,"prefill":2,"decode":2,"vp":288288,"imbalance":1.19,"decodeKnee":44,"knee":44,
-"onsets":{"Prefill":54.6},"curve":[{"rate":17.6}],"targets":[{"percentile":90,"seconds":0.2,"predictedOff":37,"predictedOn":37}]}]}
+"operatingRate":37,"meanTPOT":0.01,"onsets":{"Prefill":54.6},"curve":[{"rate":17.6}],
+"targets":[{"percentile":90,"seconds":0.2,"predictedOff":37,"predictedOn":37}]},
+{"name":"H","prompt":3000,"output":500,"ca2":1,"prefill":2,"decode":2,"vp":288288,"imbalance":1.19,"decodeKnee":44,"knee":44,
+"operatingRate":37,"meanTPOT":0.01,"onsets":{"Prefill":54.6},"curve":[{"rate":17.6}],
+"targets":[{"percentile":90,"seconds":0.2,"predictedOff":37,"predictedOn":37}]}]}
 JSON
 
 cat > "$WORK/spec.yaml" <<'YAML'
@@ -87,17 +141,41 @@ warmup:
   sweep: {driver: open, schedule: "1:1:1000:32:1", seed: 11}
 buckets:
 - {name: B, fc: ["off", "on"], gate: true}
+- {name: H, fc: ["off"]}
 YAML
+
+# The rows a finished phase returns: one a second through a 600 s level, fast or slow.
+"$PY" - "$WORK" <<'PYROWS'
+import calendar, gzip, sys, time
+base = calendar.timegm(time.strptime("2026-11-06T02:00:00Z", "%Y-%m-%dT%H:%M:%SZ"))
+for name, ttft in (("good", 0.1), ("slow", 5.0)):
+    with gzip.open(sys.argv[1] + "/req-%s.gz" % name, "wt") as f:
+        f.write("index,level,scheduled,sent,first,last,status,prompt_tokens,tokens,error,pod\n")
+        for i in range(600):
+            t = base + i
+            f.write("%d,1,%.4f,%.4f,%.4f,%.4f,200,8000,101,,\n" % (i, t, t, t + ttft, t + ttft + 1))
+PYROWS
 
 cat > "$STUB/kubectl" <<'STUB'
 #!/usr/bin/env bash
 echo "kubectl $*" >> "$LOG"
+args=" $* "
+case "${HANG:-}" in
+    cp) case "$args" in *" cp "*) exec sleep 300 ;; esac ;;
+    exec) case "$args" in *" exec "*) exec sleep 300 ;; esac ;;
+    get) case "$args" in *" get scaledobject "*) exec sleep 300 ;; esac ;;
+esac
 pd='featureGates:\n- flowControl\nplugins:\n- type: a\nflowControl:\n  maxBytes: 1\nschedulingProfiles:\n- name: b\n'
 [ -e "$STATE/fc-off" ] && pd='plugins:\n- type: a\nschedulingProfiles:\n- name: b\n'
-args=" $* "
 case "$args" in
+    *" create namespace "*) touch "$STATE/ns" ;;
+    *" label namespace "*) [ -z "${LABEL_FAIL:-}" ] ;  exit ;;
+    *" get namespace "*" -o json "*) printf '{"metadata":{"labels":{"llm-scaling-manager/staircase-run":"%s"}}}\n' "${LABEL_RUN:-}" ;;
     *" get namespace "*) [ -n "${NS_EXISTS:-}" ]; exit ;;
-    *" logs job/staircase-deadline "*) echo "t deadline at x" ;;
+    *" get configmap staircase-lease "*)
+        printf '{"data":{"run":"%s"}}\n' "${LEASE_RUN-$(cat "$RUN/run-id" 2>/dev/null)}" ;;
+    *" logs job/staircase-deadline "*) [ -n "${ARM_FAIL:-}" ] || echo "t deadline at x" ;;
+    *" get job staircase-deadline "*) [ -n "${JOB_DEAD:-}" ] || echo 1 ;;
     *" get deploy -o name "*) printf 'deployment.apps/m-decode\ndeployment.apps/m-prefill\ndeployment.apps/m-epp\n' ;;
     *" get cm -o json "*) printf '{"items":[{"metadata":{"name":"eppcm"},"data":{"pd-config.yaml":"x"}}]}\n' ;;
     *" get cm eppcm -o json "*) printf '{"data":{"pd-config.yaml":"%s"}}\n' "$pd" ;;
@@ -107,20 +185,39 @@ case "$args" in
     *" get deploy m-decode -o json "*|*" get deploy m-prefill -o json "*)
         printf '{"spec":{"template":{"spec":{"containers":[{"name":"vllm","env":[{"name":"VLLM_MAX_MODEL_LEN","value":"40960"}]}]}}}}\n' ;;
     *" get scaledobject -o json "*) printf '{"items":[{"metadata":{"name":"so-d"},"spec":{"scaleTargetRef":{"name":"m-decode"}}},{"metadata":{"name":"so-p"},"spec":{"scaleTargetRef":{"name":"m-prefill"}}}]}\n' ;;
-    *" get deploy m-"*"jsonpath="*) echo 2 ;;
+    *" get deploy m-"*"jsonpath="*)
+        if [ -n "${NEVER_READY:-}" ]; then echo 1
+        elif [ -n "${READY_THEN_NOT:-}" ] && [ -e "$RUN/ladder.ready" ]; then echo 1
+        else echo 2; fi ;;
     *" get pod -l control-plane=controller-manager -o json "*)
         printf '{"items":[{"metadata":{"name":"ctl"},"status":{"phase":"Running"}}]}\n' ;;
-    *" get pods -o json "*) printf '{"items":[]}\n' ;;
+    *" get pod -l app=loadgen -o json "*)
+        if [ -n "${LOAD_ALIVE:-}" ]; then printf '{"items":[{"metadata":{"name":"lg-b-off-r1"}}]}\n'; else printf '{"items":[]}\n'; fi ;;
+    *" get pods -o json "*|*" get deploy -o json "*|*" get statefulset -o json "*|*" get daemonset -o json "*)
+        if [ -e "$STATE/tearing" ]; then
+            [ -n "${GET_FAIL:-}" ] && exit 1
+            case "$args" in *" get deploy "*) [ -n "${LEFT:-}" ] && { printf '{"items":[{"metadata":{"name":"m-decode"}}]}\n'; exit 0; } ;; esac
+        fi
+        printf '{"items":[]}\n' ;;
+    *" api-resources "*) [ -n "${HAS_LWS:-}" ] && echo leaderworkersets.leaderworkerset.x-k8s.io ;;
+    *" get leaderworkersets "*) printf '{"items":[]}\n' ;;
+    *" delete leaderworkersets "*) [ -n "${HAS_LWS:-}" ]; exit ;;
     *" get pods --no-headers "*) : ;;
     *" get --raw "*) : ;;
     *" exec ctl "*) printf '{"Kind":"start","Data":{"Commit":"abc"}}\n' ;;
     *" cp "*) d="${*: -1}"; mkdir -p "$d"; echo recording-bytes > "$d/learnrec-1.jsonl" ;;
-    *" exec "*"gzip"*) printf 'index\n' | gzip ;;
-    *" logs lg-"*|*" logs w-"*) printf '2026-11-06T02:00:00Z LEVEL 1 rate=1 in=1 out=1 ca2=1 hold=1s\n2026-11-06T02:00:02Z SWEEP DONE ok=1 err=0 runaway=no\n' ;;
-    *" apply -f "*"lg-"*|*" apply -f "*"load.yaml"*)
+    *" exec "*"gzip"*)
+        if [ -n "${SLOW:-}" ]; then cat "$WORK/req-slow.gz"; else cat "$WORK/req-good.gz"; fi ;;
+    *" logs lg-"*|*" logs w-"*)
+        if [ -n "${LOAD_STUCK:-}" ]; then exit 0; fi
+        printf '2026-11-06T02:00:00Z LEVEL 1 rate=1 in=1 out=1 ca2=1 hold=600s\n'
+        [ -n "${LOAD_RUNS:-}" ] || printf '2026-11-06T02:10:00Z SWEEP DONE ok=1 err=0 runaway=no\n' ;;
+    *" apply -f "*"load.yaml"*)
         case "$args" in *"/phases/"*)
             echo "step" >> "$STATE/steps"
-            [ -n "${TAMPER:-}" ] && echo "tampered" >> "$RUN/ladder.txt" ;;
+            [ -n "${TAMPER:-}" ] && echo "tampered" >> "$RUN/ladder.txt"
+            [ -n "${ENGINE_ERR:-}" ] && echo "boom" >> "$RUN/engine-errors.txt"
+            ;;
         esac ;;
 esac
 exit 0
@@ -133,12 +230,33 @@ fresh() {
     mkdir -p "$STATE"; : > "$LOG"
 }
 
-# base_env <command...> : run it under the stubs.
-base_env() {
-    exec_env=(env PATH="$STUB:$PATH" BENCHMARK_NAMESPACE=stair-ns STAIRCASE_RUN="$RUN" BENCHMARK_PROMETHEUS_URL=http://p:9090
+# env_line : the stubs' environment, on the restricted PATH.
+env_line() {
+    exec_env=("$TOOLS/env" PATH="$RUN_PATH" WORK="$WORK" BENCHMARK_NAMESPACE=stair-ns STAIRCASE_RUN="$RUN" BENCHMARK_PROMETHEUS_URL=http://p:9090
         STAIRCASE_SPEC="$WORK/spec.yaml" STAIRCASE_ROOT="$WORK" STAIRCASE_WHATIF="$STUB/whatif" FROZEN_FIXTURE="$WORK/frozen.json"
-        STAIRCASE_POLL=0.2 STAIRCASE_SETTLE=0 STAIRCASE_ARM_POLL=0 STAIRCASE_TEARDOWN_POLL=0 STAIRCASE_FREEZE_WAIT=30)
-    ("${exec_env[@]}" "$@")
+        STAIRCASE_POLL=0.2 STAIRCASE_TICK=0.1 STAIRCASE_SETTLE=0 STAIRCASE_ARM_POLL=0 STAIRCASE_TEARDOWN_POLL=0 STAIRCASE_TEARDOWN_TRIES=3
+        STAIRCASE_LEASE_EVERY=1 STAIRCASE_FREEZE_WAIT=40 STAIRCASE_READY_WAIT=2)
+}
+
+# base_env <VAR=value...> <command...> : run it to its end under the stubs.
+base_env() { env_line; ("${exec_env[@]}" "$@"); }
+
+# start <VAR=value...> <run args...> : a run in a session of its own; $pid leads it.
+start() {
+    env_line
+    setsid "${exec_env[@]}" "$@" bash "$B/staircase.sh" run img > "$RUN.out" 2>&1 &
+    pid=$!
+    PIDS="$PIDS $pid"
+}
+
+# wait_run : wait for $pid, capped; $rc is its exit, 99 if it never ended.
+wait_run() {
+    local i
+    for i in $(seq 1 450); do
+        kill -0 "$pid" 2>/dev/null || { wait "$pid"; rc=$?; return 0; }
+        sleep 0.2
+    done
+    rc=99
 }
 
 # wait_for <pattern> <file> : capped, so a broken run fails rather than hangs.
@@ -151,32 +269,38 @@ wait_for() {
     return 1
 }
 
-# Whether a teardown reached the harness and the load, whatever happened before.
-tore_down() { grep -q 'make --no-print-directory benchmark-teardown' "$LOG" && grep -q 'delete job,deploy,lws' "$LOG"; }
+# Whether a teardown reached the harness and the workloads, whatever happened before.
+tore_down() { grep -q 'make --no-print-directory benchmark-teardown' "$LOG" && grep -q 'delete deploy --all' "$LOG"; }
+steps() { cat "$STATE/steps" 2>/dev/null | wc -l; }
+leases() { grep -c 'patch cm staircase-lease' "$LOG"; }
 
 echo "a whole run..."
 fresh ok
-base_env bash "$B/staircase.sh" run img@sha256:0 > "$WORK/ok.out" 2>&1 &
-pid=$!
-if wait_for 'waiting for the freeze' "$RUN/timeline.txt"; then ok "reaches the freeze"; else bad "reaches the freeze"; cat "$WORK/ok.out"; fi
+start
+if wait_for 'waiting for the freeze' "$RUN/timeline.txt"; then ok "reaches the freeze"; else bad "reaches the freeze"; cat "$RUN.out"; fi
 expect "the warm-up left a recording" '[ -s "$RUN/recordings-warmup/learnrec-1.jsonl" ]'
 expect "nothing ran before the freeze" '[ ! -e "$STATE/steps" ]'
 base_env bash "$B/staircase.sh" freeze > "$WORK/freeze.out" 2>&1
-expect "freeze writes the hashes" '[ -s "$RUN/frozen.sha256" ] && [ -e "$RUN/ladder.ready" ]'
-expect "the plan is printed" 'grep -q "GPU-hours" "$RUN/plan.md"'
-wait "$pid"; rc=$?
+expect "freeze writes the hashes, spec.json among them" '[ -e "$RUN/ladder.ready" ] && grep -q spec.json "$RUN/frozen.sha256"'
+expect "the plan and its assumptions are printed" 'grep -q "GPU-hours" "$RUN/plan.md" && grep -q "What the prediction assumes" "$RUN/plan.md"'
+wait_run
 expect "the run exits 0" '[ "$rc" = 0 ]'
-expect "both phases ran" '[ "$(wc -l < "$STATE/steps")" = 2 ]'
+expect "all three phases ran" '[ "$(steps)" = 3 ]'
+expect "the gate was scored, and passed" 'grep -q "gate, repeat 1: rc=0" "$RUN/timeline.txt"'
 expect "the deadline is armed before the standup" '[ "$(grep -n "apply -f .*deadline.yaml" "$LOG" | head -1 | cut -d: -f1)" -lt "$(grep -n benchmark-standup "$LOG" | head -1 | cut -d: -f1)" ]'
+expect "the lease is claimed before anything else" 'grep -q "create configmap staircase-lease --from-literal=until=.* --from-literal=run=" "$LOG"'
 expect "slo is listed before the recorder" '[ "$(grep -n "patch configmap wva-scaling-policy-config" "$LOG" | head -1 | cut -d: -f1)" -lt "$(grep -n "patch deployment wva-controller-manager" "$LOG" | head -1 | cut -d: -f1)" ]'
-expect "the lease was renewed" 'grep -q "patch cm staircase-lease" "$LOG"'
+expect "the lease was renewed" '[ "$(leases)" -gt 0 ]'
 expect "the fleet was pinned" 'grep -q "\"minReplicaCount\":2,\"maxReplicaCount\":2" "$LOG"'
-expect "teardown on success" 'tore_down'
+expect "teardown on success, the Job after the workloads" 'tore_down && [ "$(grep -n "delete deploy --all" "$LOG" | cut -d: -f1 | head -1)" -lt "$(grep -n "delete job staircase-deadline" "$LOG" | cut -d: -f1 | head -1)" ]'
 expect "the private copy ran" '[ -s "$RUN/bin/staircase.sh" ] && grep -q "run start" "$RUN/timeline.txt"'
 if base_env bash "$B/staircase.sh" freeze > /dev/null 2>&1; then bad "a second freeze must refuse"; else ok "a second freeze refuses"; fi
 if base_env bash "$B/staircase.sh" run img > /dev/null 2>&1; then bad "a used directory must refuse"; else ok "a used directory refuses"; fi
+if base_env bash "$B/staircase.sh" analyze > "$WORK/analyze.out" 2>&1 && [ -s "$RUN/report.md" ]; then ok "analyze reads the run"; else bad "analyze reads the run"; cat "$WORK/analyze.out"; fi
+echo '{}' >> "$RUN/spec.json"
+if base_env bash "$B/staircase.sh" analyze > /dev/null 2>&1; then bad "a moved band must refuse the report"; else ok "a moved band refuses the report"; fi
 
-echo "exit paths..."
+echo "ownership..."
 fresh nofreeze
 mkdir -p "$RUN/recordings-warmup" "$RUN/phases"
 echo x > "$RUN/recordings-warmup/a.jsonl"
@@ -184,51 +308,216 @@ if base_env bash "$B/staircase.sh" freeze > /dev/null 2>&1; then bad "a freeze a
 
 fresh exists
 if base_env NS_EXISTS=1 bash "$B/staircase.sh" run img > /dev/null 2>&1; then bad "an existing namespace must refuse"; else ok "an existing namespace refuses"; fi
-expect "and nothing was created" '! grep -q "create namespace" "$LOG"'
-expect "and nothing is torn down there" '! tore_down'
+expect "and nothing was created or torn down" '! grep -q "create namespace" "$LOG" && ! tore_down'
 
+fresh dflt
+for ns in default kube-system; do
+    if base_env BENCHMARK_NAMESPACE=$ns bash "$B/staircase.sh" teardown > /dev/null 2>&1; then bad "$ns must refuse teardown"; else ok "$ns refuses teardown"; fi
+done
+expect "and nothing was deleted" '! grep -q " delete " "$LOG"'
+
+fresh other
+mkdir -p "$RUN"; echo mine > "$RUN/run-id"
+if base_env LEASE_RUN=theirs bash "$B/staircase.sh" teardown > /dev/null 2>&1; then bad "another run's namespace must refuse"; else ok "another run's namespace refuses"; fi
+expect "and nothing was deleted" '! grep -q " delete " "$LOG"'
+if base_env LEASE_RUN= LABEL_RUN=mine bash "$B/staircase.sh" teardown > /dev/null 2>&1; then ok "the namespace label alone marks it"; else bad "the namespace label alone marks it"; fi
+
+fresh noid
+mkdir -p "$RUN"
+if base_env LEASE_RUN= bash "$B/staircase.sh" teardown > /dev/null 2>&1; then bad "a directory with no id must refuse"; else ok "a directory with no id refuses"; fi
+
+echo "exit paths..."
 fresh standupfail
-if base_env MAKE_FAIL=1 bash "$B/staircase.sh" run img > /dev/null 2>&1; then bad "a failed standup must fail"; else ok "a failed standup fails"; fi
-expect "teardown after a failed standup" 'tore_down'
-expect "and no recorder" '! grep -q "patch deployment wva-controller-manager" "$LOG"'
+start MAKE_FAIL=1; wait_run
+expect "a failed standup fails and tears down, no recorder" '[ "$rc" != 0 ] && tore_down && ! grep -q "patch deployment wva-controller-manager" "$LOG"'
+
+fresh armfail
+start ARM_FAIL=1 STAIRCASE_ARM_TRIES=2; wait_run
+expect "no deadline: no standup, and teardown" '[ "$rc" != 0 ] && ! grep -q benchmark-standup "$LOG" && tore_down'
 
 fresh term
-exec_env=(env PATH="$STUB:$PATH" BENCHMARK_NAMESPACE=stair-ns STAIRCASE_RUN="$RUN" BENCHMARK_PROMETHEUS_URL=http://p:9090
-    STAIRCASE_SPEC="$WORK/spec.yaml" STAIRCASE_ROOT="$WORK" STAIRCASE_WHATIF="$STUB/whatif" FROZEN_FIXTURE="$WORK/frozen.json"
-    STAIRCASE_POLL=0.2 STAIRCASE_SETTLE=0 STAIRCASE_ARM_POLL=0 STAIRCASE_TEARDOWN_POLL=0)
-# A simple command, not the function: the job's pid must be the run's own.
-"${exec_env[@]}" MAKE_SLEEP=60 bash "$B/staircase.sh" run img > /dev/null 2>&1 &
-pid=$!
+start MAKE_SLEEP=60
 if wait_for 'make .*benchmark-standup' "$LOG" && wait_for . "$STATE/standup-sleep"; then
-    start=$(date +%s)
-    kill -TERM "$pid"
-    wait "$pid"
-    took=$(($(date +%s) - start))
-    expect "TERM during the standup tears down" 'tore_down'
-    expect "and at once, not after the standup: ${took}s" '[ "$took" -lt 30 ]'
+    begin=$(date +%s); kill -TERM "$pid"; wait_run; took=$(($(date +%s) - begin))
+    expect "TERM during the standup tears down at once: ${took}s" 'tore_down && [ "$took" -lt 15 ]'
     expect "and the standup itself is stopped" '! kill -0 "$(cat "$STATE/standup-sleep")" 2>/dev/null'
 else
-    bad "the standup never started"; bad "no TERM case"; bad "no TERM case"
+    bad "the standup never started"; bad "no TERM case"
 fi
 
+fresh abortstandup
+start MAKE_SLEEP=60
+if wait_for . "$STATE/standup-sleep"; then
+    touch "$RUN/abort"; wait_run
+    expect "abort during the standup" '[ "$rc" != 0 ] && tore_down && ! kill -0 "$(cat "$STATE/standup-sleep")" 2>/dev/null'
+else bad "abort during the standup"; fi
+
+fresh hangcp
+start HANG=cp
+if wait_for ' cp ' "$LOG"; then
+    begin=$(date +%s); kill -TERM "$pid"; wait_run; took=$(($(date +%s) - begin))
+    expect "TERM with a hung cp lands: ${took}s" '[ "$took" -lt 25 ] && grep -q "exit rc=143" "$RUN/timeline.txt"'
+else bad "TERM with a hung cp"; fi
+
+fresh hangexec
+start HANG=exec
+if wait_for ' exec ctl ' "$LOG"; then
+    touch "$RUN/abort"; begin=$(date +%s); wait_run; took=$(($(date +%s) - begin))
+    expect "abort with a hung exec lands: ${took}s" '[ "$took" -lt 25 ] && grep -q "teardown" "$RUN/timeline.txt"'
+else bad "abort with a hung exec"; fi
+
+fresh hangget
+start HANG=get STAIRCASE_KUBE_TIMEOUT=2
+begin=$(date +%s); wait_run; took=$(($(date +%s) - begin))
+expect "a hung read of the fleet stops the run, bounded by the kube timeout: ${took}s" '[ "$rc" != 0 ] && [ "$rc" != 99 ] && [ "$took" -lt 30 ] && grep -q "ScaledObjects unreadable" "$RUN/timeline.txt" && tore_down'
+
+fresh abortpin
+start NEVER_READY=1 STAIRCASE_READY_WAIT=60
+if wait_for 'get deploy m-decode -o jsonpath' "$LOG"; then
+    begin=$(date +%s); touch "$RUN/abort"; wait_run; took=$(($(date +%s) - begin))
+    expect "abort during pin_fleet: ${took}s" '[ "$took" -lt 20 ] && tore_down'
+else bad "abort during pin_fleet"; fi
+
+fresh abortlevel
+start LOAD_STUCK=1 STAIRCASE_POLL=0.5
+if wait_for 'apply -f .*load.yaml' "$LOG"; then
+    touch "$RUN/abort"; begin=$(date +%s); wait_run; took=$(($(date +%s) - begin))
+    expect "abort while waiting for LEVEL 1: ${took}s" '[ "$took" -lt 20 ] && tore_down'
+else bad "abort while waiting for LEVEL 1"; fi
+
+fresh pintimeout
+start NEVER_READY=1; wait_run
+expect "a fleet that never gets Ready stops the run" '[ "$rc" != 0 ] && tore_down && ! grep -q "patch deployment wva-controller-manager" "$LOG"'
+
+fresh nofreeze2
+start STAIRCASE_FREEZE_WAIT=1; wait_run
+expect "no freeze in time stops the run" '[ "$rc" != 0 ] && grep -q "no freeze in time" "$RUN/timeline.txt" && tore_down'
+
+fresh refused
+start STAIRCASE_FREEZE_WAIT=60
+wait_for 'waiting for the freeze' "$RUN/timeline.txt"
+base_env WHATIF_REFUSE=1 bash "$B/staircase.sh" freeze > /dev/null 2>&1
+wait_run
+expect "a refused freeze aborts the run, not waits out its cap" '[ -e "$RUN/abort" ] && tore_down && [ ! -e "$STATE/steps" ]'
+
 fresh tamper
-base_env TAMPER=1 bash "$B/staircase.sh" run img > /dev/null 2>&1 &
-pid=$!
+start TAMPER=1
 wait_for 'waiting for the freeze' "$RUN/timeline.txt"
 base_env bash "$B/staircase.sh" freeze > /dev/null 2>&1
-wait "$pid"; rc=$?
-expect "a prediction that moved stops the run" '[ "$rc" != 0 ] && [ "$(wc -l < "$STATE/steps")" = 1 ]'
-expect "teardown after it" 'tore_down'
+wait_run
+expect "a prediction that moved stops the run after that step" '[ "$rc" != 0 ] && [ "$(steps)" = 1 ] && tore_down'
 
-fresh abort
-base_env STAIRCASE_FREEZE_WAIT=600 bash "$B/staircase.sh" run img > /dev/null 2>&1 &
-pid=$!
+fresh engine
+start ENGINE_ERR=1
+wait_for 'waiting for the freeze' "$RUN/timeline.txt"
+base_env bash "$B/staircase.sh" freeze > /dev/null 2>&1
+wait_run
+expect "an engine error stops the run after that step" '[ "$rc" != 0 ] && [ "$(steps)" = 1 ] && grep -q "engine errors: stopping" "$RUN/timeline.txt" && tore_down'
+
+fresh gatefail
+start SLOW=1
+wait_for 'waiting for the freeze' "$RUN/timeline.txt"
+base_env bash "$B/staircase.sh" freeze > /dev/null 2>&1
+wait_run
+expect "a failed gate stops the run before the held-out phase" '[ "$rc" != 0 ] && [ "$(steps)" = 2 ] && grep -q "the gate failed" "$RUN/timeline.txt" && tore_down'
+
+fresh crashed
+start READY_THEN_NOT=1
+wait_for 'waiting for the freeze' "$RUN/timeline.txt"
+base_env bash "$B/staircase.sh" freeze > /dev/null 2>&1
+wait_run
+expect "phases whose fleet fails run no load, and fail the gate as missing" '[ "$rc" != 0 ] && [ "$(steps)" = 0 ] && grep -q "the gate failed" "$RUN/timeline.txt" && grep -q "missing" "$RUN/gate-r1.out" && tore_down'
+
+fresh abortwait
+start STAIRCASE_FREEZE_WAIT=600
 wait_for 'waiting for the freeze' "$RUN/timeline.txt"
 base_env bash "$B/staircase.sh" abort > /dev/null 2>&1
-wait "$pid"
-expect "abort tears down" 'tore_down'
+wait_run
+expect "abort at the freeze wait tears down" 'tore_down'
+
+echo "a dead runner..."
+fresh kill9
+start STAIRCASE_FREEZE_WAIT=60
+if wait_for 'waiting for the freeze' "$RUN/timeline.txt" && wait_for 'patch cm staircase-lease' "$LOG"; then
+    kill -KILL "$pid"
+    sleep 3
+    before=$(leases); sleep 3; after=$(leases)
+    expect "kill -9: the lease stops being renewed" '[ "$before" = "$after" ]'
+    expect "and the capture loop ends with the main shell" 'grep -q "the main shell is gone" "$RUN/timeline.txt"'
+else bad "kill -9 case"; bad "kill -9 case"; fi
+
+fresh stale
+mkdir -p "$RUN"
+env_line
+(
+    export PATH="$RUN_PATH" STAIRCASE_LIB=1 BENCHMARK_NAMESPACE=stair-ns STAIRCASE_RUN="$RUN" STAIRCASE_POLL=0.1 STAIRCASE_LEASE_EVERY=0 STAIRCASE_HEART_MAX=100
+    # shellcheck source=/dev/null
+    . "$B/staircase.sh"
+    echo $(($(date +%s) + 99999)) > "$R/deadline-epoch.txt"
+    touch -d '1 hour ago' "$R/heartbeat"
+    sleep 30 & main=$!
+    (sleep 1; touch "$R/STOP") &
+    capture_loop "$main" > /dev/null 2>&1
+    kill "$main" 2>/dev/null
+)
+expect "a stale heartbeat stops renewal, with the main shell alive" '[ "$(leases)" = 0 ] && grep -q "lease not renewed" "$RUN/timeline.txt"'
+
+fresh jobdead
+mkdir -p "$RUN"
+(
+    export PATH="$RUN_PATH" STAIRCASE_LIB=1 BENCHMARK_NAMESPACE=stair-ns STAIRCASE_RUN="$RUN" JOB_DEAD=1
+    # shellcheck source=/dev/null
+    . "$B/staircase.sh"
+    echo $(($(date +%s) + 99999)) > "$R/deadline-epoch.txt"
+    JOB_MISSES=0
+    job_check; job_check
+    [ ! -e "$R/abort" ] || exit 1
+    job_check
+    [ -e "$R/abort" ]
+)
+expect "a deadline Job that stopped aborts the run, on the third read" '[ $? = 0 ]'
+
+fresh capnear
+mkdir -p "$RUN"
+(
+    export PATH="$RUN_PATH" STAIRCASE_LIB=1 BENCHMARK_NAMESPACE=stair-ns STAIRCASE_RUN="$RUN"
+    # shellcheck source=/dev/null
+    . "$B/staircase.sh"
+    date +%s > "$R/deadline-epoch.txt"
+    JOB_MISSES=0
+    job_check
+    [ -e "$R/abort" ]
+)
+expect "a hard cap that nears aborts the run" '[ $? = 0 ]'
+
+echo "teardown..."
+fresh nolws
+mkdir -p "$RUN"; echo id > "$RUN/run-id"
+if base_env bash "$B/staircase.sh" teardown > "$RUN.out" 2>&1; then ok "no LeaderWorkerSet API does not fail it"; else bad "no LeaderWorkerSet API does not fail it"; cat "$RUN.out"; fi
+expect "and the kinds after it are still deleted" 'grep -q "delete daemonset --all" "$LOG"'
+
+fresh getfail
+mkdir -p "$RUN"; echo id > "$RUN/run-id"
+if base_env GET_FAIL=1 bash "$B/staircase.sh" teardown > "$RUN.out" 2>&1; then bad "a failed read must not read as nothing left"; else ok "a failed read does not read as nothing left"; fi
+expect "the Job stays, and the message is loud" '! grep -q "delete job staircase-deadline" "$LOG" && grep -q "TEARDOWN NOT CONFIRMED" "$RUN.out"'
+
+fresh leftover
+mkdir -p "$RUN"; echo id > "$RUN/run-id"
+if base_env LEFT=1 bash "$B/staircase.sh" teardown > "$RUN.out" 2>&1; then bad "a workload left must fail teardown"; else ok "a workload left fails teardown"; fi
+expect "and the Job stays" '! grep -q "delete job staircase-deadline" "$LOG"'
+
+fresh rescue
+mkdir -p "$RUN/phases/B-off-r1"; echo id > "$RUN/run-id"; echo "$RUN/phases/B-off-r1" > "$RUN/load-dir-lg-b-off-r1"
+base_env LOAD_ALIVE=1 bash "$B/staircase.sh" teardown > /dev/null 2>&1
+expect "teardown saves a load pod before deleting it" '[ -s "$RUN/phases/B-off-r1/requests.csv.gz" ] && [ "$(grep -n "gzip" "$LOG" | head -1 | cut -d: -f1)" -lt "$(grep -n "delete pod -l app=loadgen" "$LOG" | head -1 | cut -d: -f1)" ]'
 
 echo "captures..."
+fresh snapshots
+start LOAD_RUNS=1 STAIRCASE_FREEZE_WAIT=60
+if wait_for 'gzip' "$LOG"; then
+    expect "the requests are on disk while the load runs" 'wait_for . "$RUN/warmup/sweep/sweep.log" && [ -s "$RUN/warmup/sweep/requests.csv.gz" ]'
+    kill -TERM "$pid"; wait_run
+else bad "snapshot on a poll"; fi
 (
     export STAIRCASE_LIB=1
     # shellcheck source=/dev/null
@@ -243,6 +532,21 @@ echo "captures..."
     [ "$(cat saved)" = "a longer capture than before" ]
 )
 expect "a capture never shrinks the saved copy, and grows it" '[ $? = 0 ]'
+
+echo "this check..."
+reap_sessions() {
+    local p
+    for p in $PIDS; do kill -KILL "-$p" 2>/dev/null; done
+    sleep 0.3
+}
+reap_sessions
+if pgrep -f "$WORK" > "$WORK.left" 2>/dev/null; then
+    bad "no process is left naming the work directory"
+    while read -r p; do tr '\0' ' ' < "/proc/$p/cmdline" | cut -c1-200; echo; done < "$WORK.left"
+else
+    ok "no process is left naming the work directory"
+fi
+rm -f "$WORK.left"
 
 echo "$checks checks, $fails failed"
 if [ "$checks" != "$EXPECTED_CHECKS" ]; then

@@ -1711,12 +1711,20 @@ make benchmark-staircase-run IMG=<your build, by digest>     # in a shell that o
 # When the timeline says "waiting for the freeze", from another shell:
 make benchmark-staircase-freeze
 # After the run:
+make benchmark-staircase-redo                               # re-prices bursty buckets at the Ca2 sent
 make benchmark-staircase-analyze                            # writes $STAIRCASE_RUN/report.md
 ```
 
+Read what the freeze prints: its last lines are what the prediction assumes. A refused
+freeze aborts the run. After repeat 1 of the gate buckets the run scores them itself,
+and a fail stops it and frees the GPUs.
+
 `make benchmark-staircase-status` shows progress and what holds GPUs.
-`make benchmark-staircase-abort` stops a run, and `make benchmark-staircase-teardown`
-frees everything from any state. Confirm with `kubectl get pods -n $BENCHMARK_NAMESPACE`.
+`make benchmark-staircase-abort` stops a run within a minute, as a TERM does, and
+`make benchmark-staircase-teardown` frees everything from any state. It refuses a
+namespace that does not carry this run's id, and fails unless the workloads are
+confirmed gone; the deadline Job then stays. Confirm with
+`kubectl get pods -n $BENCHMARK_NAMESPACE`.
 
 **To predict without a cluster**, from any warm-up recording:
 
@@ -1727,18 +1735,19 @@ make benchmark-staircase-predict RECORDING=<learner recording>
 It prints the frozen file. The same recording and spec give the same bytes. `whatif
 freeze` exits 3 when a bucket refuses, with the refusal in the file.
 
-**If the runner dies**, a Job in the namespace deletes the workloads when the lease
-lapses, about 40 minutes after the last renewal, or at a 4-day hard cap
-(`STAIRCASE_HARD_CAP`). The check is `kubectl get deploy -n $BENCHMARK_NAMESPACE`.
+**If the runner dies**, even by `kill -9`, the capture loop stops renewing the lease and
+exits. A Job in the namespace then deletes the workloads when the lease lapses, up to
+40 minutes after the last renewal, or at a 4-day hard cap (`STAIRCASE_HARD_CAP`). The
+check is `kubectl get deploy -n $BENCHMARK_NAMESPACE`.
 
 **Reading the report.** The client's rate decides the mark, at the operating point.
 The router's column is a cross-check, because its buckets are wide where the targets
 sit. "How each phase ended" names the rule that stopped each phase: `client-p90` is
 the frozen rule, and `max-inflight` is the safety cap, whose step reads as a bound.
 
-`make lint-deploy-scripts` runs `hack/check-staircase.sh`, which takes every exit path
-against a stub kubectl and checks the arithmetic against hand-worked figures. It proves
-nothing about a real cluster.
+`make lint-deploy-scripts` runs `hack/check-staircase.sh`, which takes the exit paths it
+lists against a stub kubectl and checks the arithmetic against hand-worked figures. It
+proves nothing about a real cluster.
 
 ## End-to-End Tests
 

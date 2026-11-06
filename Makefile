@@ -2995,6 +2995,10 @@ benchmark-staircase-predict: whatif ## TTFT staircase: print the frozen predicti
 benchmark-staircase-freeze: whatif ## TTFT staircase: freeze the prediction and write the ladder, once, after the warm-up and before any step
 	@$(STAIRCASE) freeze
 
+.PHONY: benchmark-staircase-redo
+benchmark-staircase-redo: whatif ## TTFT staircase: re-price each bursty bucket at its measured Ca2, targets held; analyze then reads it
+	@$(STAIRCASE) redo
+
 .PHONY: benchmark-staircase-analyze
 benchmark-staircase-analyze: ## TTFT staircase: per-step analysis of every phase, then report.md
 	@$(STAIRCASE) analyze
@@ -3008,7 +3012,7 @@ benchmark-staircase-abort: ## TTFT staircase: stop a run; its own exit path tear
 	@$(STAIRCASE) abort
 
 .PHONY: benchmark-staircase-teardown
-benchmark-staircase-teardown: ## TTFT staircase: free everything, from any state (shared cluster -- do not skip)
+benchmark-staircase-teardown: ## TTFT staircase: free everything this run owns, from any state; fails unless confirmed (shared cluster -- do not skip)
 	@$(STAIRCASE) teardown
 
 # Stub for llm-d nightly reusable workflows (test_target=nightly-test-llm-d)
