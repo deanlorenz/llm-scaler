@@ -172,7 +172,7 @@ expect "slo is listed before the recorder" '[ "$(grep -n "patch configmap wva-sc
 expect "the lease was renewed" 'grep -q "patch cm staircase-lease" "$LOG"'
 expect "the fleet was pinned" 'grep -q "\"minReplicaCount\":2,\"maxReplicaCount\":2" "$LOG"'
 expect "teardown on success" 'tore_down'
-expect "the private copy ran" '[ -x "$RUN/bin/staircase.sh" ]'
+expect "the private copy ran" '[ -s "$RUN/bin/staircase.sh" ] && grep -q "run start" "$RUN/timeline.txt"'
 if base_env bash "$B/staircase.sh" freeze > /dev/null 2>&1; then bad "a second freeze must refuse"; else ok "a second freeze refuses"; fi
 if base_env bash "$B/staircase.sh" run img > /dev/null 2>&1; then bad "a used directory must refuse"; else ok "a used directory refuses"; fi
 

@@ -117,9 +117,9 @@ type frozenBucket struct {
 	// the recorded one.
 	TransferSecondsPerToken float64        `json:"transferSecondsPerToken"`
 	Flags                   []whatif.Flag  `json:"flags"`
-	Assumed   []string       `json:"assumed"`
-	Targets   []frozenTarget `json:"targets"`
-	Curve     []frozenPoint  `json:"curve"`
+	Assumed                 []string       `json:"assumed"`
+	Targets                 []frozenTarget `json:"targets"`
+	Curve                   []frozenPoint  `json:"curve"`
 	// Refused is why the bucket has no prediction; "" with one.
 	Refused string `json:"refused,omitempty"`
 }
