@@ -2291,6 +2291,7 @@ saturatedThroughputBucket
 saturation
 saturation-holds-role
 saturation-itl-one-sided-at-cap
+saturation-itl-tier-hysteresis
 saturation-only
 saturation-token-based
 saturation.Analyze
@@ -2444,6 +2445,7 @@ slo-itl-pinned
 slo-itl-reads-the-finite-pod-mean
 slo-itl-reads-the-settle-tracker
 slo-itl-restart-under-its-name-settles
+slo-itl-tier-hysteresis
 slo-itl-waits-after-controller-restart
 slo-model
 slo-transient
@@ -2640,6 +2642,7 @@ throughput-itl-reads-the-settle-tracker
 throughput-itl-restart-under-its-name-settles
 throughput-itl-settling
 throughput-itl-steady-gate
+throughput-itl-tier-hysteresis
 throughput-itl-waits-after-controller-restart
 throughput.Analyze
 throughput.ForgetVariant
@@ -2657,6 +2660,7 @@ throughput|
 tier
 tier-1
 tier-2
+tierHeld
 tiers
 time
 time-base

@@ -48,11 +48,12 @@ const (
 // with throughput.SwitchITLAdmitsAtSequenceCap off the path counts 0 pinned
 // there, and 7 above-band fits take their place.
 //
-// The held slope has no floor here: it ran 0 times in both. The restart
-// recording ends with 35 minutes of light load, and the line stayed silent
-// through them with cause shape-change: a shape change drops the held slope
-// with the window, and the load's shape changed as it went light. The held
-// slope stays synthetic (the engine fixture, and throughput's property cases).
+// Since the tier dwell (issue #495) throughput-sweep's 9 pinned fits are gone:
+// the spread collapses inside the dwell, and the line holds its slope, 8 times.
+// Its floor is the held path in their place; the restart recording still
+// floors the pinned one. The restart recording's light load holds nothing: it
+// ends with 35 minutes of it, and the line stayed silent through them with cause
+// shape-change, since a shape change drops the held slope with the window.
 type throughputSweepFloor struct {
 	fixture string
 	// paths is the fewest runs of each path, by throughput.PathNames.
@@ -64,7 +65,7 @@ type throughputSweepFloor struct {
 
 var throughputSweepFloors = []throughputSweepFloor{
 	{fixture: throughputSweepFixture, paths: map[string]int64{
-		throughput.PathITLOLS: 1, throughput.PathITLPinned: 1, throughput.PathITLSettling: 1},
+		throughput.PathITLOLS: 1, throughput.PathITLHeld: 1, throughput.PathITLSettling: 1},
 		restsOn: map[string][]string{throughput.SwitchITLWaitsAfterRestart: {throughput.PathITLSettling}}},
 	{fixture: throughputSweepRestartFixture, paths: map[string]int64{
 		throughput.PathITLOLS: 1, throughput.PathITLPinned: 1, throughput.PathITLSettling: 1, throughput.PathITLAtCap: 1},
@@ -122,7 +123,7 @@ func TestGoldens_ThroughputSweepFloors(t *testing.T) {
 					PackageThroughput: {name: false}}})
 				require.NoError(t, err)
 				t.Logf("%s: %s off, throughput line paths %v", f.fixture, name, throughputPaths(sw.Paths))
-				var want []string
+				want := make([]string, 0, len(paths))
 				for _, p := range paths {
 					want = append(want, fmt.Sprintf("%s: the throughput line's path %s ran 0 times, under its floor of %d",
 						f.fixture, p, f.paths[p]))
