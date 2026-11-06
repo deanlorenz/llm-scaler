@@ -41,16 +41,19 @@ is_golden() {
 NAME_CHARS='^[A-Za-z0-9._/*?-]+$'
 NAME_LINE='^- `([^`]+)`( - .*)?$'
 
-# relative sets REL to the name or path $1 without its golden root, and DEPTH to
-# how many path components may be left: fixture and file, or the file alone.
+# relative sets ROOT to the golden root the name or path $1 carries, empty for
+# none, REL to the rest of it, and DEPTH to how many path components may be left:
+# fixture and file, or the file alone.
 relative() {
     DEPTH=2
+    ROOT=''
+    REL="$1"
     case "$1" in
-        "$GOLDEN_DIR"/*) REL="${1#"$GOLDEN_DIR"/}" ;;
-        "$COUNTS_DIR"/*) REL="${1#"$COUNTS_DIR"/}"; DEPTH=1 ;;
-        "$WHATIF_DIR"/*) REL="${1#"$WHATIF_DIR"/}"; DEPTH=1 ;;
-        *) REL="$1" ;;
+        "$GOLDEN_DIR"/*) ROOT="$GOLDEN_DIR" ;;
+        "$COUNTS_DIR"/*) ROOT="$COUNTS_DIR"; DEPTH=1 ;;
+        "$WHATIF_DIR"/*) ROOT="$WHATIF_DIR"; DEPTH=1 ;;
     esac
+    [ -z "$ROOT" ] || REL="${1#"$ROOT"/}"
 }
 
 # literals prints how many characters of $1 are not wildcards.
@@ -66,34 +69,37 @@ slashes() {
 }
 
 # name_allowed: a literal path, or a glob whose file part has at least three
-# literal characters and that is not the whole of a golden root. So no wildcard
-# stands above the fixture, and `*/*.csv` and `*.golden` are refused while
-# `ttft-*/*.csv`, `*/results.csv` and `ttft-*.golden` are not.
+# literal characters, whose fixture part is literal or has at least six, and
+# whose file part opens with a literal character when it has no fixture part. So
+# `acceptance/*.csv`, `ttft-staircase-*/*.csv` and `ttft-*.golden` are allowed,
+# and `*/results.csv`, `*/*csv` and `*golden` are refused.
 name_allowed() {
-    local file fixture stem
+    local file fixture
     [[ "$1" =~ $NAME_CHARS ]] || return 1
     relative "$1"
     [ "$(slashes "$REL")" -lt "$DEPTH" ] || return 1
     [[ "$REL" == *[*?]* ]] || return 0
     file="${REL##*/}"
-    stem="${file%.*}"
     [ "$(literals "$file")" -ge 3 ] || return 1
-    [ "$(literals "$stem")" -ge 3 ] && return 0
-    [ "$REL" != "$file" ] || return 1
+    if [ "$REL" = "$file" ]; then
+        [[ "$file" != [*?]* ]]
+        return
+    fi
     fixture="${REL%/*}"
-    [[ "$fixture" != *[*?]* ]] || [ "$(literals "$fixture")" -ge 3 ]
+    [[ "$fixture" != *[*?]* ]] || [ "$(literals "$fixture")" -ge 6 ]
 }
 
-# name_matches: does the allowed name $1 name the golden $2? A golden outside the
-# learner directory goes by its file name. The slashes must agree, so * never
-# crosses one.
+# name_matches: does the allowed name $1 name the golden $2? A root the name
+# carries must be the golden's. A golden outside the learner directory goes by
+# its file name. The slashes must agree, so * never crosses one.
 name_matches() {
-    local want path="${2##*/}"
+    local want want_root path
     relative "$1"
     want="$REL"
-    case "$2" in
-        "$GOLDEN_DIR"/*) relative "$2"; path="$REL" ;;
-    esac
+    want_root="$ROOT"
+    relative "$2"
+    path="$REL"
+    [ -z "$want_root" ] || [ "$want_root" = "$ROOT" ] || return 1
     [ "$(slashes "$want")" = "$(slashes "$path")" ] || return 1
     # The right side is deliberately unquoted: it is the pattern.
     # shellcheck disable=SC2053
@@ -104,6 +110,7 @@ name_matches() {
 # here-string: a pipe would run it in a subshell, and lose all of it.
 SECTIONS=0
 NAMES=()
+NAME_LINES=()
 NONE_LINES=()
 BAD_LINES=()
 BAD_NAMES=()
@@ -129,6 +136,7 @@ read_section() {
             name="${BASH_REMATCH[1]}"
             if name_allowed "$name"; then
                 NAMES+=("$name")
+                NAME_LINES+=("$number")
             else
                 BAD_NAMES+=("$number")
             fi
@@ -190,8 +198,23 @@ for path in "${moved[@]}"; do
     [ "$found" = 1 ] || missing+=("$path")
 done
 
+# A bare file name stands for the file of one golden root, not of two.
+SPLIT_NAMES=()
+for index in ${NAMES[@]+"${!NAMES[@]}"}; do
+    hit=''
+    for path in "${moved[@]}"; do
+        name_matches "${NAMES[$index]}" "$path" || continue
+        relative "$path"
+        if [ -n "$hit" ] && [ "$hit" != "$ROOT" ]; then
+            SPLIT_NAMES+=("${NAME_LINES[$index]}")
+            break
+        fi
+        hit="$ROOT"
+    done
+done
+
 moved_goldens="${#moved[@]} $(plural "${#moved[@]}" golden)"
-problems=$((${#missing[@]} + ${#NONE_LINES[@]} + ${#BAD_LINES[@]} + ${#BAD_NAMES[@]}))
+problems=$((${#missing[@]} + ${#NONE_LINES[@]} + ${#BAD_LINES[@]} + ${#BAD_NAMES[@]} + ${#SPLIT_NAMES[@]}))
 if [ "$SECTIONS" -eq 1 ] && [ "$problems" -eq 0 ]; then
     echo "ok: goldens: $moved_goldens moved in $changed_files changed, and the section names each"
     exit 0
@@ -209,6 +232,9 @@ for number in ${BAD_LINES[@]+"${BAD_LINES[@]}"}; do
 done
 for number in ${BAD_NAMES[@]+"${BAD_NAMES[@]}"}; do
     echo "  line $number of the body: the name is not allowed"
+done
+for number in ${SPLIT_NAMES[@]+"${SPLIT_NAMES[@]}"}; do
+    echo "  line $number of the body: the name matches goldens under two directories"
 done
 for number in ${NONE_LINES[@]+"${NONE_LINES[@]}"}; do
     echo "  line $number of the body: none, and a golden moved"

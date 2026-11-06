@@ -32,6 +32,7 @@ OLS_SLO="$G/ols-sweep-slo/results.csv"
 TTFT_A="$G/ttft-staircase-a/lines.csv"
 TTFT_B="$G/ttft-staircase-b/lines.csv"
 COUNTS=internal/engines/steadystate/testdata/engine-run-event-counts.txt
+ENGINE_WHATIF=cmd/whatif/testdata/engine-new.golden
 WHATIF=cmd/whatif/testdata/ttft-open-loop-short.golden
 SCHEMA=cmd/whatif/testdata/schema-v1.txt
 DOC=docs/reference/metrics.md
@@ -137,10 +138,22 @@ expect "two lines name two" 0 "names each" "$(section "$R" "$L")"
 expect "a fixture's outputs by glob" 0 "names each" "$(section '- `acceptance/*.csv`')"
 pr_with "$TTFT_A" "$TTFT_B"
 expect "a family by glob" 0 "names each" "$(section '- `ttft-staircase-*/lines.csv`')"
-expect "a family's outputs by glob" 0 "names each" "$(section '- `ttft-*/*.csv`')"
+expect "a family's outputs by glob" 0 "names each" "$(section '- `ttft-staircase-*/*.csv`')"
+expect "six literals in the fixture are enough" 0 "names each" "$(section '- `ttft-s*/*.csv`')"
 pr_with "$A_RESULTS" "$OLS_RESULTS"
-expect "one output across fixtures" 0 "names each" "$(section '- `*/results.csv`')"
+expect "a literal fixture and three literals" 1 "not named: ols-sweep/results.csv" "$(section '- `acceptance/*csv`')"
 expect "a star does not cross a slash" 1 "does not hold up" "$(section '- `acc*.csv`' '- `ols*.csv`')"
+pr_with "$COUNTS" "$ENGINE_WHATIF"
+expect "a bare name fails across two golden roots" 1 "line 3 of the body: the name matches goldens under two directories" "$(section '- `eng*`')"
+expect "and takes one root's file" 1 "not named: $ENGINE_WHATIF" "$(section '- `eng*.txt`')"
+expect "a root-bound name takes that root alone" 0 "names each" "$(section "- \`$COUNTS\`" "- \`cmd/whatif/testdata/eng*.golden\`")"
+pr_with "$WHATIF"
+expect "the counts root does not name a whatif golden" 1 "not named: $WHATIF" "$(section '- `internal/engines/steadystate/testdata/ttft-open-loop-short.golden`')"
+expect "the learner root does not name a whatif golden" 1 "not named: $WHATIF" "$(section "- \`$G/ttft-open-loop-short.golden\`")"
+pr_with "$COUNTS"
+expect "the whatif root does not name the event counts" 1 "not named: $COUNTS" "$(section '- `cmd/whatif/testdata/engine-run-event-counts.txt`')"
+pr_with "$G/goldens.yaml"
+expect "the whatif root does not name the manifest" 1 "not named: goldens.yaml" "$(section '- `cmd/whatif/testdata/goldens.yaml`')"
 pr_with "$G/e1/lines.csv"
 expect "a short fixture name is literal" 0 "names each" "$(section '- `e1/*.csv`')"
 pr_with "$OLS_RESULTS"
@@ -224,6 +237,8 @@ name() {
     expect "not a name: $1" 1 "line 4 of the body: the name is not allowed" "$(section "$R" "- \`$1\`")"
 }
 for bad in '*' '**' '*/*' '?/*' '*.csv' '*/*.csv' '*.gz' '*e*' '*e*/*' '*/*e*' '*/re*.csv' 'ac*/*.csv' '???/*.csv' \
+    '*/*csv' '*golden' '*txt' '*/*json' '*/results.csv' '*/lines.csv' 'ttft-*/lines.csv' 'ttft-*/*.csv' \
+    '?tft-open-loop-short.golden' \
     'acceptance/*' 'acceptance/???' 'acceptance/ab*' '*/*/results.csv' \
     '*.golden' '*.txt' '*.yaml' 'cmd/whatif/testdata/*' 'cmd/whatif/testdata/*.golden' 'cmd/whatif/testdata/*/ttft-open-loop-short.golden' \
     'cmd/*/testdata/ttft-open-loop-short.golden' 'internal/engines/steadystate/testdata/*.txt' \

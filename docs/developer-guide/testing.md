@@ -1488,15 +1488,15 @@ render as, so prose and pasted output go under the next heading.
 | `acceptance/results.csv` | that output |
 | `acceptance/*.csv` | the outputs of that fixture. Name its `recording.jsonl.gz` as well if it moved |
 | `ttft-staircase-*/*.csv` | those outputs of each fixture that matches |
-| `*/results.csv` | that output in every fixture |
 | `goldens.yaml` | the manifest. A new fixture changes it, so name it |
 | `engine-run-event-counts.txt`, `ttft-*.golden` | a golden outside the learnreplay directory, by file name or by its full path |
 
-A full repository path also works. A name that has a wildcard must have at least
-3 literal characters in its file part, and must not be the whole of a golden
-directory, so `acceptance/*`, `*/*.csv` and `*.golden` are refused. No wildcard
-may stand above the fixture, so `internal/*/results.csv` is refused too. `*`
-stops at a slash.
+A full repository path also works, and then names only a golden under that
+path. A name with a wildcard needs at least 3 literal characters in its file part,
+a fixture part that is literal or has at least 6 literal characters, and, with no
+fixture part, a file part that starts with a literal character. So
+`acceptance/*`, `*/results.csv`, `*/*.csv` and `*.golden` are refused. A bare name
+that matches goldens under two directories fails. `*` stops at a slash.
 
 **What the check does not do.** It catches honest mistakes, not an adversary: a
 PR runs its own copy of it. It compares file names with the section. It does not
