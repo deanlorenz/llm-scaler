@@ -888,7 +888,9 @@ assumed         V_P 30000 tok/s (--assume-vp); prompt 1000 tokens (--assume-inpu
 That is the worked example with the CLI's `cv` of 2 and an assumed 20 ms hop, so
 373 ms where the page, at `cv` 1 on the old sum, has 160 ms; `a` is P1's 11.04 ms.
 Question 1 at 200 ms p95 reads 0.25 r/s where the page has 11.10, and the assumed
-row says the assumed term moved it from 1.19.
+row says the assumed term moved it from 1.19. `--assume-prompt-cv 1`, the page's
+`cv`, reads 10.80, and `--arrival-cv2 4` on top of it 4.80
+(`TestInputs_TheWorkedExampleAtTheStatedInputs`).
 `TestTTFT_TheWorkedExampleFromTheRecording` puts `cv` 1 and the old sum back on
 the fleet the CLI read, and gets the page's figures within 1 ms, 1.6 ms lower as
 the page says. `TestTTFT_HandComputedAtCV2` holds a figure at `cv` 2 through the command

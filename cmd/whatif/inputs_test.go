@@ -140,6 +140,23 @@ func TestPromptCV_TheNoteQuotesTheTableAtItsOwnCV(t *testing.T) {
 	assert.Contains(t, got, "at the sent spread (cv 0.06) it read up to 34%")
 }
 
+// The page's figures for the worked question at the inputs it can now state.
+func TestInputs_TheWorkedExampleAtTheStatedInputs(t *testing.T) {
+	asked := workedTTFT("slo-to-rate", "--tpot", "4ms", "--ttft", "200ms@p95")
+	for _, c := range []struct {
+		flags []string
+		want  string
+	}{
+		{nil, "fleet    0.25 r/s"},
+		{[]string{"--assume-prompt-cv", "1"}, "fleet    10.80 r/s"},
+		{[]string{"--assume-prompt-cv", "1", "--arrival-cv2", "4"}, "fleet    4.80 r/s"},
+	} {
+		text, code := runCmd(t, slices.Concat(asked, c.flags)...)
+		assert.Equal(t, 0, code, text)
+		assert.Contains(t, text, c.want, "%v", c.flags)
+	}
+}
+
 // The two flags, refused before any replay, on both questions and both exit
 // paths. Ca^2 0 is refused and not read: P3 reads it as Poisson, and a flag
 // asking for evenly spaced arrivals would be priced as Poisson with no word.
