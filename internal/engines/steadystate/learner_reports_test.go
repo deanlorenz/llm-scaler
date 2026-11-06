@@ -2,6 +2,7 @@ package steadystate
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -9,9 +10,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	clocktesting "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
 	prometheuscollector "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source/prometheus"
@@ -97,20 +102,37 @@ type parkRig struct {
 	t      *testing.T
 	e      *Engine
 	c      client.Client
+	base   *clocktesting.FakePassiveClock
 	series *prometheus.Registry
+	// forbid makes every Deployment read Forbidden, and reads counts them.
+	forbid bool
+	reads  int
 }
 
 func newParkRig(t *testing.T) *parkRig {
 	t.Helper()
 	series := prometheus.NewRegistry()
 	require.NoError(t, metrics.InitMetrics(series))
-	c := fake.NewClientBuilder().Build()
+	// What other tests published is process-wide bookkeeping, not this rig's.
+	metrics.NewMetricsEmitter().RetainLearnerSeries(func(string, string, string) bool { return false })
+	r := &parkRig{t: t, series: series, base: clocktesting.NewFakePassiveClock(time.Unix(1_700_000_000, 0))}
+	r.c = fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*appsv1.Deployment); ok {
+				r.reads++
+				if r.forbid {
+					return apierrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "deployments"}, key.Name, errors.New("no"))
+				}
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}).Build()
 	sources := source.NewSourceRegistry()
 	require.NoError(t, sources.Register("prometheus",
 		prometheuscollector.NewPrometheusSource(context.Background(), nil, prometheuscollector.DefaultPrometheusSourceConfig())))
-	e := NewEngine(c, c, c.Scheme(), nil, sources, config.NewTestConfig(), allocation.NewNoOpLimiter("test"))
-	e.Variants = variantregistry.New(0)
-	return &parkRig{t: t, e: e, c: c, series: series}
+	r.e = newEngine(r.c, r.c, r.c.Scheme(), nil, sources, config.NewTestConfig(), allocation.NewNoOpLimiter("test"), r.base)
+	r.e.Variants = variantregistry.New(0)
+	return r
 }
 
 // variant adds a variant at replicas, with a learner series published for it.
@@ -122,7 +144,26 @@ func (r *parkRig) variant(model, name string, replicas int32) {
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
 		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
 	}))
-	r.e.metricsEmitter.RecordLearnerReports(spyReports(model, name)["ns|"+model])
+	r.e.metricsEmitter.RecordLearnerReports(spyReports(model, name)["ns|"+model], r.e.learnerTarget)
+}
+
+// expire is KEDA no longer calling about a variant, its workload still there.
+func (r *parkRig) expire(name string) {
+	r.t.Helper()
+	r.e.Variants.Forget("ns", name)
+}
+
+// remove deletes a variant: its ScaledObject and its workload both go.
+func (r *parkRig) remove(name string) {
+	r.t.Helper()
+	r.expire(name)
+	require.NoError(r.t, r.c.Delete(context.Background(), &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"}}))
+}
+
+// after moves the clock on.
+func (r *parkRig) after(d time.Duration) *parkRig {
+	r.base.SetTime(r.base.Now().Add(d))
+	return r
 }
 
 // cycle runs one optimize. A model with replicas has nothing to collect from
@@ -144,10 +185,10 @@ func TestLearnerSeries_AllModelsParked(t *testing.T) {
 	for range 3 {
 		assert.ElementsMatch(t, []string{"a-wva", "b-wva"}, r.cycle())
 	}
-	r.e.Variants.Forget("ns", "a-wva")
-	assert.Equal(t, []string{"b-wva"}, r.cycle())
-	r.e.Variants.Forget("ns", "b-wva")
-	assert.Empty(t, r.cycle())
+	r.remove("a-wva")
+	assert.Equal(t, []string{"b-wva"}, r.after(learnerTargetCheckInterval).cycle())
+	r.remove("b-wva")
+	assert.Empty(t, r.after(learnerTargetCheckInterval).cycle())
 }
 
 // One model parked among others: it is in no model group, so the prune of the
@@ -161,8 +202,8 @@ func TestLearnerSeries_OneModelOfSeveralParked(t *testing.T) {
 	for range 2 {
 		assert.ElementsMatch(t, []string{"running-wva", "parked-wva", "deleted-wva"}, r.cycle())
 	}
-	r.e.Variants.Forget("ns", "deleted-wva")
-	assert.ElementsMatch(t, []string{"running-wva", "parked-wva"}, r.cycle())
+	r.remove("deleted-wva")
+	assert.ElementsMatch(t, []string{"running-wva", "parked-wva"}, r.after(learnerTargetCheckInterval).cycle())
 }
 
 // A variant parked beside a running sibling of its model keeps its series; a
@@ -173,8 +214,131 @@ func TestLearnerSeries_OneVariantOfAModel(t *testing.T) {
 	r.variant("m", "parked-wva", 0)
 	r.variant("m", "deleted-wva", 0)
 	r.cycle()
-	r.e.Variants.Forget("ns", "deleted-wva")
-	assert.ElementsMatch(t, []string{"running-wva", "parked-wva"}, r.cycle())
+	r.remove("deleted-wva")
+	assert.ElementsMatch(t, []string{"running-wva", "parked-wva"}, r.after(learnerTargetCheckInterval).cycle())
+}
+
+// A KEDA outage past the registry's TTL, through the registry itself: every
+// entry expires, every target stands, and the series stay, or an alert on
+// their age resolves in the middle of the outage.
+func TestLearnerSeries_RegistryExpiryWithTheTargetPresentKeeps(t *testing.T) {
+	r := newParkRig(t)
+	const ttl = 300 * time.Millisecond
+	r.e.Variants = variantregistry.New(ttl)
+	r.variant("a", "a-wva", 0)
+	r.variant("b", "b-wva", 1)
+	require.Eventually(t, func() bool { return r.e.Variants.Len() == 0 || len(r.e.Variants.Snapshot()) == 0 },
+		10*ttl, ttl/10, "premise: the entries expire")
+	for range 3 {
+		assert.ElementsMatch(t, []string{"a-wva", "b-wva"}, r.after(learnerTargetCheckInterval).cycle())
+	}
+}
+
+// A trigger that stops parsing drops the variant from the known set, and only
+// from it: the entry and the workload stand.
+func TestLearnerSeries_AParseFailureKeeps(t *testing.T) {
+	r := newParkRig(t)
+	r.variant("m", "m-wva", 0)
+	r.e.Variants.Observe("ns", "m-wva", map[string]string{"typo": "m"})
+	require.Empty(t, utils.KnownVariantAutoscalings(context.Background(), r.e.Variants), "premise: the variant is not known")
+	assert.Equal(t, []string{"m-wva"}, r.after(learnerTargetCheckInterval).cycle())
+}
+
+// NotFound is an answer, and the first variant to go missing is read at once:
+// a cycle that read nothing does not start the interval.
+func TestLearnerSeries_NotFoundDeletes(t *testing.T) {
+	r := newParkRig(t)
+	r.variant("m", "m-wva", 0)
+	r.cycle()
+	r.remove("m-wva")
+	assert.Empty(t, r.cycle())
+}
+
+// A scale target being deleted is gone already.
+func TestLearnerSeries_ADeletionTimestampDeletes(t *testing.T) {
+	r := newParkRig(t)
+	r.variant("m", "m-wva", 0)
+	var d appsv1.Deployment
+	key := client.ObjectKey{Namespace: "ns", Name: "m-wva"}
+	require.NoError(t, r.c.Get(context.Background(), key, &d))
+	d.Finalizers = []string{"test/hold"}
+	require.NoError(t, r.c.Update(context.Background(), &d))
+	require.NoError(t, r.c.Delete(context.Background(), &d))
+	r.expire("m-wva")
+	assert.Empty(t, r.cycle())
+}
+
+// Forbidden is not absent: the read could not ask. Nor is a kind the check
+// does not read.
+func TestLearnerSeries_ForbiddenKeeps(t *testing.T) {
+	r := newParkRig(t)
+	r.variant("m", "m-wva", 0)
+	r.forbid = true
+	r.expire("m-wva")
+	for range 3 {
+		assert.Equal(t, []string{"m-wva"}, r.after(learnerTargetCheckInterval).cycle())
+	}
+	assert.Equal(t, 3, r.reads, "premise: the reads were made")
+	assert.False(t, r.e.scaleTargetGone(context.Background(), metrics.LearnerVariant{Namespace: "ns",
+		Target: metrics.LearnerTarget{Kind: "StatefulSet", Name: "m-wva"}}))
+}
+
+// The cap ends a series no read can: the target stands, the variant has been
+// missing for a day. Just under it the series stays, and a variant that comes
+// back starts the count again.
+func TestLearnerSeries_TheCapDeletes(t *testing.T) {
+	r := newParkRig(t)
+	r.variant("m", "m-wva", 0)
+	r.expire("m-wva")
+	require.Equal(t, []string{"m-wva"}, r.cycle())
+	r.after(learnerSeriesMissingMax - time.Second)
+	require.Equal(t, []string{"m-wva"}, r.cycle())
+	r.e.Variants.Observe("ns", "m-wva", map[string]string{variantregistry.ModelIDKey: "m"})
+	r.e.Variants.SetTarget("ns", "m-wva", variantregistry.Target{APIVersion: "apps/v1", Kind: "Deployment", Name: "m-wva"})
+	require.Equal(t, []string{"m-wva"}, r.after(time.Second).cycle())
+	r.expire("m-wva")
+	require.Equal(t, []string{"m-wva"}, r.after(learnerSeriesMissingMax-time.Second).cycle(), "the count starts again")
+	require.Equal(t, []string{"m-wva"}, r.after(learnerSeriesMissingMax-time.Second).cycle())
+	assert.Empty(t, r.after(time.Second).cycle())
+	assert.Empty(t, r.e.learnerMissingSince, "and nothing is kept of it")
+}
+
+// A variant with no target on record has nothing to read: it waits for the cap.
+func TestLearnerSeries_NoRecordedTargetWaitsForTheCap(t *testing.T) {
+	r := newParkRig(t)
+	r.e.metricsEmitter.RecordLearnerReports(spyReports("m", "m-wva")["ns|m"], nil)
+	r.reads = 0
+	require.Equal(t, []string{"m-wva"}, r.cycle())
+	assert.Zero(t, r.reads)
+	assert.Empty(t, r.after(learnerSeriesMissingMax).cycle())
+}
+
+// The reads are bounded whatever the client is: one per missing variant per
+// interval, however many cycles and however many learners publish.
+func TestLearnerSeries_ReadsAreOnePerVariantPerInterval(t *testing.T) {
+	r := newParkRig(t)
+	r.variant("m", "m-wva", 0)
+	r.e.metricsEmitter.RecordLearnerReports([]learn.Report{{Learner: learn.K2, Namespace: "ns", ModelID: "m", Variant: "m-wva",
+		Role: domain.RoleDecode, PricingKey: "k", LastAdmitted: time.Unix(1_700_000_000, 0)}}, r.e.learnerTarget)
+	r.variant("n", "n-wva", 0)
+	r.expire("m-wva")
+	r.expire("n-wva")
+	r.reads = 0
+	for range 5 {
+		r.after(time.Second).cycle()
+	}
+	assert.Equal(t, 2, r.reads, "two variants, read once in the interval")
+	r.after(learnerTargetCheckInterval).cycle()
+	assert.Equal(t, 4, r.reads, "and once in the next")
+}
+
+// A variant still known costs no read.
+func TestLearnerSeries_AKnownVariantCostsNoRead(t *testing.T) {
+	r := newParkRig(t)
+	r.variant("m", "m-wva", 0)
+	r.reads = 0
+	r.e.retainLearnerSeries(context.Background())
+	assert.Zero(t, r.reads)
 }
 
 // The analyzer series follow what analyzers report, and these do not: a

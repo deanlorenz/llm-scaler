@@ -904,8 +904,9 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 			delete(a.computeCapacityHistory, key)
 			evicted.K2History++
 			// k2 forgets the key itself, unused past its horizon: its
-			// variant's next report says so.
-			if name, model, ok := variantOfKey(key); ok {
+			// variant's next report says so. Not while a stash holds the key:
+			// it can still price, and the stash's eviction names it.
+			if name, model, ok := variantOfKey(key); ok && !stashHolds(a.k2Stash, key) {
 				if ns, variant, ok := strings.Cut(name, "/"); ok {
 					a.noteForgottenLocked(ns, model, variant, []string{key}, learn.ByEvicted)
 				}
@@ -1114,9 +1115,11 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 			delete(a.throughputPodReads, key)
 			delete(a.throughputMuChoice, key)
 			evicted.MuWindows++
-			// Mu forgets the key itself, unused past its horizon. The
-			// prefill bound's windows share the map and are not mu.
-			if name, model, ok := variantOfKey(key); ok && a.muForgetReported && !isPrefillBoundKey(key) {
+			// Mu forgets the key itself, unused past its horizon, unless a
+			// stash holds it, as k2's does. The prefill bound's windows
+			// share the map and are not mu.
+			if name, model, ok := variantOfKey(key); ok && a.muForgetReported && !isPrefillBoundKey(key) &&
+				!stashHolds(a.throughputStash, key) {
 				if ns, variant, ok := strings.Cut(name, "/"); ok {
 					fileForgotten(a.muForgotten, ns+"|"+model, variant, []string{key}, learn.ByEvicted)
 				}

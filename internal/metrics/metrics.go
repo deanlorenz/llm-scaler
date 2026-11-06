@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"strconv"
@@ -2356,9 +2357,25 @@ type learnerSeriesID struct {
 }
 
 // learnerSeries is what RecordLearnerReports last published under an ID: the
-// role label, and the key the figure came from, which no label carries.
+// role label, and the key the figure came from and the variant's scale target,
+// which no label carries.
 type learnerSeries struct {
 	role, key string
+	target    LearnerTarget
+}
+
+// LearnerTarget is the workload a variant scales. It outlives the variant's
+// registry entry, so that a variant gone from the registry can be told from a
+// variant nobody has called about lately.
+type LearnerTarget struct {
+	Kind, Name string
+}
+
+// LearnerVariant is one variant with a last-admitted series, and its scale
+// target, zero if none was known when a series was published.
+type LearnerVariant struct {
+	Namespace, ModelID, Variant string
+	Target                      LearnerTarget
 }
 
 // learnerPublished holds what RecordLearnerReports last published, guarded by
@@ -2376,7 +2393,10 @@ var (
 // variant keeps showing how old its evidence is, and only a forgotten key is
 // no longer evidence. No report at all, on a cycle whose Analyze failed, also
 // leaves it alone: that is what keeps time() minus it honest through a stall.
-func (m *MetricsEmitter) RecordLearnerReports(reports []learn.Report) {
+//
+// targetOf names a variant's scale target, and may be nil. A series keeps the
+// target it had when targetOf has none.
+func (m *MetricsEmitter) RecordLearnerReports(reports []learn.Report, targetOf func(namespace, variant string) LearnerTarget) {
 	if learnedStateLastAdmitted == nil {
 		return
 	}
@@ -2386,7 +2406,13 @@ func (m *MetricsEmitter) RecordLearnerReports(reports []learn.Report) {
 		prev, had := learnerPublished[id]
 		switch {
 		case r.PricingKey != "":
-			learnerPublished[id] = learnerSeries{role: r.Role, key: r.PricingKey}
+			target := prev.target
+			if targetOf != nil {
+				if t := targetOf(r.Namespace, r.Variant); t.Name != "" {
+					target = t
+				}
+			}
+			learnerPublished[id] = learnerSeries{role: r.Role, key: r.PricingKey, target: target}
 		case had && slices.Contains(learn.Keys(r.Forgotten), prev.key):
 			delete(learnerPublished, id)
 		default:
@@ -2425,6 +2451,30 @@ func unixSeconds(t time.Time) float64 {
 		return 0
 	}
 	return float64(t.UnixMilli()) / 1000
+}
+
+// LearnerVariants is every variant with a last-admitted series, once each,
+// sorted, with the scale target recorded for it.
+func (m *MetricsEmitter) LearnerVariants() []LearnerVariant {
+	learnerPublishedMu.Lock()
+	defer learnerPublishedMu.Unlock()
+	byName := map[[3]string]LearnerVariant{}
+	for id, s := range learnerPublished {
+		name := [3]string{id.namespace, id.modelID, id.variant}
+		v, ok := byName[name]
+		if !ok {
+			v = LearnerVariant{Namespace: id.namespace, ModelID: id.modelID, Variant: id.variant}
+		}
+		if v.Target.Name == "" {
+			v.Target = s.target
+		}
+		byName[name] = v
+	}
+	out := make([]LearnerVariant, 0, len(byName))
+	for _, name := range slices.SortedFunc(maps.Keys(byName), func(x, y [3]string) int { return slices.Compare(x[:], y[:]) }) {
+		out = append(out, byName[name])
+	}
+	return out
 }
 
 // RetainLearnerSeries removes the last-admitted series of every variant known

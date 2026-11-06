@@ -3492,10 +3492,15 @@ and the `restored` field have none, because no replay output reads either.
   leaves the series, and so does a model parked, or one whose `Analyze` failed.
   A key whose only window is in a stash is named too, on a forget and when the
   sweep evicts the stash, or the series of a key set aside by an args change
-  would stand for good. The series also goes when the variant leaves the
-  registry (`KnownVariantAutoscalings`), which is what "the model is deleted"
-  comes to here. Not where the engine deletes the analyzer series: those follow
-  the active set, and a model at zero replicas is not in it. Nor where the
+  would stand for good. The series also goes when the variant is deleted, which
+  takes two tests: it is missing from `KnownVariantAutoscalings`, and a read of
+  the scale target recorded at publish time says NotFound or finds it being
+  deleted. The registry alone will not do: a KEDA outage past `DefaultTTL` empties
+  it, and a trigger typo drops a variant from it. Any other read keeps the series,
+  Forbidden included, and `learnerSeriesMissingMax` (24 h, an assumed figure, not
+  measured) ends it whatever the reads say. Not where the engine deletes the
+  analyzer series: those follow the active set, and a model at zero replicas is
+  not in it. Nor where the
   k2-source series goes on a cycle with no replica rows: that one describes this
   cycle, this one the evidence. Reasons, writes and forgets are not published: 6.3
   lists them in the Report, and no alert or operator question needs them yet.

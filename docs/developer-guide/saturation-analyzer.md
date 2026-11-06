@@ -427,9 +427,17 @@ The engine takes the cycle's reports once, at the end of the cycle
 `wva_learned_state_last_admitted_timestamp_seconds`. `RecordLearnerReports`
 remembers the key behind each series, which no label carries, and deletes the
 series only when a report without a `PricingKey` names that key `Forgotten`,
-or when the variant has left the registry (`retainLearnerSeries`,
-`utils.KnownVariantAutoscalings`). The active set is not the test: a variant at
-zero replicas is in no model group, and its series must outlive the park.
+or when the variant is really gone (`retainLearnerSeries`). The active set is
+not the test: a variant at zero replicas is in no model group, and its series
+must outlive the park. Nor is the registry alone
+(`utils.KnownVariantAutoscalings`): a KEDA outage past `registry.DefaultTTL`
+empties it, and a trigger `ParseMeta` refuses leaves it. Each series records its
+scale target at publish time, and a variant missing from the registry goes only
+when a read of that target says NotFound, or finds it being deleted. Any other
+answer, Forbidden included, keeps the series. The read is one `Get` through the
+controller's client with no backoff, at most once per variant per
+`learnerTargetCheckInterval` (1 min), and `learnerSeriesMissingMax` (24 h) ends
+the wait whatever the reads say.
 
 `RollingAverage.Restored` is true from `RestoreRollingAverage` until the
 window's first write, and `itl.Tracker.Restored` from `RestoreBaseline` or

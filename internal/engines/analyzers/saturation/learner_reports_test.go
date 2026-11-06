@@ -528,6 +528,52 @@ func TestStashEviction_NamesAKeyWithNoWindowLeft(t *testing.T) {
 	})
 }
 
+// A live window and a stash of one key: the sweep names the key once, when the
+// last of them goes, and not while a stash still holds it.
+func TestEviction_NamesAKeyOnceAndOnlyWhenNothingHoldsIt(t *testing.T) {
+	both := func(t *testing.T, stashAt func(r *restartRig) time.Time) (r *restartRig, k2, mu string) {
+		t.Helper()
+		r, mu = muForgetRig(t, true)
+		k2 = firstKey(r.a)
+		aged := r.now.Add(-r.a.horizons.BucketRetention - time.Hour)
+		r.a.mu.Lock()
+		defer r.a.mu.Unlock()
+		k2Stash := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, r.now)
+		muStash := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, r.now)
+		k2Stash.TouchAt(stashAt(r))
+		muStash.TouchAt(stashAt(r))
+		r.a.k2Stash[stashKey(k2, "old")] = k2Stash
+		r.a.throughputStash[stashKey(mu, "old")] = stashedThroughput{window: muStash}
+		r.a.computeCapacityHistory[k2].TouchAt(aged)
+		r.a.saturatedThroughput[mu].TouchAt(aged)
+		return r, k2, mu
+	}
+	t.Run("both stale in one sweep", func(t *testing.T) {
+		r, k2, mu := both(t, func(r *restartRig) time.Time { return r.now.Add(-r.a.horizons.BucketRetention - time.Hour) })
+		r.a.EvictStaleHistory()
+		r.cycle(unqueuedRow(), decodeVariants("v"))
+		reports := r.a.LearnerReports()["test-ns|test-model"]
+		assert.Equal(t, []learn.Forgotten{{Key: k2, By: learn.ByEvicted}}, reportsOf(reports, learn.K2)[0].Forgotten)
+		assert.Equal(t, []learn.Forgotten{{Key: mu, By: learn.ByEvicted}}, reportsOf(reports, learn.Mu)[0].Forgotten)
+	})
+	t.Run("a stale window beside a fresher stash", func(t *testing.T) {
+		r, _, _ := both(t, func(r *restartRig) time.Time { return r.now })
+		r.a.EvictStaleHistory()
+		r.cycle(unqueuedRow(), decodeVariants("v"))
+		reports := r.a.LearnerReports()["test-ns|test-model"]
+		assert.Empty(t, reportsOf(reports, learn.K2)[0].Forgotten, "the stash can still price")
+		assert.Empty(t, reportsOf(reports, learn.Mu)[0].Forgotten, "the stash can still price")
+	})
+}
+
+// A key pending from a forget is not filed again before its report.
+func TestFileForgotten_NamesAKeyOnce(t *testing.T) {
+	pending := map[string]map[string][]learn.Forgotten{}
+	fileForgotten(pending, "m", "v", []string{"k"}, learn.ByOperator)
+	fileForgotten(pending, "m", "v", []string{"k", "other"}, learn.ByEvicted)
+	assert.Equal(t, []learn.Forgotten{{Key: "k", By: learn.ByOperator}, {Key: "other", By: learn.ByEvicted}}, pending["m"]["v"])
+}
+
 // The keys a forget names are window keys, not the stash's, and a key with a
 // live window and a stash is named once.
 func TestForget_KeysAreWindowKeysNamedOnce(t *testing.T) {

@@ -27,7 +27,7 @@ func TestRecordLearnerReportsPublishesOneSeriesPerVariantAndLearner(t *testing.T
 		report(learn.Mu, "decode", "mu-key", at.Add(time.Minute)),
 		report(learn.ITL, "decode", "itl-key", at.Add(2*time.Minute)),
 		report(learn.Start, "decode", "start-key", at.Add(3*time.Minute)),
-	})
+	}, nil)
 	if got := countSeries(t, registry, lastAdmittedSeries); got != 4 {
 		t.Fatalf("series = %d, want 4", got)
 	}
@@ -42,7 +42,7 @@ func TestRecordLearnerReportsPublishesOneSeriesPerVariantAndLearner(t *testing.T
 // A figure with no stamp is as old as can be, not the year 1.
 func TestRecordLearnerReportsPublishesZeroForNoStamp(t *testing.T) {
 	emitter, registry := engineConfigEmitter(t)
-	emitter.RecordLearnerReports([]learn.Report{report(learn.Start, "decode", "start-key", time.Time{})})
+	emitter.RecordLearnerReports([]learn.Report{report(learn.Start, "decode", "start-key", time.Time{})}, nil)
 	if v, ok := seriesValue(t, registry, lastAdmittedSeries, map[string]string{constants.LabelLearner: learn.Start}); !ok || v != 0 {
 		t.Fatalf("start = %v (present %v), want 0", v, ok)
 	}
@@ -54,7 +54,7 @@ func TestRecordLearnerReportsAChangeOfKeyStaysOneSeries(t *testing.T) {
 	emitter, registry := engineConfigEmitter(t)
 	at := time.Unix(1_700_000_000, 0)
 	for i := range 1000 {
-		emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key-"+string(rune('a'+i%26)), at.Add(time.Duration(i)*time.Second))})
+		emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key-"+string(rune('a'+i%26)), at.Add(time.Duration(i)*time.Second))}, nil)
 	}
 	if got := countSeries(t, registry, lastAdmittedSeries); got != 1 {
 		t.Fatalf("series = %d, want 1", got)
@@ -68,8 +68,8 @@ func TestRecordLearnerReportsAChangeOfKeyStaysOneSeries(t *testing.T) {
 func TestRecordLearnerReportsAChangeOfRoleMovesTheSeries(t *testing.T) {
 	emitter, registry := engineConfigEmitter(t)
 	at := time.Unix(1_700_000_000, 0)
-	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key", at)})
-	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "both", "key", at)})
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key", at)}, nil)
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "both", "key", at)}, nil)
 	if got := countSeries(t, registry, lastAdmittedSeries); got != 1 {
 		t.Fatalf("series = %d, want 1", got)
 	}
@@ -85,23 +85,51 @@ func TestRecordLearnerReportsAChangeOfRoleMovesTheSeries(t *testing.T) {
 func TestRecordLearnerReportsDeletesOnlyWhenThePublishedKeyIsForgotten(t *testing.T) {
 	emitter, registry := engineConfigEmitter(t)
 	at := time.Unix(1_700_000_000, 0)
-	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key", at)})
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key", at)}, nil)
 
-	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "", time.Time{})})
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "", time.Time{})}, nil)
 	if v, ok := seriesValue(t, registry, lastAdmittedSeries, map[string]string{constants.LabelLearner: learn.K2}); !ok || v != 1_700_000_000 {
 		t.Fatalf("no key priced: %v (present %v), want the value kept", v, ok)
 	}
-	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "", time.Time{}, "another-key")})
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "", time.Time{}, "another-key")}, nil)
 	if got := countSeries(t, registry, lastAdmittedSeries); got != 1 {
 		t.Fatalf("another key forgotten: series = %d, want 1", got)
 	}
-	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "", time.Time{}, "another-key", "key")})
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "", time.Time{}, "another-key", "key")}, nil)
 	if got := countSeries(t, registry, lastAdmittedSeries); got != 0 {
 		t.Fatalf("the published key forgotten: series = %d, want 0", got)
 	}
-	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "new-key", at)})
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "new-key", at)}, nil)
 	if got := countSeries(t, registry, lastAdmittedSeries); got != 1 {
 		t.Fatalf("a new key: series = %d, want 1", got)
+	}
+}
+
+// A series remembers its variant's scale target, through a report that has
+// none, once per variant however many learners publish.
+func TestLearnerVariantsCarryTheScaleTarget(t *testing.T) {
+	emitter, _ := engineConfigEmitter(t)
+	at := time.Unix(1_700_000_000, 0)
+	target := LearnerTarget{Kind: "Deployment", Name: "d"}
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key", at), report(learn.Mu, "decode", "key", at)},
+		func(namespace, variant string) LearnerTarget {
+			if namespace != "ns" || variant != "v" {
+				t.Fatalf("targetOf(%q, %q)", namespace, variant)
+			}
+			return target
+		})
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key", at)},
+		func(string, string) LearnerTarget { return LearnerTarget{} })
+	emitter.RecordLearnerReports([]learn.Report{report(learn.Mu, "decode", "key", at)}, nil)
+	emitter.RecordLearnerReports([]learn.Report{report(learn.ITL, "decode", "key", at)}, nil) // published with none
+	var got []LearnerVariant
+	for _, v := range emitter.LearnerVariants() {
+		if v.Namespace == "ns" && v.ModelID == "m" && v.Variant == "v" {
+			got = append(got, v)
+		}
+	}
+	if len(got) != 1 || got[0].Target != target {
+		t.Fatalf("LearnerVariants() = %+v, want one with %+v", got, target)
 	}
 }
 
@@ -109,8 +137,8 @@ func TestRecordLearnerReportsDeletesOnlyWhenThePublishedKeyIsForgotten(t *testin
 func TestRecordLearnerReportsAForgottenKeyWithANewOneKeepsTheSeries(t *testing.T) {
 	emitter, registry := engineConfigEmitter(t)
 	at := time.Unix(1_700_000_000, 0)
-	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key", at)})
-	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "new-key", at.Add(time.Second), "key")})
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key", at)}, nil)
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "new-key", at.Add(time.Second), "key")}, nil)
 	if v, ok := seriesValue(t, registry, lastAdmittedSeries, map[string]string{constants.LabelLearner: learn.K2}); !ok || v != 1_700_000_001 {
 		t.Fatalf("value = %v (present %v), want the new key's", v, ok)
 	}
@@ -120,8 +148,8 @@ func TestRecordLearnerReportsAForgottenKeyWithANewOneKeepsTheSeries(t *testing.T
 func TestRecordLearnerReportsAForgetIsPerLearner(t *testing.T) {
 	emitter, registry := engineConfigEmitter(t)
 	at := time.Unix(1_700_000_000, 0)
-	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key", at), report(learn.Mu, "decode", "key", at)})
-	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "", time.Time{}, "key")})
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key", at), report(learn.Mu, "decode", "key", at)}, nil)
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "", time.Time{}, "key")}, nil)
 	if _, ok := seriesValue(t, registry, lastAdmittedSeries, map[string]string{constants.LabelLearner: learn.Mu}); !ok {
 		t.Fatal("mu's series went with k2's forget")
 	}
@@ -137,7 +165,7 @@ func TestRetainLearnerSeriesKeepsOnlyWhatIsKnown(t *testing.T) {
 			{Learner: learn.K2, Namespace: "ns", ModelID: "m", Variant: "w", Role: "decode", PricingKey: "k", LastAdmitted: at},
 			{Learner: learn.K2, Namespace: "ns", ModelID: "other", Variant: "v", Role: "decode", PricingKey: "k", LastAdmitted: at},
 		} {
-			emitter.RecordLearnerReports([]learn.Report{r})
+			emitter.RecordLearnerReports([]learn.Report{r}, nil)
 		}
 	}
 	seed()
@@ -164,7 +192,7 @@ func TestRetainLearnerSeriesKeepsOnlyWhatIsKnown(t *testing.T) {
 	}
 	seed()
 	emitter.RecordLearnerReports([]learn.Report{{Learner: learn.K2, Namespace: "ns", ModelID: "m", Variant: "v",
-		Role: "both", PricingKey: "k", LastAdmitted: at}})
+		Role: "both", PricingKey: "k", LastAdmitted: at}}, nil)
 	emitter.RetainLearnerSeries(func(string, string, string) bool { return false })
 	if got := countSeries(t, registry, lastAdmittedSeries); got != 0 {
 		t.Fatalf("a series that moved role: series = %d, want 0", got)
@@ -180,7 +208,7 @@ func TestRetainLearnerSeriesKeepsOnlyWhatIsKnown(t *testing.T) {
 // bucket or a key as a label would grow with the fleet.
 func TestLearnerSeriesLabelsAreBounded(t *testing.T) {
 	emitter, registry := engineConfigEmitter(t)
-	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key", time.Unix(1, 0))})
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key", time.Unix(1, 0))}, nil)
 	mfs, err := registry.Gather()
 	if err != nil {
 		t.Fatal(err)

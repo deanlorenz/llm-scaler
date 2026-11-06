@@ -250,6 +250,13 @@ type Engine struct {
 	// lastAnalyzerSeries.
 	publishedEngineConfig map[string]engineConfigPublished
 
+	// learnerMissingSince is when each variant with learner series first went
+	// missing from the registry, and learnerTargetsCheckedAt when the scale
+	// targets of such variants were last read (retainLearnerSeries).
+	// Unguarded for the same reason as lastAnalyzerSeries.
+	learnerMissingSince     map[learnerVariantID]time.Time
+	learnerTargetsCheckedAt time.Time
+
 	// lastDecided records, per scale target (keyed namespace/target), when the
 	// optimize loop last DECIDED for it -- as opposed to republished for it --
 	// and which incarnation of the target that decision was about. The sticky

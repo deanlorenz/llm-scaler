@@ -488,7 +488,8 @@ func (a *SaturationAnalyzer) noteForgottenLocked(namespace, modelID, variant str
 }
 
 // fileForgotten adds keys of a variant to pending, a learner's keys forgotten
-// per namespace|model and variant since the variant's last report.
+// per namespace|model and variant since the variant's last report. A key
+// already pending stays as it was filed: a report names a key once.
 func fileForgotten(pending map[string]map[string][]learn.Forgotten, model, variant string, keys []string, by learn.By) {
 	if len(keys) == 0 {
 		return
@@ -497,7 +498,9 @@ func fileForgotten(pending map[string]map[string][]learn.Forgotten, model, varia
 		pending[model] = map[string][]learn.Forgotten{}
 	}
 	for _, k := range keys {
-		pending[model][variant] = append(pending[model][variant], learn.Forgotten{Key: k, By: by})
+		if !slices.Contains(learn.Keys(pending[model][variant]), k) {
+			pending[model][variant] = append(pending[model][variant], learn.Forgotten{Key: k, By: by})
+		}
 	}
 }
 
