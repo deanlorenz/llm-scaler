@@ -42,8 +42,6 @@ section_names() {
     local line lower rest span
     local in_fence=0 in_comment=0 in_section=0
     while IFS= read -r line || [ -n "$line" ]; do
-        line="${line%$'\r'}"
-
         # A fenced block is pasted output: it opens no section, ends none and
         # names nothing. An HTML comment is the template's own text.
         if [ "$in_comment" = 0 ] && [[ "$line" =~ ^\ {0,3}(\`\`\`|~~~) ]]; then
