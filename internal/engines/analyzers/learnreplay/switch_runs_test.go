@@ -399,8 +399,8 @@ var earlierSeams = withMoves(startSeedSeamMoves, withSeams(learner4b2Seams, with
 		"throughput-sweep-restart/variant-capacities.csv",
 	},
 	saturation.SwitchK2ReadsSettle: nil,
-	// No golden moved until throughput-sweep-restart. Its unit tests still
-	// hold it.
+	// No golden moved until the start-seed goldens (startSeedSeamMoves) and
+	// throughput-sweep-restart. Its unit tests still hold it.
 	saturation.SwitchMuKeyBucketHeld: {
 		"throughput-sweep-restart/composite-results.csv",
 		"throughput-sweep-restart/composite-roles.csv",
@@ -416,7 +416,8 @@ var earlierSeams = withMoves(startSeedSeamMoves, withSeams(learner4b2Seams, with
 	saturation.SwitchMuUnknownAgeSafe:    nil,
 	saturation.SwitchMuLatchRestoresSafe: nil,
 	saturation.SwitchIdleBand:            nil,
-	// As SwitchMuKeyBucketHeld: moved only by throughput-sweep-restart.
+	// As SwitchMuKeyBucketHeld: only the start-seed goldens
+	// (startSeedSeamMoves) and throughput-sweep-restart move it.
 	saturation.SwitchK2KeyBucketHeld: {
 		"throughput-sweep-restart/variant-capacities.csv",
 	},
