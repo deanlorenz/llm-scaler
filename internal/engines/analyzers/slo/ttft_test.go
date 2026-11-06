@@ -234,9 +234,9 @@ func TestNoteShare_TheWindow(t *testing.T) {
 	assert.Equal(t, 1.3, a.noteShare("k", 4, 0, false, ttftNow).largest, "a cycle with no share leaves the window")
 	assert.Equal(t, shareWindow{}, a.noteShare("k2", 4, 0, false, ttftNow), "no share yet")
 
-	// Least, and full only at ttftWindowCycles readings.
+	// Least, and full only at whatif.TTFTWindowCycles readings.
 	var w shareWindow
-	for i := range ttftWindowCycles {
+	for i := range whatif.TTFTWindowCycles {
 		assert.False(t, w.full, "after %d", i)
 		w = a.noteShare("k3", 2, 1.7+float64(i)*0.01, true, ttftNow)
 	}

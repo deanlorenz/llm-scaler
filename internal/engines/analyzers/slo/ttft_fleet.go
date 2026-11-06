@@ -16,12 +16,6 @@ import (
 // it: only err toward more replicas. An unknown input takes the value that
 // asks for more, and is flagged.
 
-const (
-	// ttftWindowCycles is how many cycles the raw share and the decode
-	// engine's TTFT are held over.
-	ttftWindowCycles = 5
-)
-
 // The analyzer's own flags, added to the TTFT model's on an answer.
 const (
 	// AssumedPoissonArrivals is every S1 answer: arrivals are taken as
@@ -274,7 +268,7 @@ func rawShare(rows []domain.ReplicaMetrics, view *prefill.Settle, now time.Time)
 }
 
 // imbalanceWindow is a prefill variant's raw shares over the last
-// ttftWindowCycles cycles at its current Ready count.
+// whatif.TTFTWindowCycles cycles at its current Ready count.
 type imbalanceWindow struct {
 	pods   int
 	shares []float64
@@ -285,7 +279,7 @@ type imbalanceWindow struct {
 type shareWindow struct {
 	// largest and least are over the window; 0 with none.
 	largest, least float64
-	// full is a window of ttftWindowCycles readings.
+	// full is a window of whatif.TTFTWindowCycles readings.
 	full bool
 }
 
@@ -302,11 +296,11 @@ func (a *Analyzer) noteShare(key string, pods int, share float64, ok bool, now t
 	w.seen = now
 	if ok {
 		w.shares = append(w.shares, share)
-		if len(w.shares) > ttftWindowCycles {
+		if len(w.shares) > whatif.TTFTWindowCycles {
 			w.shares = w.shares[1:]
 		}
 	}
-	out := shareWindow{full: len(w.shares) == ttftWindowCycles}
+	out := shareWindow{full: len(w.shares) == whatif.TTFTWindowCycles}
 	for i, s := range w.shares {
 		out.largest = max(out.largest, s)
 		if i == 0 || s < out.least {
@@ -317,7 +311,7 @@ func (a *Analyzer) noteShare(key string, pods int, share float64, ok bool, now t
 }
 
 // decodeTTFTWindow is a decode variant's measured TTFT over the last
-// ttftWindowCycles cycles, each with the prompt of its cycle. A cycle with no
+// whatif.TTFTWindowCycles cycles, each with the prompt of its cycle. A cycle with no
 // reading holds an empty slot, so a figure ages out when the rows stop
 // carrying one.
 type decodeTTFTWindow struct {
@@ -337,7 +331,7 @@ func (a *Analyzer) noteDecodeTTFT(key string, cycle whatif.DecodeTTFT, now time.
 	}
 	w.seen = now
 	w.cycles = append(w.cycles, cycle)
-	if len(w.cycles) > ttftWindowCycles {
+	if len(w.cycles) > whatif.TTFTWindowCycles {
 		w.cycles = w.cycles[1:]
 	}
 	var largest whatif.DecodeTTFT

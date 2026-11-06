@@ -34,6 +34,10 @@ const (
 	FlowControlKVThreshold    = 0.8
 )
 
+// TTFTWindowCycles is how many cycles the callers hold the raw share and the
+// decode engine's TTFT over (docs/proposals/slo-tiers.md, "S1 decisions").
+const TTFTWindowCycles = 5
+
 // promptCVPeaks is, from p50 to p93, the cv at which a mean-one gamma's quantile
 // peaks on [0, 3], to 0.01. From p94 it is still rising at 3. Below p50 the
 // figure is a median, under the mean at any cv, so its peak is cv 0.

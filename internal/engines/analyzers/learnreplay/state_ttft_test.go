@@ -153,14 +153,14 @@ func TestTTFTSamples_RawShare(t *testing.T) {
 	assert.False(t, full)
 
 	// An idle tail forgets nothing: S1 appends only the cycles that read one.
-	for c := 5; c < 5+2*rawShareCycles; c++ {
+	for c := 5; c < 5+2*whatif.TTFTWindowCycles; c++ {
 		s.note(pdInput(prefillRow("p0", 0, 0), prefillRow("p1", 0, 0)), c)
 	}
 	largest, _, full = s.shares["pre"].read()
 	assert.InDelta(t, 4.0/3, largest, 1e-9)
 	assert.False(t, full)
 
-	for c := 20; c < 20+rawShareCycles; c++ {
+	for c := 20; c < 20+whatif.TTFTWindowCycles; c++ {
 		s.note(pdInput(prefillRow("p0", 300, 1), prefillRow("p1", 200, 1)), c)
 	}
 	largest, least, full = s.shares["pre"].read()
@@ -197,7 +197,7 @@ func TestTTFTSamples_EngineTTFTIsAPair(t *testing.T) {
 	idle(12)
 	assert.InDelta(t, 0.05, largestTTFT(s.engineTTFT["dec"]).Seconds, 1e-12, "the 0.25 has aged out")
 	idle(13)
-	assert.Len(t, s.engineTTFT["dec"], decodeTTFTCycles)
+	assert.Len(t, s.engineTTFT["dec"], whatif.TTFTWindowCycles)
 	assert.Zero(t, largestTTFT(s.engineTTFT["dec"]))
 }
 
