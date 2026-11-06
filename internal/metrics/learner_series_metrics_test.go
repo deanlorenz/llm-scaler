@@ -145,6 +145,12 @@ func TestDeleteLearnerSeriesIsScoped(t *testing.T) {
 	if got := countSeries(t, registry, lastAdmittedSeries); got != 2 {
 		t.Fatalf("after the variant: series = %d, want 2", got)
 	}
+	learnerPublishedMu.Lock()
+	_, other := learnerPublished[learnerSeriesID{"ns", "other", "v", learn.K2}]
+	learnerPublishedMu.Unlock()
+	if !other {
+		t.Fatal("the bookkeeping lost a same-named variant of another model")
+	}
 	seed()
 	emitter.DeleteLearnerSeriesForModel("ns", "m")
 	if got := countSeries(t, registry, lastAdmittedSeries); got != 1 {

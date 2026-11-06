@@ -13,6 +13,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
@@ -24,8 +25,8 @@ const lastAdmittedSeries = constants.WVALearnedStateLastAdmittedTimestampSeconds
 // reportSpy is a saturation analyzer that hands over fixed reports, once, and
 // counts the takes.
 type reportSpy struct {
-	reports map[string][]learn.Report
-	takes   int
+	reports, filed map[string][]learn.Report
+	takes          int
 }
 
 func (s *reportSpy) Name() string { return "report-spy" }
@@ -46,12 +47,19 @@ func spyReports(model, variant string) map[string][]learn.Report {
 		Variant: variant, Role: domain.RoleDecode, PricingKey: "key", LastAdmitted: time.Unix(1_700_000_000, 0)}}}
 }
 
-// The analyzer's reports reach the metrics on a cycle, taken once: a spec of
-// the emitter passes with no caller, which is how learner reports came to be
-// read by nothing but the replay.
+// EvictStaleHistory files the spy's reports: the sweep runs inside the cycle,
+// after the prune, as the Analyze calls that file real ones do.
+func (s *reportSpy) EvictStaleHistory() saturation.Evicted {
+	s.reports = s.filed
+	return saturation.Evicted{}
+}
+
+// The analyzer's reports reach the metrics on the cycle that filed them, taken
+// once: a spec of the emitter passes with no caller, which is how learner
+// reports came to be read by nothing but the replay.
 func TestLearnerReportsAreWiredIntoTheCycle(t *testing.T) {
 	e, registry := analyzerSeriesEngine(t)
-	spy := &reportSpy{reports: spyReports("m", "v")}
+	spy := &reportSpy{filed: spyReports("m", "v")}
 	e.Config = config.NewTestConfig()
 	e.optimizer = allocation.NewCostAwareOptimizer()
 	e.analyzers = testAnalyzers(spy)

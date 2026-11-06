@@ -125,6 +125,7 @@ func TestLearnerWrite_AFigureLearnedHereIsNotRestored(t *testing.T) {
 	for range waitWindow + 2 {
 		r.cycleCtx(ctx, oneFull(), decodeVariants("v"))
 	}
+	requireLogged(t, logs, "learner-write")
 	for _, learner := range []string{learn.K2, learn.Mu} {
 		lines := lineFields(learnerWrites(logs, learner))
 		require.NotEmpty(t, lines, learner)
@@ -162,7 +163,7 @@ func TestLearnerWrite_TheITLLineSaysRestoredUntilAReadingIsKept(t *testing.T) {
 	}
 
 	first := process()
-	var own []map[string]any
+	own := make([]map[string]any, 0, itl.DefaultMinSamples+6)
 	for range itl.DefaultMinSamples {
 		clock = clock.Add(15 * time.Second)
 		own = append(own, cycle(first, replica(0.40, 0.03))...)

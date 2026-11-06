@@ -22,9 +22,9 @@ type learnerSeriesModel struct {
 	namespace, modelID string
 }
 
-// publishLearnerReports publishes what the cycle's Analyze calls reported, on
-// one call per cycle, so every model's reports are of this cycle and the
-// models that report are tracked for retainLearnerSeries.
+// publishLearnerReports publishes what the cycle's Analyze calls reported, at
+// the end of the cycle, and tracks the models that reported for
+// retainLearnerSeries.
 func (e *Engine) publishLearnerReports() {
 	reporter := e.analyzers.saturationCaps().reporter
 	if reporter == nil {

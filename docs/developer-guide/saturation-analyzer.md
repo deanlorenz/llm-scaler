@@ -422,7 +422,7 @@ was set for the first time, moved more than `K2WriteBand` (2 %) from the value
 last logged, or has not logged for `LearnerHeartbeat` (10 min). The
 forget-learned-state annotation reaches k2 through `learn.Learners`.
 
-The engine takes the cycle's reports once, before it prunes the model series
+The engine takes the cycle's reports once, at the end of the cycle
 (`publishLearnerReports`, `TakeLearnerReports`), and publishes each learner's
 `wva_learned_state_last_admitted_timestamp_seconds`. `RecordLearnerReports`
 remembers the key behind each series, which no label carries, and deletes the

@@ -3461,7 +3461,7 @@ Built on main f7130a9cb. One replay switch, `saturation.SwitchMuForgetReported`
 and the `restored` field have none, because no replay output reads either.
 
 - **Reports reach the engine (6.2, 6.3, 3.6).** `TakeLearnerReports` hands them
-  over and keeps none, and the engine takes them once a cycle, before it prunes.
+  over and keeps none, and the engine takes them at the end of each cycle.
   It is a capability (`learnerReporter`), as `TakeRestoreOutcomes` is.
   `LearnerReports` stays for the replay. The take is unrecorded: nothing the
   analyzer prices or stores reads the reports, so `coverage_test.go` files it

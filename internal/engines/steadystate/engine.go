@@ -1534,9 +1534,6 @@ func (e *Engine) optimizeV2(
 		activeKeys[utils.GetNamespacedKey(modelVAs[0].Namespace, modelVAs[0].Spec.ModelID)] = true
 	}
 	e.pruneLastGoodAnalysis(activeKeys)
-	// Before the prune: every model analyzed this cycle is active, and what
-	// the prune deletes must not come back from a report it did not see.
-	e.publishLearnerReports()
 	e.pruneAnalyzerSeries(activeKeys)
 	e.pruneBlockedModels(activeKeys)
 	// evaluated are the models whose scale-to-zero stage 3 resolves this cycle.
@@ -1556,6 +1553,9 @@ func (e *Engine) optimizeV2(
 	// swept, and written after the cycle has learned what it will.
 	e.restoreLearnedState(ctx, e.clock.Now())
 	defer func() { e.writeLearnedState(ctx, e.clock.Now()) }()
+	// What the learners reported this cycle, on every way out of it: the
+	// prune above ran before any Analyze, so no report is of a pruned model.
+	defer e.publishLearnerReports()
 
 	// Before the sweep, which would otherwise judge a variant on a stamp from
 	// before it parked: Analyze stamps too, but only after this point.
