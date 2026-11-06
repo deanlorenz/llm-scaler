@@ -23,8 +23,9 @@ internal/engines/analyzers/learnreplay/testdata/goldens/, a
 cmd/whatif/testdata/*.golden, cmd/whatif/testdata/schema-v*.txt, or
 internal/engines/steadystate/testdata/engine-run-event-counts.txt.
 
-Name each one in backticks and say which way it moves. Then paste the
-per-output summary from `make learner-goldens-check`, never the CSV.
+Name each one in backticks and say which way it moves. For a learner golden,
+paste the per-output summary from `make learner-goldens-check`, never the CSV.
+That target replays learner goldens only: for any other golden, say what moved.
 
 - `acceptance/results.csv`: decode demand up on 12 cycles, by at most 0.5 %
 - `pd-restart/*`: new fixture
