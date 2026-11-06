@@ -224,9 +224,10 @@ name() {
     expect "not a name: $1" 1 "line 4 of the body: the name is not allowed" "$(section "$R" "- \`$1\`")"
 }
 for bad in '*' '**' '*/*' '?/*' '*.csv' '*/*.csv' '*.gz' '*e*' '*e*/*' '*/*e*' '*/re*.csv' 'ac*/*.csv' '???/*.csv' \
-    'acceptance/*' 'acceptance/???' '*/*/results.csv' \
-    '*.golden' '*.txt' '*.yaml' 'cmd/whatif/testdata/*' 'cmd/whatif/testdata/*.golden' 'cmd/whatif/testdata/*/x.golden' \
+    'acceptance/*' 'acceptance/???' 'acceptance/ab*' '*/*/results.csv' \
+    '*.golden' '*.txt' '*.yaml' 'cmd/whatif/testdata/*' 'cmd/whatif/testdata/*.golden' 'cmd/whatif/testdata/*/ttft-open-loop-short.golden' \
     'cmd/*/testdata/ttft-open-loop-short.golden' 'internal/engines/steadystate/testdata/*.txt' \
+    'internal/engines/steadystate/testdata/*/engine-run-event-counts.txt' \
     "$G/*" "$G/*/*" "$G/*/*.csv" "$G/*/*/lines.csv" \
     'internal/*/*/*/*/*/*/*' 'internal/*/*/*/*/*/*/*/results.csv' 'internal/engines/*/results.csv' \
     'internal/engines/analyzers/learnreplay/testdata/*/acceptance/results.csv' \
@@ -279,7 +280,7 @@ else
     PASS=$((PASS + 1)); echo "ok   no hostile body ran"
 fi
 CASES=$((CASES + 1))
-OUT="$(cd "$BASE" && PR_BODY="$(section '::error::injected' '- `::warning::injected`' '- `*/*.csv` - ::notice::injected')" bash "$GATE" "$BASE_SHA" HEAD 2>&1)"
+OUT="$(cd "$BASE" && PR_BODY="$(section '::error::injected' '- `::warning::injected`' '- `*/*.csv` - ::notice::injected' '- `injected/lines.csv`')" bash "$GATE" "$BASE_SHA" HEAD 2>&1)"
 if [ "${OUT#*injected}" != "$OUT" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL the body reached the job's output: $OUT"
 else
