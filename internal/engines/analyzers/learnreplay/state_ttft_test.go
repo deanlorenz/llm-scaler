@@ -98,22 +98,24 @@ func pdInput(rows ...domain.ReplicaMetrics) domain.AnalyzerInput {
 // fit.
 func TestTTFTSamples_TheTerm(t *testing.T) {
 	term := func(s *ttftSamples) whatif.DecodeTerm {
-		return whatif.TermFromEstimate(s.terms["dec"].Estimate(), largestTTFT(s.engineTTFT["dec"]))
+		return whatif.TermFromEstimate(s.terms["dec"].Estimate())
 	}
+	args := func(string) string { return "" }
 	row := func(step float64) domain.ReplicaMetrics {
 		r := decodeRow("d0", 0.03+5*step, 10)
 		r.AvgITL, r.AvgITLKnown, r.AvgInputTokens, r.AvgInputTokensRecent = step, true, 1000, 1000
+		r.CapacityQueueKnown = true
 		return r
 	}
 	s := newTTFTSamples()
 	in := pdInput(prefillRow("p0", 1000, 1))
 	s.note(in, 1)
-	s.noteTerm(in, time.Unix(0, 0))
+	s.noteTerm(in, time.Unix(0, 0), args)
 	assert.True(t, term(s).EngineOmitted)
 
 	in = pdInput(prefillRow("p0", 1000, 1), row(0.003))
 	s.note(in, 2)
-	s.noteTerm(in, time.Unix(60, 0))
+	s.noteTerm(in, time.Unix(60, 0), args)
 	held := term(s)
 	assert.True(t, held.StepAssumed)
 	assert.InDelta(t, 0.003, held.FromITL, 1e-12)
@@ -121,12 +123,30 @@ func TestTTFTSamples_TheTerm(t *testing.T) {
 	for i := range 30 {
 		in = pdInput(prefillRow("p0", 1000, 1), row(0.002+float64(i%6)*0.002))
 		s.note(in, 3+i)
-		s.noteTerm(in, time.Unix(int64(120+60*i), 0))
+		s.noteTerm(in, time.Unix(int64(120+60*i), 0), args)
 	}
 	fit := term(s)
 	assert.False(t, fit.StepAssumed)
 	assert.InDelta(t, 5, fit.PerStep, 1e-6)
 	assert.True(t, fit.HopAssumed, "this recording holds no router mean")
+
+	// A held router teaches no hop, here as in S1.
+	busy := newTTFTSamples()
+	for i := range 60 {
+		rows := pdInput(prefillRow("p0", 1000, 1), row(0.003))
+		for j := range rows.ReplicaMetrics {
+			rows.ReplicaMetrics[j].AvgTTFT, rows.ReplicaMetrics[j].AvgTTFTKnown = 0.05, true
+		}
+		rows.RouterLatency = &domain.RouterLatency{WindowSeconds: 300, TTFTSumRate: 2, TTFTCountRate: 10}
+		rows.SchedulerQueue = &domain.SchedulerQueueMetrics{QueueSize: 2}
+		busy.noteTerm(rows, time.Unix(int64(15*i), 0), args)
+	}
+	assert.Equal(t, prefill.TooFewHopWindows, term(busy).HopRefused)
+
+	// New engine arguments start the variant's readings again.
+	s.noteTerm(in, time.Unix(3000, 0), func(string) string { return "a" })
+	s.noteTerm(in, time.Unix(3060, 0), func(string) string { return "b" })
+	assert.Equal(t, prefill.TooFewDecodeMinutes, term(s).EngineRefused)
 }
 
 // The prompt is computed tokens over requests across the cycles, and a cycle

@@ -401,10 +401,10 @@ that is itself wrong (the exponential tail, Poisson arrivals, an omitted
 | TTL eviction (only where a TTL exists) | Evicted requests are not in the router histogram: the ground truth reads high near the TTL |
 | Proxy hop before the EPP | Over-promises by that hop |
 | `T_xfer` omitted (not collected) | Over-promises |
-| `D` fitted on the whole prompt and priced at `E[I_eff]` | Over-promises with prefix hits, by `perToken·(I − I_eff)`: the pull moves the whole prompt. No committed run has hits, so this is not measured |
+| `D` fitted on the whole prompt and priced at `E[I_eff]` | Over-promises with prefix hits, by `perToken·(I − I_eff)`, down to the old sum, which floors it: the pull moves the whole prompt. Flagged `DecodeTermPrefixHits` past 10% of the prompt. No committed run has hits, so this is not measured |
 | `D` and `R` added at the mean to every percentile, but for their per-token parts | Over-promises at the tail. On the staircase run, bucket A's p90 and p95 read 9% and 13% under on average with the mean 8% over |
 | `D` read past the prompts or step times it was fitted on | Either way, and not flagged: the plane is a line in each. `MaxDecodeQueue` keeps the behind-on-pulls minutes out of the fit, so `D` does not reach them, and they read far above it |
-| `AssumedDecodeStepSlope`, `AssumedRouterHopSeconds` (no fit) | Under-promises if they stand above the fleet's true figures, which is the point. Each is flagged. A long prompt may hop further than 20 ms |
+| `AssumedDecodeStepSlope`, `AssumedRouterHopSeconds` (no fit) | Under-promises if they stand above the fleet's true figures, which is the point. Each is flagged, and a refusal or a move of 25% that one alone decides says so. A long prompt may hop further than 20 ms |
 | `V_P` from a lower bound | Under-promises |
 | A mix of prompt lengths priced at its mean on a convex prefill curve ([a limit of P3](#prefill-capacity)) | Over-promises: an even 8k/52k mix at a `V_P` read at 30k is priced 32% under its prefill time. The rescale ([after P2](#as-built-p3-after-p2)) moves `V_P` to the mean, not the mix, and `VPShapeMoved`, comparing means, does not flag it |
 | `V_P` rescaled along the curve with no fixed cost per step, `s(I_vp)/s(I)` | Under-promises for a longer prompt only if P1's low-load `b` and `c` are the busy step's per-token cost, which is not measured: on run 2 at 37k it read 1.5% above the served `V_P` (over-promises), covered by the margin only from `ρ` 0.6. No-act (`VPScaledToPrompt`) until a second point confirms it. Held (not raised) for a shorter prompt |
@@ -451,8 +451,9 @@ the measured one fails; more than 25% below fails. The same mark is applied
 separately to the mean TPOT and to the per-request TPOT percentile. **Noise floor**: an M/G/1 queue at `ρ` 0.85 relaxes in about
 `E[S](1 + Cs²)/(1 − √ρ)²`, about 330 `E[S]` at `Cs²` = 1, 90 s for an 8000-token
 prefill at 30k tok/s; a step whose window holds fewer than 4 such times is
-flagged and lengthened. Until the run passes, every TTFT figure prints
-UNVALIDATED.
+flagged and lengthened. Repeat 1 failed the form before the decode term, and
+it chose the term, so it cannot validate that either. Validation is a fresh
+frozen run: until one passes, every TTFT figure prints UNVALIDATED.
 
 **Which bucket lifts which flag.** The SLO analyzer's S2 does not size on a
 figure carrying a flag below until the bucket named passes the mark above,
@@ -460,7 +461,7 @@ in all its repeats ([S1 decisions](slo-tiers.md#s1-decisions)):
 
 | Flag | Lifted by |
 | --- | --- |
-| `UnvalidatedTTFT` | Buckets A and B, flow control off and on |
+| `UnvalidatedTTFT` | Buckets A and B, flow control off and on, on a fresh frozen run of the current form |
 | `AssumedPoissonArrivals` | Bucket C, flow control off and on, predicted at the measured `Ca²` |
 | `AboveFlowControlOnset` (on a rate answer) | Buckets B and C with flow control on, with steps above the prefill onset |
 | `FlowControlInferredOff` | Never by the staircase: it is a missing series, fixed by scraping it |
@@ -1040,8 +1041,14 @@ coefficient of this run is in the code, except as the fixture of a test.
 
 | Coefficient | Learned from | Read every cycle? | With no fit |
 | --- | --- | --- | --- |
-| `base`, `perToken`, `perStep` | Per-pod `AvgTTFT`, `AvgITL`, input tokens, request rate and queues | Yes: all are scaling queries. Nothing here needs Q1's always-on work | The measured `D` held, rising by `AssumedDecodeStepSlope` (10) from the ITL it was measured at, flagged `DecodeStepSlopeAssumed`. With no `D` measured either, the old sum, flagged `DecodeTermOmitted` |
-| `R` | The router's TTFT `_sum` and `_count` over 5 minutes, less the engines' `AvgTTFT` over the same cycles | Only with this change: it adds the two queries, for a model whose policy lists the SLO analyzer | `AssumedRouterHopSeconds` (20 ms), flagged `RouterHopAssumed` |
+| `base`, `perToken`, `perStep` | Per-pod `AvgTTFT`, `AvgITL`, input tokens, request rate and queues | Yes: all are scaling queries. Nothing here needs Q1's always-on work | `D` from the last 5 minutes' quiet rows held, rising by `AssumedDecodeStepSlope` (10) from the ITL it was read at, flagged `DecodeStepSlopeAssumed`. With no quiet row, the old sum, flagged `DecodeTermOmitted` |
+| `R` | The router's TTFT `_sum` and `_count` over 5 minutes, less the engines' `AvgTTFT` over the same cycles | Only with this change: it adds the two queries, for a model whose policy lists the SLO analyzer | `AssumedRouterHopSeconds` (20 ms), flagged `RouterHopAssumed`. The CLI takes `--assume-router-hop` |
+
+The window is the variant's, under its accelerator and engine arguments: a change
+of either sweeps it, as it does the line. Why no fit stands (`NoStepSpread`,
+`NonPositiveDecodeBase`, `NoRouterMean` and so on) is carried with the term to the
+CLI's `assumed` row and JSON and to the `slo-ttft-variant` log, beside the term as
+priced.
 
 - **Why the router needed new queries.** The collector read only the histogram's
   buckets, 25 to 100 ms wide around a 5 to 15 ms figure. Read from the buckets,
@@ -1049,19 +1056,33 @@ coefficient of this run is in the code, except as the fixture of a test.
   and `_count` over a steady 5-minute window, R's median was 4.6 and 4.9 ms on
   bucket A, 11.4 and 11.6 ms on B, 12.5 and 12.5 ms on C, spread 0.6 ms on A and
   about 4 ms on B.
+- **What a router window needs.** Steady rate and prompt, and no cycle with the
+  router holding requests: the router's mean starts before flow control, and a
+  held window would count the queue in R. A line needs every median above 0.
 - **What admits a minute.** A row with a read mean of both, at least 0.05 r/s,
-  its prompt steady to 15%, no speculation, nobody waiting for a slot, and at
-  most `MaxDecodeQueue` (9) waiting at all. Past that the pod is behind on KV
+  its prompt steady to 15%, no speculation, its slot queue read and empty (an
+  unknown queue is not an empty one, so SGLang, which publishes none, takes the
+  fall-back), and at most `MaxDecodeQueue` (9) waiting at all. Past that the pod is behind on KV
   pulls: of 3,300 staircase rows, 3% at 6 to 9 waiting read over 30 ms above the
   fit, against 44% at 10 to 14 and 81% at 15 to 24. That gate is stated from one
   model.
 - **What a slope needs.** Step time must span 1.5x. A fleet at flat load stays
   refused (`NoStepSpread`) and prices the assumed slope. One prompt length gives
   `base` as the whole prompt's part, held at the shortest prompt and scaled up
-  only.
-- **A fall-back never prices under the old sum**
-  (`TestTerm_AFallBackIsNeverUnderTheOldSum`, 2000 random fleets at four
-  percentiles). A fit can in principle: `D` replaces it outright.
+  only. A `base` not above 0 is refused: a request pays something at no prompt
+  and no step, and such a plane prices under what was measured.
+- **Nothing prices under the old sum,** fit or fall-back. The figure is compared
+  with the old sum at its own rate and percentile, and the old sum stands where
+  it is higher, flagged `DecodeTermFloored`
+  (`TestTerm_NoFitPricesUnderTheOldSum`: 100 random fits at five percentiles,
+  latency, floor and rate; the floor bound on 272 figures). Before this a fit
+  with a negative `base` gave 5.4x the rate, unflagged.
+- **The held `D` is quiet.** A busy row's TTFT holds the slot wait, which the model
+  prices apart as `W_decode`, and a load the question may not ask about: a 400 ms
+  reading gave a 509 ms floor. So only the rows that admit a minute are held.
+- **A refusal keeps what it rests on.** `TargetBelowFloor` carries the term's flags.
+  Where an assumed part alone puts the floor over the target, it says so, and
+  `wva_slo_ttft_unmet` is absent: that says nothing of the fleet.
 - **Measured versus assumed.** `perStep` fits 7.05, 6.68, 6.61, 6.39, 7.46 and
   8.10 on the six phases alone, each from one prompt length, all on one small
   model. The warm-up alone gives `D` = 0.39 ms + 5.08 ms per 1000 tokens + 6.39
@@ -1088,8 +1109,9 @@ Against all 31 levels, predicted over the client's figure, old → new:
 | p95 | −23.4% → −1.9% | −56.0…+14.3% → −21.2…+30.1% | 10 → 3 of 31 |
 
 **This is a consistency check, not a validation.** The form was chosen from M2's
-own data, so M2 cannot validate it, whichever split was fitted on: only a run
-that played no part in choosing the form can. `UnvalidatedTTFT` stays. The p90
+own data, so M2 cannot validate it, whichever split was fitted on: repeat 1
+failed the old form, and only a fresh frozen run can score this one.
+`UnvalidatedTTFT` stays. The p90
 and p95 errors are the tail this term does not touch: `Ca²` stays as given (no
 thinning), so C's tail still reads high, and B's and A's low. The service-time
 change is not in this work.
@@ -1097,7 +1119,8 @@ change is not in this work.
 S1 stays shadow. `slo.SwitchTTFTDecodeTerm` off replays the old sum unflagged. It
 moves no committed golden, since no recording with `slo.Analyze` prices a line.
 The CLI has no switch, and its goldens carry the fall-back: their recordings read
-no decode TTFT, so `DecodeTermOmitted`, `RouterHopAssumed` and 20 ms.
+no decode TTFT, so `DecodeTermOmitted`, `RouterHopAssumed` and 20 ms. A refusal, or
+a move of 25%, that an assumed term alone decides is named on the `assumed` row.
 
 ### What #482 took from this change
 

@@ -3,6 +3,7 @@ package whatif
 import (
 	"math"
 	"math/rand/v2"
+	"slices"
 	"testing"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/prefill"
@@ -26,7 +27,7 @@ func termFleet(t *DecodeTerm) TTFTFleet {
 // the pull.
 func TestTerm_PricesTheHandSum(t *testing.T) {
 	fl := termFleet(stateTerm())
-	fl.Prefill.TransferSecondsPerToken = 1e-3 // would be seconds, were it priced
+	fl.Prefill.TransferSecondsPerToken = 1e-6 // not priced: D holds the pull
 	const rate = 8.0
 	v := mustTTFT(t, ttftAt(t, fl, rate, 0))
 	d := *fl.Decode
@@ -213,39 +214,214 @@ func TestPromptLine_Split(t *testing.T) {
 	}
 }
 
-// A negative fitted intercept with a small step never prices a negative term.
+// A negative intercept with a small step never prices a negative term.
 func TestTerm_NeverNegative(t *testing.T) {
-	v := mustTTFT(t, ttftAt(t, termFleet(&DecodeTerm{Engine: PromptLine{Base: -5, PerToken: 1e-6}, PerStep: 1, Hop: PromptLine{Base: -1}}), 0.5, 0))
-	if v.Parts.DecodeEngine != 0 || v.Parts.RouterHop != 0 {
-		t.Errorf("%+v", v.Parts)
+	engine, hop := termPlan{engine: -5, perStep: 1, hop: -1}.at(0.01, 0.01)
+	if engine != 0 || hop != 0 {
+		t.Errorf("engine %g, hop %g", engine, hop)
+	}
+}
+
+// No fit prices under the old sum, on any path: latency at every percentile and
+// rate, floor and the rate answered. Where the floor binds the flag says so, and
+// the parts still sum to the mean.
+func TestTerm_NoFitPricesUnderTheOldSum(t *testing.T) {
+	r := rand.New(rand.NewPCG(7, 11))
+	bound := 0
+	for range 100 {
+		fl := workedFleet()
+		fl.Prefill.PromptTokens = 200 + 9000*r.Float64()
+		fl.Prefill.PromptCV = 3 * r.Float64()
+		fl.Prefill.TransferSecondsPerToken = 3e-5 * r.Float64()
+		term := DecodeTerm{Engine: PromptLine{Base: 0.06*r.Float64() - 0.05, PerToken: 3e-5 * r.Float64() * r.Float64()},
+			PerStep: 8 * r.Float64() * r.Float64(), Hop: PromptLine{Base: 0.02 * r.Float64(), PerToken: 1e-6 * r.Float64()}}
+		fl.DecodeTerm = &term
+		old := fl
+		old.DecodeTerm, old.LegacyDecodeSum = nil, true
+		pl, u := fl.plan()
+		if u != nil {
+			t.Fatal(u)
+		}
+		rate := 0.9 * r.Float64() * pl.lowestKnee()
+		for _, q := range []float64{0, 0.5, 0.9, 0.95, 0.99} {
+			v, o := mustTTFT(t, ttftAt(t, fl, rate, q)), mustTTFT(t, ttftAt(t, old, rate, q))
+			if v.Seconds < o.Seconds*(1-1e-12) || v.Floor < o.Floor*(1-1e-12) {
+				t.Fatalf("%+v at %g, q %g: %g under the old sum's %g (floors %g, %g)", term, rate, q, v.Seconds, o.Seconds, v.Floor, o.Floor)
+			}
+			if !(v.Floor <= v.Seconds*(1+1e-9)) {
+				t.Fatalf("floor %g over %g", v.Floor, v.Seconds)
+			}
+			if v.Seconds == o.Seconds && !v.HasFlag(DecodeTermFloored) {
+				t.Fatalf("%+v at %g, q %g: the old sum stands unflagged: %v", term, rate, q, v.Flags)
+			}
+			if v.HasFlag(DecodeTermFloored) {
+				bound++
+			}
+			if q == 0 {
+				p := v.Parts
+				relNear(t, "parts", v.Seconds, p.EngineWait+p.OwnPrefill+p.DecodeWait+p.FirstStep+p.DecodeEngine+p.RouterHop, 1e-9)
+			}
+			target := TTFTTarget{Seconds: o.Floor * (1.05 + r.Float64()), Percentile: q}
+			a, ok := rateForTTFT(t, old, target).(Answer)
+			if !ok {
+				continue
+			}
+			switch n := rateForTTFT(t, fl, target).(type) {
+			case Answer:
+				if n.Value > a.Value*(1+1e-6) {
+					t.Fatalf("%+v at %+v: rate %g over the old sum's %g", term, target, n.Value, a.Value)
+				}
+			case Unanswerable:
+				if n.Reason != TargetBelowFloor {
+					t.Fatalf("%+v", n)
+				}
+			}
+		}
+	}
+	if bound == 0 {
+		t.Fatal("the floor never bound: this property tested nothing")
+	}
+	t.Logf("the floor bound on %d figures", bound)
+}
+
+// The reviewer's case on the fleet he used: a fit whose plane read under the old
+// sum gave 5.4x the rate, unflagged. Priced directly, past the learner's refusal,
+// the floor holds the rate and says so.
+func TestTerm_AFitUnderTheOldSumHoldsItsRate(t *testing.T) {
+	old := workedFleet()
+	old.Prefill.TransferSecondsPerToken = 5e-5
+	old.LegacyDecodeSum = true
+	fl := old
+	fl.LegacyDecodeSum = false
+	fl.DecodeTerm = &DecodeTerm{Engine: PromptLine{Base: -0.03, PerToken: 1e-6}, PerStep: 7}
+	target := TTFTTarget{Seconds: mustTTFT(t, ttftAt(t, old, 0.5, 0.9)).Seconds * 1.02, Percentile: 0.9}
+	was, now := mustAnswer(t, rateForTTFT(t, old, target)), mustAnswer(t, rateForTTFT(t, fl, target))
+	relNear(t, "rate", now.Value, was.Value, 1e-6)
+	if !now.HasFlag(DecodeTermFloored) {
+		t.Errorf("flags %v", now.Flags)
+	}
+}
+
+// The floor can bind at the rate and not at no load: a D with no slope clears
+// the old sum at the band's bottom and falls under it as ITL climbs. The rate
+// answer carries the flag.
+func TestTerm_TheFloorBindsAtTheRateAlone(t *testing.T) {
+	old := workedFleet()
+	old.LegacyDecodeSum = true
+	fl := workedFleet()
+	d := *fl.Decode
+	fl.DecodeTerm = &DecodeTerm{Engine: PromptLine{Base: 1.01 * d.Line.ITLAt(d.Band.Lo)}}
+	if mustTTFT(t, ttftAt(t, fl, 0, 0.9)).HasFlag(DecodeTermFloored) {
+		t.Fatal("bound at no load: this tests nothing")
+	}
+	target := TTFTTarget{Seconds: mustTTFT(t, ttftAt(t, old, 8, 0.9)).Seconds, Percentile: 0.9}
+	a := mustAnswer(t, rateForTTFT(t, fl, target))
+	if !a.HasFlag(DecodeTermFloored) {
+		t.Errorf("flags %v", a.Flags)
+	}
+}
+
+// Prefix hits past the share are flagged: D goes with the whole prompt. A term
+// with no D has nothing to flag, and an unread prompt says nothing.
+func TestTerm_PrefixHitsAreFlagged(t *testing.T) {
+	flagged := func(whole float64, omitted bool) bool {
+		term := stateTerm()
+		term.WholePromptTokens, term.EngineOmitted = whole, omitted
+		return mustTTFT(t, ttftAt(t, termFleet(term), 2, 0.9)).HasFlag(DecodeTermPrefixHits)
+	}
+	i := workedPrefill().PromptTokens
+	for _, c := range []struct {
+		whole   float64
+		omitted bool
+		want    bool
+	}{{0, false, false}, {i, false, false}, {i / (1 - MaterialPrefixHitShare) * 0.999, false, false}, {i * 2, false, true}, {i * 2, true, false}} {
+		if got := flagged(c.whole, c.omitted); got != c.want {
+			t.Errorf("whole %g, omitted %v: %v", c.whole, c.omitted, got)
+		}
+	}
+}
+
+// A refusal keeps the flags of the term it rests on, and says when an assumed
+// part alone refused it: with that part out, the fleet answers.
+func TestTerm_ARefusalKeepsWhatItRestsOn(t *testing.T) {
+	old := workedFleet()
+	old.LegacyDecodeSum = true
+	oldFloor := mustTTFT(t, ttftAt(t, old, 1, 0.9)).Floor
+
+	assumed := termFleet(&DecodeTerm{EngineOmitted: true, HopAssumed: true, Hop: PromptLine{Base: 0.02}})
+	u, ok := rateForTTFT(t, assumed, TTFTTarget{Seconds: oldFloor + 0.01, Percentile: 0.9}).(Unanswerable)
+	if !ok || u.Reason != TargetBelowFloor {
+		t.Fatalf("%#v", u)
+	}
+	if !u.AssumedTermDecides || !slices.Contains(u.Flags, RouterHopAssumed) || !slices.Contains(u.Flags, DecodeTermOmitted) {
+		t.Errorf("%+v", u)
+	}
+
+	// Under the old floor too: the fleet refuses it whatever is assumed.
+	u, _ = rateForTTFT(t, assumed, TTFTTarget{Seconds: oldFloor * 0.9, Percentile: 0.9}).(Unanswerable)
+	if u.AssumedTermDecides || !slices.Contains(u.Flags, RouterHopAssumed) {
+		t.Errorf("%+v", u)
+	}
+
+	// A held D, slope assumed, decides too.
+	held := termFleet(&DecodeTerm{Engine: PromptLine{Base: 0.3, HeldPromptTokens: 1000}, PerStep: 10, FromITL: 0.004, StepAssumed: true})
+	u, _ = rateForTTFT(t, held, TTFTTarget{Seconds: oldFloor + 0.01, Percentile: 0.9}).(Unanswerable)
+	if u.Reason != TargetBelowFloor || !u.AssumedTermDecides || !slices.Contains(u.Flags, DecodeStepSlopeAssumed) {
+		t.Errorf("%+v", u)
+	}
+
+	// A learned term decides nothing assumed.
+	learned := termFleet(stateTerm())
+	u, _ = rateForTTFT(t, learned, TTFTTarget{Seconds: oldFloor + 0.001, Percentile: 0.9}).(Unanswerable)
+	if u.Reason != TargetBelowFloor || u.AssumedTermDecides || len(u.Flags) != 0 {
+		t.Errorf("%+v", u)
+	}
+}
+
+func TestWithoutAssumedTerms(t *testing.T) {
+	if _, ok := WithoutAssumedTerms(workedFleet()); ok {
+		t.Error("no term has nothing assumed")
+	}
+	if _, ok := WithoutAssumedTerms(termFleet(stateTerm())); ok {
+		t.Error("a learned term has nothing assumed")
+	}
+	fl, ok := WithoutAssumedTerms(termFleet(&DecodeTerm{Engine: PromptLine{Base: 0.3}, PerStep: 10, StepAssumed: true,
+		Hop: PromptLine{Base: 0.02}, HopAssumed: true}))
+	if !ok || !fl.DecodeTerm.EngineOmitted || fl.DecodeTerm.Hop != (PromptLine{}) || fl.DecodeTerm.PerStep != 0 {
+		t.Errorf("%+v", fl.DecodeTerm)
 	}
 }
 
 func TestTermFromEstimate(t *testing.T) {
-	measured := DecodeTTFT{Seconds: 0.05, PromptTokens: 1000, ITLSeconds: 0.004}
+	held := prefill.HeldDecode{Seconds: 0.05, PromptTokens: 1000, ITLSeconds: 0.004}
 	fit := prefill.DecodeFit{Base: 0.002, PerToken: 3e-6, PerStep: 5, Minutes: 40}
 	hop := prefill.HopFit{Base: 0.004, PerToken: 1e-6, Windows: 9}
 
-	got := TermFromEstimate(prefill.DecodeTermEstimate{Decode: fit, Hop: hop}, measured)
-	want := DecodeTerm{Engine: PromptLine{Base: 0.002, PerToken: 3e-6}, PerStep: 5, Hop: PromptLine{Base: 0.004, PerToken: 1e-6}}
+	got := TermFromEstimate(prefill.DecodeTermEstimate{Decode: fit, Hop: hop, Held: held, WholePromptTokens: 2000})
+	want := DecodeTerm{Engine: PromptLine{Base: 0.002, PerToken: 3e-6}, PerStep: 5, Hop: PromptLine{Base: 0.004, PerToken: 1e-6},
+		WholePromptTokens: 2000}
 	if got != want {
 		t.Errorf("learned: %+v", got)
 	}
 
-	got = TermFromEstimate(prefill.DecodeTermEstimate{Decode: prefill.DecodeFit{Refused: prefill.NoStepSpread}}, measured)
+	got = TermFromEstimate(prefill.DecodeTermEstimate{Decode: prefill.DecodeFit{Refused: prefill.NoStepSpread}, Held: held,
+		Hop: prefill.HopFit{Refused: prefill.NoRouterMean}})
 	want = DecodeTerm{Engine: PromptLine{Base: 0.05, HeldPromptTokens: 1000}, PerStep: AssumedDecodeStepSlope, FromITL: 0.004,
-		StepAssumed: true, Hop: PromptLine{Base: AssumedRouterHopSeconds}, HopAssumed: true}
+		StepAssumed: true, Hop: PromptLine{Base: AssumedRouterHopSeconds}, HopAssumed: true,
+		EngineRefused: prefill.NoStepSpread, HopRefused: prefill.NoRouterMean}
 	if got != want {
-		t.Errorf("refused, measured: %+v", got)
+		t.Errorf("refused, held: %+v", got)
 	}
 
-	got = TermFromEstimate(prefill.DecodeTermEstimate{}, DecodeTTFT{})
-	want = DecodeTerm{EngineOmitted: true, Hop: PromptLine{Base: AssumedRouterHopSeconds}, HopAssumed: true}
+	got = TermFromEstimate(prefill.DecodeTermEstimate{Decode: prefill.DecodeFit{Refused: prefill.NonPositiveDecodeBase}})
+	want = DecodeTerm{EngineOmitted: true, Hop: PromptLine{Base: AssumedRouterHopSeconds}, HopAssumed: true,
+		EngineRefused: prefill.NonPositiveDecodeBase, HopRefused: prefill.NoRouterMean}
 	if got != want {
-		t.Errorf("nothing: %+v", got)
+		t.Errorf("no quiet row: %+v", got)
 	}
-	if got := TermFromEstimate(prefill.DecodeTermEstimate{Hop: prefill.HopFit{Windows: 9, Refused: prefill.NonPositiveHop}}, DecodeTTFT{}); !got.HopAssumed {
-		t.Errorf("a refused hop is assumed: %+v", got)
+	got = TermFromEstimate(prefill.DecodeTermEstimate{Hop: prefill.HopFit{Windows: 9, Refused: prefill.NonPositiveHop}})
+	if !got.HopAssumed || got.HopRefused != prefill.NonPositiveHop || got.EngineRefused != prefill.TooFewDecodeMinutes {
+		t.Errorf("the reasons travel: %+v", got)
 	}
 }
 

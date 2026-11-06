@@ -613,23 +613,6 @@ func MeanEffectivePrompt(rows []domain.ReplicaMetrics, sglang bool) (float64, bo
 	return 0, false
 }
 
-// MeanStep is the serving rows' mean AvgITL, over the rows that read one; 0
-// with none.
-func MeanStep(rows []domain.ReplicaMetrics) float64 {
-	var sum float64
-	n := 0
-	for _, rm := range rows {
-		if Serving(rm) && rm.ITLState() == domain.ITLFinite && finitePositive(rm.AvgITL) {
-			sum += rm.AvgITL
-			n++
-		}
-	}
-	if n == 0 {
-		return 0
-	}
-	return sum / float64(n)
-}
-
 // finitePositive reports whether x is finite and above zero; NaN is not.
 func finitePositive(x float64) bool {
 	return x > 0 && !math.IsInf(x, 1)

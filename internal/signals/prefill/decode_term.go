@@ -70,9 +70,16 @@ const (
 	// window's requests and the engines' by their cycles' rates; a ramp
 	// inside the window parts the two.
 	MaxHopRateRatio = 1.3
+	// HeldDecodeAge is how recent a quiet row must be for its TTFT to be held
+	// where no fit stands: the five cycles' window of the decode engine's
+	// measured TTFT, in minutes, since a row is sampled once a minute.
+	HeldDecodeAge = 5 * time.Minute
 	// minHopWindowShare is how much of the router's window the cycles must
 	// span.
 	minHopWindowShare = 0.8
+	// engineHorizon is how long a cycle's engine means are kept with no
+	// router mean to set them against: twice the router's window.
+	engineHorizon = 10 * time.Minute
 	// maxDecodeSamples bounds a window's pod-minutes, and maxHopSamples its
 	// router windows, whatever the cycle interval: six hours of a dozen pods.
 	maxDecodeSamples = 12 * maxSamples
@@ -92,14 +99,18 @@ const (
 	NonPositiveStepSlope Refusal = "NonPositiveStepSlope"
 	// NegativePromptSlope is a fitted perToken below zero.
 	NegativePromptSlope Refusal = "NegativePromptSlope"
-	// NonPositiveDecodeBase is D fitted at one prompt with a base not above
-	// zero: the base stands for the whole prompt's part there.
+	// NonPositiveDecodeBase is a fitted base not above zero. A request pays
+	// something at no prompt and no step, so the plane's intercept is an
+	// extrapolation gone wrong, and it would price under what was measured. At
+	// one prompt the base also stands for the whole prompt's part.
 	NonPositiveDecodeBase Refusal = "NonPositiveDecodeBase"
 	// TooFewHopWindows is R with fewer than MinHopWindows admitted windows.
 	TooFewHopWindows Refusal = "TooFewHopWindows"
-	// NonPositiveHop is an R not above zero: the engines' means already
-	// hold the router's.
+	// NonPositiveHop is an R not above zero, at one prompt length or at any
+	// of a line's: the engines' means already hold the router's.
 	NonPositiveHop Refusal = "NonPositiveHop"
+	// NoRouterMean is R with no router TTFT _sum and _count read at all.
+	NoRouterMean Refusal = "NoRouterMean"
 )
 
 // DecodeFit is D as learned: base + perToken*I + perStep*ITL, seconds.
@@ -137,10 +148,24 @@ type HopFit struct {
 	Refused Refusal
 }
 
+// HeldDecode is the decode engine's TTFT on the window's quiet rows: the
+// largest of the last HeldDecodeAge, as a pair with its prompt and step time.
+// Quiet is what admits a row to the fit, so it holds no slot wait, which the
+// model prices apart, and no speculating row, whose AvgITL is a step and not a
+// token. Zero with no such row.
+type HeldDecode struct {
+	Seconds, PromptTokens, ITLSeconds float64
+}
+
 // DecodeTermEstimate is what a decode variant's window has learned.
 type DecodeTermEstimate struct {
 	Decode DecodeFit
 	Hop    HopFit
+	// Held is what stands in for D with no fit.
+	Held HeldDecode
+	// WholePromptTokens is the decode rows' mean whole prompt on the last
+	// cycle that read one, request-weighted; 0 with none.
+	WholePromptTokens float64
 }
 
 // DecodeTermCycle is what one cycle gives a window.
@@ -158,6 +183,9 @@ type DecodeTermCycle struct {
 	// Settled is nil, or the settle tracker's reading of a row: a replica
 	// still warming up is not admitted.
 	Settled *Settle
+	// RouterHeld says the router held requests this cycle: a router window
+	// over it holds a flow-control wait, which is not the hop.
+	RouterHeld bool
 }
 
 // decodeSample is one pod-minute of a decode row.
@@ -171,6 +199,7 @@ type engineCycle struct {
 	at                    time.Time
 	prefill, decode, rate float64
 	prompt                float64
+	held                  bool
 }
 
 // hopSample is one router window's R.
@@ -188,6 +217,13 @@ type DecodeTermWindow struct {
 	engines []engineCycle
 	hops    []hopSample
 	lastHop time.Time
+	// now is the last cycle seen, whole the decode rows' whole prompt there
+	// and routerSeen whether a router mean was ever read.
+	now        time.Time
+	whole      float64
+	routerSeen bool
+	// accelerator and args are what the readings were taken under.
+	accelerator, args string
 }
 
 // NewDecodeTermWindow returns an empty window.
@@ -195,9 +231,32 @@ func NewDecodeTermWindow() *DecodeTermWindow {
 	return &DecodeTermWindow{lastAt: map[string]time.Time{}}
 }
 
+// Under says what the next readings are taken under. D and R are properties of
+// the engine, so a change of accelerator or of engine arguments sweeps the
+// window, as the line's does (slo.linesUnderArgs): the old engine's minutes are
+// neither refitted nor held as the new one's. An unknown value changes nothing.
+func (w *DecodeTermWindow) Under(accelerator, args string) {
+	moved := accelerator != "" && w.accelerator != "" && accelerator != w.accelerator ||
+		args != "" && w.args != "" && args != w.args
+	if accelerator != "" {
+		w.accelerator = accelerator
+	}
+	if args != "" {
+		w.args = args
+	}
+	if moved {
+		*w = DecodeTermWindow{lastAt: map[string]time.Time{}, now: w.now, routerSeen: w.routerSeen,
+			accelerator: w.accelerator, args: w.args}
+	}
+}
+
 // Observe takes one cycle.
 func (w *DecodeTermWindow) Observe(c DecodeTermCycle) {
+	w.now = c.Now
 	w.prune(c.Now)
+	if whole, ok := wholePrompt(c.Decode); ok {
+		w.whole = whole
+	}
 	if !finitePositive(c.PromptTokens) {
 		return
 	}
@@ -219,15 +278,16 @@ func (w *DecodeTermWindow) Observe(c DecodeTermCycle) {
 }
 
 // admittedDecodeRow is a row's step time and TTFT, in seconds, and its prompt of
-// the same minute, when the row is admitted: serving, both means known, carrying requests at the prompt it
-// states, with nobody waiting for a slot (that wait is W_decode, priced apart)
-// and no more than MaxDecodeQueue waiting at all, and with no speculation, where
-// AvgITL is a step and the line a token.
+// the same minute, when the row is admitted: serving, both means known, carrying
+// requests at the prompt it states, with its slot queue read and empty (that
+// wait is W_decode, priced apart; an unknown queue is not an empty one) and no
+// more than MaxDecodeQueue waiting at all, and with no speculation, where AvgITL
+// is a step and the line a token.
 func admittedDecodeRow(rm domain.ReplicaMetrics) (itl, ttft, prompt float64, ok bool) {
 	switch {
 	case !Serving(rm), !rm.AvgTTFTKnown, !finitePositive(rm.AvgTTFT),
 		rm.ITLState() != domain.ITLFinite, !finitePositive(rm.AvgITL),
-		rm.SpecAcceptedPerStep > 0, rm.CapacityQueueLength > 0, rm.QueueLength > MaxDecodeQueue:
+		rm.SpecAcceptedPerStep > 0, !rm.CapacityQueueKnown, rm.CapacityQueueLength > 0, rm.QueueLength > MaxDecodeQueue:
 		return 0, 0, 0, false
 	}
 	rate, known := requestRate(rm)
@@ -247,12 +307,13 @@ func (w *DecodeTermWindow) observeRouter(c DecodeTermCycle) {
 	p, pRate, pOK := engineMean(c.Prefill)
 	d, _, dOK := engineMean(c.Decode)
 	if pOK && dOK {
-		w.engines = append(w.engines, engineCycle{at: c.Now, prefill: p, decode: d, rate: pRate, prompt: c.PromptTokens})
+		w.engines = append(w.engines, engineCycle{at: c.Now, prefill: p, decode: d, rate: pRate, prompt: c.PromptTokens, held: c.RouterHeld})
 	}
 	r := c.Router
 	if r == nil || !(r.WindowSeconds > 0) || !finitePositive(r.TTFTSumRate) || !finitePositive(r.TTFTCountRate) {
 		return
 	}
+	w.routerSeen = true
 	span := time.Duration(r.WindowSeconds * float64(time.Second))
 	cut := slices.IndexFunc(w.engines, func(e engineCycle) bool { return c.Now.Sub(e.at) < span })
 	if cut < 0 {
@@ -277,7 +338,9 @@ func (w *DecodeTermWindow) observeRouter(c DecodeTermCycle) {
 // hopOver is R over one router window: the router's mean less the engines'
 // means over its cycles, each weighted by its cycle's rate. False unless the
 // window is steady: cycles enough, spanning it, the prompt held to
-// MaxPromptDrift and the rate to MaxHopRateRatio.
+// MaxPromptDrift, the rate to MaxHopRateRatio, and no cycle with the router
+// holding requests: the router's mean starts before flow control, so such a
+// window would count the queue in R, and the model prices it apart.
 func hopOver(cycles []engineCycle, router float64, span time.Duration) (hop, prompt float64, ok bool) {
 	if len(cycles) < MinHopCycles {
 		return 0, 0, false
@@ -289,6 +352,9 @@ func hopOver(cycles []engineCycle, router float64, span time.Duration) (hop, pro
 	loRate, hiRate, loPrompt, hiPrompt := first.rate, first.rate, first.prompt, first.prompt
 	var p, d, weight, tokens float64
 	for _, e := range cycles {
+		if e.held {
+			return 0, 0, false
+		}
 		loRate, hiRate = min(loRate, e.rate), max(hiRate, e.rate)
 		loPrompt, hiPrompt = min(loPrompt, e.prompt), max(hiPrompt, e.prompt)
 		p += e.prefill * e.rate
@@ -301,6 +367,24 @@ func hopOver(cycles []engineCycle, router float64, span time.Duration) (hop, pro
 	}
 	hop = router - p/weight - d/weight
 	return hop, tokens / weight, isFinite(hop)
+}
+
+// wholePrompt is the serving rows' mean one-minute prompt, weighted by request
+// rate. False with no such row.
+func wholePrompt(rows []domain.ReplicaMetrics) (float64, bool) {
+	var weighted, weight float64
+	for _, rm := range rows {
+		rr, known := requestRate(rm)
+		if !Serving(rm) || !known || !finitePositive(rr) || !finitePositive(rm.AvgInputTokensRecent) {
+			continue
+		}
+		weighted += rr * rm.AvgInputTokensRecent
+		weight += rr
+	}
+	if !(weight > 0) {
+		return 0, false
+	}
+	return weighted / weight, true
 }
 
 // engineMean is the serving rows' mean AvgTTFT, weighted by request rate, and
@@ -325,12 +409,30 @@ func engineMean(rows []domain.ReplicaMetrics) (mean, rate float64, ok bool) {
 func (w *DecodeTermWindow) prune(now time.Time) {
 	w.decode = slices.DeleteFunc(w.decode, func(s decodeSample) bool { return now.Sub(s.at) > Retention })
 	w.hops = slices.DeleteFunc(w.hops, func(s hopSample) bool { return now.Sub(s.at) > Retention })
+	w.engines = slices.DeleteFunc(w.engines, func(e engineCycle) bool { return now.Sub(e.at) > engineHorizon })
 	maps.DeleteFunc(w.lastAt, func(_ string, at time.Time) bool { return now.Sub(at) > Retention })
 }
 
 // Estimate is what the window supports now.
 func (w *DecodeTermWindow) Estimate() DecodeTermEstimate {
-	return DecodeTermEstimate{Decode: fitDecode(w.decode), Hop: fitHop(w.hops)}
+	est := DecodeTermEstimate{Decode: fitDecode(w.decode), Hop: fitHop(w.hops), Held: w.held(), WholePromptTokens: w.whole}
+	if !w.routerSeen {
+		est.Hop.Refused = NoRouterMean
+	}
+	return est
+}
+
+// held is the largest TTFT of the last HeldDecodeAge's quiet rows, a pair from
+// one row: the largest, as S1 reads the measured figure, the side that asks for
+// more.
+func (w *DecodeTermWindow) held() HeldDecode {
+	var top HeldDecode
+	for _, s := range w.decode {
+		if w.now.Sub(s.at) <= HeldDecodeAge && s.ttft > top.Seconds {
+			top = HeldDecode{Seconds: s.ttft, PromptTokens: s.prompt, ITLSeconds: s.itl}
+		}
+	}
+	return top
 }
 
 // fitDecode fits D over the admitted minutes, untrimmed. With the prompts
@@ -371,6 +473,8 @@ func fitDecode(samples []decodeSample) DecodeFit {
 		out.Refused = NonPositiveStepSlope
 	case !(perToken >= 0):
 		out.Refused = NegativePromptSlope
+	case !(base > 0):
+		out.Refused = NonPositiveDecodeBase
 	default:
 		out.Base, out.PerToken, out.PerStep = base, perToken, perStep
 	}
@@ -444,6 +548,10 @@ func fitHop(samples []hopSample) HopFit {
 	held := median(slices.Clone(r))
 	shortest := slices.Min(prompt)
 	if len(xs) >= 2 && xs[len(xs)-1] >= MinPromptSpread*xs[0] {
+		if !(slices.Min(ys) > 0) {
+			out.Refused = NonPositiveHop
+			return out
+		}
 		base, slope := ols(xs, ys)
 		if slope >= 0 && isFinite(base) {
 			out.Base, out.PerToken = base, slope

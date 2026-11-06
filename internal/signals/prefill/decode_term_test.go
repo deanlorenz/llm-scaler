@@ -25,7 +25,7 @@ var termT0 = time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)
 func decodeRow(pod string, ttft, itl, prompt float64) domain.ReplicaMetrics {
 	return domain.ReplicaMetrics{
 		PodName: pod, Ready: true, AvgTTFT: ttft, AvgTTFTKnown: true, AvgITL: itl, AvgITLKnown: true,
-		RequestRate: 5, RequestRateKnown: true, AvgInputTokensRecent: prompt, AvgInputTokens: prompt,
+		RequestRate: 5, RequestRateKnown: true, AvgInputTokensRecent: prompt, AvgInputTokens: prompt, CapacityQueueKnown: true,
 	}
 }
 
@@ -127,6 +127,10 @@ func TestDecodeFit_RefusesWhatCannotBe(t *testing.T) {
 	assert.Equal(t, NonPositiveDecodeBase, steep(func(itl, _ float64) float64 { return 5*itl - 0.005 }, 1000).Refused)
 	assert.Equal(t, NonPositiveStepSlope, steep(func(itl, p float64) float64 { return 0.1 + 1e-6*p - 2*itl }, 1000, 2000, 4000).Refused)
 	assert.Equal(t, NegativePromptSlope, steep(func(itl, p float64) float64 { return 0.1 - 1e-6*p + 2*itl }, 1000, 2000, 4000).Refused)
+	// The reviewer's plane: its base prices D under what was measured.
+	got := steep(func(itl, p float64) float64 { return -0.03 + 5e-6*p + 7*itl }, 2000, 4000, 8000)
+	assert.Equal(t, NonPositiveDecodeBase, got.Refused)
+	assert.Zero(t, got.PerStep, "a refused fit carries no slope")
 }
 
 // Each gate of a row, alone: the row it refuses is otherwise admitted, and a
@@ -144,6 +148,7 @@ func TestDecodeRow_TheGates(t *testing.T) {
 		"itl NaN":            func(r *domain.ReplicaMetrics) { r.AvgITL = math.NaN() },
 		"speculating":        func(r *domain.ReplicaMetrics) { r.SpecAcceptedPerStep = 0.5 },
 		"a slot queue":       func(r *domain.ReplicaMetrics) { r.CapacityQueueLength = 1 },
+		"slot queue unread":  func(r *domain.ReplicaMetrics) { r.CapacityQueueKnown = false },
 		"behind on pulls":    func(r *domain.ReplicaMetrics) { r.QueueLength = MaxDecodeQueue + 1 },
 		"rate unread":        func(r *domain.ReplicaMetrics) { r.RequestRateKnown = false },
 		"too few requests":   func(r *domain.ReplicaMetrics) { r.RequestRate = MinDecodeRequestRate / 2 },
@@ -288,8 +293,10 @@ func TestHop_AFallingLineIsHeldHigh(t *testing.T) {
 
 func TestHop_Refusals(t *testing.T) {
 	w := NewDecodeTermWindow()
-	assert.Equal(t, TooFewHopWindows, w.Estimate().Hop.Refused)
-	hopRun(w, termT0, 15, -0.002, 1000)
+	assert.Equal(t, NoRouterMean, w.Estimate().Hop.Refused)
+	hopRun(w, termT0, 3, -0.002, 1000)
+	assert.Equal(t, TooFewHopWindows, w.Estimate().Hop.Refused, "a router mean, and no window over it yet")
+	hopRun(w, termT0.Add(3*time.Minute), 12, -0.002, 1000)
 	assert.Equal(t, NonPositiveHop, w.Estimate().Hop.Refused, "the engines already hold the router's mean")
 }
 
@@ -321,6 +328,31 @@ func TestHop_TheWindowGates(t *testing.T) {
 	}
 }
 
+// A window over a cycle the router held requests in holds their wait, which is
+// no hop: the router's mean starts before flow control.
+func TestHop_AHeldWindowIsNoReading(t *testing.T) {
+	w := NewDecodeTermWindow()
+	for i := range 60 {
+		c := hopCycle(termT0.Add(time.Duration(i)*15*time.Second), 0.5, 10, 1000)
+		c.RouterHeld = i%8 == 0
+		w.Observe(c)
+	}
+	assert.Empty(t, w.hops)
+}
+
+// A line through a median at or under zero is no reading of a hop, as a single
+// median is not.
+func TestHop_ALineMustBeAbovePositiveMedians(t *testing.T) {
+	var s []hopSample
+	for range 8 {
+		s = append(s, hopSample{r: -0.003, prompt: 1000}, hopSample{r: 0.001, prompt: 8000})
+	}
+	f := fitHop(s)
+	assert.Equal(t, NonPositiveHop, f.Refused)
+	assert.Zero(t, f.Base)
+	assert.Zero(t, f.PerToken)
+}
+
 // With no router mean there is nothing to subtract from, and half a pair is
 // not one: buckets alone leave R unlearned.
 func TestHop_NoRouterMeanNoHop(t *testing.T) {
@@ -331,7 +363,89 @@ func TestHop_NoRouterMeanNoHop(t *testing.T) {
 		w.Observe(c)
 	}
 	assert.Empty(t, w.hops)
-	assert.Equal(t, TooFewHopWindows, w.Estimate().Hop.Refused)
+	assert.Equal(t, NoRouterMean, w.Estimate().Hop.Refused, "the reason a caller names")
+}
+
+// A controller with no router series keeps a bounded window of engine means.
+func TestHop_TheEnginesAreBoundedWithNoRouterMean(t *testing.T) {
+	w := NewDecodeTermWindow()
+	cycles := 40320 // a week at 15 s
+	for i := range cycles {
+		c := hopCycle(termT0.Add(time.Duration(i)*15*time.Second), 0, 10, 1000)
+		w.Observe(c)
+	}
+	assert.LessOrEqual(t, len(w.engines), int(engineHorizon/(15*time.Second))+1)
+	assert.NotEmpty(t, w.engines)
+}
+
+// Quiet rows give the held D: the largest of the last HeldDecodeAge, as a pair.
+// A busy row gives none, whatever its TTFT, and neither does a speculating one.
+func TestHeld_IsTheQuietRows(t *testing.T) {
+	w := NewDecodeTermWindow()
+	at := func(m int) time.Time { return termT0.Add(time.Duration(m) * time.Minute) }
+	see := func(m int, rm domain.ReplicaMetrics) {
+		w.Observe(DecodeTermCycle{Now: at(m), PromptTokens: 1000, Decode: []domain.ReplicaMetrics{rm}})
+	}
+	see(0, decodeRow("d", 0.05, 0.004, 1000))
+	see(1, decodeRow("d", 0.03, 0.006, 1200))
+	assert.Equal(t, HeldDecode{Seconds: 0.05, PromptTokens: 1000, ITLSeconds: 0.004}, w.Estimate().Held)
+
+	busy := decodeRow("d", 0.4, 0.006, 1000)
+	busy.CapacityQueueLength = 3
+	see(2, busy)
+	assert.Equal(t, 0.05, w.Estimate().Held.Seconds, "the slot wait is W_decode")
+
+	spec := decodeRow("d", 0.4, 0.006, 1000)
+	spec.SpecAcceptedPerStep = 1
+	see(3, spec)
+	assert.Equal(t, 0.05, w.Estimate().Held.Seconds, "a speculating row's ITL is a step, not a token")
+
+	see(int(HeldDecodeAge/time.Minute)+1, busy)
+	assert.Equal(t, 0.03, w.Estimate().Held.Seconds, "the 50 ms has aged out")
+	see(40, busy)
+	assert.Equal(t, HeldDecode{}, w.Estimate().Held, "no quiet row: nothing to hold")
+}
+
+// D and R are the engine's: a new accelerator or new arguments sweep the window,
+// and an unknown value changes nothing.
+func TestWindow_SweepsOnAChangeOfEngine(t *testing.T) {
+	fill := func() *DecodeTermWindow {
+		w := NewDecodeTermWindow()
+		w.Under("H100", "a")
+		feedMinutes(w, 3, func(int) domain.ReplicaMetrics { return decodeRow("d", 0.02, 0.003, 1000) })
+		hopRun(w, termT0.Add(time.Hour), 8, 0.007, 1000)
+		require.NotEmpty(t, w.decode)
+		require.NotEmpty(t, w.hops)
+		return w
+	}
+	for name, move := range map[string][2]string{"accelerator": {"H200", "a"}, "args": {"H100", "b"}} {
+		w := fill()
+		w.Under(move[0], move[1])
+		assert.Empty(t, w.decode, name)
+		assert.Empty(t, w.hops, name)
+		assert.Empty(t, w.engines, name)
+	}
+	for name, same := range map[string][2]string{"same": {"H100", "a"}, "unknown": {"", ""}} {
+		w := fill()
+		w.Under(same[0], same[1])
+		assert.NotEmpty(t, w.decode, name)
+		assert.NotEmpty(t, w.hops, name)
+	}
+	w := NewDecodeTermWindow()
+	w.Under("", "")
+	feedMinutes(w, 2, func(int) domain.ReplicaMetrics { return decodeRow("d", 0.02, 0.003, 1000) })
+	w.Under("H100", "a")
+	assert.NotEmpty(t, w.decode, "the first known value moves nothing")
+}
+
+// The whole prompt is the decode rows' own, request-weighted: what a caller
+// sets against E[I_eff].
+func TestEstimate_TheWholePrompt(t *testing.T) {
+	a, b := decodeRow("a", 0.02, 0.003, 1000), decodeRow("b", 0.02, 0.003, 4000)
+	b.RequestRate = 15
+	w := NewDecodeTermWindow()
+	w.Observe(DecodeTermCycle{Now: termT0, PromptTokens: 500, Decode: []domain.ReplicaMetrics{a, b}})
+	assert.InDelta(t, 3250, w.Estimate().WholePromptTokens, 1e-9)
 }
 
 // The windows are spaced as the rows are: one reading a minute.
@@ -340,11 +454,4 @@ func TestHop_OneWindowAMinute(t *testing.T) {
 	hopRun(w, termT0, 10, 0.007, 1000)
 	assert.LessOrEqual(t, len(w.hops), 6, "minutes 5 to 10")
 	assert.GreaterOrEqual(t, len(w.hops), 5)
-}
-
-func TestMeanStep(t *testing.T) {
-	assert.Zero(t, MeanStep(nil))
-	rows := []domain.ReplicaMetrics{decodeRow("a", 0.02, 0.002, 1000), decodeRow("b", 0.02, 0.004, 1000),
-		{Ready: true, AvgITL: 9}, {AvgITL: 9, AvgITLKnown: true}}
-	assert.InDelta(t, 0.003, MeanStep(rows), 1e-12)
 }

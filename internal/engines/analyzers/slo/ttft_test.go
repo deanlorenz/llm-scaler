@@ -1197,7 +1197,8 @@ func TestTTFT_TheFlagListIsTheModels(t *testing.T) {
 	flags := []whatif.Flag{whatif.UnvalidatedTTFT, whatif.AssumedVP, whatif.VPLowerBound, whatif.VPAboveSlopeBound,
 		whatif.AssumedImbalance, whatif.AssumedPromptSpread, whatif.TransferOmitted, whatif.DecodeSideOmitted,
 		whatif.DecodeTTFTUnmeasured, whatif.DecodeEngineMeasured, whatif.DecodeTermOmitted,
-		whatif.DecodeStepSlopeAssumed, whatif.RouterHopAssumed, whatif.VPScaledToPrompt, whatif.VPShapeMoved,
+		whatif.DecodeStepSlopeAssumed, whatif.RouterHopAssumed, whatif.DecodeTermFloored, whatif.DecodeTermPrefixHits,
+		whatif.VPScaledToPrompt, whatif.VPShapeMoved,
 		whatif.FlowControlInferredOff, whatif.AboveFlowControlOnset, whatif.HeldByDecodeAdmission,
 		whatif.DecodeOnsetUnchecked, whatif.BelowFittedBand, whatif.KVBoundSlots,
 		AssumedPoissonArrivals, PromptSpreadClamped, FlowControlMismatch, PromptSpreadAbovePeak, ImbalanceNotSustained}
@@ -1297,7 +1298,7 @@ func TestTTFT_TheDecodeTermSwitch(t *testing.T) {
 	in := ttftInputsAt(1, 0)
 	in.decode = testDecode()
 	in.decode.Replicas = 1
-	term := whatif.TermFromEstimate(prefill.DecodeTermEstimate{}, whatif.DecodeTTFT{Seconds: 0.2, PromptTokens: 2000, ITLSeconds: 0.004})
+	term := whatif.TermFromEstimate(prefill.DecodeTermEstimate{Held: prefill.HeldDecode{Seconds: 0.2, PromptTokens: 2000, ITLSeconds: 0.004}})
 	in.term = &term
 	on := priceTTFT(in, 0.1, ttftTarget)
 	require.NotNil(t, on.at)
@@ -1384,6 +1385,25 @@ func TestTTFT_TheRouterMeanReachesTheWindow(t *testing.T) {
 	assert.InDelta(t, 0.07, est.Hop.Base, 1e-9, "220 ms less 50 and 100")
 }
 
+// A cycle the router held requests in is no reading of the hop: the scheduler
+// queue reaches the window.
+func TestTTFT_AHeldRouterTeachesNoHop(t *testing.T) {
+	r := newTTFTRig(ttftEstimate(), nil)
+	r.a.router = fakeRouter{latency: &domain.RouterLatency{WindowSeconds: 300, TTFTSumRate: 2.2, TTFTCountRate: 10,
+		TTFTBuckets: []domain.LatencyBucket{{UpperBound: 1, Rate: 10}, {UpperBound: math.Inf(1), Rate: 10}}}}
+	r.in.VariantStates = append(r.in.VariantStates, decState)
+	r.in.SchedulerQueue = &domain.SchedulerQueueMetrics{QueueSize: 3}
+	rows := prefillRows("pre", 4000)
+	rows[0].AvgTTFT, rows[0].AvgTTFTKnown, rows[0].RequestRate = 0.05, true, 10
+	r.in.ReplicaMetrics = append(rows, domain.ReplicaMetrics{PodName: "d", VariantName: "dec", Ready: true, AvgTTFT: 0.1, AvgTTFTKnown: true,
+		RequestRate: 10, RequestRateKnown: true})
+	for range 60 {
+		r.analyze(t)
+		r.now = r.now.Add(15 * time.Second)
+	}
+	assert.Equal(t, prefill.TooFewHopWindows, r.a.decodeTerms[ttftWindowKey("ns", "m", "dec")].readings.Estimate().Hop.Refused)
+}
+
 // The term a window learns reaches TermFromEstimate as a fit: D from the rows,
 // R from the router's mean less the engines'.
 func TestTTFT_TheWindowLearnsTheTerm(t *testing.T) {
@@ -1395,16 +1415,56 @@ func TestTTFT_TheWindowLearnsTheTerm(t *testing.T) {
 		now := ttftNow.Add(time.Duration(i) * 15 * time.Second)
 		itl := 0.002 + float64(i%8)*0.002
 		rows := []domain.ReplicaMetrics{{PodName: "d", Ready: true, AvgTTFT: 0.1 + 5*itl, AvgTTFTKnown: true, AvgITL: itl, AvgITLKnown: true,
-			RequestRate: 10, RequestRateKnown: true, AvgInputTokens: 1000, AvgInputTokensRecent: 1000}}
+			RequestRate: 10, RequestRateKnown: true, AvgInputTokens: 1000, AvgInputTokensRecent: 1000, CapacityQueueKnown: true}}
 		pre := []domain.ReplicaMetrics{{PodName: "p", Ready: true, AvgTTFT: 0.05, AvgTTFTKnown: true, RequestRate: 10, RequestRateKnown: true}}
-		est = a.noteDecodeTerm(key, prefill.DecodeTermCycle{Now: now, Prefill: pre, Decode: rows, PromptTokens: 1000, Router: router})
+		est = a.noteDecodeTerm(key, "H100", "a", prefill.DecodeTermCycle{Now: now, Prefill: pre, Decode: rows, PromptTokens: 1000, Router: router})
 	}
 	require.Empty(t, est.Decode.Refused)
 	assert.InDelta(t, 5, est.Decode.PerStep, 1e-6)
 	require.Empty(t, est.Hop.Refused)
-	term := whatif.TermFromEstimate(est, whatif.DecodeTTFT{})
+	term := whatif.TermFromEstimate(est)
 	assert.False(t, term.StepAssumed)
 	assert.False(t, term.HopAssumed)
+
+	// New engine arguments sweep it: the old engine's readings are no fit.
+	est = a.noteDecodeTerm(key, "H100", "b", prefill.DecodeTermCycle{Now: ttftNow.Add(time.Hour), PromptTokens: 1000})
+	assert.NotEmpty(t, est.Decode.Refused)
+	assert.NotEmpty(t, est.Hop.Refused)
+}
+
+// A held D that alone puts the floor over the target does not say no fleet meets
+// it: the refusal stands, flagged, and unmet stays clear. A floor the fleet's own
+// figures set does say so.
+func TestTTFT_AnAssumedTermDoesNotClaimUnmet(t *testing.T) {
+	in := ttftInputsAt(1, 0)
+	in.decode = testDecode()
+	in.decode.Replicas = 1
+	in.base.FixedLatency = 0.01
+	fleet, _ := ttftFleet(in, 1)
+	fleet.LegacyDecodeSum = true
+	at, ok := whatif.TTFTAt(fleet, 0.1, 0.9).(whatif.TTFT)
+	require.True(t, ok)
+	target := whatif.TTFTTarget{Seconds: at.Floor * 1.05, Percentile: 0.9}
+
+	term := whatif.DecodeTerm{Engine: whatif.PromptLine{Base: 0.4, HeldPromptTokens: 2000}, PerStep: 10, FromITL: 0.006, StepAssumed: true}
+	in.term = &term
+	got := priceTTFT(in, 0.1, target)
+	require.NotNil(t, got.rateRefused)
+	assert.Equal(t, whatif.TargetBelowFloor, got.rateRefused.Reason)
+	assert.True(t, got.rateRefused.AssumedTermDecides)
+	assert.False(t, got.unmet, "the assumed term decides this, not the fleet")
+	assert.Contains(t, got.flags, whatif.DecodeStepSlopeAssumed, "the flags of the term it rests on")
+
+	past := priceTTFT(in, 1e6, target)
+	require.NotNil(t, past.atRefused, "at no rate the prefill serves")
+	assert.Contains(t, past.flags, whatif.DecodeStepSlopeAssumed, "the refusal's own flags, with no prediction to carry them")
+	assert.True(t, past.unmet, "a rate past the knee is a miss whatever the term assumes")
+
+	target.Seconds = at.Floor * 0.9
+	got = priceTTFT(in, 0.1, target)
+	require.NotNil(t, got.rateRefused)
+	assert.False(t, got.rateRefused.AssumedTermDecides)
+	assert.True(t, got.unmet, "under the old floor too: no fleet meets it")
 }
 
 // The result is what it was: a prefill variant stays no-data and the role

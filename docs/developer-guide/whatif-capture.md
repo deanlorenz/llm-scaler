@@ -78,6 +78,9 @@ whatif slo-to-rate     --recording run.jsonl --tpot 4ms --ttft 200ms@p95 [--assu
   size from it yet.
 - **Read the `assumed` row first.** It names each input the recording did not
   give. `V_P ASSUMED` means `--assume-vp` supplied `V_P`.
+- **An assumed term can decide the answer.** The `assumed` row says so when one
+  alone refuses a target, or moves the answer by 25%. `--assume-router-hop 8ms`
+  supplies the hop between the router and the engines.
 - **`--assume-vp` overrides,** as every `--assume-*` flag does. Give it when
   `NoPrefillCapacity` is refused, because the pods never queued long enough for
   `V_P` to be learned, or to ask what another `V_P` would do. A learned figure

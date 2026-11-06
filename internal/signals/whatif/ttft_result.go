@@ -44,10 +44,9 @@ func ttftReasons() []Reason {
 
 // The flags the TTFT model raises.
 const (
-	// UnvalidatedTTFT is on every TTFT figure. The model is built against
-	// closed-form queueing values and synthetic fleets only; the prefill-
-	// stress recording (P2) and the staircase run (M2) have not scored it,
-	// so no TTFT figure has been checked against a measured one. On P2's
+	// UnvalidatedTTFT is on every TTFT figure. Repeat 1 of the staircase run
+	// (M2) failed the form before the decode term. That run chose the term,
+	// so it cannot validate it: validation is a fresh frozen run. On P2's
 	// goldens it reads low at light load, up to about 34% under the router's
 	// p90: not a bound.
 	UnvalidatedTTFT Flag = "UnvalidatedTTFT"
@@ -95,8 +94,18 @@ const (
 	// under the old sum (DecodeTerm).
 	DecodeStepSlopeAssumed Flag = "DecodeStepSlopeAssumed"
 	// RouterHopAssumed is a TTFT on a decode line with no fit of the hop
-	// between the router and the engines: R is AssumedRouterHopSeconds.
+	// between the router and the engines: R is AssumedRouterHopSeconds, or the
+	// operator's (--assume-router-hop).
 	RouterHopAssumed Flag = "RouterHopAssumed"
+	// DecodeTermFloored is a figure where the decode term read under the old
+	// sum T_xfer + ITL(k_d), which stands in its place. The term holds what
+	// was measured of the pull and the step, so a term under the old sum is
+	// wrong: this says its fit or its prompt does not hold here.
+	DecodeTermFloored Flag = "DecodeTermFloored"
+	// DecodeTermPrefixHits is a TTFT on a decode line with prefix hits past
+	// MaterialPrefixHitShare: D goes with the whole prompt, which the KV pull
+	// moves, and is priced at E[I_eff], so it reads low, down to the old sum.
+	DecodeTermPrefixHits Flag = "DecodeTermPrefixHits"
 	// DecodeTTFTUnmeasured is a TTFT priced with no decode line and no
 	// measured decode-engine TTFT: decode's part, the KV pull and its first
 	// token, is left out, and the answer over-promises by it (by 25% to 65%

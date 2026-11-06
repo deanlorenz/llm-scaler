@@ -134,13 +134,24 @@ type wireTTFT struct {
 	DecodeTTFTSeconds      float64 `json:"decodeTTFTSeconds,omitempty"`
 	DecodeTTFTPromptTokens float64 `json:"decodeTTFTPromptTokens,omitempty"`
 	// DecodeTermSource and RouterHopSource say where the line's decode term
-	// and hop came from (measured, assumed; the term may be omitted), and
-	// DecodePerStep is the TTFT seconds per second of ITL priced.
-	DecodeTermSource string   `json:"decodeTermSource,omitempty"`
-	RouterHopSource  string   `json:"routerHopSource,omitempty"`
-	DecodePerStep    float64  `json:"decodePerStep,omitempty"`
-	FlowControl      string   `json:"flowControl,omitempty"`
-	Assumed          []string `json:"assumed"`
+	// and hop came from (measured, assumed; the term may be omitted), each
+	// with why no fit stands. The figures are the term as priced: on no fit
+	// the base is the held D, read at the held prompt and the from-ITL.
+	DecodeTermRefused           string   `json:"decodeTermRefused,omitempty"`
+	RouterHopRefused            string   `json:"routerHopRefused,omitempty"`
+	DecodeBaseSeconds           float64  `json:"decodeBaseSeconds,omitempty"`
+	DecodePerTokenSeconds       float64  `json:"decodePerTokenSeconds,omitempty"`
+	DecodeHeldPromptTokens      float64  `json:"decodeHeldPromptTokens,omitempty"`
+	DecodeFromITLSeconds        float64  `json:"decodeFromITLSeconds,omitempty"`
+	RouterHopBaseSeconds        float64  `json:"routerHopBaseSeconds,omitempty"`
+	RouterHopPerTokenSeconds    float64  `json:"routerHopPerTokenSeconds,omitempty"`
+	RouterHopHeldPromptTokens   float64  `json:"routerHopHeldPromptTokens,omitempty"`
+	RouterHopLearnedBaseSeconds *float64 `json:"routerHopLearnedBaseSeconds,omitempty"`
+	DecodeTermSource            string   `json:"decodeTermSource,omitempty"`
+	RouterHopSource             string   `json:"routerHopSource,omitempty"`
+	DecodePerStep               float64  `json:"decodePerStep,omitempty"`
+	FlowControl                 string   `json:"flowControl,omitempty"`
+	Assumed                     []string `json:"assumed"`
 }
 
 // wireInputs is what a variant was priced from.
@@ -299,6 +310,19 @@ type wireBasis struct {
 type wireRefusal struct {
 	Reason string `json:"reason"`
 	Detail string `json:"detail"`
+	// Flags are what the refusal rests on; AssumedTermDecides says an assumed
+	// term alone refused it.
+	Flags              []string `json:"flags,omitempty"`
+	AssumedTermDecides bool     `json:"assumedTermDecides,omitempty"`
+}
+
+// toWireRefusal is a refusal on the wire.
+func toWireRefusal(u whatif.Unanswerable) *wireRefusal {
+	w := &wireRefusal{Reason: string(u.Reason), Detail: u.Detail, AssumedTermDecides: u.AssumedTermDecides}
+	for _, f := range u.Flags {
+		w.Flags = append(w.Flags, string(f))
+	}
+	return w
 }
 
 // wireInterval is a range, Lo to Hi.
@@ -335,7 +359,7 @@ func toWire(r whatif.Result, unit string) *wireResult {
 		}
 		return &wireResult{Answer: a}
 	case whatif.Unanswerable:
-		return &wireResult{Refused: &wireRefusal{Reason: string(v.Reason), Detail: v.Detail}}
+		return &wireResult{Refused: toWireRefusal(v)}
 	}
 	return nil
 }
@@ -362,7 +386,7 @@ func toWireTTFT(r whatif.Result) *wireTTFTResult {
 		}
 		return &wireTTFTResult{Answer: a}
 	case whatif.Unanswerable:
-		return &wireTTFTResult{Refused: &wireRefusal{Reason: string(v.Reason), Detail: v.Detail}}
+		return &wireTTFTResult{Refused: toWireRefusal(v)}
 	}
 	return nil
 }

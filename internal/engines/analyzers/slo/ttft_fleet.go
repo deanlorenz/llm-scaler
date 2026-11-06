@@ -356,9 +356,9 @@ type decodeTermWindow struct {
 	seen     time.Time
 }
 
-// noteDecodeTerm folds the cycle into the variant's window and returns what it
-// supports.
-func (a *Analyzer) noteDecodeTerm(key string, cycle prefill.DecodeTermCycle) prefill.DecodeTermEstimate {
+// noteDecodeTerm folds the cycle, read under accelerator and args, into the
+// variant's window and returns what it supports.
+func (a *Analyzer) noteDecodeTerm(key, accelerator, args string, cycle prefill.DecodeTermCycle) prefill.DecodeTermEstimate {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	w := a.decodeTerms[key]
@@ -367,6 +367,7 @@ func (a *Analyzer) noteDecodeTerm(key string, cycle prefill.DecodeTermCycle) pre
 		a.decodeTerms[key] = w
 	}
 	w.seen = cycle.Now
+	w.readings.Under(accelerator, args)
 	w.readings.Observe(cycle)
 	return w.readings.Estimate()
 }

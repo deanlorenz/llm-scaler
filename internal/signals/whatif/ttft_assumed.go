@@ -32,8 +32,8 @@ const (
 	// for more.
 	AssumedDecodeStepSlope = 10.0
 	// AssumedRouterHopSeconds is the hop between the router and the engines
-	// with no fit (no router TTFT _sum and _count read yet, or too few steady
-	// windows). Not a constant of any fleet: it stands above the median the
+	// with no fit (prefill.NoRouterMean, prefill.TooFewHopWindows,
+	// prefill.NonPositiveHop). Not a constant of any fleet: it stands above the median the
 	// staircase run's phases read, 4.6 ms at 1k prompts and 12.6 ms at 8k. A
 	// longer prompt may hop further, and the answer is flagged either way.
 	AssumedRouterHopSeconds = 0.02

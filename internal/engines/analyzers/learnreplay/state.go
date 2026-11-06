@@ -215,7 +215,12 @@ func StateAt(ctx context.Context, recording []byte, opts Options, q StateQuery) 
 		}
 		noteShapes(shapes, in.ReplicaMetrics, n)
 		ttft.note(in, n)
-		ttft.noteTerm(in, ev.Now)
+		ttft.noteTerm(in, ev.Now, func(variant string) string {
+			if rec := r.store.Get(in.Namespace, in.ModelID, variant); rec != nil {
+				return rec.EngineParams.ArgsTag()
+			}
+			return ""
+		})
 		if n == cycle {
 			st = r.stateOf(in, n, ev.Now, shapes)
 			r.fillTTFT(st, in, ttft)

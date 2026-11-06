@@ -65,7 +65,8 @@ const (
 	// TTFT target (the prediction is above it, or the model refused the rate
 	// at or over the prefill knee or the decode onset, or the rate is above
 	// the prefill flow-control onset, or the target is below the floor), 0 when
-	// met, and absent when not priced.
+	// met, and absent when not priced. Absent too for a target below a floor
+	// only an assumed decode term puts over it: that says nothing of the fleet.
 	// Labels: namespace, model_name, variant_name, statistic.
 	WVASLOTTFTUnmet = "wva_slo_ttft_unmet"
 	// WVASLOTTFTReplicaRequestsPerSecond is the request rate per replica at
@@ -234,6 +235,7 @@ var SLOTTFTFlags = []string{
 	"UnvalidatedTTFT", "AssumedVP", "VPLowerBound", "VPAboveSlopeBound", "AssumedImbalance",
 	"AssumedPromptSpread", "TransferOmitted", "DecodeSideOmitted", "DecodeTTFTUnmeasured",
 	"DecodeEngineMeasured", "DecodeTermOmitted", "DecodeStepSlopeAssumed", "RouterHopAssumed",
+	"DecodeTermFloored", "DecodeTermPrefixHits",
 	"VPScaledToPrompt", "VPShapeMoved", "FlowControlInferredOff",
 	"AboveFlowControlOnset", "HeldByDecodeAdmission", "DecodeOnsetUnchecked",
 	"BelowFittedBand", "KVBoundSlots",

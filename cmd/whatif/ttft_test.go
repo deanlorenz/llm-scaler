@@ -78,7 +78,7 @@ func TestTTFT_SaysUnvalidatedAndAssumedInTextAndJSON(t *testing.T) {
 		text, code := runCmd(t, q...)
 		require.Equal(t, 0, code, text)
 		assert.Contains(t, text, "UNVALIDATED; V_P ASSUMED")
-		assert.Contains(t, text, "TTFT is UNVALIDATED until the staircase run (M2) and is not a bound: at the assumed prompt cv 2 it read "+
+		assert.Contains(t, text, "TTFT is UNVALIDATED until a fresh frozen run passes, and is not a bound: at the assumed prompt cv 2 it read "+
 			"1.1x to 4.1x the router's percentile on the P2 recordings; at the sent spread (cv 0.06) up to 34% under it.")
 		assert.Contains(t, text, "UnvalidatedTTFT")
 		assert.Contains(t, text, "AssumedVP")
@@ -119,7 +119,7 @@ func TestTTFT_TheNoteFollowsTheSpread(t *testing.T) {
 		pf.fleet.Prefill.PromptCVAssumed = true
 		return pf
 	}
-	want := "TTFT is UNVALIDATED until the staircase run (M2) and is not a bound: at the assumed prompt cv 2 it read " +
+	want := "TTFT is UNVALIDATED until a fresh frozen run passes, and is not a bound: at the assumed prompt cv 2 it read " +
 		"1.1x to 4.1x the router's percentile on the P2 recordings; at the sent spread (cv 0.06) up to 34% under it."
 	assert.Equal(t, want, footerNote([]*pricedFleet{assumed(false)}))
 	assert.Equal(t, want+" V_P ASSUMED.", footerNote([]*pricedFleet{assumed(false), assumed(true)}))
@@ -127,7 +127,7 @@ func TestTTFT_TheNoteFollowsTheSpread(t *testing.T) {
 	assert.Equal(t, want, footerNote([]*pricedFleet{{refused: &whatif.Unanswerable{}}}))
 	// A measured spread has only the sent spread's row: no word of 4.1x.
 	got := footerNote([]*pricedFleet{{}})
-	assert.Equal(t, "TTFT is UNVALIDATED until the staircase run (M2) and is not a bound: at the sent spread (cv 0.06) "+
+	assert.Equal(t, "TTFT is UNVALIDATED until a fresh frozen run passes, and is not a bound: at the sent spread (cv 0.06) "+
 		"it read up to 34% under the router's percentile on the P2 recordings.", got)
 }
 
@@ -170,6 +170,47 @@ func TestTTFT_TheWorkedExampleFromTheRecording(t *testing.T) {
 	rate, ok := whatif.RateForTTFT(fl, whatif.TTFTTarget{Seconds: 0.2, Percentile: 0.95}).(whatif.Answer)
 	require.True(t, ok)
 	near(t, "the rate at 200 ms p95", rate.Value, 11.10, 0.05)
+}
+
+// --assume-router-hop stands in for the hop, flagged and named, and a refusal
+// keeps the flags of the term it rests on and says an assumed term decided it.
+func TestTTFT_TheAssumedRouterHop(t *testing.T) {
+	base := slices.Concat([]string{"slo-to-rate", "--recording", olsSweep, "--model", "model-02", "--prefill", "1", "--decode", "1",
+		"--tpot", "4ms", "--assume-vp", "30000"}, workedShape)
+	run := func(extra ...string) wireOutput {
+		out, code := runCmd(t, slices.Concat(base, extra, []string{"-o", "json"})...)
+		require.Contains(t, []int{0, 3}, code, out)
+		return decodeOutput(t, out)
+	}
+	prefillRole := func(w wireOutput) wireRole {
+		i := slices.IndexFunc(w.Roles, func(r wireRole) bool { return r.Role == rolePrefill })
+		require.GreaterOrEqual(t, i, 0)
+		return w.Roles[i]
+	}
+	r := prefillRole(run("--ttft", "190ms@p95"))
+	require.NotNil(t, r.Results.Rate.Refused, "20 ms assumed puts the floor at 194.6 ms")
+	assert.Equal(t, string(whatif.TargetBelowFloor), r.Results.Rate.Refused.Reason)
+	assert.True(t, r.Results.Rate.Refused.AssumedTermDecides)
+	assert.Contains(t, r.Results.Rate.Refused.Flags, string(whatif.RouterHopAssumed))
+	assert.Contains(t, r.Results.Rate.Refused.Flags, string(whatif.DecodeTermOmitted))
+	assert.Equal(t, string(prefill.NoRouterMean), r.TTFT.RouterHopRefused)
+	assert.True(t, slices.ContainsFunc(r.TTFT.Assumed, func(s string) bool { return strings.Contains(s, "alone decides this refusal") }), r.TTFT.Assumed)
+
+	r = prefillRole(run("--ttft", "190ms@p95", "--assume-router-hop", "5ms"))
+	require.NotNil(t, r.Results.Rate.Answer, "the operator's 5 ms clears the floor")
+	assert.Contains(t, r.Results.Rate.Answer.Flags, string(whatif.RouterHopAssumed))
+	assert.Contains(t, r.TTFT.Assumed, "router hop 5ms (--assume-router-hop)")
+	assert.Equal(t, "assumed", r.TTFT.RouterHopSource)
+	near(t, "hop", r.TTFT.RouterHopBaseSeconds, 0.005, 1e-12)
+	assert.False(t, slices.ContainsFunc(r.TTFT.Assumed, func(s string) bool { return strings.Contains(s, "NoRouterMean") }),
+		"an operator's hop says nothing of a missing fit")
+
+	text, code := runCmd(t, slices.Concat(base, []string{"--ttft", "190ms@p95"})...)
+	require.Contains(t, []int{0, 3}, code, text)
+	assert.Contains(t, text, "RouterHopAssumed", "the flags line of a refusal")
+
+	out, code := runCmd(t, slices.Concat(base, []string{"--ttft", "190ms@p95", "--assume-router-hop", "-1ms"})...)
+	assert.NotEqual(t, 0, code, out)
 }
 
 // A figure at the CLI's cv 2, through the command, against a calculation that

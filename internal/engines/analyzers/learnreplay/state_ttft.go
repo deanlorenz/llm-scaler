@@ -224,8 +224,7 @@ func (t *ttftSamples) note(in domain.AnalyzerInput, cycle int) {
 		}
 		var slot whatif.DecodeTTFT
 		if d.ttftRows > 0 && allComputed > 0 {
-			slot = whatif.DecodeTTFT{Seconds: d.ttftPlain / float64(d.ttftRows), PromptTokens: allComputed / allRequests,
-				ITLSeconds: prefill.MeanStep(rowsOfVariant(in.ReplicaMetrics, v))}
+			slot = whatif.DecodeTTFT{Seconds: d.ttftPlain / float64(d.ttftRows), PromptTokens: allComputed / allRequests}
 			if d.ttftWeight > 0 {
 				slot.Seconds = d.ttftWeighted / d.ttftWeight
 			}
@@ -246,8 +245,9 @@ func rowsOfVariant(rows []domain.ReplicaMetrics, variant string) []domain.Replic
 }
 
 // noteTerm folds one cycle, read at now, into each decode variant's readings
-// of the decode term, as S1 does (slo.noteDecodeTerm).
-func (t *ttftSamples) noteTerm(in domain.AnalyzerInput, now time.Time) {
+// of the decode term, as S1 does (slo.noteDecodeTerm). args is a variant's
+// engine arguments, "" unknown.
+func (t *ttftSamples) noteTerm(in domain.AnalyzerInput, now time.Time, args func(variant string) string) {
 	roles := rolesOf(in)
 	var pre []domain.ReplicaMetrics
 	for _, rm := range in.ReplicaMetrics {
@@ -265,8 +265,16 @@ func (t *ttftSamples) noteTerm(in domain.AnalyzerInput, now time.Time) {
 			w = prefill.NewDecodeTermWindow()
 			t.terms[v] = w
 		}
+		accelerator := ""
+		for _, vs := range in.VariantStates {
+			if vs.VariantName == v {
+				accelerator = vs.AcceleratorName
+			}
+		}
+		w.Under(accelerator, args(v))
 		w.Observe(prefill.DecodeTermCycle{Now: now, Prefill: pre, Decode: rowsOfVariant(in.ReplicaMetrics, v),
-			PromptTokens: prompt, Router: in.RouterLatency})
+			PromptTokens: prompt, Router: in.RouterLatency,
+			RouterHeld: in.SchedulerQueue != nil && in.SchedulerQueue.QueueSize > 0})
 	}
 }
 
@@ -324,7 +332,7 @@ func (r *replayer) fillTTFT(st *State, in domain.AnalyzerInput, t *ttftSamples) 
 		if w := t.terms[vs.Variant]; w != nil {
 			est = w.Estimate()
 		}
-		vs.DecodeTTFT.Term = whatif.TermFromEstimate(est, vs.DecodeTTFT.EngineTTFT)
+		vs.DecodeTTFT.Term = whatif.TermFromEstimate(est)
 		if xs := t.transfers[vs.Variant]; len(xs) > 0 {
 			sum := 0.0
 			for _, x := range xs {

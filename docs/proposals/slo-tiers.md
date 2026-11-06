@@ -1040,7 +1040,7 @@ by name.
 The flag series zero-fills a fixed list, `constants.SLOTTFTFlags`, in this
 order: P3's TTFT flags (`UnvalidatedTTFT`, `AssumedVP`, `VPLowerBound`,
 `VPAboveSlopeBound`, `AssumedImbalance`, `AssumedPromptSpread`,
-`TransferOmitted`, `DecodeSideOmitted`, `DecodeTTFTUnmeasured`, `DecodeEngineMeasured`, `DecodeTermOmitted`, `DecodeStepSlopeAssumed`, `RouterHopAssumed`, `VPScaledToPrompt`, `VPShapeMoved`, `FlowControlInferredOff`,
+`TransferOmitted`, `DecodeSideOmitted`, `DecodeTTFTUnmeasured`, `DecodeEngineMeasured`, `DecodeTermOmitted`, `DecodeStepSlopeAssumed`, `RouterHopAssumed`, `DecodeTermFloored`, `DecodeTermPrefixHits`, `VPScaledToPrompt`, `VPShapeMoved`, `FlowControlInferredOff`,
 `AboveFlowControlOnset`, `HeldByDecodeAdmission`, `DecodeOnsetUnchecked`),
 the decode flags a TTFT answer can carry (`BelowFittedBand`,
 `KVBoundSlots`), and S1's (`AssumedPoissonArrivals`,
@@ -1153,7 +1153,8 @@ asserted.
     read 1.5% above the served `V_P` on run 2 at 37k; lifted when a second
     measured point confirms it);
   - `TransferOmitted`, raised only when no transfer time was measured;
-  - `DecodeTermOmitted`, where the old, lower sum stands.
+  - `DecodeTermOmitted`, `DecodeTermFloored` or `DecodeTermPrefixHits`, where
+    the old, lower sum stands or the term reads low.
     `DecodeStepSlopeAssumed` and `RouterHopAssumed` are not on the list: each
     takes the value that asks for more;
   - `AssumedPoissonArrivals`, until the staircase's bursty bucket passes;
@@ -1384,7 +1385,8 @@ P2](slo-capacity-planner-ttft.md#as-built-p3-after-p2), 7 each at p90 and p95:
    stays `RateForTTFT`'s, as test 16 says, so this is what names that state.
 5. **The unmet contract.** `wva_slo_ttft_unmet` reads 1 for a refused rate and
    for `target-below-floor` at any rate, each with no prediction; 0 only with
-   a prediction; absent otherwise. Every refusal reason blanks the prediction.
+   a prediction; absent otherwise, which includes a floor only an assumed decode
+   term puts over the target. Every refusal reason blanks the prediction.
 6. **Flow control is inferred from `SchedulerQueue` alone**, collected every
    cycle. `FlowControlPools` is filled only while a learner recording is on, so
    reading it would have made a replay differ from production

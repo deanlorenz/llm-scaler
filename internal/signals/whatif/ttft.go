@@ -211,10 +211,6 @@ type DecodeTTFT struct {
 	// prompt, prefix hits included: with prefix hits the ratio I/PromptTokens
 	// tracks the pull only as far as the hit rate holds.
 	PromptTokens float64
-	// ITLSeconds is the decode rows' mean ITL of the same cycle: where
-	// TermFromEstimate starts an assumed slope from. 0 is unread, which adds
-	// the whole step time to a TTFT that already holds it: high.
-	ITLSeconds float64
 }
 
 // MinDecodeTTFTPrompt is the least prompt, in tokens, a measured decode-engine
@@ -259,6 +255,13 @@ type prefillPlan struct {
 	// less the margin applied.
 	work, ownRate float64
 	flags         []Flag
+}
+
+// withTransfer is the plan with its own latency at a transfer of x per token.
+func (pl prefillPlan) withTransfer(x float64) prefillPlan {
+	pl.ownRate += x - pl.xfer
+	pl.xfer = x
+	return pl
 }
 
 // setVP sets the work and the own latency per token at V_P = vp.
@@ -723,6 +726,8 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 
 	var dec waitTail
 	var first, floorStep float64
+	// oldFirst and oldFloorStep are the old sum's steps, with a term.
+	var oldFirst, oldFloorStep float64
 	if pl.d != nil {
 		d := *pl.d
 		out.DecodeKnee, out.Tier = d.kneeRate(), d.Tier
@@ -750,6 +755,7 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 			out.Flags = addFlags(out.Flags, BelowFittedBand)
 		}
 		first, floorStep = d.Line.ITLAt(k), d.Line.ITLAt(d.Band.Lo)
+		oldFirst, oldFloorStep = first, floorStep
 		if t := pl.term; t != nil {
 			// The term reads the line at the actual fill: D is several steps,
 			// so the clamp's reading, harmless on one step, would be the
@@ -792,14 +798,39 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 		out.Parts.FirstStep = first
 	}
 
+	// The old sum floors the term on every path, at this rate and at this
+	// percentile: it is what was measured of the pull and the step. A term
+	// under it is a fit that does not hold here.
+	var oldOwn, oldOwnZero ownTime
+	if pl.term != nil {
+		oldOwn = pf.withTransfer(pl.term.oldTransfer).own()
+		oldOwnZero = pl.pf.withTransfer(pl.term.oldTransfer).own()
+		mean := out.Parts.EngineWait + out.Parts.OwnPrefill + out.Parts.DecodeWait + first
+		if excess := out.Parts.EngineWait + a + oldOwn.mean + out.Parts.DecodeWait + oldFirst - mean; excess > 0 {
+			out.Parts.DecodeEngine += excess
+		}
+	}
+	floored := func(seconds, old *float64, floor, oldFloor float64) {
+		if pl.term == nil {
+			out.Floor = floor
+			return
+		}
+		out.Floor = max(floor, oldFloor)
+		if *old > *seconds || oldFloor > floor {
+			out.Flags = addFlags(out.Flags, DecodeTermFloored)
+		}
+		*seconds = max(*seconds, *old)
+	}
+
 	if q == 0 {
 		mean := out.Parts.EngineWait + out.Parts.OwnPrefill + out.Parts.DecodeWait + first
+		oldMean := out.Parts.EngineWait + a + oldOwn.mean + out.Parts.DecodeWait + oldFirst
+		floored(&mean, &oldMean, a+pl.pf.own().mean+floorStep, a+oldOwnZero.mean+oldFloorStep)
 		if !Finite(mean) {
 			u := refuse(Saturated, fmt.Sprintf("no finite mean TTFT at %g r/s", rate))
 			return priced{u: &u}
 		}
 		out.Seconds, out.Independent = mean, mean
-		out.Floor = a + pl.pf.own().mean + floorStep
 		if extras {
 			out.Pooled = pf.pooledWait(rate).mean() + out.Parts.OwnPrefill + out.Parts.DecodeWait + first
 		}
@@ -816,8 +847,17 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 		return priced{u: &u}
 	}
 	out.Seconds, out.DecodeShare = a+v+first, beta
-
-	out.Floor = a + pl.pf.own().quantile(q) + floorStep
+	var oldSeconds float64
+	// The split is the costly part: with neither of the term's parts under the
+	// old sum's, the old sum cannot stand over it.
+	if pl.term != nil && (first < oldFirst || pf.xfer < pl.term.oldTransfer) {
+		oldV, oldBeta := split(block{wait: wait, own: oldOwn}, dec, q)
+		oldSeconds = a + oldV + oldFirst
+		if oldSeconds > out.Seconds {
+			out.DecodeShare = oldBeta
+		}
+	}
+	floored(&out.Seconds, &oldSeconds, a+pl.pf.own().quantile(q)+floorStep, a+oldOwnZero.quantile(q)+oldFloorStep)
 	out.Independent = out.Seconds
 	if extras {
 		// The two waits always sum (a single-piece wait and the decode
@@ -921,7 +961,7 @@ func RateForTTFT(fl TTFTFleet, t TTFTTarget) Result {
 	}
 	floor := zero.out.Floor
 	if floor >= t.Seconds {
-		return refuse(TargetBelowFloor, fmt.Sprintf("target %.4g s at or below the TTFT floor %.4g s", t.Seconds, floor))
+		return pl.belowFloor(fl, t, fmt.Sprintf("target %.4g s at or below the TTFT floor %.4g s", t.Seconds, floor), zero.out.Flags)
 	}
 	limit, limitBy := pl.lowestKnee(), Bound("")
 	if pl.fc.State == FlowControlOn && pl.d != nil && pl.onsets.Decode < limit {
@@ -931,7 +971,7 @@ func RateForTTFT(fl TTFTFleet, t TTFTTarget) Result {
 	if !(full > 0) {
 		// The floor is under the target, but by less than the bisection
 		// resolves: no positive rate is known to meet it.
-		return refuse(TargetBelowFloor, fmt.Sprintf("target %.4g s: no positive rate meets it (TTFT floor %.4g s)", t.Seconds, floor))
+		return pl.belowFloor(fl, t, fmt.Sprintf("target %.4g s: no positive rate meets it (TTFT floor %.4g s)", t.Seconds, floor), zero.out.Flags)
 	}
 	alone := pl.bisect(t, limit, false)
 
@@ -953,9 +993,12 @@ func RateForTTFT(fl TTFTFleet, t TTFTTarget) Result {
 		return *at.u
 	}
 	for _, f := range at.out.Flags {
-		if f == BelowFittedBand || f == KVBoundSlots || f == AboveFlowControlOnset {
+		if f == BelowFittedBand || f == KVBoundSlots || f == AboveFlowControlOnset || f == DecodeTermFloored {
 			flags = addFlags(flags, f)
 		}
+	}
+	if slices.Contains(zero.out.Flags, DecodeTermFloored) {
+		flags = addFlags(flags, DecodeTermFloored)
 	}
 	var fill float64
 	var tier string

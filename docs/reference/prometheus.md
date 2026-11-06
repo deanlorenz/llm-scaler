@@ -1368,6 +1368,8 @@ The `wva_slo_ttft_reason` values:
   decode line.
 - **`target-below-floor`:** no fleet meets the target: the TTFT at no load is
   at or above it. `wva_slo_ttft_unmet` reads `1` at any rate, with no prediction.
+  Where only an assumed decode term puts the floor over the target (the flags
+  name it), `wva_slo_ttft_unmet` is absent instead: learn or supply the term first.
 - **`no-prefill-replicas`**, **`no-decode-replicas`**, **`no-capacity`**,
   **`no-batch-cap`**, **`too-many-slots`**, **`input-invalid`:** a reading the
   model needs is missing or unusable. At verbosity 3, the `slo-ttft-variant`
@@ -1392,9 +1394,11 @@ model reads all of them `0`, including the two marked "on every answer":
 | `VPScaledToPrompt` | `V_P` was rescaled to a longer prompt. It read 1.5% high on the one measured point. |
 | `TransferOmitted` | No KV transfer time measured: left out, so TTFT reads low. |
 | `DecodeEngineMeasured` | No decode line: decode's part is the decode engine's measured mean TTFT, held at the rate it was measured at. |
-| `DecodeTermOmitted` | A decode line, but no fit of the decode engine's TTFT and no reading of it: the older, lower sum stands, so TTFT reads low. |
-| `DecodeStepSlopeAssumed` | A decode line and no fit: load has not moved enough to learn how decode's TTFT follows step time. The measured figure is held, and rises at an assumed slope of 10. |
-| `RouterHopAssumed` | No fit of the hop between the router and the engines: it is priced at an assumed 20 ms. The fit needs the router's TTFT `_sum` and `_count` and steady 5-minute windows. |
+| `DecodeTermOmitted` | A decode line, but no fit of the decode engine's TTFT and no quiet row to read it from: the older, lower sum stands, so TTFT reads low. The `slo-ttft-variant` log's `decodeTermRefused` says why. |
+| `DecodeStepSlopeAssumed` | A decode line and no fit. The usual reason is load that has not moved enough to learn how decode's TTFT follows step time; `decodeTermRefused` in the log says which. A quiet row's figure is held, and rises at an assumed slope of 10. |
+| `RouterHopAssumed` | No fit of the hop between the router and the engines: it is priced at an assumed 20 ms. `hopRefused` in the log says why: no router TTFT `_sum` and `_count` read, too few steady 5-minute windows, or a hop that read at or under zero. |
+| `DecodeTermFloored` | The decode term read under the older sum, which stands in its place: the term's fit does not hold here. |
+| `DecodeTermPrefixHits` | More than 10% of the prompt comes from prefix hits. Decode's TTFT goes with the whole prompt and is priced at the part computed, so TTFT reads low. |
 | `DecodeSideOmitted`, `DecodeTTFTUnmeasured` | No decode line and no measured TTFT: decode's part is left out, so TTFT reads low. They always come together. |
 | `FlowControlInferredOff` | `slo.flowControl` is unset and the flow-control queue series does not exist. A scrape gap looks the same: declare it. |
 | `FlowControlMismatch` | The declared `slo.flowControl` contradicts the series. Priced as declared; the log says so. |

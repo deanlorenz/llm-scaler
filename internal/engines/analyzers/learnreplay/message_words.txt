@@ -124,7 +124,9 @@ DecodeOnsetUnchecked
 DecodeSideOmitted
 DecodeStepSlopeAssumed
 DecodeTTFTUnmeasured
+DecodeTermFloored
 DecodeTermOmitted
+DecodeTermPrefixHits
 Deleted
 Deployment
 Discarding
@@ -237,6 +239,7 @@ NoPrefillCapacity
 NoPrefillReplicas
 NoPromptSpread
 NoPromptVariance
+NoRouterMean
 NoShortPrompts
 NoStepSpread
 NoTPOTHistogram
@@ -824,6 +827,7 @@ datastore
 days
 decay
 decided
+decides
 decision
 decisionCount
 decisionPath
@@ -836,10 +840,16 @@ decode
 decode-only
 decode-queue-unknown
 decode-style
+decodeBase
+decodeFromITL
+decodeHeldPrompt
+decodePerStep
+decodePerToken
 decodeSaturatedAt
 decodeSaturation
 decodeTTFT
 decodeTTFTPrompt
+decodeTermRefused
 decodeVariant
 deduced
 deeper
@@ -1207,6 +1217,10 @@ holding
 holds
 hole
 holes
+hopBase
+hopHeldPrompt
+hopPerToken
+hopRefused
 horizon
 horizons
 hot-rank-hold
