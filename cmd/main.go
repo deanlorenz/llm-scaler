@@ -262,7 +262,7 @@ const defaultLogVerbosity = logging.DEFAULT
 // nolint:gocyclo
 func main() {
 	// First, before anything reads a setting.
-	legacyEnv := config.ApplyLegacyEnv()
+	legacyEnv, discardedEnv := config.ApplyLegacyEnv()
 
 	// Command-line flags
 
@@ -396,6 +396,10 @@ func main() {
 	setupLog.Info("Logger initialized")
 	for _, name := range legacyEnv {
 		setupLog.Info("Environment variable uses a name that will be removed in the next release: read as the new name",
+			"variable", name, "prefix", config.EnvPrefix)
+	}
+	for _, name := range discardedEnv {
+		setupLog.Info("Environment variable ignored: the same setting is also set under its new name, which wins",
 			"variable", name, "prefix", config.EnvPrefix)
 	}
 	// A test aid never stops scaling: options a recording cannot start with
@@ -615,9 +619,7 @@ func main() {
 	} else {
 		// Multi-namespace mode: Use label selector to filter ConfigMaps in the cache
 		// This significantly reduces memory usage by only caching WVA-related configmaps
-		wvaConfigSelector := labels.SelectorFromSet(labels.Set{
-			"app.kubernetes.io/name": "workload-variant-autoscaler",
-		})
+		wvaConfigSelector := config.ConfigMapCacheSelector("workload-variant-autoscaler")
 
 		setupLog.Info("Configuring cache with label selector for ConfigMaps",
 			"labelSelector", wvaConfigSelector.String())

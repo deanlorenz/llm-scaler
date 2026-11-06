@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/spf13/viper"
+	"k8s.io/apimachinery/pkg/labels"
 )
 
 func fakeEnv(env map[string]string) ([]string, func(string) (string, bool), func(string, string) error) {
@@ -31,10 +32,13 @@ func TestApplyLegacyEnv_CopiesAnOldNameAndNewWins(t *testing.T) {
 	}
 	environ, lookup, set := fakeEnv(env)
 
-	used := applyLegacyEnv("LLMSM_", "WVA_", environ, lookup, set)
+	used, discarded := applyLegacyEnv("LLMSM_", "WVA_", environ, lookup, set)
 
 	if want := []string{"WVA_EMPTY", "WVA_PASSIVE"}; !reflect.DeepEqual(used, want) {
 		t.Errorf("used = %v, want %v", used, want)
+	}
+	if want := []string{"WVA_LIMITED_MODE"}; !reflect.DeepEqual(discarded, want) {
+		t.Errorf("discarded = %v, want %v", discarded, want)
 	}
 	if env["LLMSM_PASSIVE"] != "true" {
 		t.Errorf("LLMSM_PASSIVE = %q, the old value did not arrive", env["LLMSM_PASSIVE"])
@@ -53,8 +57,8 @@ func TestApplyLegacyEnv_CopiesAnOldNameAndNewWins(t *testing.T) {
 func TestApplyLegacyEnv_DoesNothingBeforeTheRename(t *testing.T) {
 	env := map[string]string{"WVA_PASSIVE": "true"}
 	environ, lookup, set := fakeEnv(env)
-	if used := applyLegacyEnv("WVA_", "WVA_", environ, lookup, set); used != nil {
-		t.Errorf("used = %v, want nothing while the prefixes are equal", used)
+	if used, discarded := applyLegacyEnv("WVA_", "WVA_", environ, lookup, set); used != nil || discarded != nil {
+		t.Errorf("used = %v, discarded = %v, want nothing while the prefixes are equal", used, discarded)
 	}
 	if len(env) != 1 {
 		t.Errorf("environment changed: %v", env)
@@ -87,10 +91,13 @@ func TestApplyLegacyConfigKeys(t *testing.T) {
 	v.SetDefault("LLMSM_PASSIVE", false)
 	v.SetDefault("WVA_DEFAULT_ONLY", true)
 
-	used := applyLegacyConfigKeys(v, "LLMSM_")
+	used, discarded := applyLegacyConfigKeys(v, "LLMSM_")
 
 	if want := []string{"wva_passive"}; !reflect.DeepEqual(used, want) {
 		t.Errorf("used = %v, want %v", used, want)
+	}
+	if want := []string{"wva_limited_mode"}; !reflect.DeepEqual(discarded, want) {
+		t.Errorf("discarded = %v, want %v", discarded, want)
 	}
 	if !v.GetBool("LLMSM_PASSIVE") {
 		t.Error("the old key in the file did not beat the new key's default")
@@ -112,8 +119,8 @@ func TestApplyLegacyConfigKeys_EnvironmentStillWins(t *testing.T) {
 
 func TestApplyLegacyConfigKeys_DoesNothingBeforeTheRename(t *testing.T) {
 	v := readConfig(t, "WVA_PASSIVE: true\n")
-	if used := applyLegacyConfigKeys(v, "WVA_"); used != nil {
-		t.Errorf("used = %v", used)
+	if used, discarded := applyLegacyConfigKeys(v, "WVA_"); used != nil || discarded != nil {
+		t.Errorf("used = %v, discarded = %v", used, discarded)
 	}
 }
 
@@ -142,7 +149,7 @@ func TestLookupPrefixed(t *testing.T) {
 // after the rename and does nothing before it.
 func TestApplyLegacyEnv_RealEnvironment(t *testing.T) {
 	t.Setenv("WVA_LEGACY_ENV_TEST", "1")
-	used := ApplyLegacyEnv()
+	used, _ := ApplyLegacyEnv()
 	copied, ok := os.LookupEnv(EnvPrefix + "LEGACY_ENV_TEST")
 	if EnvPrefix == legacyEnvPrefix {
 		if used != nil {
@@ -165,5 +172,47 @@ func TestManagerConfigPassive_ReadsTheOldKey(t *testing.T) {
 	passive, set := ManagerConfigPassive(map[string]string{ManagerConfigKey: "WVA_PASSIVE: true\n"})
 	if !passive || !set {
 		t.Errorf("passive=%v set=%v", passive, set)
+	}
+}
+
+func TestScalingPolicyConfigMapNames_OldNamesAfterTheCurrentOne(t *testing.T) {
+	got := ScalingPolicyConfigMapNames()
+	if got[0] != ScalingPolicyConfigMapName() {
+		t.Errorf("the current name must come first: %v", got)
+	}
+	if !slices.Contains(got, RenamedScalingPolicyConfigMapName) || !slices.Contains(got, LegacyScalingPolicyConfigMapName) {
+		t.Errorf("an old name is missing: %v", got)
+	}
+	seen := map[string]bool{}
+	for _, n := range got {
+		if seen[n] {
+			t.Errorf("%s appears twice: %v", n, got)
+		}
+		seen[n] = true
+	}
+}
+
+func TestScalingPolicyConfigMapNames_AnOverrideDoesNotFallBackToTheRenamedName(t *testing.T) {
+	t.Setenv("SCALING_POLICY_CONFIG_MAP_NAME", "my-policy")
+	got := ScalingPolicyConfigMapNames()
+	if want := []string{"my-policy", LegacyScalingPolicyConfigMapName}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestConfigMapCacheSelector(t *testing.T) {
+	sel := ConfigMapCacheSelector("scaling-manager")
+	const key = "app.kubernetes.io/name"
+	for value, want := range map[string]bool{"scaling-manager": true, legacyAppLabelValue: true, "something-else": false} {
+		if got := sel.Matches(labels.Set{key: value}); got != want {
+			t.Errorf("%s: matches = %v, want %v", value, got, want)
+		}
+	}
+	if sel.Matches(labels.Set{}) {
+		t.Error("a ConfigMap with no label was selected")
+	}
+	single := ConfigMapCacheSelector(legacyAppLabelValue)
+	if !single.Matches(labels.Set{key: legacyAppLabelValue}) || strings.Contains(single.String(), ",") {
+		t.Errorf("before the rename the selector should hold one value: %s", single)
 	}
 }

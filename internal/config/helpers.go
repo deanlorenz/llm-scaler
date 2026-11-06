@@ -157,12 +157,20 @@ func ScalingPolicyConfigMapName() string {
 // The rename is not a clean cutover: the ConfigMap outgrew "saturation" — it now
 // carries policy tiers, analyzer definitions, limiters and scale-to-zero, none of
 // which are saturation — but an operator who has not yet renamed theirs must not
-// lose every scaling setting they have on upgrade. So both are read, the current
-// name wins, and using the old one is reported once at startup.
+// lose every scaling setting they have on upgrade. So all are read, the current
+// name wins, and using an old one is reported.
+//
+// The project's own rename added a second old name (legacy_env.go). An override
+// through the environment is an explicit choice of one name, so only the default
+// name falls back to it.
 func ScalingPolicyConfigMapNames() []string {
 	current := ScalingPolicyConfigMapName()
-	if current == LegacyScalingPolicyConfigMapName {
-		return []string{current}
+	names := []string{current}
+	if current == DefaultScalingPolicyConfigMapName && current != RenamedScalingPolicyConfigMapName {
+		names = append(names, RenamedScalingPolicyConfigMapName)
 	}
-	return []string{current, LegacyScalingPolicyConfigMapName}
+	if current != LegacyScalingPolicyConfigMapName {
+		names = append(names, LegacyScalingPolicyConfigMapName)
+	}
+	return names
 }

@@ -109,14 +109,18 @@ func (r *ConfigMapReconciler) BootstrapInitialConfigMaps(ctx context.Context) er
 	}
 
 	// Add namespace-local ConfigMap targets
+	// Every name, current last, as for the global targets: a tenant's copy from
+	// before a rename has to keep applying.
 	for _, ns := range namespacesToScan {
-		targets = append(targets,
-			struct {
-				name      string
-				namespace string
-				isGlobal  bool
-			}{name: config.ScalingPolicyConfigMapName(), namespace: ns, isGlobal: false},
-		)
+		for i := len(policyNames) - 1; i >= 0; i-- {
+			targets = append(targets,
+				struct {
+					name      string
+					namespace string
+					isGlobal  bool
+				}{name: policyNames[i], namespace: ns, isGlobal: false},
+			)
+		}
 	}
 
 	// Bootstrap all target ConfigMaps
@@ -161,6 +165,7 @@ func (r *ConfigMapReconciler) bootstrapClusterPolicy(ctx context.Context) error 
 				r.Config.MarkConfigMapsBootstrapFailed(err)
 				return err
 			}
+			warnOldPolicyName(logger, policyNS, name)
 			return nil
 		}
 		if apierrors.IsNotFound(err) {
