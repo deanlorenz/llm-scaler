@@ -219,6 +219,8 @@ func writeReport(opts Options, e *Engine, res *Result) error {
 		fmt.Fprintf(&b, "- %s:%d [%s] %s\n", o.Path, o.Line, o.Ctx, o.Text)
 	}
 
+	res.Sweep.write(&b)
+
 	b.WriteString("\n## Identifier map\n\n")
 	ids := make([]string, 0, len(e.Stats.idents))
 	for n := range e.Stats.idents {

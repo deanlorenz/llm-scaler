@@ -149,6 +149,11 @@ func (r *Rule) applies(p, ctx string) bool {
 	} else if ctx == CtxTag || ctx == CtxImport || ctx == CtxPath {
 		return false
 	}
+	return r.pathApplies(p)
+}
+
+// pathApplies reports whether the rule covers this path, whatever the context.
+func (r *Rule) pathApplies(p string) bool {
 	if len(r.Paths) > 0 && !matchAny(r.Paths, p) {
 		return false
 	}

@@ -36,6 +36,7 @@ type Options struct {
 	Apply             bool
 	AllowUnclassified bool
 	ExpectNoop        bool
+	Sweep             bool
 	Targets           Targets
 }
 
@@ -51,6 +52,7 @@ func parseOptions(args []string) (Options, error) {
 	fs.BoolVar(&opts.Targets.CodeMoved, "code-moved", DefaultTargets.CodeMoved,
 		"the code, issues and images now live in the new repository: rename the held names too")
 	fs.StringVar(&opts.Targets.Module, "module", DefaultTargets.Module, "target Go module path")
+	fs.BoolVar(&opts.Sweep, "sweep", false, "exit non-zero if the final sweep finds a hit with no reason; the report always holds it")
 	if err := fs.Parse(args); err != nil {
 		return opts, err
 	}
@@ -85,6 +87,10 @@ func run(args []string, stdout io.Writer) error {
 		return err
 	}
 	res.Metrics = metrics
+	res.Sweep, err = e.FinalSweep(opts.Root, files)
+	if err != nil {
+		return err
+	}
 
 	if err := writeReport(opts, e, res); err != nil {
 		return err
@@ -93,6 +99,9 @@ func run(args []string, stdout io.Writer) error {
 	fmt.Fprintf(stdout, "files changed: %d, paths renamed: %d, unclassified: %d, report: %s\n",
 		len(res.Changed), len(res.Renames), unclassified, opts.Report)
 
+	if opts.Sweep && res.Sweep.Unexplained > 0 {
+		return fmt.Errorf("the sweep found %d hits with no reason: see the report", res.Sweep.Unexplained)
+	}
 	if opts.ExpectNoop && (len(res.Changed) > 0 || len(res.Renames) > 0) {
 		return fmt.Errorf("expected no change, the run would change %d files and rename %d paths",
 			len(res.Changed), len(res.Renames))
@@ -157,6 +166,7 @@ type Result struct {
 	Renames  []Move
 	Metrics  []string
 	Skipped  []string
+	Sweep    *Sweep
 	LongName map[string]int
 }
 

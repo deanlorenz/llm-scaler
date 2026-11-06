@@ -55,8 +55,6 @@ func TestRewriteText(t *testing.T) {
 		{"upstream issue stays", docsDir + "a.md", "https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1139", "https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1139"},
 		{"other repository stays", docsDir + "a.md", "see ig-wva", "see ig-wva"},
 		{"proxy image stays", "config/x.yaml", "ghcr.io/ev-shindin/llm-scaler/warmpool-proxy:v11", "ghcr.io/ev-shindin/llm-scaler/warmpool-proxy:v11"},
-		{"history stays", docsDir + "proposals/a.md", "WVA and wva_foo and wva-bar", "WVA and wva_foo and wva-bar"},
-		{"history follows a moved file", docsDir + "plans/a.md", "see two-variant-wva-benchmark.md", "see two-variant-scaling-manager-benchmark.md"},
 		{"a numbered link stays", docsDir + "a.md", "github.com/ev-shindin/llm-scaling-manager/pull/95", "github.com/ev-shindin/llm-scaling-manager/pull/95"},
 		{"held link before the move", docsDir + "a.md", "https://github.com/ev-shindin/llm-scaling-manager/blob/main/x.md", "https://github.com/ev-shindin/llm-scaling-manager/blob/main/x.md"},
 		{"held image before the move", "config/x.yaml", "ghcr.io/ev-shindin/llm-scaling-manager:main", "ghcr.io/ev-shindin/llm-scaling-manager:main"},
@@ -70,6 +68,16 @@ func TestRewriteText(t *testing.T) {
 		{"a value in that file still moves", "hack/benchmark/scenarios/guides/a.yaml", "name: wva-a", "name: scaling-manager-a"},
 		{"the harness text stays", "hack/benchmark/patch_harness.sh", `if "WVA was never installed" not in second:`, `if "WVA was never installed" not in second:`},
 		{"a dotted name is not the harness schema", "hack/x.sh", "scaler.wva-ctl.svc", "scaler.scaling-manager-ctl.svc"},
+		{"history is in scope", docsDir + "proposals/a.md", "WVA and wva_foo and wva-bar", "The scaling manager and llmsm_foo and scaling-manager-bar"},
+		{"a file name in history moves", docsDir + "plans/a.md", "see proposals/wva-keda-external-scaler.md", "see proposals/scaling-manager-keda-external-scaler.md"},
+		{"the other product stays", docsDir + "proposals/a.md", "upstream WVA #1003", "upstream WVA #1003"},
+		{"a before a consonant", docsDir + "a.md", "a WVA here", "a scaling manager here"},
+		{"an drops its n", docsDir + "a.md", "an wva-x here", "a scaling-manager-x here"},
+		{"a before a name said el", docsDir + "a.md", "a wva_x metric and a `WVA_NS`", "an llmsm_x metric and an `LLMSM_NS`"},
+		{"the kind in text", docsDir + "a.md", "the VariantAutoscaling and its VariantAutoscalingSpec", "the Variant and its variant.Spec"},
+		{"a qualified kind in text", docsDir + "a.md", "variant.VariantAutoscalingStatus", "variant.Status"},
+		{"the CRD note stays", "docs/guides/from-upstream-wva/README.md", "Releases up to v0.8 installed the VariantAutoscaling CRD.", "Releases up to v0.8 installed the VariantAutoscaling CRD."},
+		{"the harness key stays", "hack/benchmark/scenarios/guides/a.yaml", "      variantAutoscaling:", "      variantAutoscaling:"},
 		{"a recorded document stays", "internal/engines/steadystate/testdata/learned-state/v0.10.0-v1.json", `{"namespace":"wva-system"}`, `{"namespace":"wva-system"}`},
 		{"a namespace called wva is not the harness schema", "hack/x.sh", "wva-external-scaler.wva.svc", "scaling-manager-external-scaler.scaling-manager.svc"},
 		{"a shell default moves whole", "deploy/x.sh", "${POLICY_NS:-wva-policy}", "${POLICY_NS:-scaling-manager-policy}"},
@@ -189,9 +197,9 @@ func TestRewriteGo(t *testing.T) {
 		"// Package a is about the scaling manager.",
 		"// LLMSMThing is a thing. The scaling manager owns it.",
 		"type LLMSMThing struct",
-		`llmdv1alpha1 "github.com/llm-d-incubation/llm-d-scaling-manager/api/v1alpha1"`,
+		`llmdvariant "github.com/llm-d-incubation/llm-d-scaling-manager/api/v1alpha1"`,
 		`"github.com/llm-d-incubation/llm-d-scaling-manager/internal/constants"`,
-		"constants.LLMSMDesiredReplicas, llmdv1alpha1.X, pkg.Y",
+		"constants.LLMSMDesiredReplicas, llmdvariant.X, pkg.Y",
 		`short                   = "scaling-manager-a"`,
 		`scalingManagerNamespace = "scaling-manager-system"`,
 		`policyName              = "scaling-manager-policy"`,
@@ -295,7 +303,7 @@ func TestApplyEndToEnd(t *testing.T) {
 		"internal/constants/metrics.go": "package constants\r\n\r\n// WVADesiredReplicas is a metric.\r\nconst WVADesiredReplicas = \"wva_desired_replicas\"\r\n",
 		"deploy/lib/infra_wva.sh":       "#!/bin/bash\nWVA_NS=wva-system\n",
 		docsDir + "a.md":                "WVA line\r\nsee deploy/lib/infra_wva.sh\r\n",
-		docsDir + "plans/old.md":        "WVA stays\n",
+		docsDir + "plans/old.md":        "WVA moves\n",
 		"data/recording.jsonl.gz":       recording,
 		"data/nul.bin":                  "wva\x00wva",
 	})
@@ -359,8 +367,8 @@ func TestApplyEndToEnd(t *testing.T) {
 	if b, _ = os.ReadFile(filepath.Join(dir, "data/nul.bin")); string(b) != "wva\x00wva" {
 		t.Error("a binary file changed")
 	}
-	if b, _ = os.ReadFile(filepath.Join(dir, docsDir+"plans/old.md")); string(b) != "WVA stays\n" {
-		t.Errorf("history changed: %q", b)
+	if b, _ = os.ReadFile(filepath.Join(dir, docsDir+"plans/old.md")); string(b) != "The scaling manager moves\n" {
+		t.Errorf("history did not move: %q", b)
 	}
 
 	// A second run is a no-op.
@@ -405,5 +413,61 @@ func TestMixedLineEndingsInGoAreRefused(t *testing.T) {
 	_, err := e.rewriteFile("a.go", ClassGo, []byte("package a\r\n\n// WVA\n"))
 	if err == nil {
 		t.Fatal("a Go file with mixed endings went through gofmt")
+	}
+}
+
+func TestRewriteGoVariantNames(t *testing.T) {
+	const src = `package a
+
+import llmdVariantAutoscalingV1alpha1 "example.com/internal/variant"
+
+// VariantAutoscalingList holds them.
+type T struct {
+	llmdVariantAutoscalingV1alpha1.VariantAutoscalingSpec
+	Items []llmdVariantAutoscalingV1alpha1.VariantAutoscaling ` + "`json:\"items\"`" + `
+}
+
+func GroupVariantAutoscalingByModel(variantAutoscalings []T) {}
+func readyVariantAutoscalings()                       {}
+func ActiveVariantAutoscaling()                       {}
+func InactiveVariantAutoscalingByModel()              {}
+`
+	out, err := newEngine(t).RewriteGo("internal/a/a.go", ClassGo, []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"llmdvariant.Spec", "[]llmdvariant.Variant `json:\"items\"`", "// variant.List holds them.",
+		"func GroupVariantsByModel(variants []T)", "func readyVariants()", "func ActiveVariants()", "func InactiveVariantsByModel()"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestSweepGivesEveryHitAReason(t *testing.T) {
+	dir := repo(t, map[string]string{
+		"hack/rename/x.go":                   "// wva\n",
+		"docs/guides/from-upstream-wva/a.md": "text\n",
+		"docs/a.md":                          "upstream WVA and newValue and a stray xWVAx\n",
+	})
+	e := newEngine(t)
+	files, err := trackedFiles(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := e.FinalSweep(dir, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasons := map[string]int{}
+	for _, h := range s.Hits {
+		reasons[h.Reason]++
+	}
+	if reasons[reasonTool] != 1 || reasons[reasonPartial] != 1 || reasons["keep-other-product-paths"] != 1 ||
+		reasons["keep-upstream-prose"] != 1 || reasons[reasonNone] != 1 || s.Unexplained != 1 {
+		t.Errorf("reasons = %v", reasons)
+	}
+	if err := run([]string{"--root", dir, "--report", filepath.Join(t.TempDir(), "r.md"), "--sweep"}, io.Discard); err == nil {
+		t.Error("--sweep passed with a hit that has no reason")
 	}
 }

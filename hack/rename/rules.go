@@ -35,7 +35,7 @@ const (
 
 	// residualPattern is every spelling of an old name. Whatever it finds
 	// outside a rule's claim is unclassified, and --apply refuses it.
-	residualPattern = `wva|Wva|WVA|(?i:workload[-_ ]?variant|variant-autoscaler|variantautoscaler)|llm-scaling-manager|ev-shindin|llm-d/llm-d-workload`
+	residualPattern = `wva|Wva|WVA|(?i:workload[-_ ]?variant|variant-autoscaler|variantautoscal)|llm-scaling-manager|ev-shindin|llm-d/llm-d-workload`
 
 	// sweepPattern is what the final sweep looks for, in any case. Unlike the
 	// residual pattern it also finds a capital inside a word, so nothing is
@@ -230,8 +230,25 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		// article is claimed; the name goes on to its own row. wva- and
 		// workload-variant become scaling-manager, a consonant; wva_ and WVAName
 		// become llmsm_ and LLMSMName, said "el".
-		{Name: "article-before-consonant", Class: "prose", Pattern: `(?P<m>[Aa]n) `?(?:wva-|workload-variant)`, Fn: articleA},
-		{Name: "article-before-vowel-sound", Class: "prose", Pattern: `(?P<m>[Aa]) `?(?:wva_|WVA[A-Z_])`, Fn: articleAn},
+		{Name: "article-before-consonant", Class: "prose", Pattern: `\b(?P<m>[Aa]n) \x60?(?:wva-|workload-variant)`, Fn: articleA},
+		{Name: "article-before-vowel-sound", Class: "prose", Pattern: `\b(?P<m>[Aa]) \x60?(?:wva_|WVA[A-Z_])`, Fn: articleAn},
+
+		// The in-memory struct that was a CRD, in comments, strings and text. The
+		// history note is the one place the name stays: those releases did ship it.
+		{Name: "keep-crd-history", Class: "external", Pattern: `Releases up to v0\.8 installed the VariantAutoscaling CRD|variantautoscalings(?:\.llmd\.ai| -A)`, Action: Keep,
+			Paths: upstreamGuide, Why: "releases up to v0.8 did install this CRD"},
+		{Name: "keep-harness-variant-key", Class: "external", Pattern: `\bvariantAutoscaling\b`, Action: Keep,
+			Paths: []string{"hack/benchmark/scenarios/**"}, Why: "a key of llm-d-benchmark's scenario schema"},
+		{Name: "variant-kind-spec", Class: "variant", Pattern: `(?:\b|[^.\w])(?P<m>VariantAutoscaling(?:ConfigSpec|Spec|Status|List))\b`, Fn: variantDotted},
+		{Name: "variant-kind-qualified", Class: "variant", Pattern: `\.(?P<m>VariantAutoscaling(?:ConfigSpec|Spec|Status|List))\b`, Fn: variantBare},
+		{Name: "variant-word-by-model", Class: "variant", Pattern: `VariantAutoscaling(ByModel)\b`, Replace: "Variants$1"},
+		{Name: "variant-word-group", Class: "variant", Pattern: `GroupVariantAutoscaling`, Replace: "GroupVariants"},
+		{Name: "variant-word-active", Class: "variant", Pattern: `\b((?:In)?[Aa]ctive)VariantAutoscaling\b`, Replace: "${1}Variants"},
+		{Name: "variant-word-plural", Class: "variant", Pattern: `VariantAutoscalings`, Replace: "Variants"},
+		{Name: "variant-word", Class: "variant", Pattern: `VariantAutoscaling`, Replace: "Variant"},
+		{Name: "variant-lower-plural", Class: "variant", Pattern: `\bvariantAutoscalings\b`, Replace: "variants"},
+		{Name: "variant-lower", Class: "variant", Pattern: `\bvariantAutoscaling\b`, Replace: "variantObj"},
+		{Name: "variant-lowercase-kind", Class: "variant", Pattern: `\bvariantautoscalings?\b`, Replace: "variants"},
 
 		// Metrics and alert names.
 		{Name: "metric-name", Class: "metric", Pattern: metricPattern(metrics), Replace: metricPre + "${s}"},
@@ -283,8 +300,21 @@ func RulesFor(t Targets, metrics []string) []Rule {
 }
 
 // identRules map Go identifiers. First match wins.
+//
+// VariantAutoscaling was a CRD and is now an in-memory struct in internal/variant,
+// so its names lose the suffix, and its Spec, Status and List types lose the
+// stutter: variant.Spec, not variant.VariantSpec. The import aliases carry the old
+// kind and an API version the package does not have.
 var identRules = []IdentRule{
-	{Name: "ident-import-alias", Class: "go-ident", Pattern: `^wvav1alpha1$`, Replace: "llmdv1alpha1"},
+	{Name: "ident-import-alias", Class: "go-ident", Pattern: `^(?:wvav1alpha1|llmdVariantAutoscalingV1alpha1)$`, Replace: "llmdvariant"},
+	{Name: "ident-variant-spec", Class: "go-variant", Pattern: `^VariantAutoscaling(ConfigSpec|Spec|Status|List)$`, Replace: "$1"},
+	{Name: "ident-variant-by-model", Class: "go-variant", Pattern: `VariantAutoscaling(ByModel)$`, Replace: "Variants$1"},
+	{Name: "ident-variant-group", Class: "go-variant", Pattern: `^(Test)?GroupVariantAutoscaling`, Replace: "${1}GroupVariants"},
+	{Name: "ident-variant-active", Class: "go-variant", Pattern: `^((?:In)?[Aa]ctive)VariantAutoscaling$`, Replace: "${1}Variants"},
+	{Name: "ident-variant-plural", Class: "go-variant", Pattern: `VariantAutoscalings`, Replace: "Variants"},
+	{Name: "ident-variant-lower-plural", Class: "go-variant", Pattern: `^variantAutoscalings$`, Replace: "variants"},
+	{Name: "ident-variant-lower", Class: "go-variant", Pattern: `^variantAutoscaling$`, Replace: "variantObj"},
+	{Name: "ident-variant", Class: "go-variant", Pattern: `VariantAutoscaling`, Replace: "Variant"},
 	{Name: "ident-leading-upper", Class: "go-ident", Pattern: `^WVA`, Replace: "LLMSM"},
 	{Name: "ident-leading-lower", Class: "go-ident", Pattern: `^wva`, Replace: "scalingManager"},
 	{Name: "ident-embedded-upper", Class: "go-ident", Pattern: `WVA`, Replace: "ScalingManager"},
@@ -315,6 +345,16 @@ func renameFileWord(claimed, _ string) string {
 		"wva_saturation_v2_config", "saturation_v2_config", "dump_wva_", "dump_scaling_manager_",
 		"tail_wva_", "tail_scaling_manager_", "wva", kubeName)
 	return r.Replace(claimed)
+}
+
+// variantDotted and variantBare name a type of internal/variant in text: outside
+// Go code it needs its package to read, and after a dot it already has one.
+func variantDotted(claimed, _ string) string {
+	return "variant." + strings.TrimPrefix(claimed, "VariantAutoscaling")
+}
+
+func variantBare(claimed, _ string) string {
+	return strings.TrimPrefix(claimed, "VariantAutoscaling")
 }
 
 func articleA(claimed, _ string) string  { return claimed[:1] }

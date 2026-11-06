@@ -32,13 +32,14 @@ go run ./hack/rename --apply
 LEARNREPLAY_WRITE_MESSAGE_WORDS=1 go test -p 1 -run TestMessageWords_AreCurrent ./internal/engines/analyzers/learnreplay/
 make guides-render warmpool-render
 
-# Fail if a run would still change anything.
-go run ./hack/rename --expect-noop
+# Fail if a run would still change anything, or a hit has no reason.
+go run ./hack/rename --expect-noop --sweep
 ```
 
 The report lists counts and samples per rule and path class, every kept and held
 name with its reason, and every occurrence no rule covers. `--apply` needs that
-last list empty, or `--allow-unclassified`.
+last list empty, or `--allow-unclassified`. Its final sweep looks in every tracked
+file and path, in any case, and gives each remaining hit a reason by file type.
 
 Push the renamed tree to `llm-d-incubation/llm-d-scaling-manager`, let CI publish
 the images there, then run `go run ./hack/rename --code-moved --apply` and land
@@ -57,11 +58,10 @@ that.
 ## What stays
 
 - Binary and compressed files, symlinks, submodules and untracked files.
-- `docs/plans/`, `docs/proposals/` and `comparison/`, which are records. Only a
-  link to a file the tool moved changes.
 - Other projects' names: upstream repository links, `ig-wva`, and text about the
-  other product, including the upstream side of `docs/guides/from-upstream-wva`.
-- llm-d-benchmark's own names: its scenario `wva` block, `context.wva_namespace`,
+  other product, including the upstream side of `docs/guides/from-upstream-wva`
+  and its note that releases up to v0.8 installed the CRD.
+- llm-d-benchmark's own names: its scenario `wva` and `variantAutoscaling` keys, `context.wva_namespace`,
   and the text `patch_harness.sh` anchors on in its source.
 - The two old-release learned-state documents, and their writer in the test that
   reads them.
