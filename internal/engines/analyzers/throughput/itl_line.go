@@ -44,6 +44,11 @@ import (
 // at any k.
 const SwitchITLSteadyGate = "throughput-itl-steady-gate"
 
+// SwitchITLTierHysteresis is the replay switch for the latch on the line's
+// tier (issue #495, itl.Admission.TierHysteresis). Off, each cycle chooses
+// its tier alone, as before.
+const SwitchITLTierHysteresis = "throughput-itl-tier-hysteresis"
+
 // SwitchITLKeepsWindowOnGPSMismatch is the replay switch for the
 // GPS-mismatch clear (analyzer-learner.md, "The GPS-mismatch clear: dropped
 // in 4b-1"). On: three cycles in a row whose generated-token rate is more
@@ -92,6 +97,7 @@ func (a *ThroughputAnalyzer) switchFields() map[string]*bool {
 		SwitchITLReadsFinitePodMean:           &a.itlFiniteOnly,
 		SwitchITLAdmitsAtSequenceCap:          &a.itlAdmitsAtCap,
 		SwitchITLForgetReachesTheLine:         &a.itlForgetReachesLine,
+		SwitchITLTierHysteresis:               &a.itlTierHysteresis,
 	}
 }
 
@@ -116,6 +122,7 @@ func (a *ThroughputAnalyzer) lineAdmission(adm itl.Admission, namespace, modelID
 	adm.AboveBandFallback = !a.noAboveBandFallback
 	adm.AboveBandWaitsAfterRestart = a.aboveBandWaitsAfterRestart
 	adm.Args = e.args
+	adm.TierHysteresis = a.itlTierHysteresis
 	if a.itlAdmitsAtCap && e.batchCap > 0 {
 		adm.MaxNumSeqs, adm.MaxNumSeqsSource = e.batchCap, e.batchCapSource
 		// Readings at the cap sit above DefaultKSat, where a pinned fit

@@ -50,6 +50,9 @@ type Tracker struct {
 	// line (Admission.AboveBandFallback). Empty for a key whose admission
 	// never asked for it.
 	above, aboveSteady map[string]*Window
+	// latches holds, per key, the tier its line stands at under
+	// Admission.TierHysteresis, and since when.
+	latches map[string]tierLatch
 }
 
 // heldSlope is a key's last fitted A, when it was fitted, and the engine
@@ -70,6 +73,7 @@ func NewTracker() *Tracker {
 		slopes:      map[string]heldSlope{},
 		above:       map[string]*Window{},
 		aboveSteady: map[string]*Window{},
+		latches:     map[string]tierLatch{},
 	}
 }
 
@@ -107,6 +111,10 @@ type Reading struct {
 	SlopeHeld bool
 	// SlopeFittedAt is when the held A was fitted; zero unless SlopeHeld.
 	SlopeFittedAt time.Time
+	// TierHeld is set when the tier dwell refused this cycle's change of tier
+	// (Admission.TierHysteresis): Model is the key's held slope (SlopeHeld),
+	// or the pinned fit where the full fit was refused.
+	TierHeld bool
 	// AboveBandFit is set when Model is the above-band fallback
 	// (Admission.AboveBandFallback): the band gave no line, the key held no
 	// slope it may hold, and A was fitted from the readings above the band.
@@ -383,7 +391,11 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 		baseline = DefaultBaselineSec
 	}
 	// The fits run outside the lock: they read a copy of the window.
-	c := chooseFit(obs, steadyObs, r.Ready, baseline, s.MinSettledSamples)
+	c := chooseFit(obs, steadyObs, t.fullFitReady(key, r.Ready, steadyObs, adm), baseline, s.MinSettledSamples)
+	if adm.TierHysteresis {
+		c, r.TierHeld = t.dwellTier(key, c, tierInputs{obs: obs, steady: steadyObs, baseline: baseline,
+			learned: r.BaselineLearned, minSettled: s.MinSettledSamples}, adm, now)
+	}
 	if c.tier == TierOLS {
 		// B is what is remembered as the key's: B is the hardware floor,
 		// A the contention that moves with the workload, kept only for
@@ -695,7 +707,8 @@ type Refitted struct {
 // one-sided as Observe does under that admission while the key has no
 // learned B: the caller passes it for such a key only, with baseline
 // DefaultBaselineSec. Only the one-sided fields are read (OneSidedAt, BPrior,
-// OneSidedTarget, and MinK and MaxK with a target). The zero Admission is
+// OneSidedTarget, and MinK and MaxK with a target), and OLSLatched, which
+// judges the steady readings by the clear values. The zero Admission is
 // the pinned fit alone. Without it a refit of a line Observe priced
 // one-sided pins the default B alone, and prices under the line the
 // controller priced (issue #467).
@@ -703,7 +716,8 @@ func Refit(obs, steady []Observation, baseline float64, minSettled int, oneSided
 	if minSettled <= 0 {
 		minSettled = DefaultMinSettledSamples
 	}
-	c := chooseFit(obs, steady, ready(steady, DefaultMinSamples, DefaultMinKSpread), baseline, minSettled)
+	fullFit := ready(steady, DefaultMinSamples, DefaultMinKSpread) || (oneSided.OLSLatched && clearReady(steady))
+	c := chooseFit(obs, steady, fullFit, baseline, minSettled)
 	out := Refitted{Model: c.model, Tier: c.tier, Hold: c.hold, Read: c.read}
 	if oneSided.OneSidedAboveKSat && c.tier == TierPinnedB {
 		var raised, beyond bool
@@ -974,6 +988,11 @@ func (t *Tracker) sweep(now time.Time, stale func(key string) bool, keepTraces b
 			delete(t.slopes, key)
 		}
 	}
+	for key := range t.latches {
+		if stale(key) {
+			delete(t.latches, key)
+		}
+	}
 	for key := range t.above {
 		if stale(key) {
 			delete(t.above, key)
@@ -1174,6 +1193,9 @@ type KeyReadings struct {
 	// Above and AboveSteady are the above-band fallback's windows: empty for
 	// a key whose admission never asked for it.
 	Above, AboveSteady []Observation
+	// OLSLatched is set while the key's tier latch stands at the full fit
+	// (Admission.TierHysteresis): a refit judges Steady by the clear values.
+	OLSLatched bool
 }
 
 // Readings is a copy of the readings filed under key; every window is nil
@@ -1185,6 +1207,7 @@ func (t *Tracker) Readings(key string) KeyReadings {
 	return KeyReadings{
 		All: observationsOf(t.windows[key]), Steady: observationsOf(t.steady[key]),
 		Above: observationsOf(t.above[key]), AboveSteady: observationsOf(t.aboveSteady[key]),
+		OLSLatched: t.latches[key].tier == TierOLS,
 	}
 }
 

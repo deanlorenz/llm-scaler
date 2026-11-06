@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/enginerec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/steadystate"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
@@ -111,12 +110,11 @@ func TestEngineGoldens_WithoutTheEngineFixtureNoEnginePathRuns(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, c.Problems, "the analyzer goldens alone still reproduce")
 	// Pinned: an engine path a cluster golden starts or stops reaching moves
-	// this list, a reviewed change. The throughput line's held slope is the
-	// engine fixture's alone too (learner PR 4b-1): its light load after a
-	// fitted line is the only one long enough for the window to age out.
+	// this list, a reviewed change. The throughput line's held slope left it
+	// with the tier dwell (issue #495): throughput-sweep reaches that path.
 	want := []string{steadystate.PathCompositeExternalResult, steadystate.PathCompositeGrace,
 		steadystate.PathCompositeReplicaClamped, steadystate.PathWarmPoolSupply,
-		settlePathPrefix + string(settle.Lent), throughput.PathITLHeld}
+		settlePathPrefix + string(settle.Lent)}
 	require.Len(t, c.Uncovered, len(want), strings.Join(c.Uncovered, "\n"))
 	for _, p := range want {
 		assert.Contains(t, strings.Join(c.Uncovered, "\n"), "learner path "+p+":")

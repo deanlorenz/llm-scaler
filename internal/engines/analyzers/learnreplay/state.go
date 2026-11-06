@@ -474,6 +474,7 @@ func (vs *VariantState) refit() {
 	if vs.Tier == whatif.TierPinnedB && vs.analyzerRaised {
 		adm = vs.analyzerOneSided
 	}
+	adm.OLSLatched = vs.Tier == whatif.TierOLS && vs.Readings.OLSLatched
 	if got := itl.Refit(vs.Readings.All, vs.Readings.Steady, vs.Baseline, vs.MinSettled, adm); got.Tier != "" && sameLine(got.Model, vs.Line) {
 		vs.Tier, vs.LineReadings, vs.Refitted, vs.OneSided = got.Tier, got.Read, true, adm
 		return

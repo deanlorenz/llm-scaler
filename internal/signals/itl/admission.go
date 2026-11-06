@@ -144,6 +144,15 @@ type Admission struct {
 	// first built it, before its review exempted them (aboveBandSettling).
 	// Only negative controls set it.
 	AboveBandWaitsAfterRestart bool
+	// TierHysteresis latches the key's tier: the full fit is taken at the
+	// set values (DefaultMinSamples, DefaultMinKSpread), kept down to the
+	// clear values (DefaultClearMinSamples, DefaultClearKSpread), and within
+	// DefaultTierDwell of the last change the tier changes only for a line
+	// that prices DefaultTierSafeMargin more (tier_latch.go). Without it, as
+	// before, each cycle chooses alone.
+	TierHysteresis bool
+	// OLSLatched, on a refit only (Refit), is KeyReadings.OLSLatched.
+	OLSLatched bool
 }
 
 // MaxNumSeqsSourceNone is Admission.MaxNumSeqsSource when no cap is stated:
@@ -225,11 +234,16 @@ func (a Admission) pricedFill(line Model) float64 {
 // where the analyzer prices: the higher ITL at oneSidedAt, or, with a
 // target, the lower fill where the ITL meets it.
 func (a Admission) pricesHigher(line, other Model) bool {
+	return a.pricesHigherBy(line, other, 0)
+}
+
+// pricesHigherBy is pricesHigher by more than the fraction margin.
+func (a Admission) pricesHigherBy(line, other Model, margin float64) bool {
 	if a.targeted() {
-		return a.pricedFill(line) < a.pricedFill(other)
+		return a.pricedFill(line)*(1+margin) < a.pricedFill(other)
 	}
 	k := a.oneSidedAt()
-	return line.ITLAt(k) > other.ITLAt(k)
+	return line.ITLAt(k) > other.ITLAt(k)*(1+margin)
 }
 
 // keptA is the A a later hold pairs with baseline so that the held line

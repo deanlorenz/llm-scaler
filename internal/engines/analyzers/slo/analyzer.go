@@ -127,6 +127,9 @@ type Analyzer struct {
 	// itlOneSidedAtCap is SwitchITLOneSidedAtCap (issue #467, one_sided.go):
 	// on from the constructor; a replay turns it off (SetSwitchesForReplay).
 	itlOneSidedAtCap bool
+	// itlTierHysteresis is SwitchITLTierHysteresis (issue #495,
+	// tier_hysteresis.go): on, the line's tier is latched.
+	itlTierHysteresis bool
 	// settleInterval is the controller's optimize interval
 	// (WithOptimizationInterval), zero until set: what the line's own trace
 	// judges an absence by (settle.Tolerance), as the saturation analyzer's.
@@ -199,6 +202,7 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		itlIdleOnEvidence:    true,
 		itlForgetReachesLine: true,
 		itlOneSidedAtCap:     true,
+		itlTierHysteresis:    true,
 
 		ttftPrice:  true,
 		imbalance:  make(map[string]*imbalanceWindow),
@@ -591,6 +595,7 @@ func (a *Analyzer) fitLine(key string, rows []domain.ReplicaMetrics, variant str
 	a.mu.Lock()
 	a.seen[key] = now
 	a.mu.Unlock()
+	adm.TierHysteresis = a.tierHysteresisOn()
 	r := a.lines.Observe(key, variant, rows, adm, now)
 	a.paths.countFit(r.Tier)
 	switch {

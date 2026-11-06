@@ -559,7 +559,8 @@ func (c *cycle) fitLines() {
 		// arguments it was fitted under (issue #284).
 		adm := itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: atCap.perRank, MaxNumSeqsSource: atCap.source,
 			CapMaxPreemptionRate: c.cfg.ITLCapPreemptionRate(), Steady: c.tune.steadiness(),
-			SlopeHoldFor: c.a.Horizons().BucketRetention, Args: windowArgs(params)}
+			SlopeHoldFor: c.a.Horizons().BucketRetention, Args: windowArgs(params),
+			TierHysteresis: c.a.tierHysteresisOn()}
 		// When each replica's settle began: the engine's settle tracker
 		// (itl_settle.go).
 		c.a.itlSettleAdmission(&adm, c.input.Namespace, c.input.ModelID)

@@ -220,6 +220,49 @@ var replaySwitches = map[string][]string{
 		"ols-sweep-slo/slo-published.csv", "ols-sweep-slo-restart/slo-published.csv",
 	},
 
+	// Issue #495: the ITL line's tier is latched, on all three lines that
+	// share itl.Tracker's choice of fit, one named change with one switch per
+	// analyzer (itl.Admission.TierHysteresis). Base: main at f7130a9cb. It
+	// moves the sweep recordings, whose load steps collapse the spread; each
+	// analyzer moves only the line it fits, and no interaction shows: all
+	// three on moves the union and no more. Measured against all off:
+	//
+	//   - The saturation line, 29 outputs. Over those recordings the mu falls
+	//     on 278 of 329 moved cycles, to x0.83 at the lowest, and rises by at
+	//     most 3.0 %, DefaultTierSafeMargin: the bias asked for. Demand moves
+	//     x0.989 to x1.163. No RequiredCapacity and no replica count moves.
+	//     lines.csv loses the publishes of the fits a dwell held.
+	//   - The slo line, 4 outputs: slo-published.csv, on the fills priced, and
+	//     the slo rows of variant-capacities.csv.
+	//   - The throughput line, 7 outputs: throughput-sweep, whose line a dwell
+	//     held, and two engine rows.
+	saturation.SwitchITLTierHysteresis: {
+		"ols-sweep-slo-restart/composite-results.csv", "ols-sweep-slo-restart/composite-roles.csv",
+		"ols-sweep-slo-restart/composite-variants.csv", "ols-sweep-slo-restart/lines.csv",
+		"ols-sweep-slo-restart/results.csv", "ols-sweep-slo-restart/variant-capacities.csv",
+		"ols-sweep-slo-restart/warm-pool-pressure.csv", "ols-sweep-slo/composite-results.csv",
+		"ols-sweep-slo/composite-roles.csv", "ols-sweep-slo/lines.csv", "ols-sweep-slo/results.csv",
+		"ols-sweep-slo/variant-capacities.csv", "ols-sweep/composite-results.csv",
+		"ols-sweep/composite-roles.csv", "ols-sweep/lines.csv", "ols-sweep/results.csv",
+		"ols-sweep/variant-capacities.csv", "throughput-sweep-restart/composite-results.csv",
+		"throughput-sweep-restart/composite-roles.csv", "throughput-sweep-restart/composite-variants.csv",
+		"throughput-sweep-restart/lines.csv", "throughput-sweep-restart/results.csv",
+		"throughput-sweep-restart/variant-capacities.csv",
+		"throughput-sweep-restart/warm-pool-pressure.csv", "throughput-sweep/composite-release.csv",
+		"throughput-sweep/composite-results.csv", "throughput-sweep/lines.csv",
+		"throughput-sweep/results.csv", "throughput-sweep/variant-capacities.csv",
+	},
+	slo.SwitchITLTierHysteresis: {
+		"ols-sweep-slo-restart/slo-published.csv", "ols-sweep-slo-restart/variant-capacities.csv",
+		"ols-sweep-slo/slo-published.csv", "ols-sweep-slo/variant-capacities.csv",
+	},
+	throughput.SwitchITLTierHysteresis: {
+		"engine/variant-capacities.csv", "throughput-sweep/composite-release.csv",
+		"throughput-sweep/composite-results.csv", "throughput-sweep/composite-roles.csv",
+		"throughput-sweep/composite-variants.csv", "throughput-sweep/variant-capacities.csv",
+		"throughput-sweep/warm-pool-pressure.csv",
+	},
+
 	// Learner PR 5c, on main after 5b (602054e98): the replicaStartSeconds
 	// seed is the prior (SwitchStartReadsSeed), and the first starts blend
 	// with it (SwitchStartBlendsFirstSamples). Measured, each alone against
@@ -352,8 +395,10 @@ var learner4b1Seams = map[string][]string{
 		"throughput-sweep/variant-capacities.csv",
 		"throughput-sweep/warm-pool-pressure.csv",
 	},
+	// Since the tier latch (issue #495) acceptance and engine no longer move,
+	// measured off alone from all on.
 	throughput.SwitchITLKeepsWindowOnGPSMismatch: {
-		"acceptance/variant-capacities.csv", "engine/variant-capacities.csv", "mu-paths/variant-capacities.csv",
+		"mu-paths/variant-capacities.csv",
 	},
 }
 
@@ -371,9 +416,12 @@ var learner4aSeams = map[string][]string{
 	// cycle, variant-02 borrows none, and their reported service rates and
 	// the learned-state export lose them, as the slo analyzer's line does
 	// under slo.SwitchITLReadsSettle.
+	//
+	// Since the tier latch (issue #495) it moves engine/composite-variants.csv
+	// too, measured off alone from all on.
 	saturation.SwitchITLReadsSettle: {
 		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
-		"engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
+		"engine/composite-variants.csv", "engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
 	},
 	saturation.SwitchITLWaitsAfterRestart: {
 		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
@@ -1024,6 +1072,28 @@ var switchBase = map[string]string{
 	"throughput-sweep-restart/variant-capacities.csv": "ff6bac8958d07f45c547edf83028dffac78aea3aeeadcd49eee719a7ef6c48ce",
 	"throughput-sweep/composite-results.csv":          "dde3434231c8217840247e6b379be47cd730063d362a8d2d6eb93a926b48c68a",
 	"throughput-sweep/results.csv":                    "95273482cb748258383bb0dfb1c1f8001eb6dcd3cc1248d62b7d840cef60f241",
+
+	// Issue #495's outputs, replayed with every switch of replaySwitches off,
+	// at main f7130a9cb.
+	"ols-sweep-slo-restart/composite-roles.csv":       "19ca7b5ed5edb46e8d77b26cc5fc2b25d3f332f4e4e1ee9a99b8da5540760bb7",
+	"ols-sweep-slo-restart/composite-variants.csv":    "e5abe68787358baa1fd68c648c90ecb8e6200c0d2817b873c1c0f133cb25bbab",
+	"ols-sweep-slo-restart/lines.csv":                 "d57bac14f3570627b940a4aebb2bad673ae1a7f2dcd6a68f5ff6832cb394b9f1",
+	"ols-sweep-slo-restart/variant-capacities.csv":    "7859ce9a4526b5e6558d4b4e7094b205027d6e9c72ef81f57aaddedb632b1872",
+	"ols-sweep-slo-restart/warm-pool-pressure.csv":    "b50942466953102df51e05ca2f94367ba7c952a49bfe9a766157019b7c63b67c",
+	"ols-sweep-slo/composite-roles.csv":               "a6e3878b9c4df4237965025a5d81fe8e65b5876fd93f82d5ee248a3284eccf9d",
+	"ols-sweep-slo/lines.csv":                         "657312612417a55b2313c3758380ebeec849e3ed2a0be0d98e136f5722e39da6",
+	"ols-sweep-slo/variant-capacities.csv":            "6931d17981035b609cdd0a26d5e1dceb3fe4d3aa786d5485c80b1f1e07026831",
+	"ols-sweep/composite-roles.csv":                   "c29583bd2858bbcdf67deb0df87ef4c13b86a54a98c13f1d24dcb7b8b7925983",
+	"ols-sweep/lines.csv":                             "38457d55462d53de7665a0a2c70136020e4da6baeaa4bf7830d4da8f3ab370e9",
+	"ols-sweep/variant-capacities.csv":                "c5b622c36980999cfa1558042a63a7f0b44f4f61372e80347f4e1ae01dc8797d",
+	"throughput-sweep-restart/lines.csv":              "88c5c372c11f2b6e92a37cfa05a54ee2ed80c7d91eb8bc1647214cfc7776f657",
+	"throughput-sweep-restart/warm-pool-pressure.csv": "dc95671008d49554221c2e34bad5819ee76b02511c1f4df914be429f51a547f2",
+	"throughput-sweep/composite-release.csv":          "22aeac7a7c690134aae83be69045ddcd6a4c77bcd7cc8abef5b21c91fa2bfe7c",
+	"throughput-sweep/composite-roles.csv":            "93a2acd663fd77b8635a5a8a13c363761fd27aa06ddebe3d7c101b3e9e03c635",
+	"throughput-sweep/composite-variants.csv":         "28c551a8abc79a8634a027527f2b81ecdd286107bb933ee6917be719094ee565",
+	"throughput-sweep/lines.csv":                      "f55781cb4b727f97f56ab8e1611213f0e92f4c11f76a816323877d1ff101e834",
+	"throughput-sweep/variant-capacities.csv":         "4dddae1473f723feaeabe6ce16b5cc8e3cce8e188df255a08ab1ba2a5808db3e",
+	"throughput-sweep/warm-pool-pressure.csv":         "87ea51257f009bbc7fc85aefda7bd014568a94ccdc29093596a4083b455e979b",
 }
 
 // The slow tests of this package run in parallel with each other (each
