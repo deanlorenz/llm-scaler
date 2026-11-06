@@ -2025,12 +2025,6 @@ EOF
     # so the first pod of a TLS install finds its Secrets.
     wva_scaler_tls_prepare "$tmp_overlay/kustomization.yaml"
 
-    # Prune on INSTALL as well as uninstall. Waiting for an uninstall would leave
-    # the grant in place on every cluster that already has it, since upgrading is
-    # what people actually do -- and the whole reason the binding was dropped is
-    # that it handed out access nobody needed.
-    wva_delete_legacy_crbs "$WVA_NS"
-
     wva_append_replicas_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS"
 
     # WVA_VERBOSITY sets the controller's --v; unset keeps the shipped default.
@@ -2212,12 +2206,6 @@ EOF
         *)
             log_error "WVA_APPLY_SCOPE must be all, prereqs or controller (got '${WVA_APPLY_SCOPE}')"
             ;;
-    esac
-
-    # The ServiceMonitor references wva-metrics-scraper-token now; the token the
-    # controller's own ServiceAccount used to be scraped with goes.
-    case "${WVA_APPLY_SCOPE:-all}" in
-        all|prereqs) wva_delete_legacy_controller_token "$WVA_NS" ;;
     esac
 
     # Put the operator's own entries back. A merge patch names only the keys it

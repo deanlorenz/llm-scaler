@@ -2,7 +2,8 @@ package variant
 
 import "k8s.io/apimachinery/pkg/runtime"
 
-// A Variant is an event target, and an event target is a runtime.Object.
+// An event recorder takes a runtime.Object, and one caller still hands it a
+// variant (scalefromzero); the others use EventTarget.
 var (
 	_ runtime.Object = (*VariantAutoscaling)(nil)
 	_ runtime.Object = (*VariantAutoscalingList)(nil)

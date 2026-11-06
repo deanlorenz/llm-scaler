@@ -1700,6 +1700,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+wva_check_so_name "wva-warm-pool-${POOL_NAME}" || exit 1
+
 case "$ACTION" in
   plan)   cmd_plan ;;
   sizing) cmd_sizing "${SIZING_ARGS[@]}" ;;

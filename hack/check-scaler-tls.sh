@@ -538,6 +538,9 @@ secret_file "$CLIENT" ca.crt "$WORK/client-ca.pem"
 ok '[ "$(sans_of "$WORK/serving.pem")" = "$WANT_SANS" ]' "serving SANs '$(sans_of "$WORK/serving.pem")', want '$WANT_SANS'"
 ok 'openssl verify -CAfile "$WORK/ca.pem" "$WORK/serving.pem" >/dev/null 2>&1' "serving does not chain to the CA"
 ok 'openssl x509 -in "$WORK/serving.pem" -noout -text | grep -q "TLS Web Server Authentication"' "serving lacks the serverAuth usage"
+# The common name has to hold the namespace: a variable lost to a template leaves
+# "name..svc", which openssl and cert-manager both accept.
+ok 'openssl x509 -in "$WORK/serving.pem" -noout -subject | grep -qE "CN ?= ?[a-z-]+\.[a-z0-9-]+\.svc"' "serving common name: $(openssl x509 -in "$WORK/serving.pem" -noout -subject)"
 ok '[ "$(sans_of "$WORK/client.pem")" = "wva-keda-client " ]' "client SANs '$(sans_of "$WORK/client.pem")', want 'wva-keda-client'"
 ok 'openssl x509 -in "$WORK/client.pem" -noout -text | grep -q "TLS Web Client Authentication"' "client lacks the clientAuth usage"
 ok 'openssl verify -CAfile "$WORK/ca.pem" "$WORK/client.pem" >/dev/null 2>&1' "client does not chain to the CA"
@@ -636,6 +639,7 @@ reset_store
 printf 'namespace: %s\nresources:\n- ./base\npatches:\n' "$NS" >"$WORK/k/kustomization.yaml"
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=true STUB_CM=present
 ok '[ "$RC" = 0 ] && [ -f "$WORK/cm-applied.yaml" ]' "cert-manager: exit $RC, nothing applied: $(cat "$WORK/refusal")"
+ok 'jq -e ".spec.commonName | test(\"^[a-z-]+\\\\.[a-z0-9-]+\\\\.svc$\")" "$STORE/certificates.cert-manager.io__wva-external-scaler.json" >/dev/null' "cert-manager common name lost its namespace"
 CMA="$WORK/cm-applied.yaml"
 ok '[ "$(yqs "select(.kind == \"Issuer\") | .metadata.name" "$CMA" | sort | tr "\n" " ")" = "wva-external-scaler-ca wva-external-scaler-selfsigned " ]' "cert-manager: Issuers $(yqs 'select(.kind == "Issuer") | .metadata.name' "$CMA" 2>/dev/null | tr '\n' ' ')"
 ok '[ "$(yqs "select(.kind == \"Certificate\") | .metadata.name" "$CMA" | sort | tr "\n" " ")" = "wva-external-scaler wva-external-scaler-ca wva-external-scaler-client " ]' "cert-manager: Certificates $(yqs 'select(.kind == "Certificate") | .metadata.name' "$CMA" 2>/dev/null | tr '\n' ' ')"

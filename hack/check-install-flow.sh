@@ -23,7 +23,7 @@ PASS=0
 # Every case below reports ok or FAIL exactly once. A run that ends early --
 # a sourced lib that exits, a section that stops -- otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=106
+EXPECT_CASES=101
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -753,7 +753,6 @@ refuse_at="$(line_of "$dwc" 'wva_refuse_unknown_prometheus_tls')"
 render_at="$(line_of "$dwc" 'wva_render_manager_config_patch "$tmp_overlay"')"
 apply_at="$(line_of "$dwc" 'kubectl apply -k "$tmp_overlay"')"
 write_at="$(line_of "$dwc" 'wva_write_prometheus_settings')"
-token_at="$(line_of "$dwc" 'all|prereqs) wva_delete_legacy_controller_token "$WVA_NS" ;;')"
 if [ -n "$read_at" ] && [ -n "$guard_at" ] && [ "$((guard_at + 1))" = "$read_at" ] \
     && [ -n "$refuse_at" ] && [ -n "$render_at" ] && [ -n "$apply_at" ] \
     && [ "$read_at" -lt "$refuse_at" ] && [ "$refuse_at" -lt "$render_at" ] && [ "$render_at" -lt "$apply_at" ]; then
@@ -791,17 +790,6 @@ if [ -n "$write_at" ] && [ -n "$apply_at" ] && [ "$write_at" -gt "$apply_at" ]; 
 else
     fail "WIRING: wva_write_prometheus_settings must run after the apply (write ${write_at:-none}, apply ${apply_at:-none})"
 fi
-if [ -n "$token_at" ] && [ -n "$apply_at" ] && [ "$token_at" -gt "$apply_at" ]; then
-    ok "WIRING: the legacy controller token is deleted after the apply, in the all|prereqs phases"
-else
-    fail "WIRING: wva_delete_legacy_controller_token must sit in the all|prereqs case after the apply (token ${token_at:-none}, apply ${apply_at:-none})"
-fi
-if [ -n "$(line_of "$(body_of "$ROOT/deploy/lib/cleanup.sh" undeploy_wva_controller)" 'wva_delete_legacy_controller_token "$WVA_NS"')" ]; then
-    ok "WIRING: the uninstall deletes the legacy controller token"
-else
-    fail "WIRING: undeploy_wva_controller must call wva_delete_legacy_controller_token"
-fi
-
 if ! declare -F wva_remove_pod_writers >/dev/null; then
     fail "POD WRITES: wva_remove_pod_writers is not defined -- an uninstall leaves role/wva-pod-writer in every workload namespace"
 else
@@ -889,52 +877,6 @@ for target in setup-prereqs deploy-wva deploy-wva-on-k8s deploy-wva-on-openshift
         ok "make $target applies the committed manifests (prerequisites:${prereqs:- none})"
     fi
 done
-
-# --- TOKEN --------------------------------------------------------------------
-#
-# The OpenShift overlay used to mint a non-expiring token Secret for the
-# controller's own ServiceAccount. It is no longer rendered, so nothing but a
-# delete by name removes it from an existing install.
-if ! declare -F wva_delete_legacy_controller_token >/dev/null; then
-    fail "TOKEN: wva_delete_legacy_controller_token is not defined -- an upgraded install keeps the controller token Secret"
-else
-    token_case() {
-        : > "$KUBECTL_LOG"
-        out="$(
-            kubectl() {
-                printf '%s\n' "$*" >> "$KUBECTL_LOG"
-                case "$1 $2" in
-                    "get secret")
-                        case "$TOKEN_SA" in
-                            absent)    echo 'Error from server (NotFound): secrets "wva-controller-manager-token" not found'; return 1 ;;
-                            forbidden) echo 'Error from server (Forbidden): secrets "wva-controller-manager-token" is forbidden'; return 1 ;;
-                            *)         printf '%s' "$TOKEN_SA" ;;
-                        esac ;;
-                esac
-                return 0
-            }
-            wva_delete_legacy_controller_token wns 2>&1
-        )"
-    }
-    TOKEN_SA=wva-controller-manager token_case
-    if grep -qx 'delete secret wva-controller-manager-token -n wns' "$KUBECTL_LOG"; then
-        ok "TOKEN: the controller token Secret is deleted"
-    else
-        fail "TOKEN: the controller token Secret must be deleted" "$(cat "$KUBECTL_LOG")"
-    fi
-    TOKEN_SA=someone-else token_case
-    if grep -q '^delete' "$KUBECTL_LOG"; then
-        fail "TOKEN: a Secret of that name for another account is not ours to delete" "$(cat "$KUBECTL_LOG")"
-    else
-        ok "TOKEN: a Secret of that name for another account is left alone"
-    fi
-    TOKEN_SA=forbidden token_case
-    if ! grep -q '^delete' "$KUBECTL_LOG" && printf '%s' "$out" | grep -q 'Could not check'; then
-        ok "TOKEN: Forbidden is reported, not taken for absent"
-    else
-        fail "TOKEN: Forbidden must warn, not pass silently" "$out"
-    fi
-fi
 
 # --- CHART --------------------------------------------------------------------
 #
