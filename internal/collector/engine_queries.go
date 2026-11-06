@@ -38,8 +38,8 @@ var engineSpecificReplicaQueries = []string{
 	registration.QueryKvUsageMean,
 	registration.QueryRequestRate,
 	registration.QueryRunningRequests,
-	// Recorded for the TTFT model (ttft_inputs.go); only QueueMin is read
-	// yet, by the prefill observation's busy minutes.
+	// For the TTFT model (ttft_inputs.go): QueueMin is read
+	// (ttftReadReplicaQueries), the rest recorded.
 	registration.QueryPromptTokensBuckets,
 	registration.QueryTTFTBuckets,
 	registration.QueryAvgQueueTime,
@@ -71,12 +71,13 @@ var agnosticReplicaQueries = []string{
 	// vLLM's waiting count split by reason; SGLang publishes no reason.
 	registration.QueryCapacityQueueLength,
 	registration.QueryMaxRankCapacityQueueLength,
-	// vLLM's prefill time, NIXL transfer time and per-request TPOT
-	// histogram, for the TTFT model; SGLang publishes none of them
-	// (registration/ttft_inputs.go).
+	// vLLM's prefill time, NIXL transfer time, per-request TPOT histogram and
+	// computed-token histogram, for the TTFT model; SGLang publishes none of
+	// them (registration/ttft_inputs.go).
 	registration.QueryAvgPrefillTime,
 	registration.QueryAvgKVTransferTime,
 	registration.QueryTPOTBuckets,
+	registration.QueryComputedTokensBuckets,
 }
 
 // ttftAgnosticQueries are the agnostic queries above that carry model_name
@@ -86,44 +87,79 @@ var ttftAgnosticQueries = []string{
 	registration.QueryAvgPrefillTime,
 	registration.QueryAvgKVTransferTime,
 	registration.QueryTPOTBuckets,
+	registration.QueryComputedTokensBuckets,
 }
 
 // recordOnlyReplicaQueries are the replica queries above issued only while a
-// learner recording is on: the TTFT model's inputs. They are issued only
-// while the collector records them (SetRecordTTFTInputs), so a controller
-// that records nothing pays nothing for them. One is also read while it is
-// issued: QueryQueueMin, by the saturation analyzer's prefill observation
-// (busy minutes, logs only), which outside a recording sees none.
+// learner recording is on, so a controller that records nothing pays nothing
+// for them: the TTFT model's inputs no analyzer reads.
 var recordOnlyReplicaQueries = map[string]bool{
 	registration.QueryPromptTokensBuckets: true,
 	registration.QueryTTFTBuckets:         true,
 	registration.QueryAvgQueueTime:        true,
 	registration.QueryQueueTimeBuckets:    true,
-	registration.QueryQueueMin:            true,
 	registration.QueryAvgPrefillTime:      true,
-	registration.QueryAvgKVTransferTime:   true,
 	registration.QueryTPOTBuckets:         true,
 }
 
+// ttftReadReplicaQueries are the replica queries above that the TTFT pricing
+// reads: the queue minimum (the prefill observation's busy minutes), the
+// computed-token histogram (the measured prompt spread) and the KV transfer
+// time. A cycle issues them for a namespace with a TTFT target
+// (ReadTTFTInputsIn), and while recording; elsewhere nothing reads them and
+// nothing pays for them.
+var ttftReadReplicaQueries = map[string]bool{
+	registration.QueryQueueMin:              true,
+	registration.QueryComputedTokensBuckets: true,
+	registration.QueryAvgKVTransferTime:     true,
+}
+
+// isScalingQuery is a replica query issued every cycle for every namespace.
+func isScalingQuery(name string) bool {
+	return !recordOnlyReplicaQueries[name] && !ttftReadReplicaQueries[name]
+}
+
+// isTTFTReadQuery is a query of ttftReadReplicaQueries.
+func isTTFTReadQuery(name string) bool { return ttftReadReplicaQueries[name] }
+
+// isRecordOnlyQuery is a query of recordOnlyReplicaQueries.
+func isRecordOnlyQuery(name string) bool { return recordOnlyReplicaQueries[name] }
+
 // The replica query lists split once, at start: the scaling queries issued
-// every cycle, and the record-only ones issued while recording.
+// every cycle, the TTFT readers' issued where a target asks for them, and the
+// record-only ones issued while recording.
 var (
-	scalingEngineSpecificQueries    = filterQueries(engineSpecificReplicaQueries, false)
-	scalingAgnosticQueries          = filterQueries(agnosticReplicaQueries, false)
-	recordOnlyEngineSpecificQueries = filterQueries(engineSpecificReplicaQueries, true)
-	recordOnlyAgnosticQueries       = filterQueries(agnosticReplicaQueries, true)
+	scalingEngineSpecificQueries    = filterQueries(engineSpecificReplicaQueries, isScalingQuery)
+	scalingAgnosticQueries          = filterQueries(agnosticReplicaQueries, isScalingQuery)
+	ttftReadEngineSpecificQueries   = filterQueries(engineSpecificReplicaQueries, isTTFTReadQuery)
+	ttftReadAgnosticQueries         = filterQueries(agnosticReplicaQueries, isTTFTReadQuery)
+	recordOnlyEngineSpecificQueries = filterQueries(engineSpecificReplicaQueries, isRecordOnlyQuery)
+	recordOnlyAgnosticQueries       = filterQueries(agnosticReplicaQueries, isRecordOnlyQuery)
 )
 
-// filterQueries is the queries of names that are record-only, or that are
-// not, in order.
-func filterQueries(names []string, recordOnly bool) []string {
+// filterQueries is the queries of names that keep holds for, in order.
+func filterQueries(names []string, keep func(string) bool) []string {
 	var out []string
 	for _, n := range names {
-		if recordOnlyReplicaQueries[n] == recordOnly {
+		if keep(n) {
 			out = append(out, n)
 		}
 	}
 	return out
+}
+
+// replicaQueryLists is the logical replica queries a collection issues: the
+// scaling queries, the TTFT readers' with ttftRead, and with recording every
+// one, the TTFT readers' included.
+func replicaQueryLists(recording, ttftRead bool) (engineSpecific, agnostic []string) {
+	switch {
+	case recording:
+		return engineSpecificReplicaQueries, agnosticReplicaQueries
+	case ttftRead:
+		return slices.Concat(scalingEngineSpecificQueries, ttftReadEngineSpecificQueries),
+			slices.Concat(scalingAgnosticQueries, ttftReadAgnosticQueries)
+	}
+	return scalingEngineSpecificQueries, scalingAgnosticQueries
 }
 
 // capacityQueueQueries are the agnostic queries partitioned by model_name like

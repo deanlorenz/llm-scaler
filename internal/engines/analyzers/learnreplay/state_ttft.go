@@ -31,11 +31,16 @@ type PrefillState struct {
 	Estimate     prefill.Estimate
 	EstimateRead bool
 	// PromptTokens is E[I_eff], computed tokens over requests, over the
-	// variant's latest shapeCycles cycles with traffic, so that a recording
+	// variant's latest cycles with traffic (whatif.PromptWindow), so that a recording
 	// that ends idle is priced at the traffic it last served; 0 with none.
 	// PromptFromCycle, PromptToCycle and PromptCycles say which cycles.
 	PromptTokens                                 float64
 	PromptFromCycle, PromptToCycle, PromptCycles int
+	// PromptWindow is those cycles, as the slo analyzer keeps them: its
+	// Spread is the spread of that prompt, assumed when the window is nil or
+	// holds no computed-token histogram, as a recording made before the
+	// collector read one does not.
+	PromptWindow *whatif.PromptWindow
 	// RawShare is f_raw, the busiest pod's share of the computed-token rate
 	// over the mean share, not de-biased: the largest over the latest
 	// whatif.TTFTWindowCycles cycles that read one at the cycle's pod count. A pod with
@@ -60,13 +65,6 @@ type DecodeTTFTState struct {
 	// TransferSeconds is the mean KV transfer time over the rows that read
 	// one, over the latest shapeCycles cycles with a reading; 0 with none.
 	TransferSeconds float64
-}
-
-// promptSample is one cycle's computed tokens and requests of a prefill
-// variant, per second.
-type promptSample struct {
-	cycle             int
-	computed, request float64
 }
 
 // shareWindow is a prefill variant's raw shares at its current pod count. A
@@ -100,14 +98,14 @@ func (w *shareWindow) read() (largest, least float64, full bool) {
 
 // ttftSamples is the windows of the rows a TTFT question reads, by variant.
 type ttftSamples struct {
-	prompts    map[string][]promptSample
+	prompts    map[string]*whatif.PromptWindow
 	shares     map[string]*shareWindow
 	engineTTFT map[string][]whatif.DecodeTTFT
 	transfers  map[string][]float64
 }
 
 func newTTFTSamples() *ttftSamples {
-	return &ttftSamples{prompts: map[string][]promptSample{}, shares: map[string]*shareWindow{},
+	return &ttftSamples{prompts: map[string]*whatif.PromptWindow{}, shares: map[string]*shareWindow{},
 		engineTTFT: map[string][]whatif.DecodeTTFT{}, transfers: map[string][]float64{}}
 }
 
@@ -148,8 +146,8 @@ type prefillRows struct {
 // a latency, and pulls a mean low.
 func positive(x float64) bool { return whatif.Finite(x) && x > 0 }
 
-// note takes one cycle's rows.
-func (t *ttftSamples) note(in domain.AnalyzerInput, cycle int) {
+// note takes one cycle's rows, read at at.
+func (t *ttftSamples) note(in domain.AnalyzerInput, cycle int, at time.Time) {
 	roles := rolesOf(in)
 	pre := map[string]*prefillRows{}
 	decode := map[string]*decodeRows{}
@@ -208,8 +206,11 @@ func (t *ttftSamples) note(in domain.AnalyzerInput, cycle int) {
 		if p.computedRate > 0 {
 			allComputed += p.computedRate
 			allRequests += p.reqRate
-			t.prompts[v] = keepLast(t.prompts[v], promptSample{cycle: cycle, computed: p.computedRate, request: p.reqRate}, shapeCycles)
 		}
+		if t.prompts[v] == nil {
+			t.prompts[v] = &whatif.PromptWindow{}
+		}
+		t.prompts[v].Note(rowsOfVariant(in.ReplicaMetrics, v), cycle, at)
 	}
 	for v, d := range decode {
 		if d.transferRows > 0 {
@@ -236,19 +237,15 @@ func rawShare(pods int, sum, busiest float64) (float64, bool) {
 	return busiest * float64(pods) / sum, true
 }
 
-// promptOf is a prefill variant's mean effective prompt over its samples,
-// and the cycles they span: each cycle weighs by its requests, which is
-// computed tokens over requests across them.
-func promptOf(samples []promptSample) (tokens float64, from, to, cycles int) {
-	if len(samples) == 0 {
-		return 0, 0, 0, 0
+// rowsOfVariant is rows of the variant.
+func rowsOfVariant(rows []domain.ReplicaMetrics, variant string) []domain.ReplicaMetrics {
+	var out []domain.ReplicaMetrics
+	for _, rm := range rows {
+		if rm.VariantName == variant {
+			out = append(out, rm)
+		}
 	}
-	var computed, requests float64
-	for _, s := range samples {
-		computed += s.computed
-		requests += s.request
-	}
-	return computed / requests, samples[0].cycle, samples[len(samples)-1].cycle, len(samples)
+	return out
 }
 
 // fillTTFT sets what the state says of a TTFT question, from the samples
@@ -269,7 +266,8 @@ func (r *replayer) fillTTFT(st *State, in domain.AnalyzerInput, t *ttftSamples) 
 		if w := t.shares[v]; w != nil {
 			ps.RawShare, ps.RawShareLeast, ps.RawShareFull = w.read()
 		}
-		ps.PromptTokens, ps.PromptFromCycle, ps.PromptToCycle, ps.PromptCycles = promptOf(t.prompts[v])
+		ps.PromptTokens, ps.PromptFromCycle, ps.PromptToCycle, ps.PromptCycles = t.prompts[v].Prompt()
+		ps.PromptWindow = t.prompts[v].Clone()
 		ps.Estimate, ps.EstimateRead = estimateAt(r.sat.PrefillEstimate, in.Namespace, in.ModelID, v, st.At)
 		st.Prefill = append(st.Prefill, ps)
 	}

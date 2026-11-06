@@ -250,6 +250,13 @@ type Engine struct {
 	// lastAnalyzerSeries.
 	publishedEngineConfig map[string]engineConfigPublished
 
+	// learnerMissingSince is when each variant with learner series first went
+	// missing from the registry, and learnerTargetsCheckedAt when the scale
+	// targets of such variants were last read (retainLearnerSeries).
+	// Unguarded for the same reason as lastAnalyzerSeries.
+	learnerMissingSince     map[learnerVariantID]time.Time
+	learnerTargetsCheckedAt time.Time
+
 	// lastDecided records, per scale target (keyed namespace/target), when the
 	// optimize loop last DECIDED for it -- as opposed to republished for it --
 	// and which incarnation of the target that decision was about. The sticky
@@ -839,6 +846,9 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 		logger.Error(err, "Unable to get active variant autoscalings")
 		return err
 	}
+	// Here, not with the analyzer series: those go with the active set, and a
+	// fleet at zero replicas is exactly what these series are kept for.
+	e.retainLearnerSeries(ctx)
 	// Before anything decides: which variants are only observed this cycle.
 	e.observePassive(logger, activeVAs)
 
@@ -896,10 +906,13 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	// Initialize vaEventTracker for this optimize cycle
 	e.vaEventTracker = make(map[string]bool)
 
-	// Open the collector's cycle so the models grouped below share one execution
+	// Group VAs by model for per-model capacity analysis
+	modelGroups := utils.GroupVariantAutoscalingByModel(activeVAs)
+
+	// Open the collector's cycle so the models grouped above share one execution
 	// of each namespace-scoped query instead of one per model.
 	if e.ReplicaMetricsCollector != nil {
-		e.beginCollectorCycle()
+		e.beginCollectorCycle(modelGroups)
 		defer e.ReplicaMetricsCollector.EndCycle()
 	}
 
@@ -927,8 +940,6 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	// leaving every SLO model unobserved for a window and its grace.
 	e.beginSLOCycle()
 
-	// Group VAs by model for per-model capacity analysis
-	modelGroups := utils.GroupVariantAutoscalingByModel(activeVAs)
 	modelsProcessed = len(modelGroups)
 	logger.V(logging.VERBOSE).Info("Grouped VAs by model",
 		"modelCount", len(modelGroups),
@@ -1082,6 +1093,28 @@ func (e *Engine) recordScalingEvent(
 			e.recordEvent(va, corev1.EventTypeNormal, constants.K8SEventScaledDown, reason)
 		}
 	}
+}
+
+// ttftNamespaces is the namespaces holding a model whose policy prices TTFT:
+// the ones whose collection reads the TTFT inputs this cycle
+// (collector.ReadTTFTInputsIn). It reads the policy as resolveModelPolicy does,
+// and reports nothing: that is resolveModelPolicy's, once per cycle.
+func (e *Engine) ttftNamespaces(
+	modelGroups map[string][]llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
+) map[string]bool {
+	namespaces := map[string]bool{}
+	for _, vas := range modelGroups {
+		modelID, namespace := vas[0].Spec.ModelID, vas[0].Namespace
+		if namespaces[namespace] {
+			continue
+		}
+		tier, _ := modelPolicy(vas)
+		configMap := e.Config.ScalingPolicyConfigForNamespace(namespace)
+		if config.ResolveScalingPolicyForTier(configMap, modelID, namespace, tier).PricesTTFT() {
+			namespaces[namespace] = true
+		}
+	}
+	return namespaces
 }
 
 // resolveModelPolicy resolves the effective config for a model, layering in the
@@ -1548,6 +1581,9 @@ func (e *Engine) optimizeV2(
 	// swept, and written after the cycle has learned what it will.
 	e.restoreLearnedState(ctx, e.clock.Now())
 	defer func() { e.writeLearnedState(ctx, e.clock.Now()) }()
+	// What the learners reported this cycle, on every way out of it: the
+	// prune above ran before any Analyze, so no report is of a pruned model.
+	defer e.publishLearnerReports()
 
 	// Before the sweep, which would otherwise judge a variant on a stamp from
 	// before it parked: Analyze stamps too, but only after this point.

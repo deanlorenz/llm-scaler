@@ -25,7 +25,7 @@ import (
 // the accelerator memo (accelerators), as the saturation analyzer drops its
 // lastAccelerator: a variant forgotten after a move to new hardware would
 // otherwise key its next line under the old card for any cycle whose pods do
-// not resolve one; and the TTFT windows (imbalance, decodeTTFT).
+// not resolve one; and the TTFT windows (imbalance, decodeTTFT, prompts).
 //
 // What it keeps: transients, the model's recent fleet history, which is no
 // learned state of the variant; ownSettled (and ownSettle), when each replica
@@ -76,6 +76,10 @@ func (a *Analyzer) forgetVariant(namespace, modelID, variant string) (int, []lea
 		delete(a.decodeTTFT, key)
 		n++
 	}
+	if _, ok := a.prompts[key]; ok {
+		delete(a.prompts, key)
+		n++
+	}
 	return n, forgotten
 }
 
@@ -95,6 +99,10 @@ func (a *Analyzer) forgetLearnerLocked(name, namespace, modelID, variant string)
 	case learn.K2:
 		// k2 is the saturation analyzer's alone: this analyzer reads the
 		// capacity store, which that analyzer's forget clears.
+		return 0, nil, true
+	case learn.Mu:
+		// Mu is the saturation analyzer's alone: this analyzer keeps no
+		// measured service rate.
 		return 0, nil, true
 	case learn.Start:
 		// The start time is the saturation analyzer's alone: this analyzer

@@ -174,6 +174,8 @@ type wireShape struct {
 const (
 	shapeMeasured = "measured"
 	shapeAssumed  = "assumed"
+	// shapeClamped is a measured prompt spread held at whatif.PromptCVStop.
+	shapeClamped = "clamped"
 )
 
 // wireLine is the ITL line and its readings.

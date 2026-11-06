@@ -40,7 +40,7 @@ const Start = "start"
 // name to that code. A learner joins the list in the PR that moves it onto
 // the shared rules.
 func Learners() []string {
-	return []string{K2, ITL, Start}
+	return []string{K2, Mu, ITL, Start}
 }
 
 // By is what forgot a key.

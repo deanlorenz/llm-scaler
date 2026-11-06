@@ -422,6 +422,29 @@ was set for the first time, moved more than `K2WriteBand` (2 %) from the value
 last logged, or has not logged for `LearnerHeartbeat` (10 min). The
 forget-learned-state annotation reaches k2 through `learn.Learners`.
 
+The engine takes the cycle's reports once, at the end of the cycle
+(`publishLearnerReports`, `TakeLearnerReports`), and publishes each learner's
+`wva_learned_state_last_admitted_timestamp_seconds`. `RecordLearnerReports`
+remembers the key behind each series, which no label carries, and deletes the
+series only when a report without a `PricingKey` names that key `Forgotten`,
+or when the variant is really gone (`retainLearnerSeries`). The active set is
+not the test: a variant at zero replicas is in no model group, and its series
+must outlive the park. Nor is the registry alone
+(`utils.KnownVariantAutoscalings`): a KEDA outage past `registry.DefaultTTL`
+empties it, and a trigger `ParseMeta` refuses leaves it. Each series records its
+scale target at publish time, and a variant missing from the registry goes only
+when a read of that target says NotFound, or finds it being deleted. Any other
+answer, Forbidden included, keeps the series. The read is one `Get` through the
+controller's client with no backoff, at most once per variant per
+`learnerTargetCheckInterval` (1 min), and `learnerSeriesMissingMax` (24 h) ends
+the wait whatever the reads say.
+
+`RollingAverage.Restored` is true from `RestoreRollingAverage` until the
+window's first write, and `itl.Tracker.Restored` from `RestoreBaseline` or
+`RestoreSlope` until the window keeps a reading. The mark lives with the
+figure, not in a map of the analyzer's, so a stash, a forget and an eviction
+carry or drop it with no rule of their own. It is not stored in the snapshot.
+
 A replica that joined the fleet under a rate window ago is filling, whatever
 its queue: its one-minute gauges still hold the minute before it was routed
 to. On the E1 run (2026-10-23) one just joined read 84 waiting on 174,327
@@ -1062,8 +1085,11 @@ replica had been settled, and which settle test passed it). Each cycle mu
 fills a `learn.Report` per variant (`mu_learner.go`; `LearnerReports`, beside
 k2's), and logs `learner-write` at `--v=3` for a key whose priced figure was
 set for the first time, moved more than `MuWriteBand` (5 %) from the value
-last logged, changed source, or has not logged for `LearnerHeartbeat`. The
-throughput floor's line names the key and source it priced from (`muKey`,
+last logged, changed source, or has not logged for `LearnerHeartbeat`. It is
+on `learn.Learners`: the annotation reaches `forgetMuLocked`, which clears what
+`learner-write` last logged, and a key forgotten or evicted is reported
+(`muForgotten`, `SwitchMuForgetReported`). The prefill bound shares mu's maps
+and is not reported. The throughput floor's line names the key and source it priced from (`muKey`,
 `muSource`, `muPricedFor`) and the start time it projected over.
 
 ### The pricing point
@@ -1589,7 +1615,7 @@ passed through `prefillBounds`). Nothing sizes from it.
 
 | Figure | From | Refused |
 | --- | --- | --- |
-| `V_P`, computed tokens/s | busy minutes (median of at least 5 over the last 30 minutes, `prefill.BusyWindow`; a minute is busy when the row's `QueueMin` was read and is above zero, the pod's KV is not full and decode is not back-pressuring; a lower bound, `DataParallelRanks`, when any came from a multi-rank pod; switch `prefill-busy-minutes`), else the peak under a queue sustained over 3 minutes, else the back-pressure bound (at least 2 readings). The last two are lower bounds. In a default production install only the peak under a queue is live: `QueueMin` is collected only while a learner recording is on, and the bound needs `enablePrefillThroughputBound` | `NoPrefillCapacity`, logged with `queuedMinutes` (over the 6 h kept), `longestQueuedRun` and `busyMinutes` (over the 30-minute window; not comparable with `queuedMinutes`) to say which source fell short, with `busyMinutesOn`, `queueMinPods` and `kvFullPods`; `SGLangNoComputedTokens` on SGLang |
+| `V_P`, computed tokens/s | busy minutes (median of at least 5 over the last 30 minutes, `prefill.BusyWindow`; a minute is busy when the row's `QueueMin` was read and is above zero, the pod's KV is not full and decode is not back-pressuring; a lower bound, `DataParallelRanks`, when any came from a multi-rank pod; switch `prefill-busy-minutes`), else the peak under a queue sustained over 3 minutes, else the back-pressure bound (at least 2 readings). The last two are lower bounds. `QueueMin` is collected in a namespace with a TTFT target and while a learner recording is on, so elsewhere in a default production install only the peak under a queue is live; the bound needs `enablePrefillThroughputBound` | `NoPrefillCapacity`, logged with `queuedMinutes` (over the 6 h kept), `longestQueuedRun` and `busyMinutes` (over the 30-minute window; not comparable with `queuedMinutes`) to say which source fell short, with `busyMinutesOn`, `queueMinPods` and `kvFullPods`; `SGLangNoComputedTokens` on SGLang |
 | `a`, seconds | an untrimmed fit of `AvgServiceTime` against the effective prompt (`PrefillComputedTokenRate / RequestRate`) over low-load minutes (no queue, occupancy at most 0.1, prompt steady within 10% of every reading in the last 2 minutes, with at least one there), plus the least `AvgTTFT - AvgServiceTime`. `1/slope` is logged as `slopeBound`, an upper bound on `V_P` for validation only. On `ols-sweep`: intercept 8.36 ms, overhead 2.68 ms, `a` 11.04 ms, `slopeBound` about 520k tok/s | aggregated, fewer than 5 minutes, prompts spanning less than 1.5x between the second shortest and the second longest (so each end holds two minutes), one prompt length throughout (`NoPromptVariance`), a non-positive slope or intercept |
 | `f` | the busiest pod's share of computed tokens over the mean, less the expected max of `N_p` Poisson counts, over minutes with at least 100 requests a pod on average; median of at least 5. It reads low on a real imbalance at few requests (2:1:1:1 reads about 1.50 for 1.6 at 100 a pod) and high on equal pods with variable prompts (about 1.03 at `Cs²` = 1); `imbalance.go` says why. Above 10,000 requests a pod the Poisson excess is its normal approximation (within 0.33% of the exact sum there, up to 64 pods), so its cost does not grow with the rate | `OnePod`, `NoComputedTokens`, `TooFewImbalanceMinutes` |
 

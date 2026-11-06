@@ -101,6 +101,7 @@ type podMetricData struct {
 	// The TTFT model's inputs (ttft_inputs.go): histograms by bucket bound,
 	// nil when no bucket was read, and means with their presence bits.
 	promptTokensBuckets    map[float64]float64
+	computedTokensBuckets  map[float64]float64
 	ttftBuckets            map[float64]float64
 	queueTimeBuckets       map[float64]float64
 	tpotBuckets            map[float64]float64

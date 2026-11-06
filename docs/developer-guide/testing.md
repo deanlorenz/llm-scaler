@@ -738,6 +738,33 @@ frozen, and a change that moves a figure there fails it. The load
 generator, the level windows and the evidence of each run live outside
 the repository; the windows are in the test.
 
+The four `ttft-staircase-*` goldens are four of the six phases of the what-if TTFT
+staircase, repeat 1
+([as built, M2](../proposals/slo-capacity-planner-ttft.md#as-built-m2)): the
+P/D scenario with Qwen3-0.6B at TP 1 on H200, 2 prefill and 2 decode replicas
+pinned, the recorder on, and slo listed with a TTFT target. They are the first
+goldens with the flow-control gate on, and S1 reads on every cycle, as it does on
+`ols-sweep-slo` and `ols-sweep-slo-restart`. Each phase has its own controller
+start, so its own recording.
+
+| Golden | Load | Flow control | Cycles | Compressed |
+| --- | --- | --- | --- | --- |
+| `ttft-staircase-a-off` | 1000 in, 1000 out, Poisson, 3 steps | off | 128 | 589 KB |
+| `ttft-staircase-b-off` | 8000 in, 200 out, Poisson, 7 steps | off | 289 | 1.37 MB |
+| `ttft-staircase-b-on` | the same | on | 289 | 1.49 MB |
+| `ttft-staircase-c-on` | B's shape, gaps of SCV 4, 7 steps | on | 292 | 1.52 MB |
+
+Each was added whole at 59772fce2, the commit that recorded it, and carried
+over. Off means the gate and the `flowControl:` block were removed from the
+`EndpointPickerConfig` and the EPP restarted; on is the block as the scenario
+renders it. `b-off` follows an on phase, and its recording holds the wait histogram
+for the first minutes; it is not a sign of the gate. The A on and C off phases are
+in the validation table only, left out for size and test time; their recordings
+are outside the repository.
+`ttft_staircase_test.go` freezes what the recordings say of S2's gate and of the
+flow-control series. The load driver and the run's other files live outside
+the repository.
+
 The `throughput-sweep` and `throughput-sweep-restart` goldens are one run
 of the `ols-sweep` scenario with the throughput analyzer listed beside
 saturation, for learner PR 4b (the throughput analyzer's ITL line moving

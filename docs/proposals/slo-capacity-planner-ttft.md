@@ -3,7 +3,8 @@
 **Status:** proposal, 2026-11-02. The model is built as a library (P3,
 2026-11-04: [as built](#as-built-p3)), UNVALIDATED and on no switch; in the
 tree only the what-if CLI calls it
-([TTFT, as built](slo-capacity-planner.md#ttft-as-built)). The companion to
+([TTFT, as built](slo-capacity-planner.md#ttft-as-built)). Repeat 1 of the
+staircase ran, and every flag stays ([as built, M2](#as-built-m2)). The companion to
 [what-if capacity](slo-capacity-planner.md), which owns the questions, the
 decode model, the CLI and the PR plan. This page owns the TTFT model: what it
 is made of, the router's flow-control queue, how the parts combine into a
@@ -161,8 +162,8 @@ alone: `S_work = I_eff/V_P`, `ρ = λ·E[I_eff]/V_P`.
    `k2ReasonObsDownstream`). `V_P` is the median of `PrefillComputedTokenRate`
    over at least 5 such minutes. On P/D this is rare: saturation has never
    recorded a non-back-pressured prefill saturation there. As built, the
-   minimum is the recorder's per-pod `QueueMin`, read only while a learner
-   recording is on. A minute on a KV-full prefill pod is not busy, and only
+   minimum is the per-pod `QueueMin`, read in a namespace with a TTFT target
+   ([Q1](slo-tiers.md#as-built-q1)) and while a learner recording is on. A minute on a KV-full prefill pod is not busy, and only
    the last 30 minutes are read. A busy minute reads at or below capacity:
    data-parallel pods (flagged a lower bound) and stalls under-read
    ([P1 and busy minutes](slo-capacity-planner.md#pr-plan)).
@@ -338,10 +339,13 @@ or off.
 
 **Detecting it.** The EPP publishes the flow-control series with the gate on,
 and the queue series is the signal. Its absence means off, flagged "flow control
-inferred off (no queue series)" (a scrape gap looks the same). Whether an on gate
-publishes it while empty is not verified. The other series are not the signal:
-wait buckets at rate 0 were recorded within a run's first 3 to 4 minutes on runs
-`goldens.yaml` describes as off, cause not known. `FlowControlUnknown` is refused only when it is on and the detector's
+inferred off (no queue series)" (a scrape gap looks the same). An on gate publishes
+it at 0 while the queue is empty, once the router has had a request, and not before
+([as built, M2](#as-built-m2)). The other series are not the signal: wait buckets
+at rate 0 were recorded within a run's first 3 to 4 minutes on runs `goldens.yaml`
+describes as off. On the staircase they follow an on phase; the non-zero rates fit
+its 5-minute window, and the rest of the cause is not known, here or on the earlier
+runs. `FlowControlUnknown` is refused only when it is on and the detector's
 thresholds are neither readable nor given (`--fc-queue-threshold`,
 `--fc-kv-threshold`, `--fc-max-concurrency`).
 
@@ -1031,6 +1035,353 @@ TTFT histogram) and for P1 (an overhead that grows with the prompt).
    must take these whatever happens to this change. Run 4's levels are then
    priced at 11.58 ms.
 
+## As built (M2)
+
+The first staircase, one repeat of all six phases, against a prediction frozen
+before its first step.
+
+**This is repeat 1 only. Every flag stays, and no operator page is written.**
+The documented criteria ask for 3 repeats, and a flag lifts only if its bucket
+passes in all of them. A fail cannot be undone by a later repeat, so repeats 2
+and 3 run only after a clean repeat 1. This one is not clean: A and B fail on
+TTFT, so `UnvalidatedTTFT` stays and repeats 2 and 3 were not run. C passes
+here, and that lifts nothing: `AssumedPoissonArrivals` needs all its repeats.
+`AboveFlowControlOnset` cannot be lifted by this ladder: its steps stop below
+every predicted onset (decode 42.4 r/s and prefill 54.6 r/s in B).
+
+### The run
+
+Qwen3-0.6B at TP 1 on H200, 2 prefill and 2 decode replicas, one warm-up with
+flow control off, then each bucket off and on.
+
+Four phases have a committed golden: `ttft-staircase-a-off`, `-b-off`, `-b-on` and
+`-c-on` ([Learner Goldens](../developer-guide/testing.md#learner-goldens)). A on and
+C off are in this section's tables only. Their figures rest on the run's own
+request logs, Prometheus captures and raw recordings, which are outside the
+repository, and no test here replays them. Every figure below was derived the same
+way for all six phases.
+
+Where it departs from [the specification](#ground-truth-and-the-staircase):
+
+| Item | As run | Why |
+| --- | --- | --- |
+| Replicas | Pinned by ScaledObject min = max = 2, not `paused`. 911 samples per role, all 2 | The earlier runs' pin |
+| Load | One driver for all buckets, streamed, Poisson on A and B. It is not in the repository | guidellm has no bucket C. Poisson is what A and B are predicted at |
+| Steps | 0.40, 0.55, 0.70, then +0.06 to 1.12 of the predicted knee: 10 steps | 100 minutes a phase, not 3 hours |
+| Warm-up | One, flow control off | The model's inputs do not depend on the gate |
+| Stop | A, B on and C on stopped on the frozen client p90 rule. B off and C off stopped on the driver's own cap, `--max-inflight 4000`, at 4535 and 4157 in flight, 330 s into step 7 and 150 s into its 420 s window | The frozen criteria do not name the cap. It ended the two runs before the p90 rule could read a full window |
+| Targets | Proposed, none being documented: `TTFTAt` at 0.85 of the knee, flow control off, frozen. TPOT: the mean priced there, and that mean times the warm-up's `R_q` (2.39 at p90, 2.44 at p95, flagged `CoarseTPOTBucket`) | |
+| Router figures | Prometheus' 1-minute rates, summed over the window. No raw EPP scrape | The EPP's metrics were not readable through the API proxy |
+
+The prediction is the file frozen before the first step. Run again at the
+recording's commit, the predictor writes the same 15 lines, byte for byte.
+Bucket C is priced at the `Ca²` each phase measured (mean 4.03 off, 4.01 on,
+every step 3.87 to 4.23 but the one cut short), targets held, as the criteria
+ask. Decode binds all three buckets: the prefill knees are 459 and 57.4 r/s
+against decode's 42.7 and 44.0, so B's "prefill-bound" did not hold.
+
+Measured rate is interpolated between step rates. "Below the ladder" is a first
+step that already misses the target, so the ratio is a lower bound. The mark is
+the page's: a ratio above 1.10 over-promises, below 0.75 under-promises. Reading
+the achieved rate in place of the step rate changes no mark.
+
+Validity. No engine error, and both roles stayed at 2 Ready. Send lag and `Ca²`
+were in bounds on every step. Step 3 of C off ran 3.3% under its rate, past the
+proposed 3%, and is kept: no crossing falls there. Step 7 of B off and C off ran
+64.1% and 65.7% under, because the in-flight cap stopped them 150 s into the
+window. A crossing that lands on one of those steps is reported as a bound, 38.7
+to 41.3 r/s, and not interpolated. C on's step 7 failed 54%, and counts as a miss.
+
+Noise floor. A step's window must hold 4 relaxation times, where a relaxation time
+is `E[S](Ca² + Cs²)/(1 − √ρ)²`: the page's formula, with `Ca²` kept for bucket C.
+On prefill the inputs are measured (`E[S]` is `I/V_P`, `Cs²` the prompt spread) and
+it never binds: 4 relaxation times are 17.3 s at most. Decode has no measured
+`E[S]` or `Cs²` for a request in the queue, so this is an estimate: `E[S]` is 2 over
+the frozen knee, `ρ` the step rate over that knee, and `Cs²` is assumed to be 1.
+
+| Phase | Step | Rate | Decode rho | 4T, s | Window, s | Window over 4T | Flagged |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| B-off | 6 | 38.7 | 0.88 | 95 | 420 | 4.42 | no |
+| B-off | 7 | 41.3 | 0.94 | 392 | 150 | 0.38 | yes |
+| B-on | 6 | 38.7 | 0.88 | 95 | 420 | 4.42 | no |
+| B-on | 7 | 41.3 | 0.94 | 392 | 420 | 1.07 | no |
+| C-off | 6 | 38.7 | 0.88 | 247 | 420 | 1.70 | no |
+| C-off | 7 | 41.3 | 0.94 | 1113 | 150 | 0.13 | yes |
+| C-on | 6 | 38.7 | 0.88 | 240 | 420 | 1.75 | no |
+| C-on | 7 | 41.3 | 0.94 | 968 | 420 | 0.43 | yes |
+
+- Steps 1 to 5 clear it by at least 4.13 times. B's step 6 clears it by 4.42, and
+  C's by 1.70 and 1.75, a thin margin on an assumed `Cs²`.
+- Three step 7s are flagged, and B on's clears it by 1.07. With the knee where
+  [the readings](#readings) put it, at or under 41.3 r/s, `ρ` at step 7 is at or
+  above 1 and no window holds it, B on's included.
+- The steps were not lengthened: the hold was fixed at 10 minutes, and the proposed
+  exception starts above `ρ` 0.95. At 0.94 this departs from the page.
+- No mark moves. A crossing on a flagged step is a bound, which adds C on's client
+  TPOT p90 to the four the 3% rule catches. B on's TPOT crossings rest on step 7,
+  and as a bound would read 0.90 to 0.97, still in the mark.
+
+The window's own drift agrees. Client p90 in the second half of the window over the
+first is 0.94 to 1.09 on every step through 6, except C on's step 6 at 1.50, and it
+is 1.18 on B on's step 7. C on's TTFT crossings end on that step 6: read as the
+whole bracket, 36.0 to 38.7 r/s, they give 0.96 to 1.04, still in the mark.
+
+### TTFT, frozen
+
+| Bucket | Flow control | q | Target | Predicted r/s | Measured r/s, router | Ratio | Mark | Measured r/s, client | Ratio | Mark |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A | off | p90 | 31.8 ms | 36.3 | below the ladder (17.1) | > 2.12 | FAIL, over-promises | below the ladder (17.1) | > 2.12 | FAIL, over-promises |
+| A | off | p95 | 33.1 ms | 36.3 | below the ladder (17.1) | > 2.12 | FAIL, over-promises | below the ladder (17.1) | > 2.12 | FAIL, over-promises |
+| A | on | p90 | 31.8 ms | 36.3 | below the ladder (17.1) | > 2.12 | FAIL, over-promises | below the ladder (17.1) | > 2.12 | FAIL, over-promises |
+| A | on | p95 | 33.1 ms | 36.3 | below the ladder (17.1) | > 2.12 | FAIL, over-promises | below the ladder (17.1) | > 2.12 | FAIL, over-promises |
+| B | off | p90 | 164.3 ms | 37.4 | below the ladder (17.6) | > 2.13 | FAIL, over-promises | 20.8 | 1.80 | FAIL, over-promises |
+| B | off | p95 | 189.6 ms | 37.4 | below the ladder (17.6) | > 2.13 | FAIL, over-promises | 21.5 | 1.74 | FAIL, over-promises |
+| B | on | p90 | 164.3 ms | 37.4 | below the ladder (17.6) | > 2.13 | FAIL, over-promises | 18.3 | 2.04 | FAIL, over-promises |
+| B | on | p95 | 189.6 ms | 37.4 | below the ladder (17.6) | > 2.13 | FAIL, over-promises | 19.8 | 1.89 | FAIL, over-promises |
+| C | off | p90 | 394.1 ms | 37.3 | 36.2 | 1.03 | in the mark | 37.2 | 1.00 | in the mark |
+| C | off | p95 | 510.3 ms | 37.3 | 37.5 | 0.99 | in the mark | 38.7 to 41.3 (bound) | 0.90 to 0.96 | in the mark, a bound |
+| C | on | p90 | 394.1 ms | 37.3 | 36.1 | 1.03 | in the mark | 36.3 | 1.03 | in the mark |
+| C | on | p95 | 510.3 ms | 37.3 | 36.5 | 1.02 | in the mark | 36.8 | 1.01 | in the mark |
+
+A and B fail in both flow-control states, by both witnesses. C is in the mark in
+both, one figure of it only as a bound. In this repeat the client's rate was lower
+with flow control on by 1.7 to 2.5 r/s in B and by 0.9 r/s in C at p90. At p95 in C
+it was lower by 1.9 r/s or more: C off's figure there is a bound, 38.7 to 41.3 r/s,
+so 1.9 is a difference from the bound's low end. That is one repeat with the phases
+run in sequence, and the differences are about a ladder step (2.6 r/s at C, 6.6 r/s
+at B), so they say nothing of the gate. The frozen prediction is the same rate on
+and off.
+
+### TPOT, frozen
+
+The predicted rate is the operating rate: each target was set there.
+
+| Bucket | Flow control | Reading | Target | Predicted r/s | Measured r/s, router | Ratio | Mark | Measured r/s, client | Ratio | Mark |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A | off | mean | 7.0 ms | 36.3 | at least 29.9 | at most 1.21 | no mark | at least 29.9 | at most 1.21 | no mark |
+| A | off | p90 | 16.7 ms | 36.3 | at least 29.9 | at most 1.21 | no mark | at least 29.9 | at most 1.21 | no mark |
+| A | off | p95 | 17.1 ms | 36.3 | at least 29.9 | at most 1.21 | no mark | at least 29.9 | at most 1.21 | no mark |
+| A | on | mean | 7.0 ms | 36.3 | at least 29.9 | at most 1.21 | no mark | at least 29.9 | at most 1.21 | no mark |
+| A | on | p90 | 16.7 ms | 36.3 | at least 29.9 | at most 1.21 | no mark | at least 29.9 | at most 1.21 | no mark |
+| A | on | p95 | 17.1 ms | 36.3 | at least 29.9 | at most 1.21 | no mark | at least 29.9 | at most 1.21 | no mark |
+| B | off | mean | 9.5 ms | 37.4 | 36.1 | 1.03 | in the mark | 36.1 | 1.03 | in the mark |
+| B | off | p90 | 22.7 ms | 37.4 | 38.7 to 41.3 (bound) | 0.90 to 0.97 | in the mark, a bound | 38.7 to 41.3 (bound) | 0.90 to 0.97 | in the mark, a bound |
+| B | off | p95 | 23.2 ms | 37.4 | 38.7 to 41.3 (bound) | 0.90 to 0.97 | in the mark, a bound | 38.7 to 41.3 (bound) | 0.90 to 0.97 | in the mark, a bound |
+| B | on | mean | 9.5 ms | 37.4 | 36.4 | 1.03 | in the mark | 36.3 | 1.03 | in the mark |
+| B | on | p90 | 22.7 ms | 37.4 | 39.3 | 0.95 | in the mark | 40.7 | 0.92 | in the mark |
+| B | on | p95 | 23.2 ms | 37.4 | 39.2 | 0.95 | in the mark | 40.7 | 0.92 | in the mark |
+| C | off | mean | 9.5 ms | 37.4 | 34.6 | 1.08 | in the mark | 35.2 | 1.06 | in the mark |
+| C | off | p90 | 22.7 ms | 37.4 | 37.0 | 1.01 | in the mark | 38.7 to 41.3 (bound) | 0.90 to 0.97 | in the mark, a bound |
+| C | off | p95 | 23.2 ms | 37.4 | 36.3 | 1.03 | in the mark | 38.2 | 0.98 | in the mark |
+| C | on | mean | 9.5 ms | 37.4 | 34.8 | 1.07 | in the mark | 34.7 | 1.08 | in the mark |
+| C | on | p90 | 22.7 ms | 37.4 | 37.2 | 1.00 | in the mark | 38.7 to 41.3 (bound) | 0.90 to 0.97 | in the mark, a bound |
+| C | on | p95 | 23.2 ms | 37.4 | 36.8 | 1.02 | in the mark | 38.3 | 0.97 | in the mark |
+
+- **B and C are in the mark** on the mean and on both percentiles, by both
+  witnesses. Ratios run 0.92 to 1.08, or 0.90 at the far end of a bound.
+- **A's TPOT is "at least".** A TTFT runaway stopped A at step 3, while mean TPOT
+  was 4.4 ms against a 7.0 ms target. The rate where TPOT meets its target was
+  never reached, so A has no TPOT mark, only a bound: the ratio is at most 1.21.
+
+### What the router's buckets can say
+
+The router's buckets are wide where the targets sit, and `histogram_quantile`
+interpolates inside them:
+
+| Bucket | q | Target | Router bucket | Width | Width over target |
+| --- | --- | --- | --- | --- | --- |
+| A | p90 | 31.8 ms | 0.025 to 0.05 s | 25 ms | 79% |
+| A | p95 | 33.1 ms | 0.025 to 0.05 s | 25 ms | 75% |
+| B | p90 | 164.3 ms | 0.1 to 0.2 s | 100 ms | 61% |
+| B | p95 | 189.6 ms | 0.1 to 0.2 s | 100 ms | 53% |
+| C | p90 | 394.1 ms | 0.2 to 0.4 s | 200 ms | 51% |
+| C | p95 | 510.3 ms | 0.4 to 0.6 s | 200 ms | 39% |
+
+So a router figure near a target is a position inside a bucket, not a
+measurement. Below the ladder on B at p90 rests on 189 ms read in a bucket from
+100 to 200 ms; the client read 147 ms there, below the target. C's p90 target,
+394 ms, is 6 ms under an edge. The client's column is the finer one, and B and
+A fail on it too.
+
+### Readings
+
+**A's target sits on the model's floor, and the gap grows with load.** The frozen
+p90 target, 31.8 ms, is 1.03 times the model's floor, 31.0 ms. The client's p90 is
+above the model's by 16.2, 23.6 and 37.4 ms over steps 1 to 3 off, and 19.9, 26.3
+and 35.9 ms on. An error in the floor alone would not grow. The runaway rule, twice
+the target, stopped A at 0.70 of the knee, so A's queue was never reached.
+
+**The capacity knee reads high, and the result does not split by flow-control
+state.** B and C predict 44.0 r/s. A phase held a step if completions over the
+judged window came within 3% of the step rate and nothing failed. By that rule all
+four held step 6, 38.7 r/s (38.5, 38.5, 38.8 and 38.8 r/s). At step 7, 41.3 r/s:
+
+| Phase | Completions, first minute, r/s | Then, r/s | Peak in flight | Stopped by |
+| --- | --- | --- | --- | --- |
+| B off | 39.8 | 13.8 to 36.8 | 4535 | the in-flight cap |
+| C off | 37.8 | 13.3 to 32.9 | 4157 | the in-flight cap |
+| C on | 39.7 | 14.9 to 26.9 | 1657, with the router's queue peaking at 1455 | the p90 rule |
+| B on | 41.2 | 40.4 to 42.9 | 234 | the p90 rule, held |
+
+That is two collapses off, one collapse on and one hold on, at one rate in one
+repeat. In B off and C off the knee lies between 38.7 and 41.3 r/s, and the
+prediction reads 6% to 14% high. In B on it is at or above 41.3 r/s, and the
+prediction reads at most 6% high.
+
+C on's step 6 held by that rule and no more. Inside its window the client's p90 went
+from 424 ms to 636 ms, 1.50 times, in flight from 90 to 136, and the residual is 32.7
+ms against 17.8 at step 5. So C on's knee may be below 38.7 r/s, and there 14% is a
+lower bound on how high the prediction reads: from step 5, which was steady, it
+could be as much as 22%.
+
+The one hold is not evidence for the gate: C on collapsed with it, and B on and C on
+differ in `Ca²`. Why the fleet collapses below the priced knee is not known.
+
+**C on's step 7 is a 429 storm.** Of the 17503 requests due in the judged window,
+9527 failed, 54%. Over the whole step 10731 of 24823 did, 43%. All were 429
+`ResourceExhausted`. The router's p90 of 45.6 s covers only requests that
+finished; the client's is infinite. The router's effective saturation peaked at
+15.3 and its queue at 1455.
+
+**Where the time goes.** The terms below are means, in ms: the model's own terms
+against the client's mean and the engines' counters over the same window.
+
+| Phase | Step, r/s | Client mean | Model mean | Prefill, measured | Prefill, priced | Decode and hop, measured | Decode and hop, priced | Residual | Client p90 | Model p90 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A off | 1, 17.1 | 39.5 | 30.2 | 13.2 | 15.6 | 26.3 | 14.6 | 5.1 | 47.3 | 31.1 |
+| A off | 3, 29.9 | 57.5 | 30.2 | 15.6 | 15.6 | 42.0 | 14.6 | 8.0 | 68.7 | 31.3 |
+| B off | 1, 17.6 | 118.7 | 81.7 | 49.8 | 45.5 | 69.0 | 36.1 | 10.9 | 147.2 | 106.7 |
+| B off | 5, 36.0 | 188.5 | 103.8 | 72.5 | 65.8 | 115.9 | 38.0 | 13.9 | 261.0 | 156.7 |
+| B on | 5, 36.0 | 185.7 | 103.8 | 71.1 | 65.8 | 114.6 | 38.0 | 13.3 | 255.6 | 156.7 |
+| C off | 1, 17.6 | 132.3 | 98.7 | 57.2 | 62.6 | 75.1 | 36.1 | 12.3 | 182.6 | 159.7 |
+| C off | 5, 36.0 | 233.0 | 177.2 | 101.4 | 139.2 | 131.6 | 38.0 | 13.9 | 359.7 | 366.2 |
+| C on | 5, 36.0 | 246.3 | 177.2 | 105.4 | 139.2 | 141.0 | 38.0 | 17.8 | 380.1 | 366.2 |
+
+Measured:
+
+- Prefill is priced close on A and B through step 6: within 2.4 ms on A and 4 to
+  9 ms low on B.
+- Decode and the hop are where A and B are lost. On A off they grow from 26.3 to
+  42.0 ms against 14.6 priced, on B off from 69.0 to 115.9 ms against 36 to 38
+  priced.
+- The residual, the client's mean less the two engines' TTFT, is 5.1 to 15.2 ms on
+  every phase through step 6, but for C on's steps 5 and 6 (17.8 and 32.7 ms).
+  Nothing in the model prices it.
+- B's gap is not a fixed offset. Its gap at step 1 is 34% to 44% of the gap at
+  steps 3 to 6 off, and 46% to 61% on.
+
+Fitted, on the warm-up alone, 305 decode rows: decode TTFT is -3.0 ms, plus 4.06 ms
+per 1000 tokens, plus 7.02 times ITL, rms 4.15 ms. Applied to the staircase, which
+it never saw, its mean error is -2.2 ms on A, -6.5 ms on B and -14.0 ms on C. Fitted
+on the staircase itself, the slope on the client's TPOT is 6.81 on A and 6.95 on B
+and C.
+
+Inferred:
+
+- The decode side scales with step time, at about 7 steps, where the model prices
+  one first step and the transfer. That is why A's and B's gaps grow with load.
+- The residual is the hop between the router and the engines.
+
+**C passes by cancelling errors: measured, no longer a hypothesis.** At 36 r/s on C
+off the model has prefill 37.8 ms over, 139.2 against 101.4, and decode and hop
+93.6 ms under, 38.0 against 131.6. C on gives 33.8 ms over and 103.0 ms under. Its
+mean is 55.8 ms low, while its p90 reads 366.2 ms against the client's 359.7 off and
+380.1 on. The over side is the bursts: from B to C at 36 r/s the prefill engine
+gained 28.9 ms off and 34.3 ms on, where the model adds 73.4 ms.
+
+| Reading | p90 | p95 |
+| --- | --- | --- |
+| Model, Ca2 4 over Ca2 1, at the operating rate | 2.40 | 2.69 |
+| Measured C over B, client, off, steps 1 to 6 | 1.22 to 1.49 | 1.18 to 1.52 |
+| Measured C over B, router, off, steps 1 to 6 | 1.02 to 1.40 | 1.02 to 1.61 |
+| Measured C over B, client, on, steps 1 to 6 | 1.14 to 1.80 | 1.13 to 2.04 |
+| Measured C over B, router, on, steps 1 to 6 | 1.02 to 1.51 | 1.08 to 1.79 |
+| A off, step 1 at 17.1 r/s: model, then client | 31.1, 47.3 ms (1.52x) | 31.6, 50.3 ms (1.59x) |
+| A on, step 1 at 17.1 r/s: model, then client | 31.1, 51.0 ms (1.64x) | 31.6, 54.6 ms (1.73x) |
+| B off, step 1 at 17.6 r/s: model, then client | 106.7, 147.2 ms (1.38x) | 115.9, 170.2 ms (1.47x) |
+| B on, step 1 at 17.6 r/s: model, then client | 106.7, 161.7 ms (1.52x) | 115.9, 181.5 ms (1.57x) |
+| C off, step 1 at 17.6 r/s: model, then client | 159.7, 182.6 ms (1.14x) | 214.0, 201.0 ms (0.94x) |
+| C on, step 1 at 17.6 r/s: model, then client | 159.7, 183.6 ms (1.15x) | 214.0, 204.2 ms (0.95x) |
+
+The model says going from `Ca²` 1 to 4 multiplies the TTFT 2.40 times at p90 and 2.69
+at p95 at the operating rate, and the client measured 1.14 to 1.80 and 1.13 to 2.04.
+So C's pass says nothing of the model at any other `Ca²`, and the two errors would
+not cancel at the same place at `Ca²` near 2. That step was not run, so C's pass is
+not evidence that the model prices bursts.
+
+### S2's gate and the flow-control series
+
+**No recording holds S2's gate on one cycle.** The gate is `V_P`, `a`, `slo` and
+a decode line that prices, at once. Replayed at this commit, with `slo` listed on
+every cycle:
+
+| Phase | Cycles | With `V_P` | With `a` | With a pricing decode line | `V_P` and decode | All | Priced |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| A off | 128 | 0 | 0 | 0 | 0 | 0 | 0 |
+| A on | 130 | 0 | 0 | 0 | 0 | 0 | 0 |
+| B off | 289 | 29 | 0 | 0 | 0 | 0 | 0 |
+| B on | 289 | 0 | 0 | 34 | 0 | 0 | 0 |
+| C off | 286 | 30 | 0 | 0 | 0 | 0 | 0 |
+| C on | 292 | 36 | 0 | 0 | 0 | 0 | 0 |
+
+`a` is the wall: a phase sends one prompt length, so P1 refuses it
+(`NoPromptSpread`, `TooFewLowLoadMinutes`). The warm-up has the other half: 44 of
+317 cycles hold `V_P` and `a` together, and it ends with a decode line, but it
+ran before `slo` was listed and is not a golden. A on and C off are read from the
+run's raw recordings; the other four rows hold on the goldens too. S2 still needs one run with a
+prompt sweep and `slo` listed from its start.
+`TestGoldens_TTFTStaircaseHoldsNoS2GateCycle` freezes the four committed rows.
+
+**An on gate publishes the queue gauge at 0.** `slo-tiers.md` left this open.
+From the recordings:
+
+| Phase | Cycles | Gauge at 0 | Gauge above 0 | No gauge | Wait histogram |
+| --- | --- | --- | --- | --- | --- |
+| A off | 128 | 0 | 0 | 128 | 0 |
+| A on | 130 | 126 | 0 | 4 | 125 |
+| B off | 289 | 0 | 0 | 289 | 15 |
+| B on | 289 | 281 | 4 | 4 | 284 |
+| C off | 286 | 0 | 0 | 286 | 14 |
+| C on | 292 | 245 | 43 | 4 | 288 |
+
+- With the gate on and the queue empty, the gauge reads 0: 652 cycles over the
+  three on phases, 526 of them in the two committed goldens, none absent once it
+  has appeared. It still reads 0 at the end
+  of each recording, 70 to 82 s after the last completion. Longer idle was not
+  measured. The test's count of 3 cycles with no arrivals, in every on phase, is
+  not all idle: in A on and B on one of the 3 is at 60 s, 11 to 12 s after the first
+  request, before the arrival rate reads. After the last completion it is 2, 2 and
+  3.
+- Before a router's first request the gauge does not exist. Each on phase's first
+  4 cycles hold none. Prometheus agrees: the pool saturation series reads from
+  its first sample, 28 to 31 s into the run, and the gauge first at 58 to 61 s,
+  after the first request at 46 to 49 s. So a router with the gate on that has
+  served nothing still reads as no series.
+- The wait histogram is no signal of the gate. B off and C off, each after an on
+  phase, hold it for the first 195 to 210 s, at a non-zero rate for the first
+  60 s. The non-zero part fits a 5-minute rate window: the on phase's last send and
+  last completion are 231 and 227 s before B off's recording starts, 226 and 222 s
+  before C off's, so the window empties them at 69 to 78 s, and the next cycle, at
+  75 s, reads 0. Why the buckets then stay at rate 0 until 195 to 210 s is not known.
+  It would take the old router's last two scrapes to end before the config patch
+  that restarted it, and no file records them. A off follows an off warm-up and
+  holds none.
+- B's gate hardly worked: B on's effective saturation, a 5-minute mean, peaked at
+  0.83, under 1, and the queue was above 0 on 4 cycles. C on is the only phase
+  that queued for long.
+
+`TestGoldens_TTFTStaircaseFlowControlSeries` freezes the table's four committed
+rows; A on and C off are read from the run's raw recordings. The golden check
+holds it too: `slo-published.csv` reads `no-decode-side` on the on phases' cycles
+with a gauge and no decode line, a reason only the on state reaches.
+
+### Not done
+
+The onsets (check 8), the mean residual against its 10 ms budget, the union bound
+and the domain check per step are report-only, and are not in this section: they
+were not derived from this run. The run's files, its driver and the script that
+derives these tables are outside the repository.
+
 ## Open questions
 
 1. **Is the per-pod model right above the prefill onset?** *Recommend:* keep it,
@@ -1038,9 +1389,10 @@ TTFT histogram) and for P1 (an overhead that grows with the prompt).
 2. **Model the dispatch-gate delay?** *Recommend:* not until the staircase shows
    a residual at the onset larger than the proxy hop.
 3. **Is `nixl_xfer_time_seconds` per request or per chunk?** (carried from
-   [SLO tiers](slo-tiers.md) open question 4). `T_xfer` as a per-request term
-   depends on it. *Recommend:* settle it on the staircase's P/D run before
-   `T_xfer` leaves "omitted".
+   [SLO tiers](slo-tiers.md) open question 4). Neither: it is per NIXL handle.
+   From vLLM's source, not measured: [Q1, as built](slo-tiers.md#as-built-q1).
+   A request posts its handles together, so they overlap and do not add. The
+   mean reads under the slowest of them, which is what a request waits for.
 4. **Does `V_P` vary with prompt length?** It does: run 3's low-load medians
    cost about 60% more per token from 30k to 37k than from 8k to 30k. `a`
    takes the curve (above), and P3 rescales `V_P` along it to the prompt

@@ -443,11 +443,12 @@ check-doc-comment-owner: ## Fail on a doc comment describing a different declara
 # The per-package limit for make test. go test's default is 10 minutes, and
 # the learnreplay package, which replays every learner golden many times
 # (the golden check and its negative controls, the switch runs), measured
-# 503 s on a GitHub runner before the TTFT goldens: too close to 600. 30
-# minutes is about twice that package's time on a runner with the goldens
-# (CheckGoldens replays them in parallel since). One -timeout covers every
-# package of one go test, so it cannot be scoped to learnreplay alone.
-TEST_TIMEOUT ?= 30m
+# 503 s on a GitHub runner before the TTFT goldens: too close to 600. 60
+# minutes is about twice that package's time on a runner with the goldens:
+# 868 s before the TTFT staircase's four, and 1729 s with them, 96% of the 30
+# minutes this was. One -timeout covers every package of one go test, so it
+# cannot be scoped to learnreplay alone.
+TEST_TIMEOUT ?= 60m
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest helm check-import-direction check-doc-comment-owner ## Run tests.
@@ -3092,6 +3093,9 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# they selected the controller by, so a pool Pod's log was read as the
 	@# controller's -- and the selector parses perfectly.
 	@bash hack/check-benchmark-controller-pod.sh
+	@echo "Checking the k1/k2 report's Restored column..."
+	@# Fixture events through render_report: a restore is a field, not a source.
+	@bash hack/check-k2-decisions-restored.sh
 	@echo "Checking model identification..."
 	@# Same shape as the check above, on the parsers that name the model every
 	@# ScaledObject is written for. `bash -n` sees none of it: a --served-model-name
