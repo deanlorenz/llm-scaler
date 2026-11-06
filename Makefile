@@ -3033,6 +3033,7 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n deploy/ci-pr-checks/free-disk.sh
 	@bash -n deploy/ci-pr-checks/disk-report.sh
 	@bash -n hack/check-disk-report.sh
+	@bash -n hack/check-goldens-section.sh
 	@bash -n hack/check-policy-apply-docs.sh
 	@bash -n hack/check-release-latest.sh
 	@bash -n hack/check-controller-ready.sh
@@ -3264,6 +3265,10 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@echo "Checking the e2e disk report never fails the job, whatever its samples..."
 	@# It runs after every e2e job; an empty sample value made it exit 1.
 	@bash hack/check-disk-report.sh
+	@echo "Checking the goldens gate..."
+	@# Runs it on fixture pull requests. A gate that reads a template comment as
+	@# a name, or treats an unreadable diff as no golden moved, passes everything.
+	@bash hack/check-goldens-section.sh
 	@echo "Checking no doc applies the sample scaling policy over an install..."
 	@# The sample has no limiters: applying it removes the GPU limit.
 	@bash hack/check-policy-apply-docs.sh

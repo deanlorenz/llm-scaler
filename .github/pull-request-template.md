@@ -15,6 +15,25 @@ Fixes #
 -
 -
 
+## goldens:
+
+<!--
+Keep this heading. Fill it in only when the PR moves a golden: a file under
+internal/engines/analyzers/learnreplay/testdata/goldens/, a
+cmd/whatif/testdata/*.golden, cmd/whatif/testdata/schema-v*.txt, or
+internal/engines/steadystate/testdata/engine-run-event-counts.txt.
+
+Name each one in backticks and say which way it moves. Then paste the
+per-output summary from `make learner-goldens-check`, never the CSV.
+
+- `acceptance/results.csv`: decode demand up on 12 cycles, by at most 0.5 %
+- `pd-restart/*`: new fixture
+- `goldens.yaml`: lists it
+
+CI fails when a moved golden is not named. Editing this section re-runs it.
+The format: docs/developer-guide/testing.md, "The goldens: section".
+-->
+
 ### Pre-review Checklist
 
 <!-- If these boxes are not checked, you will be asked to complete these requirements or explain why they do not apply to your PR. -->

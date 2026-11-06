@@ -1415,6 +1415,70 @@ many rows changed and the first change with its sign and size.
 `TestGoldens_OLSSweepReplayFitsOLS`. If your change moves them, update them in
 the test and say why in the PR.
 
+#### The `goldens:` section
+
+A PR that moves a golden names it in its body. CI fails the PR when it does
+not. Write the section like this:
+
+```markdown
+## goldens:
+
+- `acceptance/results.csv`: decode demand up on 12 cycles, by at most 0.5 %
+- `throughput-sweep/*`: new fixture
+- `goldens.yaml`: lists it
+- `engine-run-event-counts.txt`: one `settle.Observe` line per cycle
+
+(the per-output summary from `make learner-goldens-check`)
+```
+
+**What counts as a golden:** every file under
+`internal/engines/analyzers/learnreplay/testdata/goldens/` (outputs,
+recordings and `goldens.yaml`), `cmd/whatif/testdata/*.golden`,
+`cmd/whatif/testdata/schema-v*.txt`, and
+`internal/engines/steadystate/testdata/engine-run-event-counts.txt`.
+
+**Where the section is.** It opens at a heading that says only `goldens`
+(`## goldens:`, `### Goldens`), or at a line that starts `goldens:` or
+`**goldens:**`. It ends at the next heading, or the next line that starts in
+bold. A list item does not open it. A PR that moves no golden needs no section.
+
+**How to name a file.** Only text in backticks counts, and not inside a fenced
+block or an HTML comment, so the template's comment names nothing.
+
+| name | names |
+| --- | --- |
+| `acceptance/results.csv` | that output |
+| `acceptance/*`, `acceptance/`, `acceptance` | every file of that fixture |
+| `ttft-staircase-*/` | every file of each fixture that matches |
+| `*/results.csv` | that output in every fixture |
+| `goldens.yaml` | the manifest. A new fixture changes it, so name it |
+| `engine-run-event-counts.txt`, `ttft-*.golden` | a golden outside the learnreplay directory, by file name or by its full path |
+
+A full repository path also works. `*` stops at a slash, so `*.csv` names
+nothing, and a name of wildcards alone (`*`, `*/*`) names nothing.
+
+**What the check does not do.** It compares file names with the section. It
+does not run a replay, read a CSV, or check the direction or the summary: those
+are for the reviewer. Naming a file that did not move is not an error.
+
+**How it runs.** `.github/workflows/ci-goldens-gate.yaml` runs on `opened`,
+`edited`, `reopened` and `synchronize`, so editing the body re-runs it without a
+new commit. It has its own workflow because `edited` on `ci-pr-checks.yaml` would
+restart the e2e jobs on every title change. The workflow passes
+`github.event.pull_request.body` to `deploy/ci-pr-checks/goldens-section.sh` in
+the `PR_BODY` environment variable, and diffs the merge commit against its first
+parent. It runs on `pull_request`, with a `contents: read` token. The script
+never evaluates the body and never prints it.
+
+To try a body before you open the PR:
+
+```bash
+PR_BODY="$(cat body.md)" bash deploy/ci-pr-checks/goldens-section.sh "$(git merge-base main HEAD)" HEAD
+```
+
+`hack/check-goldens-section.sh` runs the script on fixture PRs, and holds the
+workflow to its event, token and env var. `make lint-deploy-scripts` runs it.
+
 #### Write the acceptance run again
 
 To write the acceptance run as a raw recording:
@@ -1510,7 +1574,7 @@ one is a row in `known-failures.yaml` with these fields:
 | `expect` | the violation kind the case fails with |
 | `finding` | the defect |
 | `measured` | how often it failed, and the first failure, when the row was written |
-| `owner` | what clears it: a PR of the plan (`PR 3`), an issue (`#391`), or `open` |
+| `owner` | what clears it: an issue (`#391`), or `open`. `CheckLedger` refuses anything else |
 
 The test is strict both ways:
 
