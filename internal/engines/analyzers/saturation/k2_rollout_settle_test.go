@@ -8,6 +8,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
 )
 
 // k2's wait after a rollout (analyzer-learner.md, 4.2 and 4.3;
@@ -82,6 +84,31 @@ func TestK2Rollout_ALaterWaitIsNotMovedBack(t *testing.T) {
 	notReady[0].Ready = false
 	r.cycle(notReady, decodeVariants("v"))
 	assert.Equal(t, []string{k2ReasonObsUnsettled}, r.cycle(revisedFull(ready, "rev-2"), decodeVariants("v")))
+}
+
+// Only a rollout starts this wait: a new lend under a bridge's key moves the
+// tracker's Since too, and is no join.
+func TestK2Rollout_OnlyARolloutStartsTheWait(t *testing.T) {
+	tr := settle.NewTracker()
+	a := NewSaturationAnalyzer(nil).WithSettleView(tr)
+	early := restartT0.Add(-time.Hour)
+	row := domain.ReplicaMetrics{PodName: "p0", VariantName: "v", Ready: true, ReadySince: early, FromWarmPool: true,
+		LentSince: early}
+	model := settleModel("ns", "m")
+	roles := map[string]string{"v": domain.RoleDecode}
+	lentAgain := restartT0.Add(JoinedReplicaWindow + time.Minute)
+	for at := restartT0; at.Before(lentAgain); at = at.Add(15 * time.Second) {
+		tr.Observe(model, settlerow.Of([]domain.ReplicaMetrics{row}, roles), at)
+	}
+	row.LentSince = lentAgain
+	tr.Observe(model, settlerow.Of([]domain.ReplicaMetrics{row}, roles), lentAgain)
+	r, ok := tr.Replica(model, settlerow.Key(row))
+	require.True(t, ok)
+	require.Equal(t, settle.Lent, r.Reason, "premise: the lend moved the tracker's settle")
+	require.Equal(t, lentAgain, r.Since)
+	in := k2SettleInput{namespace: "ns", modelID: "m", variant: "v", pod: "p0", ready: true, bridge: true, readyAt: early}
+	joined, _, _, _ := a.k2Joined(in, restartT0, lentAgain)
+	assert.False(t, joined)
 }
 
 // A new Ready time waits whichever way the switch is: only the revision that

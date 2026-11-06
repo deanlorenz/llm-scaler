@@ -121,6 +121,9 @@ func TestLearner_WriteLogsALineLostOnce(t *testing.T) {
 	require.Len(t, lost, 1)
 	assert.Equal(t, constants.SLOSourceOwn, lost[0].ContextMap()["previousSource"])
 	assert.Equal(t, constants.SLOSourceNoLine, lost[0].ContextMap()["source"])
+
+	r.now = r.now.Add(LearnerHeartbeat)
+	assert.Empty(t, learnerCycles(t, r, 1, func(int) []domain.ReplicaMetrics { return nil }), "no heartbeat for no line")
 }
 
 // A forget says which keys went, by the operator, ahead of the cycle's own
@@ -152,6 +155,7 @@ func TestLearner_AForgetIsReportedWithNoCycleAfterIt(t *testing.T) {
 	require.Len(t, reports, 1)
 	assert.Equal(t, "agg", reports[0].Variant)
 	require.Len(t, reports[0].Forgotten, 1)
+	assert.Empty(t, r.a.TakeLearnerReports(), "said once")
 }
 
 // The sweep says what it evicted, against the variant the key belongs to, a
@@ -159,10 +163,13 @@ func TestLearner_AForgetIsReportedWithNoCycleAfterIt(t *testing.T) {
 func TestLearner_AnEvictionIsReported(t *testing.T) {
 	r := newRolloutRig(t, nil)
 	key := windowKey("ns", "a|b", settleAgg)
-	r.a.lines.ClearWindow(key)
-	_, err := r.a.Analyze(context.Background(), domain.AnalyzerInput{Namespace: "ns", ModelID: "a|b", Config: policy(44*time.Millisecond, 0),
-		VariantStates: []domain.VariantReplicaState{settleAgg}, ReplicaMetrics: settleFleet()})
-	require.NoError(t, err)
+	for range 4 {
+		_, err := r.a.Analyze(context.Background(), domain.AnalyzerInput{Namespace: "ns", ModelID: "a|b", Config: policy(44*time.Millisecond, 0),
+			VariantStates: []domain.VariantReplicaState{settleAgg}, ReplicaMetrics: settleFleet()})
+		require.NoError(t, err)
+		r.now = r.now.Add(settleCycle)
+	}
+	require.Contains(t, r.a.lineLogged, key, "premise: learner-write logged the line")
 	r.a.TakeLearnerReports()
 	ev := r.a.evictStale(r.now.Add(r.a.stateTimeout + time.Minute))
 	require.Positive(t, ev.Lines, "premise: the key was swept")
