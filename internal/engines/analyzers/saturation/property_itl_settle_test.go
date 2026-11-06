@@ -11,6 +11,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
 )
 
 // Property cases for the ITL line on the settle tracker (learner PR 4a,
@@ -40,12 +41,14 @@ func settleCases(learner string, newL func() itlLearner) []propCase {
 	}
 }
 
-// itlSettleCases is the saturation analyzer's line's cases and the slo
-// analyzer's.
+// itlSettleCases is the saturation analyzer's line's cases, the slo
+// analyzer's, and the tracker's own.
 func itlSettleCases() []propCase {
 	def := func() itlLearner { return newTrackerITL(steadinessOf(tuningDefault)) }
 	sloLine := func() itlLearner { return newSLOITL(nil) }
-	return append(settleCases("itl", def), settleCases("slo-itl", sloLine)...)
+	return append(append(settleCases("itl", def), settleCases("slo-itl", sloLine)...),
+		propCase{class: classTransient, learner: "settle", name: "lent-again", family: familyDirect, tuning: tunedDefault,
+			check: checkSettleLentAgain(nil)})
 }
 
 const (
@@ -166,6 +169,41 @@ func checkITLRestartWarmup(newL func() itlLearner) func(uint64) error {
 			return rows
 		})
 		return compareFrom(control, got, 0, "the restart")
+	}
+}
+
+// checkSettleLentAgain: r2 is a warm-pool Pod, handed back and lent again to
+// the same variant between two cycles, so its key does not change and it is
+// never absent. Only the new lend time says so, and the tracker starts a
+// settle at it. No learner reads the event yet (a bridge is no reading of the
+// ITL line or of k2); the balance tracker does, so the case holds the tracker.
+func checkSettleLentAgain(wrap func(*domain.ReplicaMetrics)) func(uint64) error {
+	return func(seed uint64) error {
+		r := propRand(seed)
+		fleet := readyFleet(steadyFleet(r, 3, settleRuns))
+		lentAt := propStart.Add(time.Duration(settleAt+r.IntN(20)) * propCycle)
+		st := settle.NewTracker()
+		st.SetInterval(propCycle)
+		var key settle.Key
+		for i := range settleRuns {
+			now := propStart.Add(time.Duration(i) * propCycle)
+			rows := fleet(i)
+			rows[2].FromWarmPool, rows[2].LentSince = true, propStart.Add(-time.Hour)
+			if !now.Before(lentAt) {
+				rows[2].LentSince = lentAt
+			}
+			if wrap != nil {
+				wrap(&rows[2])
+			}
+			key = settlerow.Key(rows[2])
+			st.Observe(propSettleModel, settlerow.Of(rows, nil), now)
+		}
+		rep, ok := st.Replica(propSettleModel, key)
+		if !ok {
+			return violation(kindNotLearned, "the tracker does not know r2")
+		}
+		return holds(rep.Reason == settle.Lent && rep.Since.Equal(lentAt), kindTransient,
+			"lent again at %s, and its settle is %s at %s", lentAt.Format(time.TimeOnly), rep.Reason, rep.Since.Format(time.TimeOnly))
 	}
 }
 
