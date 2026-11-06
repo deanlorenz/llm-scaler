@@ -123,7 +123,7 @@ func TestGoldens_ThroughputSweepFloors(t *testing.T) {
 					PackageThroughput: {name: false}}})
 				require.NoError(t, err)
 				t.Logf("%s: %s off, throughput line paths %v", f.fixture, name, throughputPaths(sw.Paths))
-				var want []string
+				want := make([]string, 0, len(paths))
 				for _, p := range paths {
 					want = append(want, fmt.Sprintf("%s: the throughput line's path %s ran 0 times, under its floor of %d",
 						f.fixture, p, f.paths[p]))
