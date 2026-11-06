@@ -13,16 +13,16 @@ import (
 // warm-up recording left them, on two pods a role, flow control off. The
 // recording is not committed here, so its figures are literals.
 //
-// ladderTerm is the form on the warm-up's own readings: D the plane
-// prefill.fitDecode reaches over its admitted rows, R the warm-up's fit of the
-// router's _sum and _count (which no learner recording holds, so it was read
-// from the run's Prometheus). Both come from the warm-up alone; no staircase
-// level went into them. The plane's base is below 0, which the learner refuses
-// (prefill.NonPositiveDecodeBase), so this is the form and not what a window
-// learns from this recording: see the page.
+// ladderTerm is what a window learned over that warm-up, past its latch: D as
+// DecodeTermWindow published it at the last cycle. The warm-up recording is not
+// committed (the four phases are, and TestGoldens_TheDecodeTermIsLearned holds a
+// window on them), so its figures are literals here. R is the warm-up's fit of
+// the router's _sum and _count, which no learner recording holds: it was read
+// from the run's Prometheus. Both come from the warm-up alone; no staircase
+// level went into them.
 var ladderTerm = DecodeTerm{
-	Engine:  PromptLine{Base: -0.0021163, PerToken: 4.0897e-06},
-	PerStep: 6.7792,
+	Engine:  PromptLine{Base: -0.0021163385366780585, PerToken: 4.089790884615122e-06},
+	PerStep: 6.7792790425064675,
 	Hop:     PromptLine{Base: 0.00461, PerToken: 0.511e-6},
 }
 
@@ -131,7 +131,7 @@ var ladderFigures = []struct {
 	{"B", 33.404, 0.95, 0.15944, 0.08149, 0.20918, 0.09945},
 	{"B", 36.042, 0, 0.10379, 0.07594, 0.16244, 0.09320},
 	{"B", 36.042, 0.9, 0.15667, 0.08022, 0.21536, 0.09802},
-	{"B", 36.042, 0.95, 0.17996, 0.08149, 0.23865, 0.09945},
+	{"B", 36.042, 0.95, 0.17996, 0.08149, 0.23866, 0.09945},
 	{"B", 38.679, 0, 0.11221, 0.07594, 0.18502, 0.09320},
 	{"B", 38.679, 0.9, 0.17282, 0.08022, 0.24567, 0.09802},
 	{"B", 38.679, 0.95, 0.20037, 0.08149, 0.27322, 0.09945},
@@ -154,7 +154,7 @@ var ladderFigures = []struct {
 	{"C", 36.042, 0.9, 0.36624, 0.08022, 0.42490, 0.09802},
 	{"C", 36.042, 0.95, 0.47462, 0.08149, 0.53328, 0.09945},
 	{"C", 38.679, 0, 0.20273, 0.07594, 0.27554, 0.09320},
-	{"C", 38.679, 0.9, 0.42473, 0.08022, 0.49754, 0.09802},
+	{"C", 38.679, 0.9, 0.42473, 0.08022, 0.49755, 0.09802},
 	{"C", 38.679, 0.95, 0.54995, 0.08149, 0.62277, 0.09945},
 	{"C", 41.316, 0, 0.27142, 0.07594, 0.36994, 0.09320},
 	{"C", 41.316, 0.9, 0.62747, 0.08022, 0.72600, 0.09802},

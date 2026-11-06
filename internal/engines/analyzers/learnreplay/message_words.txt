@@ -246,6 +246,7 @@ NoStepSpread
 NoTPOTHistogram
 NoTraffic
 NonPositiveDecodeBase
+NonPositiveDecodePlane
 NonPositiveHop
 NonPositiveIntercept
 NonPositiveSlope

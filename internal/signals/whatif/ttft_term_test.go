@@ -315,9 +315,10 @@ func TestTerm_NoFitPricesUnderTheOldSum(t *testing.T) {
 	t.Logf("the floor bound on %d figures", bound)
 }
 
-// The reviewer's case on the fleet he used: a fit whose plane read under the old
-// sum gave 5.4x the rate, unflagged. Priced directly, past the learner's refusal,
-// the floor holds the rate and says so.
+// The reviewer's case: a fit whose plane read under the old sum gave 5.4x the
+// rate, unflagged. The learner refuses that plane; priced directly, past the
+// refusal, the floor holds the rate and says so. Refused or floored, it is
+// flagged either way and the rate is never over the old sum's.
 func TestTerm_AFitUnderTheOldSumHoldsItsRate(t *testing.T) {
 	old := workedFleet()
 	old.Prefill.TransferSecondsPerToken = 5e-5
@@ -444,9 +445,9 @@ func TestTermFromEstimate(t *testing.T) {
 		t.Errorf("refused, held: %+v", got)
 	}
 
-	got = TermFromEstimate(prefill.DecodeTermEstimate{Decode: prefill.DecodeFit{Refused: prefill.NonPositiveDecodeBase}})
+	got = TermFromEstimate(prefill.DecodeTermEstimate{Decode: prefill.DecodeFit{Refused: prefill.NonPositiveDecodePlane}})
 	want = DecodeTerm{EngineOmitted: true, Hop: PromptLine{Base: AssumedRouterHopSeconds}, HopAssumed: true,
-		EngineRefused: prefill.NonPositiveDecodeBase, HopRefused: prefill.NoRouterMean}
+		EngineRefused: prefill.NonPositiveDecodePlane, HopRefused: prefill.NoRouterMean}
 	if got != want {
 		t.Errorf("no quiet row: %+v", got)
 	}

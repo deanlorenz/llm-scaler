@@ -128,10 +128,17 @@ func TestDecodeFit_RefusesWhatCannotBe(t *testing.T) {
 	assert.Equal(t, NonPositiveDecodeBase, steep(func(itl, _ float64) float64 { return 5*itl - 0.005 }, 1000).Refused)
 	assert.Equal(t, NonPositiveStepSlope, steep(func(itl, p float64) float64 { return 0.1 + 1e-6*p - 2*itl }, 1000, 2000, 4000).Refused)
 	assert.Equal(t, NegativePromptSlope, steep(func(itl, p float64) float64 { return 0.1 - 1e-6*p + 2*itl }, 1000, 2000, 4000).Refused)
-	// The reviewer's plane: its base prices D under what was measured.
+	// The reviewer's plane: under zero where it was read, at 2000 tokens and 2 ms.
 	got := steep(func(itl, p float64) float64 { return -0.03 + 5e-6*p + 7*itl }, 2000, 4000, 8000)
-	assert.Equal(t, NonPositiveDecodeBase, got.Refused)
+	assert.Equal(t, NonPositiveDecodePlane, got.Refused)
 	assert.Zero(t, got.PerStep, "a refused fit carries no slope")
+
+	// A base under zero alone is no refusal: the warm-up's plane has one, and
+	// stands well above zero wherever it was read.
+	got = steep(func(itl, p float64) float64 { return -0.002 + 4e-6*p + 7*itl }, 1000, 4000, 8000)
+	require.Empty(t, got.Refused)
+	assert.InDelta(t, -0.002, got.Base, 1e-9)
+	assert.InDelta(t, 7, got.PerStep, 1e-6)
 }
 
 // Each gate of a row, alone: the row it refuses is otherwise admitted, and a
@@ -566,11 +573,11 @@ func excursion(r *rand.Rand) []float64 {
 
 // The edges of the choice, each as the fit it reads: x above 0 is admissible.
 var fitEdges = map[string]func(x float64) bool{
-	"base above 0": func(x float64) bool {
+	"plane above 0 where it was read": func(x float64) bool {
 		s := make([]decodeSample, 0, 30)
 		for i := range 30 {
 			itl, p := 0.002+float64(i%7)*0.002, []float64{2000, 4000, 8000}[i%3]
-			s = append(s, decodeSample{ttft: 0.01*x + 3e-6*p + 5*itl, itl: itl, prompt: p})
+			s = append(s, decodeSample{ttft: 0.01*x - 0.016 + 3e-6*p + 5*itl, itl: itl, prompt: p})
 		}
 		return fitDecode(s).Refused == ""
 	},

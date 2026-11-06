@@ -119,10 +119,14 @@ const (
 	NonPositiveStepSlope Refusal = "NonPositiveStepSlope"
 	// NegativePromptSlope is a fitted perToken below zero.
 	NegativePromptSlope Refusal = "NegativePromptSlope"
-	// NonPositiveDecodeBase is a fitted base not above zero. A request pays
-	// something at no prompt and no step, so the plane's intercept is an
-	// extrapolation gone wrong, and it would price under what was measured. At
-	// one prompt the base also stands for the whole prompt's part.
+	// NonPositiveDecodePlane is a plane not above zero at the shortest prompt
+	// and the shortest step it read: it prices no time where it was measured.
+	// Its intercept may be under zero: nothing reads it there, and no figure
+	// prices under the old sum wherever it is read (whatif.DecodeTerm). On the
+	// staircase run's warm-up it is -2.1 ms and the plane is sound.
+	NonPositiveDecodePlane Refusal = "NonPositiveDecodePlane"
+	// NonPositiveDecodeBase is D fitted at one prompt with a base not above
+	// zero: there the base stands for the whole prompt's part.
 	NonPositiveDecodeBase Refusal = "NonPositiveDecodeBase"
 	// TooFewHopWindows is R with fewer than MinHopWindows admitted windows.
 	TooFewHopWindows Refusal = "TooFewHopWindows"
@@ -525,7 +529,8 @@ func (w *DecodeTermWindow) held() HeldDecode {
 // fitDecode fits D over the admitted minutes, untrimmed. With the prompts
 // spanning MinPromptSpread it is the three-term least squares; otherwise TTFT
 // against ITL alone, whose intercept is then the prompt's part as well, held at
-// the shortest prompt read, so that the caller's scaling reads high.
+// the shortest prompt read, so that the caller's scaling reads high. A plane must
+// stand above zero at the shortest prompt and step it read.
 func fitDecode(samples []decodeSample) DecodeFit {
 	out := DecodeFit{Minutes: len(samples)}
 	if len(samples) < MinDecodeMinutes {
@@ -560,8 +565,8 @@ func fitDecode(samples []decodeSample) DecodeFit {
 		out.Refused = NonPositiveStepSlope
 	case !(perToken >= 0):
 		out.Refused = NegativePromptSlope
-	case !(base > 0):
-		out.Refused = NonPositiveDecodeBase
+	case !(base+perToken*slices.Min(prompt)+perStep*slices.Min(itl) > 0):
+		out.Refused = NonPositiveDecodePlane
 	default:
 		out.Base, out.PerToken, out.PerStep = base, perToken, perStep
 	}

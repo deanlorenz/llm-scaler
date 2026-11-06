@@ -1180,7 +1180,8 @@ Declared rows:
 The term's latch is tuned on AR(1) noise at phi 0.9 around a crossing, one reversal
 per excursion at a noise of 0.3 of the excursion (`TestLatch_OneReversalPerExcursion`,
 each edge), about 9 flips with none. At 0.5 the simulation reads a mean of 2.0 flips
-and a worst of 4. That phi is assumed; it is not measured on the fit's own series.
+and a worst of 4. **The noise is assumed:** phi 0.9 is not measured on the fit's own
+series.
 This latch is its own: the ITL tier's (#495, not merged) is private to its tracker.
 
 ### 3.6 Clocks

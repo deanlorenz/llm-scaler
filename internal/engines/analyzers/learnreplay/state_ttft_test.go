@@ -143,6 +143,30 @@ func pdInput(rows ...domain.ReplicaMetrics) domain.AnalyzerInput {
 		{VariantName: "pre", Role: domain.RolePrefill}, {VariantName: "dec", Role: domain.RoleDecode}}}
 }
 
+// A window learns the term from the rows a golden holds: each staircase phase,
+// one prompt length, gives a slope and a base past the latch, with no router
+// mean recorded. The figures are the page's.
+func TestGoldens_TheDecodeTermIsLearned(t *testing.T) {
+	t.Parallel() // reads the goldens, writes nowhere
+	for fixture, want := range map[string]struct{ base, step float64 }{
+		"ttft-staircase-a-off": {0.0031866, 7.0469},
+		"ttft-staircase-b-off": {0.0392244, 6.6086},
+		"ttft-staircase-b-on":  {0.0406247, 6.4443},
+		"ttft-staircase-c-on":  {0.0354927, 8.0912},
+	} {
+		st := goldenState(t, fixture, 0)
+		i := slices.IndexFunc(st.Variants, func(v VariantState) bool { return domain.CanonicalRole(v.Role) == domain.RoleDecode })
+		require.GreaterOrEqual(t, i, 0, fixture)
+		term := st.Variants[i].DecodeTTFT.Term
+		assert.False(t, term.StepAssumed, fixture)
+		assert.False(t, term.EngineOmitted, fixture)
+		assert.InDelta(t, want.base, term.Engine.Base, 1e-6, fixture)
+		assert.InDelta(t, want.step, term.PerStep, 1e-3, fixture)
+		assert.True(t, term.HopAssumed, fixture)
+		assert.Equal(t, prefill.NoRouterMean, term.HopRefused, fixture)
+	}
+}
+
 // The state's term is what the cycles teach: with no reading it is omitted,
 // with a reading and no fit held and assumed, and a sweep of step times is the
 // fit.
