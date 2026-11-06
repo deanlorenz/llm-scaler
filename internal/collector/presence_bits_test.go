@@ -106,6 +106,14 @@ func collectParsed(t *testing.T, series map[string]model.Value, failed map[strin
 // collectParsedRows is collectParsed returning every row.
 func collectParsedRows(t *testing.T, series map[string]model.Value, failed map[string]bool, reader client.Reader) []domain.ReplicaMetrics {
 	t.Helper()
+	// The TTFT inputs are queried only in a cycle that records.
+	return collectParsedCycle(t, series, failed, reader, func(c *ReplicaMetricsCollector) { c.BeginRecordingCycle(true) })
+}
+
+// collectParsedCycle is collectParsedRows in the cycle begin opens.
+func collectParsedCycle(t *testing.T, series map[string]model.Value, failed map[string]bool, reader client.Reader,
+	begin func(*ReplicaMetricsCollector)) []domain.ReplicaMetrics {
+	t.Helper()
 	reg := promclient.NewRegistry()
 	if err := metrics.InitMetrics(reg); err != nil {
 		t.Fatalf("InitMetrics: %v", err)
@@ -129,8 +137,7 @@ func collectParsedRows(t *testing.T, series map[string]model.Value, failed map[s
 
 	c := NewReplicaMetricsCollector(parsedSource{src}, fake.NewClientBuilder().WithScheme(scheme).Build(), reader, nil,
 		scalerLocator(map[string]string{presencePod: "va-1"}))
-	// The TTFT inputs are queried only in a cycle that records.
-	c.BeginRecordingCycle(true)
+	begin(c)
 	defer c.EndCycle()
 	got, err := c.CollectReplicaMetrics(context.Background(), "test-model", "test-ns",
 		make(map[string]scaletarget.ScaleTargetAccessor),

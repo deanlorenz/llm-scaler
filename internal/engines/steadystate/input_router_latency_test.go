@@ -119,7 +119,7 @@ func TestInputBuilder_RouterAndPoolQueriesOnlyWhileRecording(t *testing.T) {
 		registration.QueryFlowControlPoolModels, registration.QueryFlowControlPoolSaturation, registration.QueryFlowControlOutcomes}
 
 	cycle := func(e *Engine) {
-		e.beginCollectorCycle()
+		e.beginCollectorCycle(nil)
 		defer e.ReplicaMetricsCollector.EndCycle()
 		// Two models in one namespace: the second reads the memo.
 		for _, model := range []string{"m", "m2"} {

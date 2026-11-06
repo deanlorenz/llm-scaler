@@ -113,7 +113,11 @@ type ReplicaMetricsCollector struct {
 	// one, and cleared by EndCycle, so it can never outlive the recording
 	// that asked for it.
 	cycleRecord bool
-	cycleMu     sync.Mutex
+	// cycleTTFTNamespaces is the namespaces this cycle reads the TTFT
+	// pricing's inputs for (ReadTTFTInputsIn). Part of the cycle, like
+	// cycleRecord.
+	cycleTTFTNamespaces map[string]bool
+	cycleMu             sync.Mutex
 	// clock is what collectedAt is read from: the instant the rows are
 	// stamped with, their freshness is judged at and a Pod's uptime is
 	// measured to. Nil reads the wall clock (now).
@@ -122,14 +126,40 @@ type ReplicaMetricsCollector struct {
 
 // RecordsTTFTInputs reports whether the open cycle issues the queries whose
 // results only a learner recording reads (docs/proposals/analyzer-learner.md,
-// 2.9): the per-pod TTFT inputs (recordOnlyReplicaQueries), the router's TPOT
-// and flow-control wait histograms, and the flow-control pools. False outside
-// a cycle and in a cycle opened by BeginCycle: none of them is issued, and the
-// rows, the router latency and the pools carry none of their fields.
+// 2.9): the per-pod TTFT inputs (recordOnlyReplicaQueries and
+// ttftReadReplicaQueries), the router's TPOT and flow-control wait histograms,
+// and the flow-control pools. False outside a cycle and in a cycle opened by
+// BeginCycle: none of them is issued, the rows, the router latency and the
+// pools carry none of their fields, and only ReadTTFTInputsIn asks for the
+// three the TTFT pricing reads.
 func (c *ReplicaMetricsCollector) RecordsTTFTInputs() bool {
 	c.cycleMu.Lock()
 	defer c.cycleMu.Unlock()
 	return c.cycleRecord
+}
+
+// ReadTTFTInputsIn names the namespaces whose replica collections this cycle
+// issue the queries the TTFT pricing reads (ttftReadReplicaQueries), each once
+// per namespace through the cycle's memo, whether or not a recording is on.
+// By namespace and not by model: the queries are namespace-scoped, so a
+// model's series cost its neighbours nothing to read, and every model of the
+// namespace gets the same rows whatever order they are collected in. Outside
+// a cycle it does nothing, and EndCycle clears it.
+func (c *ReplicaMetricsCollector) ReadTTFTInputsIn(namespaces map[string]bool) {
+	c.cycleMu.Lock()
+	defer c.cycleMu.Unlock()
+	if c.cycleResults == nil {
+		return
+	}
+	c.cycleTTFTNamespaces = namespaces
+}
+
+// readsTTFTInputs reports whether this cycle reads the TTFT pricing's inputs
+// for namespace (ReadTTFTInputsIn).
+func (c *ReplicaMetricsCollector) readsTTFTInputs(namespace string) bool {
+	c.cycleMu.Lock()
+	defer c.cycleMu.Unlock()
+	return c.cycleTTFTNamespaces[namespace]
 }
 
 // NewReplicaMetricsCollector creates a new replica metrics collector.
@@ -210,6 +240,7 @@ func (c *ReplicaMetricsCollector) BeginRecordingCycle(record bool) {
 	c.cycleResults = make(map[source.CacheKey]*source.MetricResult)
 	c.cyclePods = make(map[string]namespacePods)
 	c.cycleRecord = record
+	c.cycleTTFTNamespaces = nil
 }
 
 // EndCycle closes the cycle opened by BeginCycle and releases the memoized
@@ -218,6 +249,7 @@ func (c *ReplicaMetricsCollector) EndCycle() {
 	c.cycleMu.Lock()
 	defer c.cycleMu.Unlock()
 	c.cycleRecord = false
+	c.cycleTTFTNamespaces = nil
 	c.cycleResults = nil
 	c.cyclePods = nil
 }

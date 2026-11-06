@@ -2417,6 +2417,8 @@ slo-itl-tier-hysteresis
 slo-itl-waits-after-controller-restart
 slo-model
 slo-transient
+slo-ttft-measured-spread
+slo-ttft-measured-transfer
 slo-ttft-price
 slo-ttft-variant
 slo-variant

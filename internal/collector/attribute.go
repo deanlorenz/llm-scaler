@@ -473,6 +473,7 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		// The TTFT model's inputs, as read, for a not-Ready Pod too
 		// (domain.ReplicaMetrics, "Recorded for the TTFT model").
 		PromptTokensBuckets:    sortedBuckets[domain.LengthBucket](data.promptTokensBuckets),
+		ComputedTokensBuckets:  sortedBuckets[domain.LengthBucket](data.computedTokensBuckets),
 		OutputTokensBuckets:    sortedBuckets[domain.LengthBucket](data.outputTokensBuckets),
 		TTFTBuckets:            sortedBuckets[domain.LatencyBucket](data.ttftBuckets),
 		AvgQueueTime:           data.avgQueueTime,

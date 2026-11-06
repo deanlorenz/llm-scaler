@@ -142,11 +142,18 @@ type Analyzer struct {
 	// ttftPrice is SwitchTTFTPrice (ttft.go): on from the constructor; a
 	// replay turns it off (SetSwitchesForReplay).
 	ttftPrice bool
+	// ttftMeasuredSpread is SwitchTTFTMeasuredSpread and
+	// ttftMeasuredTransfer SwitchTTFTMeasuredTransfer (ttft.go): on from the
+	// constructor; a replay turns them off (SetSwitchesForReplay).
+	ttftMeasuredSpread, ttftMeasuredTransfer bool
 	// imbalance is each prefill variant's raw shares and decodeTTFT each
 	// decode variant's measured TTFT, keyed namespace|model|variant, for the
 	// TTFT pricing (ttft_fleet.go). Under mu.
 	imbalance  map[string]*imbalanceWindow
 	decodeTTFT map[string]*decodeTTFTWindow
+	// prompts is each prefill variant's prompt window (ttft.go), under the
+	// same key, from the first row to carry a computed-token histogram.
+	prompts map[string]*promptSpreadWindow
 }
 
 // The batch cap's readers in this analyzer (issue #420). Each took the cap
@@ -204,9 +211,13 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		itlOneSidedAtCap:     true,
 		itlTierHysteresis:    true,
 
-		ttftPrice:  true,
-		imbalance:  make(map[string]*imbalanceWindow),
-		decodeTTFT: make(map[string]*decodeTTFTWindow),
+		ttftPrice: true,
+
+		ttftMeasuredSpread:   true,
+		ttftMeasuredTransfer: true,
+		imbalance:            make(map[string]*imbalanceWindow),
+		prompts:              make(map[string]*promptSpreadWindow),
+		decodeTTFT:           make(map[string]*decodeTTFTWindow),
 	}
 }
 
@@ -778,6 +789,12 @@ func (a *Analyzer) evictStale(now time.Time) Evicted {
 			ev.TTFTWindows++
 		}
 	}
+	for key, w := range a.prompts {
+		if now.Sub(w.seen) > a.stateTimeout {
+			delete(a.prompts, key)
+			ev.TTFTWindows++
+		}
+	}
 	a.evictOwnSettleLocked(now)
 	return ev
 }
@@ -785,7 +802,7 @@ func (a *Analyzer) evictStale(now time.Time) Evicted {
 // Evicted counts what one EvictStale forgot, per map.
 type Evicted struct {
 	Lines, Baselines, Transients, Accelerators int
-	// TTFTWindows counts the imbalance and decode-TTFT windows.
+	// TTFTWindows counts the imbalance, decode-TTFT and prompt windows.
 	TTFTWindows int `learnrec:"omitzero"`
 }
 
@@ -829,6 +846,9 @@ func (a *Analyzer) noteVariantsPresent(namespace, modelID string, variantNames [
 			w.seen = now
 		}
 		if w := a.decodeTTFT[ttftWindowKey(namespace, modelID, name)]; w != nil {
+			w.seen = now
+		}
+		if w := a.prompts[ttftWindowKey(namespace, modelID, name)]; w != nil {
 			w.seen = now
 		}
 	}
