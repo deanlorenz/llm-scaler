@@ -391,10 +391,10 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 		baseline = DefaultBaselineSec
 	}
 	// The fits run outside the lock: they read a copy of the window.
-	c := chooseFit(obs, steadyObs, t.fullFitReady(key, r.Ready, steadyObs, adm), baseline, s.MinSettledSamples)
+	c := chooseFit(obs, steadyObs, t.fullFitReady(key, r.Ready, steadyObs, adm, now), baseline, s.MinSettledSamples)
 	if adm.TierHysteresis {
 		c, r.TierHeld = t.dwellTier(key, c, tierInputs{obs: obs, steady: steadyObs, baseline: baseline,
-			learned: r.BaselineLearned, minSettled: s.MinSettledSamples}, adm, now)
+			learned: r.BaselineLearned, set: r.Ready, minSettled: s.MinSettledSamples}, adm, now)
 	}
 	if c.tier == TierOLS {
 		// B is what is remembered as the key's: B is the hardware floor,
@@ -402,12 +402,18 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 		// the pinned fit to hold through a settle. And only a physical,
 		// positive floor -- a negative B pinned into the next fit would
 		// be worse than the constant it replaced.
-		t.mu.Lock()
-		if c.model.B > 0 {
-			t.baselines[key] = c.model.B
+		//
+		// Between the clear and set values (Admission.TierHysteresis) a full
+		// fit prices the line and teaches nothing: that spread earns a slope
+		// good enough to rest on, not a B to pin every later fit to.
+		if r.Ready || !adm.TierHysteresis {
+			t.mu.Lock()
+			if c.model.B > 0 {
+				t.baselines[key] = c.model.B
+			}
+			t.slopes[key] = heldSlope{a: c.model.A, fittedAt: now, args: adm.Args}
+			t.mu.Unlock()
 		}
-		t.slopes[key] = heldSlope{a: c.model.A, fittedAt: now, args: adm.Args}
-		t.mu.Unlock()
 		r.Model, r.Tier = c.model, TierOLS
 		return r
 	}
@@ -1046,10 +1052,12 @@ func (t *Tracker) forgetKeys(now time.Time, by learn.By, match func(key string) 
 // above the band too, and keeps the key's intercept, its held slope and its
 // replicas' settle traces: the next fit is made from new readings only, and
 // until there are enough the held slope is the line, as on light load. It
-// reports whether the key held any readings.
+// reports whether the key held any readings. The tier latch goes back to the
+// pinned tier: the readings that put it at the full fit are gone.
 func (t *Tracker) ClearWindow(key string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.unlatch(key)
 	had := false
 	for _, m := range []map[string]*Window{t.windows, t.steady, t.above, t.aboveSteady} {
 		if w, ok := m[key]; ok {
@@ -1087,6 +1095,7 @@ func (t *Tracker) ForgetSlope(key string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.slopes, key)
+	t.unlatch(key)
 }
 
 // Baselines returns a copy of every key's remembered intercept.
@@ -1140,6 +1149,9 @@ func (t *Tracker) ForgetSlopes() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	clear(t.slopes)
+	for key := range t.latches {
+		t.unlatch(key)
+	}
 }
 
 // RestoreSlope sets the key's last A unless it already holds one: what was
@@ -1237,4 +1249,7 @@ func (t *Tracker) ForgetBaselines() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	clear(t.baselines)
+	for key := range t.latches {
+		t.unlatch(key)
+	}
 }

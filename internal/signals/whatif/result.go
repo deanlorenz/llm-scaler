@@ -138,8 +138,10 @@ const (
 	// for the same engine configuration: evidence about the configuration,
 	// not about this variant's own load. It has no readings to band.
 	BorrowedLine Flag = "BorrowedLine"
-	// HeldLine is an answer priced on a slope held from an earlier fit, the
-	// window having too few readings to fit a new one.
+	// HeldLine is an answer priced on a line the tracker held: a slope from an
+	// earlier fit, the window having too few readings to fit a new one, or a
+	// line the tier dwell kept where this cycle's readings chose another
+	// (itl.Reading.TierHeld).
 	HeldLine Flag = "HeldLine"
 	// TierUnstable is a band in which more than a tenth of the resamples
 	// fitted the line at another tier than the answer's, and those that did
@@ -169,7 +171,8 @@ const (
 	// TierPinnedB is a fit of the slope alone with the intercept held from
 	// the last full fit, or the default.
 	TierPinnedB = itl.TierPinnedB
-	// TierHeld is the last slope kept, the window too thin to refit it.
+	// TierHeld is a line the tracker held: the last slope kept, the window too
+	// thin to refit it, or the tier dwell refusing a change of tier.
 	TierHeld = "held"
 	// TierBorrowed is another variant's line for the same engine
 	// configuration.

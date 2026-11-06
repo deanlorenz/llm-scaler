@@ -1181,14 +1181,19 @@ lines, one named change with one `SwitchITLTierHysteresis` per analyzer.
 
 - **Set:** 10 steady readings, spread 0.30, as before. **Clear:** under 8, or
   spread 0.18. **Dwell:** 10 min after the last change.
-- **Safe side:** the line that prices more replicas, from either tier. Inside
-  the dwell the tier moves only for a line that prices 3 % more. So a held line
-  prices at most 3 % under the line it refused (`tier-safe-margin`).
+- **Safe side:** the line that prices more replicas, from either tier, by what it
+  sustains where the analyzer prices it (`Admission.PricedRate`). Inside the dwell
+  the tier moves only for a line that prices 3 % more, so a held line prices at
+  most 3 % under the line it refused (`tier-safe-margin`,
+  `TestDwellTier_AClampedFillStillComparesTheRate`).
+- **Resting:** between the clear and set values the full fit teaches no `B` and no
+  held slope, and leaves at once for a pinned fit that prices 3 % more.
+- **Evidence:** an emptied steady window, a gap past the steady carry and every
+  forget put the key back at the pinned tier.
 - **Restart:** the latch is not persisted. A key with a restored slope stands at
   the pinned fit, the rule's safe choice (`TestDwellTier_ARestoredKeyStartsOnTheSafeSide`).
-- **Not held:** a key's first full fit, since no `B` is learned without it
-  (without this exemption the b-converges cases fail), and a tier change once the
-  dwell has run out, which may still price less in one cycle.
+- **Not held:** a key's first full fit, since no `B` is learned without it, and a
+  tier change once the dwell has run out, which may still price less in one cycle.
 
 Measured before the change, main at f7130a9cb, every golden replayed, the
 staircase recordings of #492 included: 78 analyzer-key series, 7758 cycles.
@@ -1204,36 +1209,65 @@ Flips are real and fast: 20 in 44 min on `ols-sweep`. They came from load steps
 ageing out of the steady window, not from noise. Leaving the full fit moved the
 line by at most 2.8 % on the saturation line, as a remembered `B` now pins the
 same line. The run in which a flip halved ITL does not reproduce on these
-recordings: its pinned fit went through the default `B`, and a full fit now
-leaves its own. The largest moves were on entering the full fit. No flip changed
-a replica answer on these fleets; a fleet of 30 is what a 15 % step would move.
-That last part is arithmetic, not a measurement. Synthetic rate[1m] noise at
-spread 0.28 reversed 88 times in 4 h (median, 10 pods) and stepped the line by
-up to 7 %, a synthetic load sweep by up to 9 %.
+recordings: its pinned fit went through the default `B`, and a full fit now leaves
+its own. The largest moves were on entering the full fit. No flip changed a
+replica answer on these fleets.
 
-After it, on the same goldens:
+After it, on the same replays:
 
 | line | tier flips | back within 1 h | moves at a flip |
 | --- | --- | --- | --- |
-| saturation | 21 | 11 | x0.921, x1.249 |
-| slo | 9 | 2 | x0.959, x1.249 |
-| throughput | 2 | 0 | x0.803, x1.000 |
+| saturation | 21 | 11 | x0.909, x1.249 |
+| slo | 9 | 2 | x0.944, x1.249 |
+| throughput | 5 | 1 | x0.803, x1.000 |
 
-The x1.249 is a key's first full fit, on a staircase, which no dwell delays. On
-the moved goldens the saturation mu falls on 278 of 329 cycles and rises by at
-most 3.0 %. Demand moves x0.989 to x1.163. No `RequiredCapacity` or replica count
-moved. The cost: 250 of 2274 cycles refused a tier change, and `lines.csv` loses
-the publishes of those fits. Full fits rose from 376 to 472 over the goldens, and
-fell from 52 to 42 on `ols-sweep-slo-restart`, whose floor came down with them.
+The x1.249 is a key's first full fit, on a staircase, which no dwell delays. The
+mu falls on 222 of 294 moved cycles and rises by at most 3.0 %. Decode demand
+moves x0.933 to x1.120. In whole replicas of supply the decode requirement is
+higher on one cycle and lower on none. The two lowest cycles of decode demand
+are where main's line stepped to a full fit; the latch held that step, and main's
+floor order there is not traced further. Variant `TotalDemand` falls to x0.890
+where main held a shape change and this does not: role demand is up x1.06 to x1.08
+on those cycles, so that move is on the safe side. The cost: 250 of 2274 cycles
+refused a tier change.
 
-Noise, 20 seeds of 4 h on rate[1m]: at most one reversal at spreads of 0.24 to
-0.34 with 2, 4 and 10 pods, against a median of 88 before. At a spread of 0.22
-with 10 pods two seeds of 20 reversed more, up to 3 times. The priced line's error
-at that noise does not widen at the clear value. All of this noise is synthetic.
+**The reversal trade.** 2.6 asks for at most one reversal per excursion. With the
+resting rule this does not hold near the set value. It is the choice made, on
+these numbers. All are synthetic: rate[1m] noise, 40 seeds of 4 h from a cold key
+for reversals, and 20 seeds of a key that entered at spread 0.36 and rests for the
+under-the-truth share (cycles more than 3 % under).
+
+| spread, pods | off: reversals (median, max) | built | no resting rule (first build) |
+| --- | --- | --- | --- |
+| 0.26, 4 | 44, 60 | 9, 13 | 1, 1 |
+| 0.28, 4 | 56, 76 | 4, 10 | 1, 1 |
+| 0.30, 4 | 26, 47 | 0, 3 | 0, 1 |
+| 0.26, 10 | 38, 58 | 7, 13 | 1, 1 |
+| 0.28, 10 | 86, 106 | 7, 11 | 1, 1 |
+| 0.30, 10 | 78, 98 | 2, 5 | 0, 1 |
+| ramp, two crossings, 4 and 10 | 8 to 12, 12 to 20 | 2, 4 | not run |
+
+| resting at, pods | off: under the truth | built | no resting rule | clear 0.21 |
+| --- | --- | --- | --- | --- |
+| 0.22, 4 | 2.37 % | 2.41 % | 7.06 % | 2.29 % |
+| 0.26, 4 | 4.82 % | 3.20 % | 4.94 % | 3.20 % |
+| 0.22, 10 | 1.82 % | 1.19 % | 3.72 % | 1.55 % |
+| 0.26, 10 | 1.90 % | 1.68 % | 2.88 % | 1.66 % |
+
+What moved the error was the `B`, not the clear value. With the band teaching
+`B`, a clear of 0.24 gave 18.8 % at 0.22 with 4 pods, since that `B` pins every
+later fit. With it taught nothing, 0.21 is no better than 0.18. So the clear stays
+at 0.18, the band teaches nothing, and the 3 % rule keeps a resting line on the
+safe side, at the price of some reversals,
+each a move to the safe side and back no faster than the spread sets again. A
+margin of 6 % or a 4 min confirmation gives median reversals near 0 and loses most
+of the gain (5.06 % and 5.53 % at 0.22 with 4 pods). A 10 % margin is no rule at
+all. `ols-spread-reversals-bounded` holds at most 16 in 4 h on the flat paths,
+and 6 on the ramp.
 
 What is assumed: the 3 % comes from the 2.8 % above, and 10 min is twice the
-steady carry. A 5 min dwell measured worse (25 flips and a x0.799 step, at a
-clear of 0.24). Neither value is proven on a large fleet.
+steady carry. A 5 min dwell measured worse (25 flips and a x0.799 step, on the
+first build). Neither value is proven on a large fleet.
 
 ### 3.6 Clocks
 

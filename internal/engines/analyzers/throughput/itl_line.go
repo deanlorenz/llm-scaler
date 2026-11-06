@@ -241,6 +241,7 @@ func noteLineSilence(ctx context.Context, state *variantState, r itl.Reading, re
 	ctrl.LoggerFrom(ctx).Info("throughput analyzer: ITL line", "namespace", namespace, "modelID", modelID,
 		"variant", variant, "silent", silent, "cause", cause, "source", reason,
 		"inBand", r.Offered-r.Capped, "aboveBand", r.AboveBand, "belowBand", r.BelowBand, "settling", r.Settling,
+		"tierHeld", r.TierHeld,
 		"held", r.Held, "aboveBandHeld", r.AboveBandHeld,
 		"atCap", r.Capped, "batchCap", state.batchCap, "batchCapSource", state.batchCapSource,
 		"pinnedAtLeastITL", r.PinnedAtLeastITL)

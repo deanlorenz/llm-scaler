@@ -151,6 +151,10 @@ type Admission struct {
 	// that prices DefaultTierSafeMargin more (tier_latch.go). Without it, as
 	// before, each cycle chooses alone.
 	TierHysteresis bool
+	// TierPrice is what a targeted line's price reads of the engine
+	// (PricedRate). The slo analyzer sets it; a line priced at a fixed fill
+	// has no need of it.
+	TierPrice TierPrice
 	// OLSLatched, on a refit only (Refit), is KeyReadings.OLSLatched.
 	OLSLatched bool
 }
@@ -234,16 +238,67 @@ func (a Admission) pricedFill(line Model) float64 {
 // where the analyzer prices: the higher ITL at oneSidedAt, or, with a
 // target, the lower fill where the ITL meets it.
 func (a Admission) pricesHigher(line, other Model) bool {
-	return a.pricesHigherBy(line, other, 0)
-}
-
-// pricesHigherBy is pricesHigher by more than the fraction margin.
-func (a Admission) pricesHigherBy(line, other Model, margin float64) bool {
 	if a.targeted() {
-		return a.pricedFill(line)*(1+margin) < a.pricedFill(other)
+		return a.pricedFill(line) < a.pricedFill(other)
 	}
 	k := a.oneSidedAt()
-	return line.ITLAt(k) > other.ITLAt(k)*(1+margin)
+	return line.ITLAt(k) > other.ITLAt(k)
+}
+
+// PricedRate is what a replica sustains on line where the analyzer prices it,
+// up to a constant for one key: sequences over ITL at the fill. The replica
+// count goes as its inverse, so the tier latch compares lines by it. At a fixed
+// fill that is the ITL there. With a target the fill is the line's own
+// (pricedFill) and may clamp to the band's top for both lines, where only the
+// ITL still tells them apart; the batch cap then lowers it as
+// whatif.ReachableFill does and caps the sequences as whatif.ReplicaTokenRate
+// does (TierPrice). Zero for a line with no positive ITL there.
+func (a Admission) PricedRate(line Model) float64 {
+	k := a.oneSidedAt()
+	if a.targeted() {
+		lo, _ := a.band()
+		k = a.TierPrice.reachable(a.pricedFill(line), lo)
+	}
+	lat := line.ITLAt(k)
+	if !(lat > 0) || math.IsInf(lat, 0) {
+		return 0
+	}
+	return a.TierPrice.sequences(k) / lat
+}
+
+// TierPrice is the engine a targeted line is priced on, for PricedRate: the
+// replica's KV in tokens, the KV one request holds, and the sequences the
+// replica admits (the batch cap times its ranks). A zero field states nothing:
+// the fill is the sequences' measure then, which only a cap could change.
+type TierPrice struct {
+	CapacityTokens, KVPerRequest float64
+	MaxSeqs                      int64
+}
+
+// reachable is whatif.ReachableFill: k, unless the batch cap stops the cache
+// filling that far, and never below the band.
+func (p TierPrice) reachable(k, lo float64) float64 {
+	if p.MaxSeqs <= 0 || !(p.CapacityTokens > 0) || !(p.KVPerRequest > 0) {
+		return k
+	}
+	kCap := float64(p.MaxSeqs) * p.KVPerRequest / p.CapacityTokens
+	if kCap >= k {
+		return k
+	}
+	return max(kCap, lo)
+}
+
+// sequences is the sequences resident at k, capped; k itself with no engine
+// stated.
+func (p TierPrice) sequences(k float64) float64 {
+	seqs := Sequences(k, p.CapacityTokens, p.KVPerRequest)
+	if !(seqs > 0) {
+		return k
+	}
+	if p.MaxSeqs > 0 {
+		seqs = min(seqs, float64(p.MaxSeqs))
+	}
+	return seqs
 }
 
 // keptA is the A a later hold pairs with baseline so that the held line

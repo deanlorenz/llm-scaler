@@ -61,34 +61,47 @@ func latchFleet() []float64 { return latchPods(0, 1) }
 // narrow is ten pods whose spread is far under the clear value.
 func narrow() []float64 { return latchPods(0.55, 0.685) }
 
-// atOLS is a rig whose key stands at the full fit, since latchStart, with
-// the fleet's window dropped so that the next cycles alone decide.
+// atOLS is a rig whose key stands at the full fit, since latchStart.
 func atOLS(t *testing.T) *latchRig {
 	t.Helper()
 	l := newLatchRig()
 	if r := l.see(0, latchFleet(), 1); r.Tier != TierOLS {
 		t.Fatalf("the fleet's first cycle fitted %q, want the full fit", r.Tier)
 	}
-	l.tr.ClearWindow(latchKey)
 	return l
+}
+
+// after is one cycle at at whose windows hold exactly ks, read a cycle
+// earlier: the window a key at the full fit has aged to, with the evidence it
+// stands on. ClearWindow would be a forget, which unlatches.
+func (l *latchRig) after(at time.Duration, ks []float64, scale float64) Reading {
+	l.tr.mu.Lock()
+	for _, w := range []*Window{l.tr.windows[latchKey], l.tr.steady[latchKey]} {
+		w.Clear()
+		for _, k := range ks {
+			w.Add(k, scale*(l.a*k+l.b), latchStart.Add(at-15*time.Second))
+		}
+	}
+	l.tr.mu.Unlock()
+	return l.see(at, nil, 1)
 }
 
 // Inside the clear values a key at the full fit stays on it, where the set
 // values alone would leave it: the window here is Ready at neither.
 func TestDwellTier_ClearValuesKeepTheFullFit(t *testing.T) {
 	spread := atOLS(t)
-	r := spread.see(15*time.Second, latchPods(0.46, 0.73), 1)
+	r := spread.after(15*time.Second, latchPods(0.46, 0.73), 1)
 	if r.Ready || r.Tier != TierOLS || r.TierHeld {
 		t.Fatalf("spread %.2f: Ready %v tier %q held %v, want the full fit kept", r.SteadySpread, r.Ready, r.Tier, r.TierHeld)
 	}
 
 	rows := atOLS(t)
-	r = rows.see(15*time.Second, []float64{0.40, 0.46, 0.52, 0.58, 0.64, 0.73, 0.70}, 1)
+	r = rows.after(15*time.Second, []float64{0.40, 0.46, 0.52, 0.58, 0.64, 0.73, 0.70}, 1)
 	if r.SteadyHeld != 7 || r.Tier == TierOLS {
 		t.Fatalf("under the clear rows: %d rows tier %q", r.SteadyHeld, r.Tier)
 	}
 	rows = atOLS(t)
-	r = rows.see(15*time.Second, []float64{0.40, 0.46, 0.52, 0.58, 0.64, 0.73, 0.70, 0.55}, 1)
+	r = rows.after(15*time.Second, []float64{0.40, 0.46, 0.52, 0.58, 0.64, 0.73, 0.70, 0.55}, 1)
 	if r.SteadyHeld != 8 || r.Ready || r.Tier != TierOLS {
 		t.Fatalf("at the clear rows: %d rows, Ready %v tier %q, want the full fit kept", r.SteadyHeld, r.Ready, r.Tier)
 	}
@@ -105,12 +118,12 @@ func TestDwellTier_ACollapsedSpreadHoldsTheLineForTheDwell(t *testing.T) {
 		want = Model{A: probe.tr.Slopes()[latchKey].A, B: b}
 	}
 	for at := 15 * time.Second; at < DefaultTierDwell; at += 15 * time.Second {
-		r := l.see(at, narrow(), 1)
+		r := l.after(at, narrow(), 1)
 		if !r.TierHeld || !r.SlopeHeld || r.Tier != TierPinnedB || r.Model != want {
 			t.Fatalf("at %v: held %v slope %v tier %q line %+v, want %+v", at, r.TierHeld, r.SlopeHeld, r.Tier, r.Model, want)
 		}
 	}
-	r := l.see(DefaultTierDwell, narrow(), 1)
+	r := l.after(DefaultTierDwell, narrow(), 1)
 	if r.TierHeld || r.SlopeHeld || r.Tier != TierPinnedB {
 		t.Fatalf("at the dwell: held %v slope %v tier %q, want the pinned fit", r.TierHeld, r.SlopeHeld, r.Tier)
 	}
@@ -124,7 +137,7 @@ func TestDwellTier_ACollapsedSpreadHoldsTheLineForTheDwell(t *testing.T) {
 func TestDwellTier_OffChoosesEachCycleAlone(t *testing.T) {
 	l := atOLS(t)
 	l.adm.TierHysteresis = false
-	r := l.see(15*time.Second, narrow(), 1)
+	r := l.after(15*time.Second, narrow(), 1)
 	if r.TierHeld || r.SlopeHeld || r.Tier != TierPinnedB {
 		t.Fatalf("off: held %v slope %v tier %q", r.TierHeld, r.SlopeHeld, r.Tier)
 	}
@@ -138,7 +151,7 @@ func TestDwellTier_OnlyTheMarginGoesThroughTheDwell(t *testing.T) {
 		held  bool
 	}{{0.90, true}, {1.00, true}, {1.029, true}, {1.031, false}, {1.20, false}} {
 		l := atOLS(t)
-		r := l.see(15*time.Second, latchPods(0.61, 0.745), tc.scale)
+		r := l.after(15*time.Second, latchPods(0.61, 0.745), tc.scale)
 		if r.TierHeld != tc.held {
 			t.Errorf("readings at %.3fx the line: held %v, want %v", tc.scale, r.TierHeld, tc.held)
 		}
@@ -232,12 +245,12 @@ func TestDwellTier_ASlopeItMayNotHoldEndsTheDwell(t *testing.T) {
 	args.tr.slopes[latchKey] = s
 	args.tr.mu.Unlock()
 	args.adm.Args = "after"
-	if r := args.see(15*time.Second, narrow(), 1); r.TierHeld || r.SlopeHeld {
+	if r := args.after(15*time.Second, narrow(), 1); r.TierHeld || r.SlopeHeld {
 		t.Fatalf("other arguments: held %v slope %v", r.TierHeld, r.SlopeHeld)
 	}
 	age := atOLS(t)
 	age.adm.SlopeHoldFor = time.Minute
-	if r := age.see(2*time.Minute, narrow(), 1); r.TierHeld || r.SlopeHeld {
+	if r := age.after(2*time.Minute, narrow(), 1); r.TierHeld || r.SlopeHeld {
 		t.Fatalf("a slope past its age: held %v slope %v", r.TierHeld, r.SlopeHeld)
 	}
 }
@@ -277,7 +290,7 @@ func TestDwellTier_APinnedLineIsPricedOneSided(t *testing.T) {
 	const heldA = (0.08 - DefaultBaselineSec) / latchKPrice
 	l.tr.RestoreSlope(latchKey, Slope{A: heldA, FittedAt: latchStart})
 	l.tr.mu.Lock()
-	l.tr.latches[latchKey] = tierLatch{tier: TierOLS, since: latchStart}
+	l.tr.latches[latchKey] = tierLatch{tier: TierOLS, since: latchStart, seen: latchStart}
 	l.tr.mu.Unlock()
 	ks := make([]float64, 12)
 	for i := range ks {
@@ -286,5 +299,122 @@ func TestDwellTier_APinnedLineIsPricedOneSided(t *testing.T) {
 	r := l.see(15*time.Second, ks, 1)
 	if r.TierHeld || !r.PinnedAtLeastITL {
 		t.Fatalf("held %v, one-sided %v, line %+v: want the one-sided line through the dwell", r.TierHeld, r.PinnedAtLeastITL, r.Model)
+	}
+}
+
+// A target can clamp both lines to the band's top, where their fills agree and
+// the replica count still goes as the ITL there: the margin is held on the
+// rate, not the fill. Readings at 1.5x the line clamp to the same 0.80.
+func TestDwellTier_AClampedFillStillComparesTheRate(t *testing.T) {
+	for _, tc := range []struct {
+		scale float64
+		held  bool
+	}{{1.02, true}, {1.05, false}, {1.5, false}} {
+		l := atOLS(t)
+		l.adm.OneSidedAt, l.adm.OneSidedTarget = 0, 1
+		r := l.after(15*time.Second, latchPods(0.61, 0.745), tc.scale)
+		if got := l.adm.pricedFill(r.Model); got != DefaultMaxObservableK {
+			t.Fatalf("the fill did not clamp: %v", got)
+		}
+		if r.TierHeld != tc.held {
+			t.Errorf("readings at %.3fx at a clamped fill: held %v, want %v", tc.scale, r.TierHeld, tc.held)
+		}
+	}
+}
+
+// The batch cap lowers the fill a target prices and caps the sequences, as
+// slo's ReplicaTokenRate does: the rate falls with the ITL at that fill.
+func TestAdmission_PricedRateReadsTheBatchCap(t *testing.T) {
+	adm := Admission{OneSidedTarget: 1, MaxK: 0.80,
+		TierPrice: TierPrice{CapacityTokens: 1000, KVPerRequest: 10, MaxSeqs: 50}}
+	line := Model{A: 0.03, B: 0.0025}
+	want := 50 / line.ITLAt(0.50)
+	if got := adm.PricedRate(line); got != want {
+		t.Fatalf("priced rate %v, want %v at the cap's fill 0.50", got, want)
+	}
+}
+
+// The latch stands on its evidence: after any of these, spread 0.20 on 8 rows
+// (inside the clear values) earns nothing, and a new B is not written.
+func TestDwellTier_TheLatchGoesWithItsEvidence(t *testing.T) {
+	inside := []float64{0.46, 0.49, 0.52, 0.55, 0.58, 0.61, 0.64, 0.66}
+	// A fleet past the steady window's size holds one cycle of readings: that
+	// is not lost evidence.
+	wide := atOLS(t)
+	many := make([]float64, 0, 48)
+	for i := range 48 {
+		many = append(many, 0.40+0.007*float64(i))
+	}
+	for i := 1; i <= 3; i++ {
+		wide.see(time.Duration(i)*15*time.Second, many, 1)
+	}
+	if got := wide.tr.latches[latchKey].tier; got != TierOLS {
+		t.Errorf("48 rows a cycle: the latch stands at %q", got)
+	}
+	for name, drop := range map[string]func(l *latchRig){
+		"ClearWindow":     func(l *latchRig) { l.tr.ClearWindow(latchKey) },
+		"ForgetSlope":     func(l *latchRig) { l.tr.ForgetSlope(latchKey) },
+		"ForgetSlopes":    func(l *latchRig) { l.tr.ForgetSlopes() },
+		"ForgetBaselines": func(l *latchRig) { l.tr.ForgetBaselines() },
+	} {
+		l := atOLS(t)
+		drop(l)
+		if r := l.after(15*time.Second, inside, 1); r.Tier == TierOLS {
+			t.Errorf("%s: the full fit was kept on the clear values", name)
+		}
+		if got := l.tr.latches[latchKey].tier; got != TierPinnedB {
+			t.Errorf("%s: the latch stands at %q", name, got)
+		}
+	}
+	// Past the carry with no steady reading: only this cycle's remain.
+	l := atOLS(t)
+	l.tr.mu.Lock()
+	l.tr.windows[latchKey].Clear()
+	l.tr.steady[latchKey].Clear()
+	l.tr.mu.Unlock()
+	if r := l.see(2*time.Hour, inside, 1); r.Tier == TierOLS {
+		t.Error("a window that aged out kept the full fit on the clear values")
+	}
+	if got := l.tr.latches[latchKey].tier; got != TierPinnedB {
+		t.Errorf("aged out: the latch stands at %q", got)
+	}
+	// An empty window goes the same way, with no row to offer.
+	l = atOLS(t)
+	l.tr.mu.Lock()
+	l.tr.windows[latchKey].Clear()
+	l.tr.steady[latchKey].Clear()
+	l.tr.mu.Unlock()
+	l.see(15*time.Second, nil, 1)
+	if got := l.tr.latches[latchKey].tier; got != TierPinnedB {
+		t.Errorf("emptied: the latch stands at %q", got)
+	}
+}
+
+// Resting between the clear and set values, a pinned fit that prices the
+// margin more takes the line at once, inside the dwell; one that does not
+// leaves the full fit where it is. Either way a fit at that spread teaches
+// neither B nor the held slope.
+func TestDwellTier_RestingLeavesForAHigherPinnedFit(t *testing.T) {
+	l := atOLS(t)
+	l.a, l.b = 0.02, 0.012
+	r := l.after(15*time.Second, latchPods(0.46, 0.67), 1)
+	if r.Ready || r.Tier != TierPinnedB || r.TierHeld || r.SlopeHeld {
+		t.Fatalf("Ready %v tier %q held %v slope %v, want the pinned fit", r.Ready, r.Tier, r.TierHeld, r.SlopeHeld)
+	}
+	if got := l.tr.latches[latchKey]; got.tier != TierPinnedB || !got.since.Equal(latchStart.Add(15*time.Second)) {
+		t.Fatalf("the latch: %+v", got)
+	}
+	l = atOLS(t)
+	b, _ := l.tr.Baseline(latchKey)
+	a := l.tr.Slopes()[latchKey].A
+	l.a, l.b = 0.0295, 0.0028
+	if r := l.after(15*time.Second, latchPods(0.46, 0.67), 1); r.Tier != TierOLS {
+		t.Fatalf("near the line: tier %q, want the full fit kept", r.Tier)
+	}
+	if got, _ := l.tr.Baseline(latchKey); got != b {
+		t.Errorf("a resting fit moved B: %v, was %v", got, b)
+	}
+	if got := l.tr.Slopes()[latchKey].A; got != a {
+		t.Errorf("a resting fit moved the held slope: %v, was %v", got, a)
 	}
 }

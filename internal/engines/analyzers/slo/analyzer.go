@@ -334,6 +334,7 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 				// Which line, and what it was fitted from: the window's key,
 				// the coefficients, and what the window was offered and held.
 				"lineKey", key, "lineA", d.line.Model.A, "lineB", d.line.Model.B, "lineTier", d.line.Tier,
+				"tierHeld", d.line.TierHeld,
 				// A held slope reads pinned or pinned-default on the metric
 				// like a fit made this cycle; these say it is an old one.
 				"lineSlopeHeld", d.line.SlopeHeld, "lineSlopeAge", d.line.SlopeAge(now),
@@ -497,6 +498,8 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	// default B prices under the truth: priced one-sided until B is learned
 	// (one_sided.go).
 	a.oneSided(&adm, tpotTarget, a.priorScope(key, args, input.VariantStates))
+	a.tierPrice(&adm, tpotTarget, capacityInputs{tokens: fleet.capacityTokens(vs.VariantName, params),
+		kvPerRequest: fleet.shape.KVreq, ranks: fleet.engineRanks(vs.VariantName)}, params)
 	// The fill is clamped to the band the line is fitted over.
 	band := whatif.FillBand{Lo: adm.MinK, Hi: adm.MaxK}
 	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, adm, now)

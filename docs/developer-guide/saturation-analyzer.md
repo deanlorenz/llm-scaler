@@ -753,16 +753,38 @@ Add a row when you add such a threshold.
 
 | threshold | set | clear | dwell | safe side | after a restart |
 | --- | --- | --- | --- | --- | --- |
-| ITL tier: full fit or pinned fit (`itl/tier_latch.go`, on the saturation, slo and throughput lines) | 10 steady readings, spread 0.30 of `k` | under 8 steady readings or spread 0.18 | 10 min after the last change, unless the new line prices 3 % more replicas | the line that prices more replicas, from either tier | the latch is not kept: a key with a restored slope stands at the pinned fit |
+| ITL tier: full fit or pinned fit (`itl/tier_latch.go`, on the saturation, slo and throughput lines) | 10 steady readings, spread 0.30 of `k` | under 8 steady readings or spread 0.18, or a pinned fit pricing 3 % more | 10 min after the last change, unless the new line prices 3 % more replicas | the line that prices more replicas, from either tier, judged by what the line sustains where the analyzer prices it | the latch is not kept: a key with a restored slope stands at the pinned fit |
 
-A spread near the set value wanders: on synthetic rate[1m] noise the bare gate
-reversed 88 times in 4 h (median, 10 pods), and at most once with the clear value.
+**Price.** A line's price is sequences over ITL at the fill the analyzer reads
+(`Admission.PricedRate`). At a fixed fill that is the ITL there. With a TPOT
+target the fill is the line's own, lowered by the batch cap, and it often clamps
+to the band's top for both lines: the ITL there is what tells them apart.
+
+**Resting.** Between the clear and set values the full fit prices the line and
+teaches nothing: it writes neither `B` nor the held slope. It stays only while
+the pinned fit, through a `B` learned at the set values, does not price 3 % more.
+So a resting line prices at most 3 % under the pinned fit.
+
+**Evidence.** The latch goes back to the pinned tier when the steady window
+empties, when the key goes past `DefaultSteadyCarry` without a steady reading,
+and on `ClearWindow`, `ForgetSlope`, `ForgetSlopes` and `ForgetBaselines`.
+
+**Noise.** On synthetic rate[1m] noise the tier still changes near the set value,
+far less often than the bare gate: at spread 0.26, a median of 7 to 9 changes in
+4 h against 38 to 44. Those changes are the resting rule leaving for the safe side
+and the spread setting again. Dropping the rule would give one change, and more
+cycles under the truth ([3.5](../proposals/analyzer-learner.md#the-itl-tier-as-built-495)).
 A load step collapses the spread past any clear value, so the dwell does that
-work. While it refuses a change, `itl-fit` logs `tierHeld`: leaving the full fit
-holds the key's last slope (`slopeHeld`), and entering it stays on the pinned
-fit. A key's first full fit does not wait: with no `B` learned, only it can
-replace the default. A new line may price less than the one it replaces by more
-than 3 % once the dwell ends, as it always could before.
+work.
+
+**While the dwell refuses a change** the log says `tierHeld`: `itl-fit` on the
+saturation line, `slo-variant` (at `-v=3`) on the slo line, and the
+`throughput analyzer: ITL line` summary on the throughput line, which logs only
+when the line goes silent or comes back. Leaving the full fit holds the key's last
+slope (`slopeHeld`), and entering it stays on the pinned fit; the what-if planner
+reads both as `held` and flags `HeldLine`. A key's first full fit does not wait:
+with no `B` learned, only it can replace the default. Once the dwell ends a new
+line may price less than the one it replaces by more than 3 %, as it could before.
 
 `SwitchITLTierHysteresis`, one per analyzer, turns the latch off for a replay.
 

@@ -222,20 +222,21 @@ var replaySwitches = map[string][]string{
 
 	// Issue #495: the ITL line's tier is latched, on all three lines that
 	// share itl.Tracker's choice of fit, one named change with one switch per
-	// analyzer (itl.Admission.TierHysteresis). Base: main at f7130a9cb. It
+	// analyzer (itl.Admission.TierHysteresis). Base: main at de9043f23. It
 	// moves the sweep recordings, whose load steps collapse the spread; each
 	// analyzer moves only the line it fits, and no interaction shows: all
 	// three on moves the union and no more. Measured against all off:
 	//
 	//   - The saturation line, 29 outputs. Over those recordings the mu falls
-	//     on 278 of 329 moved cycles, to x0.83 at the lowest, and rises by at
-	//     most 3.0 %, DefaultTierSafeMargin: the bias asked for. Demand moves
-	//     x0.989 to x1.163. No RequiredCapacity and no replica count moves.
-	//     lines.csv loses the publishes of the fits a dwell held.
+	//     on 222 of 294 moved cycles, to x0.858 at the lowest, and rises by at
+	//     most 3.0 %, DefaultTierSafeMargin. Decode demand moves x0.933 to
+	//     x1.120; in whole replicas of supply the decode requirement is higher
+	//     on one cycle and lower on none. lines.csv loses the publishes of the
+	//     fits a dwell held.
 	//   - The slo line, 4 outputs: slo-published.csv, on the fills priced, and
 	//     the slo rows of variant-capacities.csv.
-	//   - The throughput line, 7 outputs: throughput-sweep, whose line a dwell
-	//     held, and two engine rows.
+	//   - The throughput line, 6 outputs of throughput-sweep, whose line a
+	//     dwell held.
 	saturation.SwitchITLTierHysteresis: {
 		"ols-sweep-slo-restart/composite-results.csv", "ols-sweep-slo-restart/composite-roles.csv",
 		"ols-sweep-slo-restart/composite-variants.csv", "ols-sweep-slo-restart/lines.csv",
@@ -257,11 +258,11 @@ var replaySwitches = map[string][]string{
 		"ols-sweep-slo/slo-published.csv", "ols-sweep-slo/variant-capacities.csv",
 	},
 	throughput.SwitchITLTierHysteresis: {
-		"engine/variant-capacities.csv", "throughput-sweep/composite-release.csv",
-		"throughput-sweep/composite-results.csv", "throughput-sweep/composite-roles.csv",
-		"throughput-sweep/composite-variants.csv", "throughput-sweep/variant-capacities.csv",
-		"throughput-sweep/warm-pool-pressure.csv",
+		"throughput-sweep/composite-release.csv", "throughput-sweep/composite-results.csv",
+		"throughput-sweep/composite-roles.csv", "throughput-sweep/composite-variants.csv",
+		"throughput-sweep/variant-capacities.csv", "throughput-sweep/warm-pool-pressure.csv",
 	},
+
 	// Q1 of the TTFT track (docs/proposals/slo-capacity-planner.md, the PR
 	// plan): the collector reads the computed-token histogram every cycle, and
 	// S1's cv is measured where a row carries one. It moves no golden: no
@@ -407,10 +408,8 @@ var learner4b1Seams = map[string][]string{
 		"throughput-sweep/variant-capacities.csv",
 		"throughput-sweep/warm-pool-pressure.csv",
 	},
-	// Since the tier latch (issue #495) acceptance and engine no longer move,
-	// measured off alone from all on.
 	throughput.SwitchITLKeepsWindowOnGPSMismatch: {
-		"mu-paths/variant-capacities.csv",
+		"acceptance/variant-capacities.csv", "engine/variant-capacities.csv", "mu-paths/variant-capacities.csv",
 	},
 }
 
@@ -428,12 +427,9 @@ var learner4aSeams = map[string][]string{
 	// cycle, variant-02 borrows none, and their reported service rates and
 	// the learned-state export lose them, as the slo analyzer's line does
 	// under slo.SwitchITLReadsSettle.
-	//
-	// Since the tier latch (issue #495) it moves engine/composite-variants.csv
-	// too, measured off alone from all on.
 	saturation.SwitchITLReadsSettle: {
 		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
-		"engine/composite-variants.csv", "engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
+		"engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
 	},
 	saturation.SwitchITLWaitsAfterRestart: {
 		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
