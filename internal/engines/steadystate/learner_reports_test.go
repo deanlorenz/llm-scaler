@@ -138,13 +138,19 @@ func newParkRig(t *testing.T) *parkRig {
 // variant adds a variant at replicas, with a learner series published for it.
 func (r *parkRig) variant(model, name string, replicas int32) {
 	r.t.Helper()
+	r.workload(model, name, replicas)
+	r.e.metricsEmitter.RecordLearnerReports(spyReports(model, name)["ns|"+model], r.e.learnerTarget)
+}
+
+// workload adds a variant and what it scales, and publishes nothing.
+func (r *parkRig) workload(model, name string, replicas int32) {
+	r.t.Helper()
 	r.e.Variants.Observe("ns", name, map[string]string{variantregistry.ModelIDKey: model})
 	r.e.Variants.SetTarget("ns", name, variantregistry.Target{APIVersion: "apps/v1", Kind: "Deployment", Name: name})
 	require.NoError(r.t, r.c.Create(context.Background(), &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
 		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
 	}))
-	r.e.metricsEmitter.RecordLearnerReports(spyReports(model, name)["ns|"+model], r.e.learnerTarget)
 }
 
 // expire is KEDA no longer calling about a variant, its workload still there.
@@ -250,6 +256,17 @@ func TestLearnerSeries_NotFoundDeletes(t *testing.T) {
 	r := newParkRig(t)
 	r.variant("m", "m-wva", 0)
 	r.cycle()
+	r.remove("m-wva")
+	assert.Empty(t, r.cycle())
+}
+
+// The engine's publish records the target: the read that ends a series has
+// nothing to go on otherwise, and the series would wait out the cap.
+func TestLearnerSeries_ThePublishRecordsTheTarget(t *testing.T) {
+	r := newParkRig(t)
+	r.workload("m", "m-wva", 0)
+	r.e.analyzers = testAnalyzers(&reportSpy{reports: spyReports("m", "m-wva")})
+	r.e.publishLearnerReports()
 	r.remove("m-wva")
 	assert.Empty(t, r.cycle())
 }
