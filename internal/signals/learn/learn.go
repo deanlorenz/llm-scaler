@@ -60,6 +60,15 @@ type Forgotten struct {
 	By  By
 }
 
+// Keys is the key of each of forgotten, in order.
+func Keys(forgotten []Forgotten) []string {
+	keys := make([]string, 0, len(forgotten))
+	for _, f := range forgotten {
+		keys = append(keys, f.Key)
+	}
+	return keys
+}
+
 // Source is where a learner's figure came from, in the learner's own
 // vocabulary (k2's P1-obs, P2-hist and the rest). A restore is not a source.
 type Source string

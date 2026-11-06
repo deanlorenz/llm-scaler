@@ -1,11 +1,8 @@
 package slo
 
 import (
-	"maps"
-	"slices"
 	"strings"
 
-	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
@@ -14,9 +11,9 @@ import (
 // Forgetting one variant's learned state, on an operator's request (issue
 // #431). The forget-learned-state annotation is read by the engine, which
 // acts on a token once, through the saturation analyzer's mark
-// (saturation.ForgottenToken), and then forgets the variant in both
-// analyzers. This analyzer keeps no token of its own: it forgets when the
-// engine asks.
+// (saturation.ForgottenToken), and then forgets the variant in every
+// analyzer that keeps a line. This analyzer keeps no token of its own: it
+// forgets when the engine asks.
 //
 // Before, the annotation reached the saturation analyzer alone. This
 // analyzer fits its own ITL line with its own itl.Tracker, so after a forget
@@ -82,22 +79,6 @@ func (a *Analyzer) forgetVariant(namespace, modelID, variant string) (int, []lea
 	return n, forgotten
 }
 
-// ForgottenKeyMessage is the line logged once per key a forget takes, at
-// the default verbosity, beside the engine's one line per variant.
-const ForgottenKeyMessage = "Learned state forgotten for one key, on request"
-
-// logForgotten logs each key a forget took, one line per key, on the
-// caller's logger: the keys the saturation analyzer files in its learner
-// report (learn.Report.Forgotten), which this analyzer, with no learner
-// report, logs. Every key here is forgotten by the operator, so the line
-// names no cause.
-func logForgotten(logger logr.Logger, namespace, modelID, variant string, forgotten []learn.Forgotten) {
-	for _, f := range forgotten {
-		logger.Info(ForgottenKeyMessage, "analyzer", "slo", "learner", learn.ITL,
-			"namespace", namespace, "modelID", modelID, "variant", variant, "key", f.Key)
-	}
-}
-
 // forgetLearnerLocked forgets one learner's state for a variant, and returns
 // how many entries it dropped, the keys it forgot, and whether it has code
 // for the learner. The learners on learn.Learners are the saturation
@@ -138,14 +119,7 @@ func (a *Analyzer) forgetLinesLocked(namespace, modelID, variant string) (int, [
 	// matching "v2".
 	prefix := namespace + "|" + modelID + "|" + variant + "|"
 	match := func(k string) bool { return strings.HasPrefix(k, prefix) }
-	keys := map[string]bool{}
-	windows, baselines := a.lines.Sweep(a.now(), func(k string) bool {
-		if match(k) {
-			keys[k] = true
-			return true
-		}
-		return false
-	})
+	windows, baselines, forgotten := a.lines.ForgetKeys(a.now(), learn.ByOperator, match)
 	for key := range a.args {
 		if match(key) {
 			delete(a.args, key)
@@ -155,10 +129,6 @@ func (a *Analyzer) forgetLinesLocked(namespace, modelID, variant string) (int, [
 		if match(key) {
 			delete(a.seen, key)
 		}
-	}
-	forgotten := make([]learn.Forgotten, 0, len(keys))
-	for _, k := range slices.Sorted(maps.Keys(keys)) {
-		forgotten = append(forgotten, learn.Forgotten{Key: k, By: learn.ByOperator})
 	}
 	return windows + baselines, forgotten
 }

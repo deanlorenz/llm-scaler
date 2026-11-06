@@ -16,18 +16,24 @@ type replicasAnswer struct {
 	slo whatif.DecodeSLO
 	// ratio is R_q, when a percentile was asked and resolved.
 	ratio whatif.TPOTRatio
+	// query is the question as priced: the prefill knee may set its rate.
+	// ttft is the TTFT asked, nil with none; headroom the operating point's
+	// fraction of the knee.
+	query    whatif.ReplicasQuery
+	ttft     *operatingTTFT
+	headroom float64
 }
 
 // runReplicasToSLO answers question 2 (docs/proposals/slo-capacity-planner.md,
 // "Question 2: from replicas to an SLO") for decode: the knee the replicas
 // saturate at, the operating rate below it, and the TPOT held there.
 func runReplicasToSLO(ctx context.Context, args []string, out, warn io.Writer) error {
-	return asJSONError("replicas-to-slo", args, out, replicasToSLO(ctx, args, out, warn))
+	return asJSONError(replicasQuestion, args, out, replicasToSLO(ctx, args, out, warn))
 }
 
 func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) error {
-	fs := newAnswerFlags("replicas-to-slo", args, out)
-	f := answerFlags{question: "replicas-to-slo", warn: warn}
+	fs := newAnswerFlags(replicasQuestion, args, out)
+	f := answerFlags{question: replicasQuestion, warn: warn}
 	f.register(fs)
 	rate := fs.Float64("rate", 0, "the operating rate, requests per second over the fleet, in place of headroom x knee")
 	pct := fs.String("tpot-percentile", "", "report the TPOT at this per-request percentile too, in percent (90)")
@@ -50,6 +56,10 @@ func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) erro
 			return usagef("--tpot-percentile %q: %v", *pct, err)
 		}
 	}
+	ttft, err := f.replicasTTFT()
+	if err != nil {
+		return err
+	}
 	st, err := f.readState(ctx)
 	if err != nil {
 		return err
@@ -57,6 +67,13 @@ func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) erro
 	variants, err := f.decodeVariants(st)
 	if err != nil {
 		return err
+	}
+	ttft.policyPercentile(st)
+	var fleets []*pricedFleet
+	if ttft != nil {
+		if fleets, err = f.ttftFleets(st, *ttft, variants); err != nil {
+			return err
+		}
 	}
 
 	query := whatif.ReplicasQuery{}
@@ -87,7 +104,20 @@ func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) erro
 
 	answers := make([]replicasAnswer, 0, len(variants))
 	var results []whatif.Result
-	for _, pv := range variants {
+	h := f.headroomFor(st.Policy)
+	var given *float64
+	if f.set["rate"] {
+		given = rate
+	}
+	for i, pv := range variants {
+		query := query
+		var at *operatingTTFT
+		if ttft != nil {
+			var o operatingTTFT
+			o, query = fleets[i].atOperatingPoint(*ttft, query, given, h, whatif.KneeRate(pv.decode))
+			at = &o
+			results = append(results, o.results()...)
+		}
 		slo := whatif.SLOAtReplicas(pv.decode, query)
 		if slo.PercentileTPOT != nil {
 			slo.PercentileTPOT = withRatioRefusal(slo.PercentileTPOT, ratioRefused)
@@ -97,11 +127,15 @@ func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) erro
 		}
 		slo.KneeRate = pv.qualify(pv.band(slo.KneeRate, whatif.KneeRate))
 		// A rate --rate gives is an input, not an estimate: it has no band.
-		if !f.set["rate"] {
+		// A rate the prefill knee sets has none either: V_P is not resampled.
+		if query.Rate == 0 {
 			slo.Rate = pv.band(slo.Rate, on(func(s whatif.DecodeSLO) whatif.Result { return s.Rate }))
 		}
 		slo.Rate = pv.qualify(slo.Rate)
 		slo.MeanTPOT = pv.qualify(pv.band(slo.MeanTPOT, on(func(s whatif.DecodeSLO) whatif.Result { return s.MeanTPOT })))
+		if at != nil {
+			slo.Rate, slo.MeanTPOT = at.onDecode(slo.Rate), at.onDecode(slo.MeanTPOT)
+		}
 		if slo.PercentileTPOT != nil {
 			p := pv.band(slo.PercentileTPOT, on(func(s whatif.DecodeSLO) whatif.Result { return s.PercentileTPOT }))
 			if a, ok := p.(whatif.Answer); ok {
@@ -109,25 +143,39 @@ func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) erro
 				p = a
 			}
 			slo.PercentileTPOT = pv.qualify(p)
+			if at != nil {
+				slo.PercentileTPOT = at.onDecode(slo.PercentileTPOT)
+			}
 		}
-		answers = append(answers, replicasAnswer{pv: pv, slo: slo, ratio: ratio})
+		answers = append(answers, replicasAnswer{pv: pv, slo: slo, ratio: ratio, query: query, ttft: at, headroom: h})
 		results = append(results, slo.KneeRate, slo.Rate, slo.MeanTPOT, slo.PercentileTPOT)
 	}
 	none := noDecode(st, variants)
 	if none != nil {
 		results = append(results, *none)
 	}
+	// With no decode variant the prefill role still answers.
+	var alone *operatingTTFT
+	if ttft != nil && len(variants) == 0 {
+		o, _ := fleets[0].atOperatingPoint(*ttft, query, given, h, nil)
+		alone = &o
+		results = append(results, o.results()...)
+	}
 	code := whatif.ExitCode(results...)
 
 	if f.output == outputJSON {
-		w := newWireOutput("replicas-to-slo", &f, st, variants, code)
+		w := newWireOutput(replicasQuestion, &f, st, variants, code)
+		w.addTTFTNote(fleets)
 		for _, a := range answers {
 			in := inputsOf(&f, a.pv)
 			if f.set["rate"] {
 				in.Rate = rate
 			} else {
-				h := query.Headroom
+				h := a.headroom
 				in.Headroom = &h
+			}
+			if a.ttft != nil && a.ttft.prefillBinds {
+				in.Rate, in.RateSource = &a.ttft.rate, sourcePrefillKnee
 			}
 			if query.PercentileTarget != nil {
 				in.TPOT = tpotInputs(st, 0, q, a.ratio)
@@ -136,16 +184,22 @@ func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) erro
 				Knee: toWire(a.slo.KneeRate, unitRate), OperatingRate: toWire(a.slo.Rate, unitRate),
 				MeanTPOT: toWire(a.slo.MeanTPOT, unitSeconds), PercentileTPOT: toWire(a.slo.PercentileTPOT, unitSeconds),
 			}})
+			if a.ttft != nil {
+				w.Roles = append(w.Roles, a.ttft.wire())
+			}
 		}
 		if none != nil {
 			w.Roles = append(w.Roles, wireRole{Role: "decode", Results: wireResults{Knee: toWire(*none, unitRate)}})
+		}
+		if alone != nil {
+			w.Roles = append(w.Roles, alone.wire())
 		}
 		if err := writeJSON(out, w); err != nil {
 			return err
 		}
 	} else if _, err := io.WriteString(out, f.sourceLine(st)); err != nil {
 		return err
-	} else if err := writeReplicasText(out, &f, st, variants, answers, none, *pct, query); err != nil {
+	} else if err := writeReplicasText(out, &f, st, variants, answers, none, alone, fleets, *pct); err != nil {
 		return err
 	}
 	if code != whatif.ExitAnswered {
@@ -172,14 +226,14 @@ func tpotInputs(st *learnreplay.State, target, q float64, r whatif.TPOTRatio) *w
 	case r.Assumed:
 		t.RatioSource = "assumed"
 	default:
-		t.RatioSource = "learned"
+		t.RatioSource = sourceLearned
 	}
 	return t
 }
 
 // writeReplicasText is question 2's human output, in the page's layout.
 func writeReplicasText(out io.Writer, f *answerFlags, st *learnreplay.State, variants []pricedVariant, answers []replicasAnswer,
-	none *whatif.Unanswerable, pct string, query whatif.ReplicasQuery) error {
+	none *whatif.Unanswerable, alone *operatingTTFT, fleets []*pricedFleet, pct string) error {
 	var b strings.Builder
 	for i, a := range answers {
 		if len(answers) > 1 {
@@ -191,6 +245,10 @@ func writeReplicasText(out io.Writer, f *answerFlags, st *learnreplay.State, var
 		if u, ok := a.slo.KneeRate.(whatif.Unanswerable); ok {
 			fmt.Fprintf(&b, "%-16s%s\n", "decode", refusedText(u))
 			fmt.Fprintf(&b, "%-16s%s\n", "shape", a.pv.shapeText())
+			if a.ttft != nil {
+				a.ttft.writeRows(&b)
+				flagsLine(&b, a.pv, a.ttft.results()...)
+			}
 			continue
 		}
 		knee := a.slo.KneeRate.(whatif.Answer)
@@ -198,28 +256,49 @@ func writeReplicasText(out io.Writer, f *answerFlags, st *learnreplay.State, var
 		switch r := a.slo.Rate.(type) {
 		case whatif.Answer:
 			why := "--rate"
-			if query.Rate == 0 {
+			if !f.set["rate"] {
 				src := "scaleUpThreshold"
 				if f.set["headroom"] {
 					src = "--headroom"
 				}
-				why = fmt.Sprintf("%s x knee (%s)", num(query.Headroom), src)
+				of := "knee"
+				if a.ttft != nil && a.ttft.prefillBinds {
+					of = "prefill knee"
+				}
+				why = fmt.Sprintf("%s x %s (%s)", num(a.headroom), of, src)
+				if a.ttft != nil && a.ttft.prefillBinds {
+					why += "; " + a.ttft.fleet.verdict()
+				}
 			}
 			row(&b, "operating rate", rateText(r.Value), "", why)
 		case whatif.Unanswerable:
 			fmt.Fprintf(&b, "%-16s%s\n", "operating rate", refusedText(r))
 		}
-		tpotRow(&b, "mean TPOT", a.slo.MeanTPOT, lineText(a.pv))
+		tpotRow(&b, "mean TPOT", a.slo.MeanTPOT, lineText(a.pv)+a.ttft.decodeNote())
 		if a.slo.PercentileTPOT != nil {
-			tpotRow(&b, "TPOT p"+strings.TrimPrefix(pct, "p"), a.slo.PercentileTPOT, "per request; "+f.ratioNote(st, a.ratio))
+			tpotRow(&b, "TPOT p"+strings.TrimPrefix(pct, "p"), a.slo.PercentileTPOT, "per request; "+f.ratioNote(st, a.ratio)+a.ttft.decodeNote())
+		}
+		if a.ttft != nil {
+			a.ttft.writeRows(&b)
 		}
 		fmt.Fprintf(&b, "%-16s%s\n", "shape", a.pv.shapeText())
-		flagsLine(&b, a.pv, a.slo.KneeRate, a.slo.Rate, a.slo.MeanTPOT, a.slo.PercentileTPOT)
+		results := []whatif.Result{a.slo.KneeRate, a.slo.Rate, a.slo.MeanTPOT, a.slo.PercentileTPOT}
+		if a.ttft != nil {
+			results = append(results, a.ttft.results()...)
+		}
+		flagsLine(&b, a.pv, results...)
 	}
 	if none != nil {
 		fmt.Fprintf(&b, "%-16s%s\n", "decode", refusedText(*none))
 	}
+	if alone != nil {
+		alone.writeRows(&b)
+		flagsLine(&b, pricedVariant{}, alone.results()...)
+	}
 	b.WriteString(footer(st, variants) + "\n")
+	if len(fleets) > 0 {
+		b.WriteString(footerNote(fleets) + "\n")
+	}
 	_, err := io.WriteString(out, b.String())
 	return err
 }
@@ -241,7 +320,7 @@ func tpotRow(b *strings.Builder, label string, r whatif.Result, basis string) {
 // row is one line of question 2's output: the label, the value, and, for a
 // banded figure, the band, then the basis.
 func row(b *strings.Builder, label, value, band, basis string) {
-	if band == "" && !strings.HasPrefix(label, "mean") && !strings.HasPrefix(label, "TPOT") {
+	if band == "" && !strings.HasPrefix(label, "mean") && !strings.HasPrefix(label, "TPOT") && !strings.HasPrefix(label, "TTFT") {
 		fmt.Fprintf(b, "%-16s%-12s%s\n", label, value, basis)
 		return
 	}

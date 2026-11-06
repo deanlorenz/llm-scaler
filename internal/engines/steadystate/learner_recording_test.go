@@ -396,13 +396,20 @@ func recordRun(t *testing.T, start time.Time, record bool) ([]byte, [][]allocati
 // recordRunEngine is recordRun, with the engine that recorded.
 func recordRunEngine(t *testing.T, start time.Time, record bool) ([]byte, [][]allocation.NamedAnalyzerResult, *Engine) {
 	t.Helper()
+	return recordRunRestartingAt(t, start, start.Add(30*time.Minute), record)
+}
+
+// recordRunRestartingAt is the scripted run with the controller restarting at
+// restartAt. The first controller's last cycle is 6 min after start, so the
+// usual 30 min is a document far past sightingsMaxAge: its replicas wait.
+func recordRunRestartingAt(t *testing.T, start, restartAt time.Time, record bool) ([]byte, [][]allocation.NamedAnalyzerResult, *Engine) {
+	t.Helper()
 	s := newRecScript(start)
 	first := s.engine(t)
 	// Long enough apart for each snapshot write to land.
 	for i := range 4 {
 		s.cycle(t, first, i, start.Add(time.Duration(i)*2*time.Minute))
 	}
-	restartAt := start.Add(30 * time.Minute)
 	second := s.engine(t)
 	var buf bytes.Buffer
 	if record {
@@ -531,9 +538,11 @@ func TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult(t *testing
 		slo.KindBeginCycle:          12,
 		slo.KindEvictStale:          12,
 		slo.KindNoteVariantsPresent: 28,
-		// The forget reaches the slo line too (#431), on the same token.
-		slo.KindForgetVariant: 1,
-		settle.KindObserve:    28,
+		// The forget reaches the slo line (#431) and the throughput line too,
+		// on the same token.
+		slo.KindForgetVariant:        1,
+		throughput.KindForgetVariant: 1,
+		settle.KindObserve:           28,
 	}, kinds, "the events the scripted run records")
 	t.Logf("recorded %d bytes: %v", len(recording), kinds)
 	assertResultsPriced(t, recording)
@@ -623,10 +632,12 @@ func TestLearnerRecording_EveryEventRoundTripsByteForByte(t *testing.T) {
 		slo.KindNoteVariantsPresent:         func() any { return &slo.PresentEvent{} },
 		slo.KindForgetVariant:               func() any { return &slo.ForgetVariantEvent{} },
 		throughput.KindAnalyze:              func() any { return &throughput.AnalyzeEvent{} },
+		throughput.KindForgetVariant:        func() any { return &throughput.ForgetVariantEvent{} },
 		capacity.KindFileScaleTarget:        func() any { return &capacity.FileScaleTargetEvent{} },
 		capacity.KindEvictStale:             func() any { return &capacity.EvictStaleEvent{} },
 		settle.KindObserve:                  func() any { return &settle.ObserveEvent{} },
 		settle.KindHold:                     func() any { return &settle.ObserveEvent{} },
+		settle.KindRestore:                  func() any { return &settle.RestoreEvent{} },
 	}
 	checked := map[string]int{}
 	for _, ev := range events {

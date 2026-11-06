@@ -52,6 +52,7 @@ var recordedTypes = []reflect.Type{
 
 	reflect.TypeFor[throughput.AnalyzeEvent](),
 	reflect.TypeFor[throughput.ObserveEvent](),
+	reflect.TypeFor[throughput.ForgetVariantEvent](),
 
 	reflect.TypeFor[capacity.FileScaleTargetEvent](),
 	reflect.TypeFor[capacity.EvictStaleEvent](),
@@ -61,6 +62,7 @@ var recordedTypes = []reflect.Type{
 	reflect.TypeFor[enginerec.CompositeEvent](),
 
 	reflect.TypeFor[settle.ObserveEvent](),
+	reflect.TypeFor[settle.RestoreEvent](),
 }
 
 // fieldNames is every Go field name of recordedTypes: an object whose keys
@@ -249,6 +251,7 @@ var keyRules = map[string]rule{
 	"LowerBounds": {class: classComposite}, "PriorK2": {class: classComposite},
 	"StartSeconds": {class: classComposite}, "Throughput": {class: classComposite},
 	"StartSamples": {class: classComposite}, "StartAdmittedAt": {class: classComposite},
+	"StartCounted":   {class: classComposite},
 	"ThroughputArgs": {class: classComposite}, "ThroughputStash": {class: classComposite},
 	"VariantSeenAt": {class: classComposite}, "Reports": {class: classComposite},
 
@@ -278,7 +281,7 @@ var vocabulary = withWords(ttftWords(), withWords(enginerec.Words(), setOf(
 	"T1-ols", "T2-above-band", "T2-default", "T2-failed", "T2-held", "T2-pinned",
 	"no-change", "no-data", "no-itl", "no-line", "no-rate", "no-separators", "no-seqs", "no-shape",
 	"slo-model", "slo-own", "slo-pinned", "slo-tpot", "slo-transient", "slo-ttft", "slo-variant",
-	"own", "pinned", "borrowed", "borrowed-line", "derived", "derived-report-only", "derived-aggregated", "report-only", "measured", "sibling", "stale", "served",
+	"own", "pinned", "borrowed", "borrowed-line", "derived", "derived-report-only", "derived-aggregated", "report-only", "measured", "neighbour", "lower-bound", "sibling", "stale", "served",
 	"k1-bound", "pinned-default", "slo-pinned-default", "no-output-length", "declined", "infeasible",
 	"input-invalid",
 	"itl-line", "k2", "mu", "deployment", "live", "store", "unobserved", "whole", "partial", "none",

@@ -64,26 +64,31 @@ func TestGolden(t *testing.T) {
 			"--tpot", "2ms"}, workedShape), 3},
 	}
 	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got, code := runCmd(t, c.args...)
-			if code != c.code {
-				t.Errorf("exit %d, want %d; output:\n%s", code, c.code, got)
-			}
-			path := filepath.Join("testdata", c.name+".golden")
-			if *update {
-				if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				return
-			}
-			want, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatalf("%v (go test ./cmd/whatif -run TestGolden -update writes it)", err)
-			}
-			if w := strings.ReplaceAll(string(want), "\r\n", "\n"); got != w {
-				t.Errorf("output differs from %s\ngot:\n%s\nwant:\n%s", path, got, w)
-			}
-		})
+		t.Run(c.name, func(t *testing.T) { checkGolden(t, c.name, c.code, c.args) })
+	}
+}
+
+// checkGolden runs a command line and holds its output and exit code to
+// testdata/name.golden.
+func checkGolden(t *testing.T, name string, wantCode int, args []string) {
+	t.Helper()
+	got, code := runCmd(t, args...)
+	if code != wantCode {
+		t.Errorf("exit %d, want %d; output:\n%s", code, wantCode, got)
+	}
+	path := filepath.Join("testdata", name+".golden")
+	if *update {
+		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("%v (go test ./cmd/whatif -run Golden -update writes it)", err)
+	}
+	if w := strings.ReplaceAll(string(want), "\r\n", "\n"); got != w {
+		t.Errorf("output differs from %s\ngot:\n%s\nwant:\n%s", path, got, w)
 	}
 }
 
@@ -161,8 +166,10 @@ func TestWorkedExampleFromTheRecording(t *testing.T) {
 
 // The JSON output's schema is pinned: every key path the wire types can
 // write, with its JSON type, is in testdata/schema-v<schemaVersion>.txt. A
-// change to the wire types fails here until the schema version is bumped
-// and the list rewritten (-update writes the list for the current version).
+// change to the wire types fails here until the list is rewritten (-update
+// writes it for the current version). Removing, renaming or retyping a key, or
+// changing its meaning, also bumps the version; a key absent unless a new
+// flag asks for it does not.
 func TestJSONSchemaIsPinned(t *testing.T) {
 	var paths []string
 	schemaPaths(reflect.TypeFor[wireOutput](), "", &paths)
@@ -180,7 +187,7 @@ func TestJSONSchemaIsPinned(t *testing.T) {
 		t.Fatalf("%v: a schema version with no pinned key list", err)
 	}
 	if w := strings.ReplaceAll(string(want), "\r\n", "\n"); got != w {
-		t.Errorf("the JSON schema moved without a new schemaVersion (now %d)\ngot:\n%s\nwant:\n%s", schemaVersion, got, w)
+		t.Errorf("the JSON schema moved from its pinned list (schemaVersion %d): bump it unless every change is a key only a new flag asks for\ngot:\n%s\nwant:\n%s", schemaVersion, got, w)
 	}
 	if len(paths) < 40 {
 		t.Fatalf("walked only %d key paths: %v", len(paths), paths)
@@ -289,8 +296,8 @@ func TestExitCodes(t *testing.T) {
 		{"input: a variant the cycle lacks", q2("--variant", "nope"), 2, ""},
 		{"input: no such file", []string{"replicas-to-slo", "--recording", "testdata/none.jsonl"}, 2, ""},
 		{"input: not a recording", []string{"replicas-to-slo", "--recording", "answer_test.go"}, 2, ""},
-		{"usage: TTFT is not modelled", q1("--tpot", "4ms", "--ttft", "200ms@p95"), 2, ""},
-		{"usage: prefill is not modelled", q2("--prefill", "1"), 2, ""},
+		{"refused: TTFT with no V_P", q1("--tpot", "4ms", "--ttft", "200ms@p95"), 3, ""},
+		{"refused: a prefill count with no V_P", q2("--prefill", "1"), 3, ""},
 		{"usage: an output format", q2("-o", "yaml"), 2, ""},
 		{"usage: a negative --decode", q2("--decode", "-1"), 2, ""},
 		{"usage: a negative --batch-cap", q2("--batch-cap", "-1"), 2, ""},

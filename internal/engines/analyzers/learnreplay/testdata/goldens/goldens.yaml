@@ -160,6 +160,92 @@ goldens:
   recording: pd-restart/recording.jsonl.gz
   source: P/D benchmark scenario, flow control off, saturated load, one decode engine
     restarted in its own pod, recorder on
+- name: start-restored
+  notRun:
+  - slo
+  outputs:
+  - start-restored/learned-state.csv
+  - start-restored/lines.csv
+  - start-restored/results.csv
+  - start-restored/slo-published.csv
+  - start-restored/store-records.csv
+  - start-restored/variant-capacities.csv
+  - start-restored/composite-holds.csv
+  - start-restored/composite-release.csv
+  - start-restored/composite-results.csv
+  - start-restored/composite-roles.csv
+  - start-restored/composite-variants.csv
+  - start-restored/warm-pool-pressure.csv
+  - start-restored/warm-pool-supply.csv
+  recording: start-restored/recording.jsonl.gz
+  source: One model, two variants on a kind cluster with the simulator, recorder on,
+    snapshot on, default analyzerTuning; after a controller restart under load, snapshot
+    restored, then light load
+- name: start-seed
+  notRun:
+  - slo
+  outputs:
+  - start-seed/learned-state.csv
+  - start-seed/lines.csv
+  - start-seed/results.csv
+  - start-seed/slo-published.csv
+  - start-seed/store-records.csv
+  - start-seed/variant-capacities.csv
+  - start-seed/composite-holds.csv
+  - start-seed/composite-release.csv
+  - start-seed/composite-results.csv
+  - start-seed/composite-roles.csv
+  - start-seed/composite-variants.csv
+  - start-seed/warm-pool-pressure.csv
+  - start-seed/warm-pool-supply.csv
+  recording: start-seed/recording.jsonl.gz
+  source: One model, two variants on a kind cluster with the simulator, recorder on,
+    snapshot on, default analyzerTuning, load to 5 replicas each, one variant seeded
+    and slow to start; up to a controller restart under load
+- name: start-seed-restart
+  notRun:
+  - slo
+  outputs:
+  - start-seed-restart/learned-state.csv
+  - start-seed-restart/lines.csv
+  - start-seed-restart/results.csv
+  - start-seed-restart/slo-published.csv
+  - start-seed-restart/store-records.csv
+  - start-seed-restart/variant-capacities.csv
+  - start-seed-restart/composite-holds.csv
+  - start-seed-restart/composite-release.csv
+  - start-seed-restart/composite-results.csv
+  - start-seed-restart/composite-roles.csv
+  - start-seed-restart/composite-variants.csv
+  - start-seed-restart/warm-pool-pressure.csv
+  - start-seed-restart/warm-pool-supply.csv
+  recording: start-seed-restart/recording.jsonl.gz
+  source: One model, two variants on a kind cluster with the simulator, recorder on,
+    snapshot on, default analyzerTuning, load to 5 replicas each, one variant seeded
+    and slow to start; after a controller restart under load, snapshot restored, then
+    light load
+- name: start-seed-restart-2
+  notRun:
+  - slo
+  outputs:
+  - start-seed-restart-2/learned-state.csv
+  - start-seed-restart-2/lines.csv
+  - start-seed-restart-2/results.csv
+  - start-seed-restart-2/slo-published.csv
+  - start-seed-restart-2/store-records.csv
+  - start-seed-restart-2/variant-capacities.csv
+  - start-seed-restart-2/composite-holds.csv
+  - start-seed-restart-2/composite-release.csv
+  - start-seed-restart-2/composite-results.csv
+  - start-seed-restart-2/composite-roles.csv
+  - start-seed-restart-2/composite-variants.csv
+  - start-seed-restart-2/warm-pool-pressure.csv
+  - start-seed-restart-2/warm-pool-supply.csv
+  recording: start-seed-restart-2/recording.jsonl.gz
+  source: One model, two variants on a kind cluster with the simulator, recorder on,
+    snapshot on, default analyzerTuning, load to 5 replicas each, one variant seeded
+    and slow to start; after a second controller restart under light load, snapshot
+    restored, then one more scale up
 - name: ttft-open-loop-long
   notRun:
   - slo

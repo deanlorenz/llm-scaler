@@ -29,11 +29,11 @@ func TestTheTrimKeepsAPriorWithItsClock(t *testing.T) {
 		Config:          map[string]string{"ns/v": "fp"},
 		Args:            map[string]string{"ns/v": "args"},
 	}
-	full, dropped, err := encodeLearnedState(s, now, 1<<20)
+	full, dropped, err := encodeLearnedState(s, nil, now, 1<<20)
 	if err != nil || dropped != 0 {
 		t.Fatalf("precondition: full encode, dropped=%d err=%v", dropped, err)
 	}
-	raw, dropped, err := encodeLearnedState(s, now, len(full)-1)
+	raw, dropped, err := encodeLearnedState(s, nil, now, len(full)-1)
 	if err != nil {
 		t.Fatalf("trimmed encode: %v", err)
 	}
@@ -104,11 +104,11 @@ func TestTheTrimDropsAnOrphanedLineUnitMarkFirst(t *testing.T) {
 			LearnedAt: now.Add(-time.Hour)}},
 		ITLLinesPerToken: map[string]bool{"line": true, "orphan": true},
 	}
-	full, dropped, err := encodeLearnedState(s, now, 1<<20)
+	full, dropped, err := encodeLearnedState(s, nil, now, 1<<20)
 	if err != nil || dropped != 0 {
 		t.Fatalf("precondition: full encode, dropped=%d err=%v", dropped, err)
 	}
-	raw, dropped, err := encodeLearnedState(s, now, len(full)-1)
+	raw, dropped, err := encodeLearnedState(s, nil, now, len(full)-1)
 	if err != nil {
 		t.Fatalf("trimmed encode: %v", err)
 	}
@@ -137,11 +137,11 @@ func TestTheTrimDropsAnOrphanedLineShapeFirst(t *testing.T) {
 			LearnedAt: now.Add(-time.Hour)}},
 		ITLLineShapes: map[string]saturation.LineShapeSnapshot{"line": {G: 250}, "orphan": {G: 600}},
 	}
-	full, dropped, err := encodeLearnedState(s, now, 1<<20)
+	full, dropped, err := encodeLearnedState(s, nil, now, 1<<20)
 	if err != nil || dropped != 0 {
 		t.Fatalf("precondition: full encode, dropped=%d err=%v", dropped, err)
 	}
-	raw, dropped, err := encodeLearnedState(s, now, len(full)-1)
+	raw, dropped, err := encodeLearnedState(s, nil, now, len(full)-1)
 	if err != nil {
 		t.Fatalf("trimmed encode: %v", err)
 	}

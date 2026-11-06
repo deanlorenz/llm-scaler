@@ -1800,7 +1800,8 @@ The slo analyzer reads the same gate, so both fit their lines from the same
 readings. So does the throughput analyzer's ITL line, with the same settle:
 a replica waits `steadyFor` after it joins, restarts under its name, is back
 after more than a minute without a row, or takes load after `idleRows` idle
-cycles, and every replica waits it after a controller restart.
+cycles. Every replica also waits it after a controller restart, unless the
+learned-state snapshot is on and the replica's Ready time has not moved.
 
 #### `analyzerTuning.k2Settle`: is a saturated reading a limit or a load step
 

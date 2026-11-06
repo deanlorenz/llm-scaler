@@ -55,16 +55,19 @@ func flagsLine(b *strings.Builder, pv pricedVariant, results ...whatif.Result) {
 	var flags []whatif.Flag
 	fill := -1.0
 	for _, r := range results {
-		a, ok := r.(whatif.Answer)
-		if !ok {
-			continue
+		var from []whatif.Flag
+		switch a := r.(type) {
+		case whatif.Answer:
+			from = a.Flags
+			if a.HasFlag(whatif.ExtrapolatedFill) {
+				fill = max(fill, a.Basis.Fill)
+			}
+		case whatif.TTFT:
+			from = a.Flags
 		}
-		for _, f := range a.Flags {
+		for _, f := range from {
 			if !slices.Contains(flags, f) {
 				flags = append(flags, f)
-			}
-			if f == whatif.ExtrapolatedFill {
-				fill = max(fill, a.Basis.Fill)
 			}
 		}
 	}

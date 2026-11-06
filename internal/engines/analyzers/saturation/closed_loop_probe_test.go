@@ -70,6 +70,11 @@ type probeCase struct {
 	// exported is restored into the new one; without it nothing is.
 	restartAt time.Duration
 	snapshot  bool
+	// sightings, with snapshot, also restores the old tracker's sightings
+	// (settle.Tracker.Restore), as the engine's restore does; without it the
+	// new tracker sees every replica first, as with learner PR 5d's switch
+	// off.
+	sightings bool
 	// stabilization replaces the default scale-down stabilization window
 	// (learnertest.DefaultStabilization, 5 min) when set.
 	stabilization time.Duration
@@ -113,6 +118,8 @@ type probeResult struct {
 	trace    []int
 	// fleet is the simulator's result, whose verdict this is.
 	fleet learnertest.Result
+	// sightings is how many restored sightings the last process installed.
+	sightings int64
 }
 
 // runProbe drives the case to its horizon and returns what the fleet did.
@@ -135,7 +142,11 @@ func runProbe(t *testing.T, pc probeCase) probeResult {
 		if pc.restartAt > 0 && !restarted && elapsed >= pc.restartAt {
 			restarted = true
 			doc := rig.a.ExportLearnedState()
+			sightings := st.Sightings()
 			st = probeProcess(t, rig, pc.switches)
+			if pc.sightings {
+				st.Restore(sightings, rig.clock)
+			}
 			if pc.snapshot {
 				raw, err := json.Marshal(doc)
 				require.NoError(t, err)
@@ -179,6 +190,9 @@ func runProbe(t *testing.T, pc probeCase) probeResult {
 		return learnertest.Ceil(impliedReplicas(out))
 	})
 	res.fleet = out
+	if st != nil {
+		res.sightings = st.RestoredCount()
+	}
 	res.need, res.final, res.peak = out.Need, out.Final, out.Peak
 	res.overSince, res.underFor, res.trace = out.OverSince, out.UnderFor, out.Trace
 	return res
@@ -312,6 +326,73 @@ func TestClosedLoopProbe_ARestoredSnapshotCarriesTheFleetThroughARestart(t *test
 		r.underFor, control.underFor)
 	require.Empty(t, r.verdict())
 	require.Equal(t, control.underFor, r.underFor, "the snapshot restores what the floor prices from")
+}
+
+// Learner PR 5d's change E through the same restart and step: the first
+// sights come back with the snapshot. The fleet carries the step as the
+// snapshot alone does, no longer under need, and settles at need. Measured,
+// E moves no cycle of this fleet: the restored windows and held line already
+// price it. What E moves is a price the probe's fleet does not depend on
+// (first_sight_price_test.go has the two signs).
+func TestClosedLoopProbe_ARestoredFirstSightCarriesTheStep(t *testing.T) {
+	control := restartStepCase(15*time.Minute, true, 0)
+	base := runProbe(t, control)
+	withSight := control
+	withSight.sightings = true
+	r := runProbe(t, withSight)
+	cycles, lower, higher := traceDelta(r.trace, base.trace)
+	t.Logf("need %d, final %d, peak %d; under need for %s, against %s with the snapshot alone; fleet differs on %d cycles, lower by %d at most, higher by %d",
+		r.need, r.final, r.peak, r.underFor, base.underFor, cycles, lower, higher)
+	require.EqualValues(t, 4, r.sightings, "premise: every replica's first sight came back")
+	require.Empty(t, r.verdict())
+	require.LessOrEqual(t, r.underFor, base.underFor, "skipping the wait never leaves the fleet under need for longer")
+}
+
+// traceDelta compares two fleets cycle by cycle: on how many cycles they
+// differ, and the most a is below and above b.
+func traceDelta(a, b []int) (cycles, lower, higher int) {
+	for i := range min(len(a), len(b)) {
+		if a[i] != b[i] {
+			cycles++
+		}
+		lower = max(lower, b[i]-a[i])
+		higher = max(higher, a[i]-b[i])
+	}
+	return cycles, lower, higher
+}
+
+// A settled, saturated fleet through a restart: load holds at 12 requests/s
+// (need 17), and the controller restarts. The lowest order in the 10 min
+// after, with first sight restored and with the wait. Measured, the two are
+// the same fleet on every cycle, at need, so this holds the outcome and does
+// not by itself show the bound: first_sight_price_test.go measures the case
+// that sizes lower.
+func TestClosedLoopProbe_ARestoredFirstSightDoesNotTakeAFleetBelowNeed(t *testing.T) {
+	steady := func(sightings bool) probeResult {
+		return runProbe(t, probeCase{
+			name: "restart-steady", pods: []float64{1, 1, 1, 1}, addedMu: 1, meanMu: 1, decode: true,
+			lambda: func(time.Duration) float64 { return 12 }, horizon: 40 * time.Minute,
+			restartAt: 25 * time.Minute, snapshot: true, sightings: sightings,
+		})
+	}
+	lowest := func(r probeResult) int {
+		from := int(25 * time.Minute / propCycle)
+		to := min(from+int(10*time.Minute/propCycle), len(r.trace))
+		low := r.trace[from]
+		for _, n := range r.trace[from:to] {
+			low = min(low, n)
+		}
+		return low
+	}
+	waits, restored := steady(false), steady(true)
+	cycles, lower, higher := traceDelta(restored.trace, waits.trace)
+	t.Logf("need %d: lowest fleet in the 10 min after the restart %d restored, %d with the wait; final %d, %d; longest under need %s, %s; fleet differs on %d cycles, lower by %d at most, higher by %d",
+		restored.need, lowest(restored), lowest(waits), restored.final, waits.final, restored.underFor, waits.underFor,
+		cycles, lower, higher)
+	require.Positive(t, restored.sightings, "premise: the first sights came back")
+	require.Empty(t, restored.verdict())
+	require.GreaterOrEqual(t, lowest(restored), restored.need, "the fleet stays at need through the restart")
+	require.LessOrEqual(t, restored.underFor, waits.underFor)
 }
 
 // A scale-down stabilization of 120 s, under the 2.75 min the floor can be

@@ -129,6 +129,15 @@ const SwitchStartReadsSeed = "start-reads-replica-start-seed"
 // first sample, as in 5b. On from the constructor; a replay turns it off.
 const SwitchStartBlendsFirstSamples = "start-blends-first-samples"
 
+// SwitchStartCountedPodsRestored is the replay switch for learner PR 5d's
+// change D (analyzer-learner.md, PR 5): the snapshot keeps each counted Pod's
+// Ready time, and after a controller restart a Pod reporting the same Ready
+// time is counted already, so it is not folded again. A Pod with no Ready
+// time, or another one, is folded as before. Off, every running Pod is folded
+// again after a restart, and nothing is stored. On from the constructor; a
+// replay turns it off (SetSwitchesForReplay).
+const SwitchStartCountedPodsRestored = "start-counted-pods-restored"
+
 // The estimate gauge's sources (wva_replica_start_seconds_estimate), and the
 // start learner's: the 70 s default, the ScaledObject's seed, or a start
 // measured on a Pod of the variant.
@@ -375,6 +384,10 @@ func (a *SaturationAnalyzer) noteReplicaStartFor(
 			a.startSeenPods[seen] = a.now()
 			continue
 		}
+		if a.claimRestoredCountLocked(seen, rm) {
+			a.startSeenPods[seen] = now
+			continue
+		}
 		if !(rm.StartSeconds > 0) {
 			continue
 		}
@@ -448,6 +461,8 @@ func (a *SaturationAnalyzer) noteReplicaStartFor(
 	// that no longer exists. (A run that confirmed logs no rejection line.)
 	runPods := len(a.startOutlierPods[key])
 
+	a.noteCountedReadyLocked(key, variantName, replicas)
+
 	// Forget this variant's Pods that no longer report. Scoped by the key
 	// prefix so one variant's cycle cannot drop another's bookkeeping.
 	prefix := key + "|"
@@ -458,6 +473,12 @@ func (a *SaturationAnalyzer) noteReplicaStartFor(
 		if _, still := present[k]; !still {
 			delete(a.startSeenPods, k)
 		}
+	}
+	for _, counted := range []map[string]time.Time{a.startCountedReady, a.startCountedRestored} {
+		maps.DeleteFunc(counted, func(k string, _ time.Time) bool {
+			_, still := present[k]
+			return strings.HasPrefix(k, prefix) && !still
+		})
 	}
 	f := a.startFiguresLocked(key, note.seed)
 	contradicted := a.noteSeedContradictionLocked(key, f)
@@ -511,6 +532,65 @@ func (a *SaturationAnalyzer) noteReplicaStartFor(
 			"lowSeconds", startSeedLowFactor*f.prior, "highSeconds", startSeedHighFactor*f.prior,
 			"publishedSeconds", f.published, "sizedSeconds", f.sized, "podsNeeded", startConfirmPods)
 	}
+}
+
+// claimRestoredCountLocked says whether the Pod seen (key|namespace|pod), not
+// counted in this process, is one the snapshot counted: its row reports the
+// Ready time stored for it (SwitchStartCountedPodsRestored). A row that
+// reports neither a Ready time nor a start says nothing, a Pod list that
+// could not be read among them, and the stored time waits for the next. Any
+// other row settles it: a Pod with no Ready time, or another one, is folded
+// as a new Pod is. Callers hold a.mu.
+func (a *SaturationAnalyzer) claimRestoredCountLocked(seen string, rm domain.ReplicaMetrics) bool {
+	stored, ok := a.startCountedRestored[seen]
+	if !ok {
+		return false
+	}
+	ready := a.readySince(rm)
+	if ready.IsZero() && !(rm.StartSeconds > 0) {
+		return false
+	}
+	delete(a.startCountedRestored, seen)
+	return !ready.IsZero() && ready.Equal(stored)
+}
+
+// noteCountedReadyLocked keeps, for each Pod of key counted this cycle, the
+// Ready time its row reports, which is what the snapshot stores
+// (SwitchStartCountedPodsRestored). The latest, not the one it was counted
+// at: a Pod whose readiness blipped stays counted, and reports its new time
+// on the far side of a restart. A row with no Ready time keeps the last one.
+// Callers hold a.mu.
+func (a *SaturationAnalyzer) noteCountedReadyLocked(key, variantName string, replicas []domain.ReplicaMetrics) {
+	if !a.startCountsRestored {
+		return
+	}
+	for _, rm := range replicas {
+		seen, ok := startPodKey(key, variantName, rm)
+		if !ok {
+			continue
+		}
+		if _, counted := a.startSeenPods[seen]; !counted {
+			continue
+		}
+		if ready := a.readySince(rm); !ready.IsZero() {
+			a.startCountedReady[seen] = ready
+		}
+	}
+}
+
+// startCountedKeyOf is the start key a counted Pod's key
+// (key|namespace|pod) was built from, and false for a key too short to be
+// one.
+func startCountedKeyOf(counted string) (string, bool) {
+	i := strings.LastIndexByte(counted, '|')
+	if i < 0 {
+		return "", false
+	}
+	i = strings.LastIndexByte(counted[:i], '|')
+	if i <= 0 {
+		return "", false
+	}
+	return counted[:i], true
 }
 
 // StartSeedContradictedMessage is logged once per variant key and seed, and
@@ -824,9 +904,15 @@ func startSource(measured bool) string {
 // is never swept out from under its own "already counted" record.
 func (a *SaturationAnalyzer) evictStartSeenPods(now time.Time, timeout time.Duration) int {
 	dropped := 0
+	for pod := range a.startCountedRestored {
+		if key, ok := startCountedKeyOf(pod); !ok || a.variantIsStale(key, now, timeout) {
+			delete(a.startCountedRestored, pod)
+		}
+	}
 	for pod, seen := range a.startSeenPods {
 		if now.Sub(seen) > timeout {
 			delete(a.startSeenPods, pod)
+			delete(a.startCountedReady, pod)
 			dropped++
 		}
 	}

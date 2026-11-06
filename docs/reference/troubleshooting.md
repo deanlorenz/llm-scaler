@@ -417,7 +417,8 @@ the router is not using, and new replicas are routed to no more than the idle
 ones are. A scale-up in progress does not raise it: a replica is not counted
 idle until 2 minutes after it became Ready and the controller first saw it
 Ready. A warm-pool Pod lent to the role counts from when it was lent. After a
-controller restart every replica waits those 2 minutes again. The usual cause is the role's scheduling profile, where
+controller restart every replica waits those 2 minutes again, unless the
+learned-state snapshot is on and its Ready time has not moved. The usual cause is the role's scheduling profile, where
 the largest weight wins ties it should not. With `prefix-cache-scorer: 3`
 against `queue-scorer: 2`, the replica that saw a prefix gets the request
 however busy it is. One measured prefill fleet held 439 queued requests on one
@@ -1102,8 +1103,13 @@ failed reads and writes, and the log says why (logger `learned-state`):
 - `Learned state: no snapshot to restore` -- the first start with the store,
   or after a flush. Expected once.
 - `Learned state: snapshot restored` -- read back; `pendingVariants` wait for
-  their first cycle, and `aged`, `unusable` and `unattributable` count entries
-  not restored. Then, per variant on its first cycle, one of:
+  their first cycle, `aged`, `unusable` and `unattributable` count entries
+  not restored, `startKeys` counts the start estimates read back, and
+  `sightings` the replicas that may skip their wait if their Ready time has
+  not moved. `Learned state: the snapshot is too old to keep its replica
+  sightings` means the controller was away longer than 2 minutes from the last
+  write, or a crash found an older document: every replica waits, as expected.
+  Then, per variant on its first cycle, one of:
   - `learned state restored`;
   - `learned state restored without the ITL baseline: the engine image
     changed, the arguments did not` -- a new release rolled out while the
@@ -1252,8 +1258,11 @@ what it has learned.
 
 2. Check the controller log on the variant's next cycle:
    `Learned state forgotten for one variant, on request`, with the variant,
-   the number of `entries` dropped, and `sloEntries`, the number of ITL
-   windows, intercepts and accelerator memos the SLO analyzer dropped.
+   the number of `entries` dropped, `sloEntries`, the number of ITL
+   windows, intercepts and accelerator memos the SLO analyzer dropped, and
+   `throughputEntries`, the number of ITL windows and intercepts the
+   throughput analyzer dropped. It counts entries, not lines: a line with a
+   learned intercept is 2.
 
    `sloEntries` of 0 means the SLO analyzer held nothing for that variant,
    and nothing failed. That happens when the model's policy does not list
@@ -1262,25 +1271,72 @@ what it has learned.
    once it is analysed again, and the line it kept while parked is
    dropped then.)
 
-   For each line the SLO analyzer dropped, it also logs
-   `Learned state forgotten for one key, on request`. Its `key` field names
-   the line: namespace, model, variant, accelerator and GPU count.
+   `throughputEntries` of 0 means the same for the throughput analyzer. It
+   also reads 0 when no saturation config entry enables `throughput`, and
+   when the line was evicted after an hour unseen.
+
+   For each line either analyzer dropped, it also logs
+   `Learned state forgotten for one key, on request`. Its `analyzer` field
+   says which, and its `key` field names the line: namespace, model, variant,
+   and for the SLO analyzer accelerator and GPU count.
 
 What is forgotten: the variant's measured k2 and throughput, its ITL line
 (including one it lent to siblings), its replica start estimate, and its
 capacity record. Also its previous k2 (`P2-prior`), the old service rate
 that holds the throughput floor after a change of arguments, and the
-windows set aside under earlier arguments for a rollback. The SLO analyzer
-keeps an ITL line of its own for the variant, and that is forgotten too.
+windows set aside under earlier arguments for a rollback. The SLO and
+throughput analyzers each keep an ITL line of their own for the variant, and
+those are forgotten too: the readings, including those above the band and at
+the sequence cap, the intercept and the held slope.
 The variant then prices as a new variant would until it saturates again:
 from its deployment-derived figure, or from a lower measured k2 of a
 compatible sibling where one exists (the k2 borrow), which orders more
 replicas, not fewer. Expect more replicas or a higher price for a while,
-depending on which figure was wrong.
+depending on which figure was wrong. That is the saturation figure. The
+throughput analyzer's line differs, below.
 
 A k2 borrow the variant was running is ended, not dropped: it does not start
 again unless the sibling's figure or the variant's configuration changes. A
 dropped one would have started again at full strength on the next cycle.
+
+**After a forget, the throughput analyzer's line goes silent.** It needs 10
+new readings to price again. That is a minimum, not a recovery time. With
+readings flowing, capacity came back on cycle 4 with 3 replicas and on cycle
+10 with 1. A fleet that offers no reading stays silent for as long as it
+offers none, even though the same fleet was priced before the forget. In a
+test of 40 cycles on three replicas:
+
+| Fill k | Priced without a forget | Priced after a forget | `cause` |
+| --- | --- | --- | --- |
+| 0.82, no stated sequence cap | 40 of 40 | 0 of 40 | `all-above-band-below-ksat` |
+| 0.10 | 40 of 40 | 0 of 40 | `too-few-readings` |
+
+While the line is silent:
+
+- **Saturation listed, one variant:** scale-down is held for 3 cycles
+  (`analyzer-in-grace:throughput`), then runs on saturation alone.
+- **Throughput listed without saturation:** the role is frozen both ways
+  (`no-listed-analyzer-sizes-role`). At k 0.80 to 0.85 with no stated cap such
+  a policy cannot scale up after a forget until k leaves that range.
+
+To see it, read two log lines: `throughput analyzer: ITL line` (`silent` and
+`cause`) and `composite holds a role`. For the throughput analyzer,
+`wva_analyzer_demand` reads 0 during the silence and `wva_analyzer_target` is
+absent. A demand of 0 here means no line, not no load.
+
+**When the line comes back it can be wrong in either direction.** With its
+intercept gone, a fleet whose replicas sit at one fill pins the default 6 ms,
+the same as a new variant. In the band that price is not one-sided, so "more
+replicas, not fewer" does not hold for this line. Measured capacity against
+the truth, on a true slope of 50 ms per unit of k:
+
+| True intercept | k 0.30 | k 0.50 | k 0.70 |
+| --- | --- | --- | --- |
+| 2 ms | 1.20x | 1.07x | 1.02x |
+| 20 ms | 0.71x | 0.86x | 0.95x |
+
+The error ends when the variant's load spreads across fills enough for a full
+fit to learn the intercept again.
 
 - **Acted on once per value.** Leaving the annotation in place does nothing
   more, across controller restarts too when `LEARNED_STATE_SNAPSHOT` is on.

@@ -101,7 +101,7 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 	for _, vs := range input.VariantStates {
 		variantNames = append(variantNames, vs.VariantName)
 	}
-	a.logLearnerStart(ctx, input.Namespace, input.ModelID, variantNames)
+	a.logLearnerStart(ctx, input.Namespace, input.ModelID, variantNames, input.ReplicaMetrics)
 	a.beginK2Cycle(input.Namespace, input.ModelID)
 	a.beginMuCycle(input.Namespace, input.ModelID)
 	a.beginITLCycle(input.Namespace, input.ModelID)

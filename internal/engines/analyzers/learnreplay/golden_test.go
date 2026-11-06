@@ -50,7 +50,9 @@ func TestGoldens_EveryCommittedGoldenReproduces(t *testing.T) {
 	assert.Equal(t, map[string][]string{"e1": {analyzerSLO}, "e1-tuned": {analyzerSLO},
 		olsFixture: {analyzerSLO}, "pd-restart": {analyzerSLO},
 		ttftThreePodsFixture: {analyzerSLO}, ttftSaturatedFixture: {analyzerSLO},
-		ttftOpenLongFixture: {analyzerSLO}, ttftOpenShortFixture: {analyzerSLO}}, c.NotRun)
+		ttftOpenLongFixture: {analyzerSLO}, ttftOpenShortFixture: {analyzerSLO},
+		startSeedFixture: {analyzerSLO}, startSeedRestartFixture: {analyzerSLO}, startSeedRestart2Fixture: {analyzerSLO},
+		startRestoredFixture: {analyzerSLO}}, c.NotRun)
 	t.Logf("%d fixtures, rows compared per file: %v; built and never analyzed: %v", c.Fixtures, c.Rows, c.NotRun)
 }
 

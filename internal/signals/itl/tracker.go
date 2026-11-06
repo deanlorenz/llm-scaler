@@ -3,11 +3,13 @@ package itl
 import (
 	"maps"
 	"math"
+	"slices"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 )
 
 // The tiers a Tracker's line comes from.
@@ -932,6 +934,11 @@ func pinnedReadings(obs, steady []Observation) (pinned []Observation, ok bool) {
 // into the tracker. What it reads of the caller's state is the caller's to
 // guard -- both analyzers call Sweep holding their own lock.
 func (t *Tracker) Sweep(now time.Time, stale func(key string) bool) (windows, baselines int) {
+	return t.sweep(now, stale, false)
+}
+
+// sweep is Sweep, keeping the replicas' traces when keepTraces is set.
+func (t *Tracker) sweep(now time.Time, stale func(key string) bool, keepTraces bool) (windows, baselines int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, w := range t.windows {
@@ -955,9 +962,11 @@ func (t *Tracker) Sweep(now time.Time, stale func(key string) bool) (windows, ba
 			delete(t.steady, key)
 		}
 	}
-	for key := range t.traces {
-		if stale(key) {
-			delete(t.traces, key)
+	if !keepTraces {
+		for key := range t.traces {
+			if stale(key) {
+				delete(t.traces, key)
+			}
 		}
 	}
 	for key := range t.slopes {
@@ -980,6 +989,38 @@ func (t *Tracker) Sweep(now time.Time, stale func(key string) bool) (windows, ba
 		}
 	}
 	return windows, baselines
+}
+
+// ForgetKeys is Sweep for a learner's forget: it forgets every key match
+// reports true for, and returns how many windows and intercepts that was and
+// each key the tracker held anything of, sorted, as forgotten by by. match
+// runs under the tracker's lock, as Sweep's stale does.
+func (t *Tracker) ForgetKeys(now time.Time, by learn.By, match func(key string) bool) (windows, baselines int, forgotten []learn.Forgotten) {
+	return t.forgetKeys(now, by, match, false)
+}
+
+// ForgetKeysKeepingTraces is ForgetKeys, keeping the replicas' settle traces:
+// what the key's replicas are doing now, which no line is fitted from. The
+// next Observe judges a reading's steadiness and settle against them, so a
+// step or a settle under way at the forget is still read; made anew, a key's
+// traces take every replica as settled and still for that cycle.
+func (t *Tracker) ForgetKeysKeepingTraces(now time.Time, by learn.By, match func(key string) bool) (windows, baselines int, forgotten []learn.Forgotten) {
+	return t.forgetKeys(now, by, match, true)
+}
+
+func (t *Tracker) forgetKeys(now time.Time, by learn.By, match func(key string) bool, keepTraces bool) (windows, baselines int, forgotten []learn.Forgotten) {
+	keys := map[string]bool{}
+	windows, baselines = t.sweep(now, func(k string) bool {
+		if match(k) {
+			keys[k] = true
+			return true
+		}
+		return false
+	}, keepTraces)
+	for _, k := range slices.Sorted(maps.Keys(keys)) {
+		forgotten = append(forgotten, learn.Forgotten{Key: k, By: by})
+	}
+	return windows, baselines, forgotten
 }
 
 // ClearWindow drops the readings filed under key, the steady ones and those

@@ -18,6 +18,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
@@ -244,7 +245,7 @@ func TestForget_LogsEachForgottenKeyOnTheCallersLogger(t *testing.T) {
 		core, logs := observer.New(zapcore.InfoLevel)
 		ctx := logr.NewContext(context.Background(), zapr.NewLogger(zap.New(core)).WithValues("cycle", "c-1"))
 		r.a.ForgetVariant(ctx, "ns", "m", "agg")
-		lines := logs.FilterMessage(ForgottenKeyMessage).All()
+		lines := logs.FilterMessage(logging.ForgottenKeyMessage).All()
 		require.Len(t, lines, 2, "recording %v: one line per key", recording)
 		for i, want := range []string{windowKey("ns", "m", settleAgg), windowKey("ns", "m", other)} {
 			fields := lines[i].ContextMap()
@@ -259,6 +260,6 @@ func TestForget_LogsEachForgottenKeyOnTheCallersLogger(t *testing.T) {
 
 		// Control: a second forget takes nothing and logs nothing.
 		r.a.ForgetVariant(ctx, "ns", "m", "agg")
-		assert.Len(t, logs.FilterMessage(ForgottenKeyMessage).All(), 2)
+		assert.Len(t, logs.FilterMessage(logging.ForgottenKeyMessage).All(), 2)
 	}
 }

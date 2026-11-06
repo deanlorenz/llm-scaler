@@ -15,6 +15,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 )
 
 // checkKinds are made inside a replayed call, never applied: the replay
@@ -196,6 +197,18 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 		r.rep.Analyzes[ev.Kind]++
 		res, err := r.tp.Analyze(ctx, input)
 		r.noteResult(throughput.AnalyzerName, input.Namespace, input.ModelID, res, err)
+	case throughput.KindForgetVariant:
+		// A recording made before the engine forgot the throughput line has
+		// none of these: its replay forgets nothing in the throughput
+		// analyzer, as the run did not.
+		if r.tp == nil {
+			return errNoThroughput
+		}
+		var d throughput.ForgetVariantEvent
+		if err := ev.DecodeData(&d); err != nil {
+			return err
+		}
+		r.tp.ForgetVariant(ctx, d.Namespace, d.ModelID, d.Variant)
 	case throughput.KindObserve:
 		if r.tp == nil {
 			return errNoThroughput
@@ -226,6 +239,19 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 		r.settleUncounted(ev)
 		r.settle.hold(d, ev.Now)
 		r.rec.Record(settle.KindHold, ev.Now, d)
+
+	case settle.KindRestore:
+		var d settle.RestoreEvent
+		if err := ev.DecodeData(&d); err != nil {
+			return err
+		}
+		sightings := make(map[string][]settle.Sighting, len(d.Models))
+		for _, m := range d.Models {
+			sightings[utils.GetNamespacedKey(m.Namespace, m.ModelID)] = m.Sightings
+		}
+		r.settle.setInterval(d.Interval)
+		r.settle.tracker.Restore(sightings, ev.Now)
+		r.rec.Record(settle.KindRestore, ev.Now, d)
 
 	default:
 		if r.engine == nil || !r.engine.Owns(ev.Kind) {

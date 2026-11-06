@@ -104,7 +104,7 @@ var reviewed = map[reflect.Type]buckets{
 		seams: []string{"SetSwitchesForReplay"},
 	},
 	reflect.TypeFor[*throughput.ThroughputAnalyzer](): {
-		recorded: []string{"Analyze", "Observe"},
+		recorded: []string{"Analyze", "Observe", "ForgetVariant"},
 		// StartConfig states what the builders set, for the recording's
 		// first line; it changes nothing. PathCounts reads the per-path
 		// counters of the ITL line's fits (2.5), which only a replay reads.
@@ -184,6 +184,7 @@ func TestCoverage_EachRecordedCallWritesOneEvent(t *testing.T) {
 		{"slo.BeginCycle", slo.KindBeginCycle, func(f *fixture) { f.slo.BeginCycle() }},
 		{"slo.NoteVariantsPresent", slo.KindNoteVariantsPresent, func(f *fixture) { f.slo.NoteVariantsPresent("ns", "m", []string{"v"}) }},
 		{"slo.ForgetVariant", slo.KindForgetVariant, func(f *fixture) { f.slo.ForgetVariant(ctx, "ns", "m", "v") }},
+		{"throughput.ForgetVariant", throughput.KindForgetVariant, func(f *fixture) { f.tp.ForgetVariant(ctx, "ns", "m", "v") }},
 		{"throughput.Analyze", throughput.KindAnalyze, func(f *fixture) { _, _ = f.tp.Analyze(ctx, input) }},
 		{"throughput.Observe", throughput.KindObserve, func(f *fixture) { f.tp.Observe(ctx, at, "m", "ns", input.ReplicaMetrics) }},
 		{"store.FileScaleTarget", capacity.KindFileScaleTarget, func(f *fixture) {
@@ -279,6 +280,7 @@ func TestSwitchHooks_AcceptTheEmptySetAndRefuseUnknownNames(t *testing.T) {
 		PackageSLO:        f.slo.SetSwitchesForReplay,
 		PackageThroughput: f.tp.SetSwitchesForReplay,
 		PackageCapacity:   f.store.SetSwitchesForReplay,
+		PackageSettle:     settle.NewTracker().SetSwitchesForReplay,
 	}
 	for pkg, hook := range hooks {
 		assert.NoError(t, hook(nil), pkg)
@@ -345,11 +347,11 @@ func TestSwitchHooks_NoProductionPathCallsThem(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	// The walk reached the four hooks themselves, so it read the packages
+	// The walk reached the five hooks themselves, so it read the packages
 	// that define them, and the rest of the tree with them.
-	require.Equal(t, 4, defined, "the walk found %d SetSwitchesForReplay definitions in %d files", defined, files)
-	// ReplaySwitchNames: saturation's, slo's and throughput's.
-	require.Equal(t, 3, namesDefined, "the walk found %d ReplaySwitchNames definitions", namesDefined)
+	require.Equal(t, 5, defined, "the walk found %d SetSwitchesForReplay definitions in %d files", defined, files)
+	// ReplaySwitchNames: saturation's, slo's, throughput's and settle's.
+	require.Equal(t, 4, namesDefined, "the walk found %d ReplaySwitchNames definitions", namesDefined)
 	assert.Empty(t, callers, "a production path calls a replay switch hook")
 }
 
@@ -418,9 +420,22 @@ func ttftInput() domain.AnalyzerInput {
 	}
 }
 
+// The kind start-time recording, one golden per controller start (learner PR
+// 5, "Recording" in analyzer-learner.md): the first golden in which a variant
+// sets replicaStartSeconds, and the first recorded with the snapshot on.
+const (
+	startSeedFixture         = "start-seed"
+	startSeedRestartFixture  = "start-seed-restart"
+	startSeedRestart2Fixture = "start-seed-restart-2"
+)
+
+// startSeedFixtures is the three start-seed goldens, in the order they ran.
+var startSeedFixtures = []string{startSeedFixture, startSeedRestartFixture, startSeedRestart2Fixture}
+
 // r1Goldens is the goldens recorded with the R1 fields: the TTFT track's
-// prefill-stress runs (P2).
-var r1Goldens = []string{ttftThreePodsFixture, ttftSaturatedFixture, ttftOpenLongFixture, ttftOpenShortFixture}
+// prefill-stress runs (P2), and the start-seed runs.
+var r1Goldens = []string{ttftThreePodsFixture, ttftSaturatedFixture, ttftOpenLongFixture, ttftOpenShortFixture,
+	startSeedFixture, startSeedRestartFixture, startSeedRestart2Fixture, startRestoredFixture}
 
 // ttftFieldNames are the R1 field names as a recording writes them.
 var ttftFieldNames = []string{"QueueLengthKnown", "AvgServiceTimeKnown", "AvgTTFTKnown", "PromptTokensBuckets",

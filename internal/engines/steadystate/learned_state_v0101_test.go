@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 )
 
 // The learned-state document as v0.10.1 reads it, frozen, so a test can hold
@@ -252,7 +253,7 @@ func TestV0101Decoder_ReadsTheCurrentDocument(t *testing.T) {
 	n := 0
 	fillNonZeroValue(t, reflect.ValueOf(&s).Elem(), "LearnedState", &n)
 	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
-	raw, dropped, err := encodeLearnedState(s, now, learnedStateMaxBytes)
+	raw, dropped, err := encodeLearnedState(s, nil, now, learnedStateMaxBytes)
 	require.NoError(t, err)
 	require.Zero(t, dropped, "precondition: the whole state fits")
 
@@ -263,6 +264,39 @@ func TestV0101Decoder_ReadsTheCurrentDocument(t *testing.T) {
 	assert.True(t, old.WrittenAt.Equal(now))
 	assertNoZeroField(t, reflect.ValueOf(old), "v0101LearnedStateDoc")
 
+	reencoded, err := json.Marshal(old)
+	require.NoError(t, err)
+	var got, want any
+	require.NoError(t, json.Unmarshal(reencoded, &got))
+	require.NoError(t, json.Unmarshal([]byte(raw), &want))
+	assertJSONSubset(t, got, want, "doc")
+}
+
+// The same with sightings, a field beside State that the filler does not
+// reach: v0.10.1 reads the document with every field it knows intact, and a
+// settle key does not stop it. v0.10.2's types are v0.10.1's blob for blob,
+// and v0.10.0's differ by itlSlopes alone, so this stands for all three:
+// each ignores a field it does not know the same way.
+func TestV0101Decoder_ReadsADocumentWithSightings(t *testing.T) {
+	var s saturation.LearnedState
+	n := 0
+	fillNonZeroValue(t, reflect.ValueOf(&s).Elem(), "LearnedState", &n)
+	require.NotEmpty(t, s.StartCounted, "the filler reached the new field")
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	sightings := map[string][]settle.Sighting{"ns/m": {{PodName: "p0", VariantName: "v", FirstSeen: now,
+		ReadySince: now, ReadySeen: now}}}
+	raw, dropped, err := encodeLearnedState(s, sightings, now, learnedStateMaxBytes)
+	require.NoError(t, err)
+	require.Zero(t, dropped)
+	var all map[string]any
+	require.NoError(t, json.Unmarshal([]byte(raw), &all))
+	require.Contains(t, all, "settle", "the field is written under its name")
+	require.Contains(t, all["state"], "startCounted")
+
+	var old v0101LearnedStateDoc
+	require.NoError(t, json.Unmarshal([]byte(raw), &old))
+	assert.Equal(t, 1, old.Version)
+	assertNoZeroField(t, reflect.ValueOf(old), "v0101LearnedStateDoc")
 	reencoded, err := json.Marshal(old)
 	require.NoError(t, err)
 	var got, want any
@@ -351,14 +385,14 @@ func TestV0101Decoder_ANewFieldIsLeftOutWhileEmpty(t *testing.T) {
 	}
 	require.Equal(t, len(known), filled, "every map v0.10.1 knows is still in the document")
 
-	raw, _, err := encodeLearnedState(s, time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC), learnedStateMaxBytes)
+	raw, _, err := encodeLearnedState(s, nil, time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC), learnedStateMaxBytes)
 	require.NoError(t, err)
 	var doc any
 	require.NoError(t, json.Unmarshal([]byte(raw), &doc))
 	assertKnownTo(t, doc, reflect.TypeFor[v0101LearnedStateDoc](), "doc")
 
 	// And an empty state writes nothing v0.10.1 does not know.
-	raw, _, err = encodeLearnedState(saturation.LearnedState{}, time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC), learnedStateMaxBytes)
+	raw, _, err = encodeLearnedState(saturation.LearnedState{}, nil, time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC), learnedStateMaxBytes)
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal([]byte(raw), &doc))
 	assertKnownTo(t, doc, reflect.TypeFor[v0101LearnedStateDoc](), "doc")

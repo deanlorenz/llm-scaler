@@ -469,7 +469,9 @@ that is empty without one:
   the controller took no learned-state snapshot in the run.
 - `composite-holds.csv`, when the replay held no role (its
   `composite-hold` count is 0), and `composite-release.csv`, when no other
-  analyzer's frame bounded a release (`composite-release-bound` is 0). Only
+  analyzer's frame bounded a release (`composite-release-bound` is 0), and
+  `composite-roles.csv`, when no composite priced a role (its
+  `composite-role-capacities` count is 0: the run has no P/D model). Only
   a golden whose recording carries engine events has these two.
 
 The `acceptance` golden is the in-process acceptance run. It covers little
@@ -990,6 +992,49 @@ again and carry on from there.
   No Pod may show a GPU count. If one does, delete what owns it (its
   Deployment or LeaderWorkerSet) and check again; do not leave the
   namespace until this reads clean.
+
+#### The start-seed goldens
+
+`start-seed`, `start-seed-restart` and `start-seed-restart-2` are one kind run,
+one golden per controller start, as `ols-sweep-slo` and its restart are. They
+are the first goldens in which a variant sets `replicaStartSeconds`, and the
+first recorded with `LEARNED_STATE_SNAPSHOT=true`, so the restart goldens
+replay a real restore. Start time is Pod creation to Ready, so a simulator with
+a readiness delay gives real samples and needs no GPUs. Measured:
+[analyzer-learner, recording as run](../proposals/analyzer-learner.md#recording-as-run).
+`TestGoldens_StartSeedHoldsTheSeedAndTheMeasuredStart` and
+`TestGoldens_StartSeedRestartsRestoreBothStartKeys` hold them to what the run
+was for. They were recorded before learner PR 5d, so their restores hold no
+`startCounted` and no sightings, and replayed as committed they show neither.
+`TestGoldens_StartSeedChainRestoresCountsAndFirstSight` splices in what each
+run stored on this build, and holds 5d to their rows.
+
+`start-restored` is the same run taken again on a 5d build, the recording
+between its two controller restarts. Nothing in it is spliced: it holds a real
+`settle.Restore`, and `TestGoldens_StartRestoredRestoresForReal` holds it to no
+refold, with each switch off as its control.
+
+To take it again at a new commit:
+
+1. Create a kind cluster of its own (`CLUSTER_NAME`, `CREATE_CLUSTER=true`),
+   and `make deploy-e2e-infra` with an image built from that commit. Turn the
+   recorder on, set `LEARNED_STATE_SNAPSHOT=true` and add `--v=3`.
+2. Deploy one model as two Deployments of the simulator, each with a TCP
+   readiness probe: `initialDelaySeconds` 20 for the fast one, 240 for the slow
+   one, `periodSeconds` 1. Give them a Service over both and a ServiceMonitor.
+3. Give each a ScaledObject, `maxReplicaCount: 5`. The fast variant is cheaper
+   (`variantCost` 10 against 30), so a saturated model fills it to its ceiling
+   and the order spills to the slow one. Only the slow one sets
+   `replicaStartSeconds: "120"`. Keep the scale-down window short (60 s).
+4. Wait until one Pod of each is Ready, then saturate the model: 80 closed-loop
+   clients on the Service. Wait for at least 4 Ready replicas of each.
+5. Copy the recording out, then delete the controller Pod under load. Five
+   minutes later, drop to 2 clients; after 2.5 minutes copy the recording out
+   and delete the Pod again. When the fleet has scaled down, saturate again
+   until a new Pod of each variant is Ready. Copy the last recording out.
+6. `make learner-golden-add` each recording with `REPLACE=1`, oldest first,
+   then update the switch tables as [when an output moves](#when-an-output-moves)
+   says.
 
 #### The engine layer
 
