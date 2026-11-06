@@ -1165,6 +1165,70 @@ a demand term declares:
 | restart | an unpersisted latch restores to the safe-side choice. The mu latch does since PR 3 ([the mu choice](#the-mu-choice)) |
 | tuning | dwell is tuned on noise with the gauges' real autocorrelation, not iid noise, which over-counts flips |
 
+The rows as built are in the developer guide's
+[set, clear and dwell table](../developer-guide/saturation-analyzer.md#set-clear-and-dwell).
+
+#### The ITL tier, as built (#495)
+
+`internal/signals/itl/tier_latch.go`, on the saturation, slo and throughput
+lines, one named change with one `SwitchITLTierHysteresis` per analyzer.
+
+- **Set:** 10 steady readings, spread 0.30, as before. **Clear:** under 8, or
+  spread 0.18. **Dwell:** 10 min after the last change.
+- **Safe side:** the line that prices more replicas, from either tier. Inside
+  the dwell the tier moves only for a line that prices 3 % more. So a held line
+  prices at most 3 % under the line it refused (`tier-safe-margin`).
+- **Restart:** the latch is not persisted. A key with a restored slope stands at
+  the pinned fit, the rule's safe choice (`TestDwellTier_ARestoredKeyStartsOnTheSafeSide`).
+- **Not held:** a key's first full fit, since no `B` is learned without it
+  (without this exemption the b-converges cases fail), and a tier change once the
+  dwell has run out, which may still price less in one cycle.
+
+Measured before the change, main at f7130a9cb, every golden replayed, the
+staircase recordings of #492 included: 78 analyzer-key series, 7758 cycles.
+Recorded fleets hold 1 or 2 decode replicas.
+
+| line | tier flips | back within 1 h | largest move of ITL at k 0.68 at a flip |
+| --- | --- | --- | --- |
+| saturation | 57 | 47 | x0.853, x1.249 |
+| slo | 19 | 12 | x0.941, x1.249 |
+| throughput | 7 | 2 | x0.803, x1.005 |
+
+Flips are real and fast: 20 in 44 min on `ols-sweep`. They came from load steps
+ageing out of the steady window, not from noise. Leaving the full fit moved the
+line by at most 2.8 % on the saturation line, as a remembered `B` now pins the
+same line. The run in which a flip halved ITL does not reproduce on these
+recordings: its pinned fit went through the default `B`, and a full fit now
+leaves its own. The largest moves were on entering the full fit. No flip changed
+a replica answer on these fleets; a fleet of 30 is what a 15 % step would move.
+That last part is arithmetic, not a measurement. Synthetic rate[1m] noise at
+spread 0.28 reversed 88 times in 4 h (median, 10 pods) and stepped the line by
+up to 7 %, a synthetic load sweep by up to 9 %.
+
+After it, on the same goldens:
+
+| line | tier flips | back within 1 h | moves at a flip |
+| --- | --- | --- | --- |
+| saturation | 21 | 11 | x0.921, x1.249 |
+| slo | 9 | 2 | x0.959, x1.249 |
+| throughput | 2 | 0 | x0.803, x1.000 |
+
+The x1.249 is a key's first full fit, on a staircase, which no dwell delays. On
+the moved goldens the saturation mu falls on 278 of 329 cycles and rises by at
+most 3.0 %. Demand moves x0.989 to x1.163. No `RequiredCapacity` or replica count
+moved. The cost: 250 of 2274 cycles refused a tier change, and `lines.csv` loses
+the publishes of those fits. Full fits rose from 376 to 472 over the goldens, and
+fell from 52 to 42 on `ols-sweep-slo-restart`, whose floor came down with them.
+
+Noise, 20 seeds of 4 h on rate[1m]: at most one reversal at spreads of 0.24 to
+0.34 with 2, 4 and 10 pods, against a median of 88 before. At a spread of 0.22
+with 10 pods two seeds of 20 reversed more, up to 3 times. The priced line's error
+at that noise does not widen at the clear value. All of this noise is synthetic.
+
+What is assumed: the 3 % comes from the 2.8 % above, and 10 min is twice the
+steady carry. A 5 min dwell measured worse (25 flips and a x0.799 step, at a
+clear of 0.24). Neither value is proven on a large fleet.
+
 ### 3.6 Clocks
 
 The clock fix itself is [2.2](#22-one-clock). The clocks in use:

@@ -745,6 +745,27 @@ readings are left, the key's last `A` holds (`itl-fit` logs `slopeHeld`), and a
 key with no `A` yet gets no line. `itl-window` reports the marked readings as
 `settling`.
 
+#### Set, clear and dwell
+
+Every threshold that switches a source states three values, the safe side and
+what a restart does ([3.5](../proposals/analyzer-learner.md#35-hysteresis)).
+Add a row when you add such a threshold.
+
+| threshold | set | clear | dwell | safe side | after a restart |
+| --- | --- | --- | --- | --- | --- |
+| ITL tier: full fit or pinned fit (`itl/tier_latch.go`, on the saturation, slo and throughput lines) | 10 steady readings, spread 0.30 of `k` | under 8 steady readings or spread 0.18 | 10 min after the last change, unless the new line prices 3 % more replicas | the line that prices more replicas, from either tier | the latch is not kept: a key with a restored slope stands at the pinned fit |
+
+A spread near the set value wanders: on synthetic rate[1m] noise the bare gate
+reversed 88 times in 4 h (median, 10 pods), and at most once with the clear value.
+A load step collapses the spread past any clear value, so the dwell does that
+work. While it refuses a change, `itl-fit` logs `tierHeld`: leaving the full fit
+holds the key's last slope (`slopeHeld`), and entering it stays on the pinned
+fit. A key's first full fit does not wait: with no `B` learned, only it can
+replace the default. A new line may price less than the one it replaces by more
+than 3 % once the dwell ends, as it always could before.
+
+`SwitchITLTierHysteresis`, one per analyzer, turns the latch off for a replay.
+
 #### One-sided at the cap (issue #467)
 
 A replica at its stated cap reads above `itl.DefaultKSat`. While the key has
@@ -1634,6 +1655,10 @@ golden output.
 | `DefaultMaxObservableK` | 0.80 | `internal/signals/itl` |
 | `DefaultMinSamples` | 10 | `internal/signals/itl` |
 | `DefaultMinKSpread` | 0.30 | `internal/signals/itl` |
+| `DefaultClearMinSamples` | 8 | `internal/signals/itl` |
+| `DefaultClearKSpread` | 0.18 | `internal/signals/itl` |
+| `DefaultTierDwell` | 10m | `internal/signals/itl` |
+| `DefaultTierSafeMargin` | 0.03 | `internal/signals/itl` |
 | `DefaultSteadyFor` | 2m | `internal/signals/itl` |
 | `DefaultMaxKDrift` | 0.10 | `internal/signals/itl` |
 | `BacklogDrainSeconds` | 60 | `internal/signals/floor` |
