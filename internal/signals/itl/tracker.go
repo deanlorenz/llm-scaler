@@ -45,6 +45,10 @@ type Tracker struct {
 	// or the window too few readings at all; with when it was fitted and
 	// under which engine arguments, which bound the hold (Admission).
 	slopes map[string]heldSlope
+	// restored marks a key whose intercept or held slope a snapshot carried
+	// and whose window has kept no reading since (Restored). A mark goes
+	// with the first reading kept, and with the last of what it describes.
+	restored map[string]struct{}
 	// above and aboveSteady hold, per key, the readings above the band that
 	// were not admitted, and the steady ones among them, for the fallback
 	// line (Admission.AboveBandFallback). Empty for a key whose admission
@@ -71,6 +75,7 @@ func NewTracker() *Tracker {
 		steady:      map[string]*Window{},
 		traces:      map[string]*keyTraces{},
 		slopes:      map[string]heldSlope{},
+		restored:    map[string]struct{}{},
 		above:       map[string]*Window{},
 		aboveSteady: map[string]*Window{},
 		latches:     map[string]tierLatch{},
@@ -336,6 +341,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 				r.AboveBand++
 			} else {
 				r.Offered++
+				delete(t.restored, key)
 				if k > hi {
 					r.Capped++
 				}
@@ -1013,7 +1019,18 @@ func (t *Tracker) sweep(now time.Time, stale func(key string) bool, keepTraces b
 			baselines++
 		}
 	}
+	t.pruneRestored()
 	return windows, baselines
+}
+
+// pruneRestored drops the mark of every key that holds neither an intercept
+// nor a held slope any more. Callers hold t.mu.
+func (t *Tracker) pruneRestored() {
+	maps.DeleteFunc(t.restored, func(key string, _ struct{}) bool {
+		_, baseline := t.baselines[key]
+		_, slope := t.slopes[key]
+		return !baseline && !slope
+	})
 }
 
 // ForgetKeys is Sweep for a learner's forget: it forgets every key match
@@ -1096,6 +1113,7 @@ func (t *Tracker) ForgetSlope(key string) {
 	defer t.mu.Unlock()
 	delete(t.slopes, key)
 	t.unlatch(key)
+	t.pruneRestored()
 }
 
 // Baselines returns a copy of every key's remembered intercept.
@@ -1120,7 +1138,18 @@ func (t *Tracker) RestoreBaseline(key string, b float64) {
 	defer t.mu.Unlock()
 	if _, have := t.baselines[key]; !have {
 		t.baselines[key] = b
+		t.restored[key] = struct{}{}
 	}
+}
+
+// Restored reports whether key's intercept or held slope came from a snapshot
+// and its window has kept no reading since. An intercept put back from a
+// stash after a rollback (SetBaseline) is not marked, stored or not.
+func (t *Tracker) Restored(key string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	_, restored := t.restored[key]
+	return restored
 }
 
 // Slope is a key's last fitted A, with when and under which engine arguments
@@ -1152,6 +1181,7 @@ func (t *Tracker) ForgetSlopes() {
 	for key := range t.latches {
 		t.unlatch(key)
 	}
+	t.pruneRestored()
 }
 
 // RestoreSlope sets the key's last A unless it already holds one: what was
@@ -1163,6 +1193,7 @@ func (t *Tracker) RestoreSlope(key string, s Slope) {
 	defer t.mu.Unlock()
 	if _, have := t.slopes[key]; !have {
 		t.slopes[key] = heldSlope{a: s.A, fittedAt: s.FittedAt, args: s.Args}
+		t.restored[key] = struct{}{}
 	}
 }
 
@@ -1252,4 +1283,5 @@ func (t *Tracker) ForgetBaselines() {
 	for key := range t.latches {
 		t.unlatch(key)
 	}
+	t.pruneRestored()
 }

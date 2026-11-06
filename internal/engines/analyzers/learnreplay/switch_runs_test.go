@@ -133,6 +133,16 @@ import (
 // stashes. Its unit tests hold it (heldBy).
 var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	saturation.SwitchPrefillCapacityObserve: nil,
+
+	// #495: mu on learn's list of learners
+	// (saturation.SwitchMuForgetReported). It moves no golden: a forget and
+	// an eviction drop the same entries either way, and only the report's
+	// Forgotten and a learner-write line differ, which no output reads. Its
+	// unit tests hold it (heldBy). The Report reaching the engine and the
+	// restored field have no switch: the first adds a series no replay
+	// publishes, the second a field on lines no output reads.
+	saturation.SwitchMuForgetReported: nil,
+
 	throughput.SwitchITLAdmitsAtSequenceCap: {
 		"throughput-sweep-restart/composite-holds.csv",
 		"throughput-sweep-restart/composite-release.csv",
@@ -694,6 +704,12 @@ func withSeams(more, rows map[string][]string) map[string][]string {
 // test that holds the same on either side is a control, not a hold, and is
 // not listed here.
 var heldBy = map[string][]heldTest{
+	// #495: each runs the switch on and off and asserts both (the keys
+	// reported and the logged value gone on; neither off).
+	saturation.SwitchMuForgetReported: {
+		{"../saturation", "TestMuLearner_ForgetReportsItsKeysAndClearsWhatWasLogged"},
+		{"../saturation", "TestMuLearner_EvictionIsReported"},
+	},
 	// P1's prefill observation: it runs the switch on and off through
 	// Analyze and asserts both (a line per cycle on, none off).
 	saturation.SwitchPrefillCapacityObserve: {

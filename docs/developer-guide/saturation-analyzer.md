@@ -422,6 +422,29 @@ was set for the first time, moved more than `K2WriteBand` (2 %) from the value
 last logged, or has not logged for `LearnerHeartbeat` (10 min). The
 forget-learned-state annotation reaches k2 through `learn.Learners`.
 
+The engine takes the cycle's reports once, at the end of the cycle
+(`publishLearnerReports`, `TakeLearnerReports`), and publishes each learner's
+`wva_learned_state_last_admitted_timestamp_seconds`. `RecordLearnerReports`
+remembers the key behind each series, which no label carries, and deletes the
+series only when a report without a `PricingKey` names that key `Forgotten`,
+or when the variant is really gone (`retainLearnerSeries`). The active set is
+not the test: a variant at zero replicas is in no model group, and its series
+must outlive the park. Nor is the registry alone
+(`utils.KnownVariantAutoscalings`): a KEDA outage past `registry.DefaultTTL`
+empties it, and a trigger `ParseMeta` refuses leaves it. Each series records its
+scale target at publish time, and a variant missing from the registry goes only
+when a read of that target says NotFound, or finds it being deleted. Any other
+answer, Forbidden included, keeps the series. The read is one `Get` through the
+controller's client with no backoff, at most once per variant per
+`learnerTargetCheckInterval` (1 min), and `learnerSeriesMissingMax` (24 h) ends
+the wait whatever the reads say.
+
+`RollingAverage.Restored` is true from `RestoreRollingAverage` until the
+window's first write, and `itl.Tracker.Restored` from `RestoreBaseline` or
+`RestoreSlope` until the window keeps a reading. The mark lives with the
+figure, not in a map of the analyzer's, so a stash, a forget and an eviction
+carry or drop it with no rule of their own. It is not stored in the snapshot.
+
 A replica that joined the fleet under a rate window ago is filling, whatever
 its queue: its one-minute gauges still hold the minute before it was routed
 to. On the E1 run (2026-10-23) one just joined read 84 waiting on 174,327
@@ -1108,8 +1131,11 @@ replica had been settled, and which settle test passed it). Each cycle mu
 fills a `learn.Report` per variant (`mu_learner.go`; `LearnerReports`, beside
 k2's), and logs `learner-write` at `--v=3` for a key whose priced figure was
 set for the first time, moved more than `MuWriteBand` (5 %) from the value
-last logged, changed source, or has not logged for `LearnerHeartbeat`. The
-throughput floor's line names the key and source it priced from (`muKey`,
+last logged, changed source, or has not logged for `LearnerHeartbeat`. It is
+on `learn.Learners`: the annotation reaches `forgetMuLocked`, which clears what
+`learner-write` last logged, and a key forgotten or evicted is reported
+(`muForgotten`, `SwitchMuForgetReported`). The prefill bound shares mu's maps
+and is not reported. The throughput floor's line names the key and source it priced from (`muKey`,
 `muSource`, `muPricedFor`) and the start time it projected over.
 
 ### The pricing point

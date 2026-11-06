@@ -79,6 +79,7 @@ func TestReadersAndBuildersChangeNothing(t *testing.T) {
 		"saturation.Horizons":                 func(f *fixture) { f.sat.Horizons() },
 		"saturation.BorrowTickGap":            func(f *fixture) { f.sat.BorrowTickGap() },
 		"saturation.LearnerReports":           func(f *fixture) { f.sat.LearnerReports() },
+		"saturation.TakeLearnerReports":       func(f *fixture) { f.sat.TakeLearnerReports() },
 		"saturation.WithHorizons":             func(f *fixture) { f.sat.WithHorizons(f.sat.Horizons()) },
 		"saturation.WithOptimizationInterval": func(f *fixture) { f.sat.WithOptimizationInterval(0) },
 		"saturation.WithClock":                func(f *fixture) { f.sat.WithClock(f.clk) },

@@ -88,6 +88,8 @@ var logContract = map[string][]string{
 		"unsteady", "steadyHeld", // and how many of those kept may teach the full fit
 		"steadySpread", "minKSpread", "ready", "minSamples", // and whether that is enough to fit on
 	},
+	// The report's Restored column.
+	"learner-write": {"variant", "learner", "restored"},
 	// Which tier answered, and with what line. A pinned-B fit is the weaker
 	// answer and the report has to be able to tell the two apart.
 	// baselineLearned says whether B came from this card or from the

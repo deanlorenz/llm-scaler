@@ -327,9 +327,14 @@ type SaturationAnalyzer struct {
 	learnerStarted map[string]bool
 	// mu as a learner (mu_learner.go): the cycle per namespace|model, kept
 	// until the next begins so the throughput floor can name what priced
-	// each role, and what learner-write last logged per throughput key.
-	muCycles map[string]*muCycle
-	muLogged map[string]muLogged
+	// each role, what learner-write last logged per throughput key, and the
+	// keys forgotten per namespace|model and variant since the variant's
+	// last report. muForgetReported is SwitchMuForgetReported: on from the
+	// constructor; a replay turns it off (SetSwitchesForReplay).
+	muCycles         map[string]*muCycle
+	muLogged         map[string]muLogged
+	muForgotten      map[string]map[string][]learn.Forgotten
+	muForgetReported bool
 	// The ITL line as a learner (itl_learner.go): its reports of the cycle
 	// in progress per namespace|model, the line learner-write last logged
 	// per ITL key, and the keys forgotten per namespace|model and variant
@@ -652,6 +657,8 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		learnerStarted:         make(map[string]bool),
 		muCycles:               make(map[string]*muCycle),
 		muLogged:               make(map[string]muLogged),
+		muForgotten:            make(map[string]map[string][]learn.Forgotten),
+		muForgetReported:       true,
 		itlCycles:              make(map[string][]learn.Report),
 		itlLogged:              make(map[string]itlLogged),
 		itlForgotten:           make(map[string]map[string][]learn.Forgotten),
@@ -901,8 +908,9 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 			delete(a.computeCapacityHistory, key)
 			evicted.K2History++
 			// k2 forgets the key itself, unused past its horizon: its
-			// variant's next report says so.
-			if name, model, ok := variantOfKey(key); ok {
+			// variant's next report says so. Not while a stash holds the key:
+			// it can still price, and the stash's eviction names it.
+			if name, model, ok := variantOfKey(key); ok && !stashHolds(a.k2Stash, key) {
 				if ns, variant, ok := strings.Cut(name, "/"); ok {
 					a.noteForgottenLocked(ns, model, variant, []string{key}, learn.ByEvicted)
 				}
@@ -1111,6 +1119,15 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 			delete(a.throughputPodReads, key)
 			delete(a.throughputMuChoice, key)
 			evicted.MuWindows++
+			// Mu forgets the key itself, unused past its horizon, unless a
+			// stash holds it, as k2's does. The prefill bound's windows
+			// share the map and are not mu.
+			if name, model, ok := variantOfKey(key); ok && a.muForgetReported && !isPrefillBoundKey(key) &&
+				!stashHolds(a.throughputStash, key) {
+				if ns, variant, ok := strings.Cut(name, "/"); ok {
+					fileForgotten(a.muForgotten, ns+"|"+model, variant, []string{key}, learn.ByEvicted)
+				}
+			}
 		}
 	}
 	// A choice memo whose window never came to be -- every reading refused
@@ -1132,18 +1149,22 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 	})
 	// A window put aside under arguments the variant no longer runs ages as
 	// it did in use: a bucket retention after it was last read.
+	var k2StashGone, muStashGone []string
 	for key, ra := range a.k2Stash {
 		if ra.StaleAt(now, bucketRetention) {
 			delete(a.k2Stash, key)
 			evicted.StashedWindows++
+			k2StashGone = append(k2StashGone, stashedKey(key))
 		}
 	}
 	for key, st := range a.throughputStash {
 		if st.window.StaleAt(now, bucketRetention) {
 			delete(a.throughputStash, key)
 			evicted.StashedWindows++
+			muStashGone = append(muStashGone, stashedKey(key))
 		}
 	}
+	a.noteStashesGoneLocked(k2StashGone, muStashGone)
 	// A held mark describes a window a rollback took back, and is read only
 	// when that window is set aside again under the same arguments: once the
 	// window is gone or carries other arguments, nothing reads it.

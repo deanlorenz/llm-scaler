@@ -250,6 +250,13 @@ type Engine struct {
 	// lastAnalyzerSeries.
 	publishedEngineConfig map[string]engineConfigPublished
 
+	// learnerMissingSince is when each variant with learner series first went
+	// missing from the registry, and learnerTargetsCheckedAt when the scale
+	// targets of such variants were last read (retainLearnerSeries).
+	// Unguarded for the same reason as lastAnalyzerSeries.
+	learnerMissingSince     map[learnerVariantID]time.Time
+	learnerTargetsCheckedAt time.Time
+
 	// lastDecided records, per scale target (keyed namespace/target), when the
 	// optimize loop last DECIDED for it -- as opposed to republished for it --
 	// and which incarnation of the target that decision was about. The sticky
@@ -839,6 +846,9 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 		logger.Error(err, "Unable to get active variant autoscalings")
 		return err
 	}
+	// Here, not with the analyzer series: those go with the active set, and a
+	// fleet at zero replicas is exactly what these series are kept for.
+	e.retainLearnerSeries(ctx)
 	// Before anything decides: which variants are only observed this cycle.
 	e.observePassive(logger, activeVAs)
 
@@ -1571,6 +1581,9 @@ func (e *Engine) optimizeV2(
 	// swept, and written after the cycle has learned what it will.
 	e.restoreLearnedState(ctx, e.clock.Now())
 	defer func() { e.writeLearnedState(ctx, e.clock.Now()) }()
+	// What the learners reported this cycle, on every way out of it: the
+	// prune above ran before any Analyze, so no report is of a pruned model.
+	defer e.publishLearnerReports()
 
 	// Before the sweep, which would otherwise judge a variant on a stamp from
 	// before it parked: Analyze stamps too, but only after this point.
