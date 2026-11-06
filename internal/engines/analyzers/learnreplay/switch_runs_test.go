@@ -131,7 +131,7 @@ import (
 // golden in S1a: it only logs (prefill-capacity-observed), and writes no
 // state an output reads there; S1b's TTFT pricing reads the estimate it
 // stashes. Its unit tests hold it (heldBy).
-var replaySwitches = map[string][]string{
+var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	saturation.SwitchPrefillCapacityObserve: nil,
 	throughput.SwitchITLAdmitsAtSequenceCap: {
 		"throughput-sweep-restart/composite-holds.csv",
@@ -209,13 +209,14 @@ var replaySwitches = map[string][]string{
 	// S1 of the TTFT track (docs/proposals/slo-tiers.md, decision 4), on main
 	// after #482 (59772fce2): each prefill variant of a model with a TTFT
 	// target is priced against it, in shadow. It moves slo-published.csv in
-	// the two goldens with a TTFT target and a prefill variant, and nothing
-	// else: no result moves, so no replica count can. Alone from all off,
+	// the two ols-sweep-slo goldens, and nothing else: no result moves, so
+	// no replica count can. Alone from all off,
 	// P1's observation is off too, so the reason reads no-estimate; with it
 	// on, as committed, no-prefill-capacity
 	// (TestGoldens_TTFTPriceReadsTheObservation holds the pair). The
-	// engine golden's P/D model is TPOT-only, and the ttft-* recordings have
-	// no slo.Analyze to replay.
+	// engine golden's P/D model is TPOT-only, and the four prefill-stress
+	// recordings have no slo.Analyze to replay. The staircase goldens, added
+	// since, have one on every cycle: their rows are staircaseSwitchMoves.
 	slo.SwitchTTFTPrice: {
 		"ols-sweep-slo/slo-published.csv", "ols-sweep-slo-restart/slo-published.csv",
 	},
@@ -356,7 +357,7 @@ var replaySwitches = map[string][]string{
 		"start-restored/composite-results.csv", "start-restored/learned-state.csv", "start-restored/results.csv",
 	},
 	settle.SwitchFirstSightRestored: nil,
-}
+})
 
 // learner4b2Seams is learner PR 4b-2's switches, earlier seams now (merged
 // into earlierSeams): the throughput line on the engine's settle tracker,
@@ -483,7 +484,7 @@ func switchPackage(name string) string {
 // in the PR, or cleanup PR, that deletes it with zero golden diff. Learner
 // PR 4a's rows are learner4aSeams, 4b-1's learner4b1Seams and 4b-2's
 // learner4b2Seams, merged in.
-var earlierSeams = withMoves(startSeedSeamMoves, withSeams(learner4b2Seams, withSeams(learner4b1Seams, withSeams(learner4aSeams, map[string][]string{
+var earlierSeams = withMoves(staircaseSeamMoves, withMoves(startSeedSeamMoves, withSeams(learner4b2Seams, withSeams(learner4b1Seams, withSeams(learner4aSeams, map[string][]string{
 	// #275 (two switches) and #438, this file's own rows before learner PR
 	// 4b-1 (see replaySwitches).
 	saturation.SwitchZeroReplicaDataParallel: nil,
@@ -605,7 +606,7 @@ var earlierSeams = withMoves(startSeedSeamMoves, withSeams(learner4b2Seams, with
 		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
 		"engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
 	},
-}))))
+})))))
 
 // startSeedSeamMoves is what each earlier seam, off alone from all on, moves
 // in the start-seed goldens, and in start-restored. Measured at 59772fce2, the
@@ -651,12 +652,18 @@ var startSeedSeamMoves = map[string][]string{
 	},
 }
 
+// withDigests is base with more's digests added.
+func withDigests(more, base map[string]string) map[string]string {
+	maps.Copy(base, more)
+	return base
+}
+
 // withMoves is rows with more's outputs added to rows the same switch
 // already has; a name with no row panics.
 func withMoves(more, rows map[string][]string) map[string][]string {
 	for name, outs := range more {
 		if _, ok := rows[name]; !ok {
-			panic("earlierSeams: " + name + " has no row to add to")
+			panic("switch tables: " + name + " has no row to add to")
 		}
 		rows[name] = append(rows[name], outs...)
 	}
@@ -1028,7 +1035,7 @@ func TestGoldens_ASwitchWithTwoRowsPanics(t *testing.T) {
 // the same bytes as at 1c9a34fe8, since 4b-2 moved none). It also holds the
 // base digests of the outputs a throughput switch could move that the
 // expectation does not name, so the measured rows need no new lookup.
-var switchBase = map[string]string{
+var switchBase = withDigests(staircaseBase, map[string]string{
 	"acceptance/results.csv":            "7aef7e7391f761fe984f89720d61b0583048b330989c449098dce8ec2d285981",
 	"acceptance/variant-capacities.csv": "47ad82ad3c017924b6cc5398d9578ddd28ab95fdc547adcec6decb69abcc91b3",
 	"engine/composite-holds.csv":        "ce02c822639f90959858c2ddc1e4681dc5b65d281a13d033520cfaa9945d3e0c",
@@ -1113,7 +1120,7 @@ var switchBase = map[string]string{
 	"throughput-sweep/lines.csv":                      "f55781cb4b727f97f56ab8e1611213f0e92f4c11f76a816323877d1ff101e834",
 	"throughput-sweep/variant-capacities.csv":         "4dddae1473f723feaeabe6ce16b5cc8e3cce8e188df255a08ab1ba2a5808db3e",
 	"throughput-sweep/warm-pool-pressure.csv":         "87ea51257f009bbc7fc85aefda7bd014568a94ccdc29093596a4083b455e979b",
-}
+})
 
 // The slow tests of this package run in parallel with each other (each
 // marked "reads the goldens, writes only to its own copies"): each replays
