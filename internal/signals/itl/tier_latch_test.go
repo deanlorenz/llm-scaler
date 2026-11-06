@@ -442,3 +442,14 @@ func TestDwellTier_AFullFitWithNoPositiveBStillDwells(t *testing.T) {
 		t.Fatalf("tier %q held %v, want the full fit refused", r.Tier, r.TierHeld)
 	}
 }
+
+// A forget takes the key back to before its first full fit: with no B and no
+// fit behind it, the next full fit does not wait, though it prices less.
+func TestDwellTier_AForgetRestoresTheFirstFullFit(t *testing.T) {
+	l := atOLS(t)
+	l.tr.ForgetBaselines()
+	l.a, l.b = 0.02, 0.012
+	if r := l.after(15*time.Second, latchFleet(), 1); r.Tier != TierOLS || r.TierHeld {
+		t.Fatalf("tier %q held %v, want the full fit at once", r.Tier, r.TierHeld)
+	}
+}
