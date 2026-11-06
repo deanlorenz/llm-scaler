@@ -258,8 +258,8 @@ func TestPromptWindow_TheMinimums(t *testing.T) {
 		}
 		return !w.Spread().Assumed
 	}
-	assert.False(t, reads(1000, PromptWindowMinCycles-1, 60), "the count passed, too few cycles")
-	assert.True(t, reads(1000, PromptWindowMinCycles, 60))
+	assert.False(t, reads(1000, 4, 60), "the count passed, too few cycles")
+	assert.True(t, reads(1000, 5, 60))
 	// 1 a second: 60 from the first cycle and 15 from each after it is 195 at
 	// cycle 10, under, and 210 at cycle 11. A count of each whole minute, the
 	// overlap counted again, would read at cycle 4.
@@ -268,6 +268,7 @@ func TestPromptWindow_TheMinimums(t *testing.T) {
 	// 42 a minute at a cycle an hour apart: 42 a cycle, not 2520.
 	assert.False(t, reads(0.7, 4, 3600), "168 requests")
 	assert.True(t, reads(0.7, 5, 3600), "210 requests")
+	assert.False(t, reads(0.3, 5, 3600), "90 requests, enough cycles")
 	// A clock that steps back adds nothing, and takes nothing away.
 	assert.True(t, reads(5, PromptWindowMinCycles, -15), "300 requests from the first cycle")
 }
