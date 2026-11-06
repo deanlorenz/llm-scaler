@@ -2342,6 +2342,46 @@ Later and optional, after 5d: a GPU witness. One small model, one variant,
 1 GPU per replica, 1 to 4 replicas, one restart; about 30 min and 4 GPUs on a
 shared cluster, torn down on every exit path. No PR waits for it.
 
+#### Recording as run
+
+Run on kind with main 59772fce2 (5a to 5c merged, 5d not): the goldens
+`start-seed`, `start-seed-restart` and `start-seed-restart-2`, one per
+controller start. Everything below is measured on that run. How to take it
+again: [the start-seed goldens](../developer-guide/testing.md#the-start-seed-goldens).
+
+Two things differ from the plan above. A cheaper fast variant at a ceiling of 5
+made the slow one scale: the cost-aware optimizer adds to the cheapest variant
+first, so without the ceiling the slow variant never scales. Step 3 (the
+engine restart) was skipped; `pd-restart` and the synthetic suite cover it.
+
+| measure | fast | slow |
+| --- | --- | --- |
+| Pods' own creation to Ready, 18 Pods from the per-minute dumps | 9 Pods, 20 to 22 s, mean 21.22 s | 9 Pods, 241 to 242 s, mean 241.44 s |
+| Learned after the first scale-up | 21.66 s | 241.46 s |
+| Learned at the end | 21.03 s | 241.29 s |
+| `startSamples` in the ConfigMap, first scale-up | 1 Pod, mean 21 | 1 Pod, mean 241 |
+
+- **Start samples written:** 8 of the first run's 10 exports hold
+  `startSamples`; none does after the third Pod of each key, as designed.
+- **Start keys restored:** 2 at each of the two restarts, in the recording's
+  `saturation.RestoreLearnedState` and in the ConfigMap after it.
+  `learner-start` does not count them yet (5d).
+- **Sightings:** none. This build does not write them (5d).
+- **The seed:** `RoleStartSeconds` reads 120 on 12 cycles, then the first
+  measured Pod. Published 160.3 s, sized 241 s, as `(2 x 120 + 241) / 3`
+  predicts. Measured alone, `start-reads-replica-start-seed` moves 12 rows of
+  `results.csv` from 21 to 120, and the blend moves them from 21 to 53.67.
+- **The contradicted-seed line fired once**: 241 s is 1 s over 2 x 120. A seed
+  half the true start sits at the edge of the band.
+- **What 5d changes here:** after each restart the running Pods were folded
+  again: slow went 241.46 to 241.66 at the first restart and 241.66 to 241.77
+  at the second, and no `learner-write` carried `restored: true`, since
+  the first cycle admits a sample.
+- **Not reached:** the floor's projection logged `startSource: none` on all 31
+  lines. The simulator run has no router, so no true arrival rate, and the
+  floor projects only over one. No refused outlier either: no start was over
+  three times the estimate.
+
 #### Split and order
 
 | PR | content | fleet sizing |
@@ -2669,7 +2709,8 @@ empties a variant's ITL rows while its scale target rolls out
 not taken as the new engine's. The throughput line never had that guard,
 before 4b or since; with the cap read from the store, a rollout that
 changes `--max-num-seqs` can briefly judge old pods against the new cap.
-A small PR of its own, with the forget for this line.
+A small PR of its own. (The forget for this line has landed:
+[as built](#the-throughput-lines-forget-as-built). The rollout guard has not.)
 
 #### 4b-3 round-2 review
 
@@ -2717,6 +2758,81 @@ killed):
 | one-sided with a learned B | `TestITLCap_ALearnedBEndsTheOneSidedPriceAndAForgetBringsItBack` |
 | the summary omits `pinnedAtLeastITL` | the probe |
 | the negative control's knob ignored | the bias table and the probe |
+
+#### The throughput line's forget, as built
+
+The forget-learned-state annotation reaches this line, as #431 took it to
+the slo line. One switch, on by the constructor:
+`throughput-itl-forget-reaches-the-line` (`T/forget.go`). `forgetOnRequest`
+calls `ThroughputAnalyzer.ForgetVariant` on the token the saturation analyzer
+acts on, after the slo analyzer's, found among the built-ins because only the
+saturation config registers it. The forget log line gains `throughputEntries`.
+
+- **What goes.** What the tracker learned of the key, through
+  `itl.Tracker.ForgetKeysKeepingTraces`: the window, the steady window, both
+  above-band windows, B and the held slope. The settling stamps and the
+  readings at the cap go with the windows. Also `itlLogged`, the parent's
+  window and B, this cycle's reading and the figures priced from the line.
+- **What stays.** The replicas' traces, which fit nothing. Unlike the
+  saturation and slo forgets, which drop theirs and were left alone. Dropped,
+  the steady gate went blind for the first cycle after a forget (a step of k
+  +0.25 and ITL x3 read `unsteady` 0, where 3 with no forget;
+  `TestForget_TheSteadyGateSeesTheFirstCycleAfter`). The settle holds through
+  the trace, not through `ownSettle`, as this section first said: with the
+  traces dropped it held only through the engine's view and the `waits` path,
+  and was lost with no view. With the traces kept a replica inside its settle
+  stays inside it on all three paths
+  (`TestForget_AReplicaSettlingAtAForgetStillSettles`,
+  `TestForget_AReplicaSettlingAtAForgetStillSettlesOnEveryPath`). Also the
+  shape, the traffic now, and the log lines' memories. Two tests hold every
+  field to a list
+  (`TestForget_EveryFieldIsClassified`,
+  `TestForget_EveryVariantStateFieldIsClassified`). The cap is read from the
+  store each cycle, so with B gone a line at the cap prices one-sided again
+  (`TestForget_AtTheCapALineIsPricedOneSidedAgain`).
+- **Nothing refills it.** This analyzer has no snapshot and no restore, read
+  from the code. `TestForget_NothingHereRestoresALine` checks method names
+  only, as a tripwire. It borrows no line, and a key is one variant's. The
+  tracker refuses a lent replica's rows; `ownReplicasOnly` drops them first on
+  the `Analyze` path, as defence in depth, and that mutant survives alone
+  (`TestForget_NoSiblingOrLentReplicaRefillsTheLine`, 16 cycles of a
+  sibling's and lent rows leave the key empty).
+- **Reuse.** `itl.Tracker.ForgetKeys` is the sweep and sorted key list that
+  the saturation and slo forgets each wrote out, and now call.
+  `logging.ForgottenKeys` is slo's per-key log line, moved: `learn` logs
+  nothing and imports only the standard library, so it could not go there. It
+  takes plain key strings, so `logging` stays a leaf (`learn.Keys` converts),
+  and writes a key's NUL separators as `|`. Which learners an analyzer keeps
+  stays each analyzer's own code, as `learn.Learners` says it should.
+- **Learner series.** `learn.Report` has no consumer for this line and no
+  learner series exists, so the deferred clause "when no key remains, the
+  variant's learner series are deleted" still has nothing to apply to. Each
+  key is logged instead.
+- **Goldens.** None moves. No committed recording carries
+  `throughput.ForgetVariant`. Measured on the `acceptance` and `engine` runs
+  taken again: each carries one event (Dropped 1: a window, no intercept), the
+  recording is otherwise line for line the one main writes, and all 19 outputs
+  are byte for byte the same with the event and without it. So the unit tests
+  hold the switch (`heldBy`), and the replay of the event is held by
+  `TestReplay_TheThroughputForgetIsApplied`. Taking those two recordings again
+  moves 9 outputs on main with no change at all; that drift is not this
+  change's, and they were not retaken here.
+- **After a forget.** `itl.DefaultMinSamples` readings are necessary and not
+  a recovery time. Capacity returned on cycle 4 with 3 replicas and cycle 10
+  with 1 (`TestForget_TheLineIsBackOnTheCycleItHoldsTenReadings`). A fleet
+  offering no reading stays silent: over 40 cycles on three replicas, k 0.82
+  with no stated cap priced 40/40 without a forget and 0/40 after
+  (`all-above-band-below-ksat`), and k 0.10 likewise (`too-few-readings`;
+  `TestForget_AFleetOfferingNoReadingStaysSilent`). So a policy listing
+  throughput without saturation cannot scale up after a forget at k 0.80 to
+  0.85 until k leaves that range. Once B is gone a balanced fleet pins
+  `DefaultBaselineSec`, as a new variant does, and in the band that is not
+  one-sided: capacity 1.20x the truth at true B 2 ms and k 0.30, 0.71x at
+  20 ms (`TestForget_ABalancedFleetPricesEitherSideOfTheTruth`). The behaviour
+  is left as it is: it is the new-variant state. `troubleshooting.md` states
+  the holds and metrics an operator sees meanwhile.
+- **Measured versus assumed.** The tests above are unit and replay tests on
+  synthetic rows. It has not been run on a cluster.
 
 #### 4b-3's follow-up: the saturation and slo lines at the cap (#467)
 
@@ -3179,7 +3295,7 @@ Round-3 lows, each settled in the PR named.
 | The recorder volume's `sizeLimit` is the per-volume ceiling (two recordings at the cap) plus headroom for the export. The writer stops each recording at the cap and deletes the oldest closed recording before the ceiling | 0b |
 | The export also pseudonymises args and config strings and borrowed-line donors, with a per-export key that is not committed | 0b |
 | `learner-write`'s `pods` lists at most 16, lowest reading first, with `podsOmitted` | 2 |
-| Forget reaches every learner through a plain list of learner names in `learn`, not a registry; it is a named change of its own; when no key remains, the variant's learner series are deleted | 2 |
+| Forget reaches every learner through a plain list of learner names in `learn`, not a registry; it is a named change of its own; when no key remains, the variant's learner series are deleted. Built for the saturation analyzer (2), the slo line (#431) and the throughput line ([as built](#the-throughput-lines-forget-as-built)). No learner series exists yet, so the deletion still has nothing to apply to | 2 |
 | Each operator-column cell names its metric series, or "metrics: none" | each PR |
 | A witness column per learner in 3.4 ("witnessed when", "non-saturating witness"), which also tells the probe which side to drive | 3 |
 | 3.6's cycle-count clocks become durations, or record the cycle interval in the threshold | each learner's PR |

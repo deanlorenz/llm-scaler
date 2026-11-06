@@ -197,7 +197,8 @@ type.
   registered analyzer lacks (a test double), and each caller skips it.
 - **Input builder** — `buildAnalyzerInput` in `engine_v2.go`, called by
   `runAnalyzers` before any analyzer runs. Per variant it forgets on request
-  (`forgetOnRequest`), files the scale target's engine parameters in the
+  (`forgetOnRequest`, which reaches the saturation analyzer, then the slo and
+  throughput analyzers' own ITL lines), files the scale target's engine parameters in the
   capacity store (`LoadFromScaleTarget`) and publishes `wva_engine_config`
   (`publishEngineConfig`), in that order. It returns the one
   `domain.AnalyzerInput` every analyzer of the model receives: rows,

@@ -196,6 +196,18 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 		r.rep.Analyzes[ev.Kind]++
 		res, err := r.tp.Analyze(ctx, input)
 		r.noteResult(throughput.AnalyzerName, input.Namespace, input.ModelID, res, err)
+	case throughput.KindForgetVariant:
+		// A recording made before the engine forgot the throughput line has
+		// none of these: its replay forgets nothing in the throughput
+		// analyzer, as the run did not.
+		if r.tp == nil {
+			return errNoThroughput
+		}
+		var d throughput.ForgetVariantEvent
+		if err := ev.DecodeData(&d); err != nil {
+			return err
+		}
+		r.tp.ForgetVariant(ctx, d.Namespace, d.ModelID, d.Variant)
 	case throughput.KindObserve:
 		if r.tp == nil {
 			return errNoThroughput

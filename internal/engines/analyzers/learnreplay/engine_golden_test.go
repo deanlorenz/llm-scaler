@@ -27,6 +27,7 @@ const engineFixture = "engine"
 // the engine layer landed. The others were recorded before it.
 var engineFixtures = []string{engineFixture, "pd-restart", olsFixture, olsSLOFixture, olsSLORestartFixture,
 	ttftThreePodsFixture, ttftSaturatedFixture, ttftOpenLongFixture, ttftOpenShortFixture,
+	startSeedFixture, startSeedRestartFixture, startSeedRestart2Fixture,
 	throughputSweepFixture, throughputSweepRestartFixture}
 
 // Each golden that carries engine events lists every engine output, and no
@@ -139,15 +140,18 @@ func TestEngineGoldens_NoEngineRegisteredIsAProblem(t *testing.T) {
 func TestEngineGoldens_TheEmptyRulesReadTheEnginesPathNames(t *testing.T) {
 	assert.Equal(t, steadystate.PathCompositeHold, enginePathHold)
 	assert.Equal(t, steadystate.PathCompositeReleaseBound, enginePathReleaseBound)
+	assert.Equal(t, steadystate.PathCompositeRoleCapacities, enginePathRoleCapacities)
 	assert.Contains(t, enginePathNames(), enginePathHold)
 	assert.Contains(t, enginePathNames(), enginePathReleaseBound)
+	assert.Contains(t, enginePathNames(), enginePathRoleCapacities)
 }
 
 // An engine output a rule may allow to be empty (engineEmptyRuled) must hold
 // rows unless the fixture's replay allows it. Refuse side: the engine
-// fixture holds roles and bounds releases, so each emptied is a problem.
-// Accept side: pd-restart's replay does neither, and its two files are empty
-// by the rule, not by its name.
+// fixture holds roles, bounds releases and prices roles, so each emptied is
+// a problem. Accept side: pd-restart's replay holds and bounds nothing, and
+// start-seed's prices no role: their files are empty by the rule, not by
+// their names.
 func TestEngineGoldens_AnEmptyEngineOutputNeedsARule(t *testing.T) {
 	t.Parallel() // reads the goldens, writes only to its own copies (TestGoldens_TheSwitchRuns)
 	ctx := context.Background()
@@ -168,9 +172,20 @@ func TestEngineGoldens_AnEmptyEngineOutputNeedsARule(t *testing.T) {
 		c, err := CheckGoldens(ctx, goldenDir)
 		require.NoError(t, err)
 		require.Empty(t, c.Problems)
-		for _, output := range engineEmptyRuled {
+		for _, output := range []string{OutputCompositeHolds, OutputCompositeRelease} {
 			assert.Zero(t, c.Rows["pd-restart/"+output], "precondition: %s is empty", output)
 			assert.True(t, c.mayBeEmpty["pd-restart"][output], "%s is allowed empty", output)
+		}
+		assert.Positive(t, c.Rows["pd-restart/"+OutputCompositeRoles], "pd-restart prices its roles")
+		assert.False(t, c.mayBeEmpty["pd-restart"][OutputCompositeRoles])
+	})
+	t.Run("accepted: start-seed priced no role", func(t *testing.T) {
+		c, err := CheckGoldens(ctx, goldenDir)
+		require.NoError(t, err)
+		require.Empty(t, c.Problems)
+		for _, fixture := range startSeedFixtures {
+			assert.Zero(t, c.Rows[fixture+"/"+OutputCompositeRoles], "precondition: %s serves both roles itself", fixture)
+			assert.True(t, c.mayBeEmpty[fixture][OutputCompositeRoles], "%s is allowed no role rows", fixture)
 		}
 	})
 }

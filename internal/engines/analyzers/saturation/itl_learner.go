@@ -174,13 +174,8 @@ func (a *SaturationAnalyzer) closeITLCycle(namespace, modelID string, rolesByVar
 // learn's list. Callers hold a.mu.
 func (a *SaturationAnalyzer) forgetITLLocked(namespace, modelID, variant string, by learn.By) int {
 	prefix := namespace + "|" + modelID + "|" + variant + "|"
-	forgotten := map[string]bool{}
-	windows, baselines := a.itlTracker.Sweep(a.now(), func(k string) bool {
-		if strings.HasPrefix(k, prefix) {
-			forgotten[k] = true
-			return true
-		}
-		return false
+	windows, baselines, forgotten := a.itlTracker.ForgetKeys(a.now(), by, func(k string) bool {
+		return strings.HasPrefix(k, prefix)
 	})
 	for key := range a.itlLogged {
 		if strings.HasPrefix(key, prefix) {
@@ -199,9 +194,7 @@ func (a *SaturationAnalyzer) forgetITLLocked(namespace, modelID, variant string,
 		if a.itlForgotten[model] == nil {
 			a.itlForgotten[model] = map[string][]learn.Forgotten{}
 		}
-		for _, k := range slices.Sorted(maps.Keys(forgotten)) {
-			a.itlForgotten[model][variant] = append(a.itlForgotten[model][variant], learn.Forgotten{Key: k, By: by})
-		}
+		a.itlForgotten[model][variant] = append(a.itlForgotten[model][variant], forgotten...)
 	}
 	return windows + baselines
 }

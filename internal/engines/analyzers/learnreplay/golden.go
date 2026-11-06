@@ -1093,15 +1093,18 @@ func (u analyzerUse) emptyRules() map[string]bool {
 
 // engineEmptyRuled is every engine output a rule may allow to be empty
 // (engineEmptyRules). The engine fixture fills each; a cluster recording
-// fills these two only when its run held a role or bound a release.
-var engineEmptyRuled = []string{OutputCompositeHolds, OutputCompositeRelease}
+// fills the first two only when its run held a role or bound a release, and
+// the third only when it ran a P/D model.
+var engineEmptyRuled = []string{OutputCompositeHolds, OutputCompositeRelease, OutputCompositeRoles}
 
 // The engine's path counters engineEmptyRules reads, by name: the replay
 // cannot import the engine (steadystate.PathCompositeHold and
-// PathCompositeReleaseBound). A test holds them to the engine's own.
+// PathCompositeReleaseBound, PathCompositeRoleCapacities). A test holds them
+// to the engine's own.
 const (
-	enginePathHold         = "composite-hold"
-	enginePathReleaseBound = "composite-release-bound"
+	enginePathHold           = "composite-hold"
+	enginePathReleaseBound   = "composite-release-bound"
+	enginePathRoleCapacities = "composite-role-capacities"
 )
 
 // engineEmptyRules is each output of engineEmptyRuled the replay allows to
@@ -1112,10 +1115,13 @@ const (
 //     (composite-hold is 0).
 //   - composite-release.csv, when no other analyzer's frame bounded a
 //     release (composite-release-bound is 0).
+//   - composite-roles.csv, when no composite priced a role: every model of
+//     the run serves both roles itself (composite-role-capacities is 0).
 func engineEmptyRules(paths map[string]int64) map[string]bool {
 	return map[string]bool{
 		OutputCompositeHolds:   paths[enginePathHold] == 0,
 		OutputCompositeRelease: paths[enginePathReleaseBound] == 0,
+		OutputCompositeRoles:   paths[enginePathRoleCapacities] == 0,
 	}
 }
 
