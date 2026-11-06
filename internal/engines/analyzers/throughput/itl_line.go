@@ -73,7 +73,8 @@ const itlReasonT2AboveBand = "T2-above-band"
 // (domain.RevisionsMixed), the line is offered no rows and fits from what it
 // holds, as the saturation analyzer's: a reading may be an old pod's, and it
 // would be judged against the new engine's sequence cap. Off, as before, every
-// fresh row is offered. Only on the tracker (SwitchITLSteadyGate).
+// fresh row is offered. The cycle after a rollout resets the line's tier latch
+// (itl.Admission.Rollout). Only on the tracker (SwitchITLSteadyGate).
 const SwitchITLRolloutGuard = "throughput-itl-rollout-guard"
 
 // SwitchITLForgetsOnNewArguments is the replay switch for the line under new

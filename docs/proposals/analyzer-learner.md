@@ -3699,7 +3699,7 @@ and the `restored` field have none, because no replay output reads either.
 
 #### Rollouts, k2's wait and the lines' reports, as built (#481, #495)
 
-Six replay switches, on from the constructors. None moves a golden: no recording
+Seven replay switches, on from the constructors. None moves a golden: no recording
 holds a rollout, a change of arguments or a new revision under a name, and
 nothing priced reads a report. Their unit tests hold them. Nothing here has run
 on a cluster.
@@ -3708,6 +3708,7 @@ on a cluster.
 | --- | --- |
 | `throughput-itl-rollout-guard`, `slo-itl-rollout-guard` | the line is offered no rows while `Record.InRollout`, or while the variant's rows report two revisions (`domain.RevisionsMixed`, moved from the saturation analyzer so all three read one rule) |
 | `throughput-itl-forgets-on-new-arguments` | the throughput line forgets on a change of `ArgsTag`, keeping the traces |
+| `saturation-itl-tier-resets-after-a-rollout` | the cycle after a rollout resets the saturation line's tier latch. The slo and throughput lines do it under their guards |
 | `k2-waits-after-a-rollout` | `settle.RolledOut` starts k2's joined wait |
 | `slo-itl-files-learner-reports` | the slo line's `learn.Report` and `learner-write` |
 | `throughput-itl-files-learner-reports` | the throughput line's `learn.Report`; its `learner-write` stands as 4b-1 built it |
@@ -3717,6 +3718,21 @@ on a cluster.
   defect #481 names: an old pod above the band counted as at the new cap
   (`TestRollout_AnOldPodIsNotJudgedAgainstTheNewCap`). The slo line had the
   arguments rule already (`linesUnderArgs`).
+- **The tier latch (#498).** The guard freezes the window, and `fullFitReady`
+  refreshes `seen` while the steady window holds anything, so without this a
+  latched full fit stood on old pods' readings for as long as they lasted, 35 min
+  at most, and through the new pods' first readings. The tier stays as it stands
+  through the rollout: the window does not move, so a reset there would move the
+  line with no new reading. The cycle after it the latch is deleted, not just
+  unlatched: the key starts as a restored one does (`dwellTier`), at the pinned
+  tier with a slope, and its dwell runs from then. A change of arguments needs
+  none of this: the forget takes the latch. The cost: an image-only rollout of a
+  line at the full fit goes to the pinned fit when it ends, and a full fit has to
+  price 3 % more or wait out the dwell (10 min). That is a move without a new
+  reading on one cycle, and its reason for 3.4 is the new engine; the pinned fit
+  and full fit were 2.8 % apart at most over the recordings (3.5). Old pods'
+  readings stay in the window, so the set values can still be met from them: as
+  on the saturation line before this, only their age ends them.
 - **"Forget the line".** #481 lists it without saying when. Read here as the
   arguments rule the saturation and slo lines have, and the table in
   [PR 4b](#pr-4b-the-throughput-analyzers-itl-line) records this line lacking

@@ -481,6 +481,10 @@ type SaturationAnalyzer struct {
 	// itlTierHysteresis is SwitchITLTierHysteresis (issue #495,
 	// itl_tier_hysteresis.go): on, the line's tier is latched.
 	itlTierHysteresis bool
+	// itlTierRolloutReset is SwitchITLTierResetsAfterRollout
+	// (itl_tier_hysteresis.go): on from the constructor; a replay turns it
+	// off (SetSwitchesForReplay).
+	itlTierRolloutReset bool
 	// itlOneSidedLast is, per ITL key, the one-sided fields of the admission
 	// the line was last priced under (itlOneSided), and whether it was raised
 	// (noteITLOneSided), for the what-if refit (ITLOneSided): its prior on B
@@ -709,6 +713,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		prefillAQuadratic:      true,
 		itlOneSidedAtCap:       true,
 		itlTierHysteresis:      true,
+		itlTierRolloutReset: true,
 		itlOneSidedLast:        make(map[string]itlOneSidedRecord),
 		prefillObserver:        prefill.NewObserver(),
 		prefillBounds:          make(map[string]stashedBound),

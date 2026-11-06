@@ -331,6 +331,7 @@ func (a *ThroughputAnalyzer) observe(
 			a.lineUnderArgsLocked(key, state, adm.Args, now)
 			rows := freshRows(variantMetrics)
 			state.rollout = rolling && a.itlRolloutGuard
+			adm.Rollout = state.rollout
 			if state.rollout {
 				rows = nil
 			}

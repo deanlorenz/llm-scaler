@@ -98,7 +98,28 @@ func TestRollout_OneVariantsRolloutIsNotAnother(t *testing.T) {
 
 	bare := New(nil, nil)
 	in := domain.AnalyzerInput{Namespace: "ns", ModelID: "m"}
-	assert.Nil(t, bare.lineRows(in, fleetReading{mixed: map[string]bool{"agg": true}}, "agg"))
+	assert.True(t, bare.rollingOut(in, fleetReading{mixed: map[string]bool{"agg": true}}, "agg"))
+}
+
+// The cycle after a rollout the line's tier latch is gone: what put it at the
+// full fit was old pods' readings. Off, it stands.
+func TestRollout_TheLatchGoesWhenItEnds(t *testing.T) {
+	run := func(switches map[string]bool) bool {
+		r := newRolloutRig(t, switches)
+		key := windowKey("ns", "m", settleAgg)
+		for range 8 {
+			r.cycle(revised(settleFleet(), "rev-1"))
+		}
+		require.True(t, r.a.lines.Readings(key).OLSLatched, "premise: the line stands at the full fit")
+		r.file(true)
+		r.cycle(revised(settleFleet(), "rev-1"))
+		require.True(t, r.a.lines.Readings(key).OLSLatched, "the tier moved mid-rollout, with no new reading")
+		r.file(false)
+		r.cycle(revised(settleFleet(), "rev-1"))
+		return r.a.lines.Readings(key).OLSLatched
+	}
+	assert.False(t, run(nil))
+	assert.True(t, run(map[string]bool{SwitchITLRolloutGuard: false}), "negative control")
 }
 
 // The line is priced from what it holds through a rollout: a window of the

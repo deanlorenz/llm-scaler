@@ -31,7 +31,7 @@ func rolledCycles(t *testing.T, switches map[string]bool, from string) []string 
 	require.NoError(t, r.a.SetSwitchesForReplay(switches))
 	ready := restartT0.Add(-time.Hour)
 	settled(t, r, func() []domain.ReplicaMetrics { return revisedFull(ready, from) }, decodeVariants("v"))
-	var got []string
+	got := make([]string, 0, waitWindow+1)
 	for range waitWindow + 1 {
 		got = append(got, r.cycle(revisedFull(ready, "rev-2"), decodeVariants("v"))...)
 	}

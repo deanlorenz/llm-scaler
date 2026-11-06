@@ -5,6 +5,12 @@ package saturation
 // chooses its tier alone, as before.
 const SwitchITLTierHysteresis = "saturation-itl-tier-hysteresis"
 
+// SwitchITLTierResetsAfterRollout is the replay switch for the latch across a
+// rollout (itl.Admission.Rollout). On, the cycle after a rollout resets the
+// key's latch. Off, it stands on old pods' evidence for as long as the window
+// holds them, as #498 built it.
+const SwitchITLTierResetsAfterRollout = "saturation-itl-tier-resets-after-a-rollout"
+
 // tierHysteresisOn reports SwitchITLTierHysteresis.
 func (a *SaturationAnalyzer) tierHysteresisOn() bool {
 	a.mu.Lock()

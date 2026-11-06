@@ -149,6 +149,11 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	throughput.SwitchITLForgetsOnNewArguments: nil,
 	slo.SwitchITLRolloutGuard:                 nil,
 
+	// #481 with #498: the saturation line's tier latch goes when a rollout
+	// ends, as the slo and throughput lines' does under their guards. It
+	// moves no golden: no recording holds a rollout.
+	saturation.SwitchITLTierResetsAfterRollout: nil,
+
 	// #495: the slo and throughput lines file reports, and the slo line logs
 	// learner-write. They move no golden: nothing the analyzers price reads a
 	// report, and no output reads the line. Their unit tests hold them
@@ -741,6 +746,10 @@ var heldBy = map[string][]heldTest{
 		{"../slo", "TestTTFT_TheDecodeTermWindow"},
 		{"../slo", "TestTTFT_TheDecodeTermSwitchOnALine"},
 		{"../slo", "TestTTFT_TheRouterMeanReachesTheWindow"},
+	},
+	// It runs the switch on and off through Analyze and asserts both.
+	saturation.SwitchITLTierResetsAfterRollout: {
+		{"../saturation", "TestITLTier_TheLatchGoesWhenARolloutEnds"},
 	},
 	// #495: each runs with the switch on, and the last with it off.
 	slo.SwitchITLFilesReports: {

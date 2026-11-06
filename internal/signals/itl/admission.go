@@ -151,6 +151,11 @@ type Admission struct {
 	// that prices DefaultTierSafeMargin more (tier_latch.go). Without it, as
 	// before, each cycle chooses alone.
 	TierHysteresis bool
+	// Rollout says the variant is rolling out, so what the key holds may be
+	// an old pod's and the caller offers no rows. The tier stays as it stands
+	// through the rollout, and the cycle after it the latch is reset
+	// (fullFitReady). Read only with TierHysteresis.
+	Rollout bool
 	// TierPrice is what a targeted line's price reads of the engine
 	// (PricedRate). The slo analyzer sets it; a line priced at a fixed fill
 	// has no need of it.

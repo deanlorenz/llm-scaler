@@ -236,6 +236,27 @@ func TestRollout_NewArgumentsKeepTheTraces(t *testing.T) {
 	require.Equal(t, 3, got.Unsteady, "the traces went with the line: the step reads as steady")
 }
 
+// The cycle after a rollout the line's tier latch is gone: what put it at the
+// full fit was old pods' readings. Off, it stands.
+func TestRollout_TheLatchGoesWhenItEnds(t *testing.T) {
+	run := func(a *ThroughputAnalyzer) bool {
+		store := capacity.NewStore()
+		fileRecord(store, rollParams(64), false)
+		r := newLineRun(t, a.WithCapacityStore(store))
+		key := variantKey("ns", "m", "v1")
+		warm(t, r, 8, spreadFleet("rev-1"))
+		require.True(t, a.lines.Readings(key).OLSLatched, "premise: the line stands at the full fit")
+		fileRecord(store, rollParams(64), true)
+		r.step(spreadFleet("rev-1"))
+		require.True(t, a.lines.Readings(key).OLSLatched, "the tier moved mid-rollout, with no new reading")
+		fileRecord(store, rollParams(64), false)
+		r.step(spreadFleet("rev-2"))
+		return a.lines.Readings(key).OLSLatched
+	}
+	require.False(t, run(NewThroughputAnalyzer()))
+	require.True(t, run(withSwitchOff(SwitchITLRolloutGuard)()), "negative control")
+}
+
 // Without the steady gate the line is the parent's window, which the guard
 // and the forget do not touch.
 func TestRollout_TheParentsWindowIsLeftAlone(t *testing.T) {

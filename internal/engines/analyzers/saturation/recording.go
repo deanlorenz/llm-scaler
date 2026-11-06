@@ -222,6 +222,8 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 
 		// The ITL line's tier latch (issue #495).
 		SwitchITLTierHysteresis: &a.itlTierHysteresis,
+		// The latch across a rollout (itl_tier_hysteresis.go).
+		SwitchITLTierResetsAfterRollout: &a.itlTierRolloutReset,
 	}
 }
 

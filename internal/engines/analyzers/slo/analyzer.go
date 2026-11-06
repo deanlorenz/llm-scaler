@@ -533,7 +533,11 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 		kvPerRequest: fleet.shape.KVreq, ranks: fleet.engineRanks(vs.VariantName)}, params)
 	// The fill is clamped to the band the line is fitted over.
 	band := whatif.FillBand{Lo: adm.MinK, Hi: adm.MaxK}
-	line, source, r := a.fitLine(key, a.lineRows(input, fleet, vs.VariantName), vs.VariantName, adm, now)
+	rows := input.ReplicaMetrics
+	if adm.Rollout = a.rollingOut(input, fleet, vs.VariantName); adm.Rollout {
+		rows = nil
+	}
+	line, source, r := a.fitLine(key, rows, vs.VariantName, adm, now)
 	d.line, d.source, d.band = r, source, band
 	if !(tpotTarget > 0) {
 		return vc, nil, d
