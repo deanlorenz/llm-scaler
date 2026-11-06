@@ -77,7 +77,6 @@ func collectRows(t *testing.T, results map[string]*source.MetricResult, pods ...
 	reg := prometheus.NewRegistry()
 	require.NoError(t, metrics.InitMetrics(reg))
 	scheme := runtime.NewScheme()
-	require.NoError(t, llmdVariantAutoscalingV1alpha1.AddToScheme(scheme))
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	scalers := map[string]string{}
 	for _, p := range pods {

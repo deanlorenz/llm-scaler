@@ -65,7 +65,6 @@ var _ = Describe("Actuator", func() {
 		scheme = runtime.NewScheme()
 		Expect(corev1.AddToScheme(scheme)).To(Succeed())
 		Expect(appsv1.AddToScheme(scheme)).To(Succeed())
-		Expect(llmdVariantAutoscalingV1alpha1.AddToScheme(scheme)).To(Succeed())
 
 		// Create a new registry for each test to avoid conflicts
 		registry = prometheus.NewRegistry()

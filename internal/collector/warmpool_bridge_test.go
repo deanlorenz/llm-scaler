@@ -36,9 +36,6 @@ func collectOne(t *testing.T, podName string, located map[string]string) []metri
 		t.Fatalf("InitMetrics: %v", err)
 	}
 	scheme := runtime.NewScheme()
-	if err := llmdVariantAutoscalingV1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	mockSource := &mockMetricsSource{

@@ -69,7 +69,6 @@ func TestRecordOptimizationFailedEvent(t *testing.T) {
 			fakeRecorder := record.NewFakeRecorder(100)
 
 			scheme := runtime.NewScheme()
-			_ = llmdVariantAutoscalingV1alpha1.AddToScheme(scheme)
 			_ = appsv1.AddToScheme(scheme)
 			_ = v1.AddToScheme(scheme)
 
@@ -134,7 +133,6 @@ func TestRecordOptimizationFailedEvent(t *testing.T) {
 
 func TestRecordOptimizationFailedEvent_NilRecorder(t *testing.T) {
 	scheme := runtime.NewScheme()
-	_ = llmdVariantAutoscalingV1alpha1.AddToScheme(scheme)
 	_ = appsv1.AddToScheme(scheme)
 	_ = v1.AddToScheme(scheme)
 
