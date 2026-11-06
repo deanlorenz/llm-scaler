@@ -1395,8 +1395,9 @@ func TestTTFT_AHeldRouterTeachesNoHop(t *testing.T) {
 	r.in.SchedulerQueue = &domain.SchedulerQueueMetrics{QueueSize: 3}
 	rows := prefillRows("pre", 4000)
 	rows[0].AvgTTFT, rows[0].AvgTTFTKnown, rows[0].RequestRate = 0.05, true, 10
-	r.in.ReplicaMetrics = append(rows, domain.ReplicaMetrics{PodName: "d", VariantName: "dec", Ready: true, AvgTTFT: 0.1, AvgTTFTKnown: true,
+	rows = append(rows, domain.ReplicaMetrics{PodName: "d", VariantName: "dec", Ready: true, AvgTTFT: 0.1, AvgTTFTKnown: true,
 		RequestRate: 10, RequestRateKnown: true})
+	r.in.ReplicaMetrics = rows
 	for range 60 {
 		r.analyze(t)
 		r.now = r.now.Add(15 * time.Second)

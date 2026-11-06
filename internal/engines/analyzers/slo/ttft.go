@@ -155,7 +155,7 @@ func priceTTFT(in ttftInputs, rate float64, target whatif.TTFTTarget) ttftPricin
 			out.unmet = !out.rateRefused.AssumedTermDecides || out.atRefused != nil && out.unmet
 		}
 	}
-	if out.rate != nil || out.at != nil {
+	if out.rate != nil || out.at != nil || len(flags) > 0 {
 		out.flags = append(slices.Clone(flags), own...)
 	}
 	return out

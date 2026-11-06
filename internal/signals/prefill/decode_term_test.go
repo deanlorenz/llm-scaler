@@ -343,7 +343,7 @@ func TestHop_AHeldWindowIsNoReading(t *testing.T) {
 // A line through a median at or under zero is no reading of a hop, as a single
 // median is not.
 func TestHop_ALineMustBeAbovePositiveMedians(t *testing.T) {
-	var s []hopSample
+	s := make([]hopSample, 0, 16)
 	for range 8 {
 		s = append(s, hopSample{r: -0.003, prompt: 1000}, hopSample{r: 0.001, prompt: 8000})
 	}
