@@ -223,13 +223,13 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 
 	// Issue #495: the ITL line's tier is latched, on all three lines that
 	// share itl.Tracker's choice of fit, one named change with one switch per
-	// analyzer (itl.Admission.TierHysteresis). Base: main at de9043f23. It
+	// analyzer (itl.Admission.TierHysteresis). Base: main at bef629924. It
 	// moves the sweep recordings, whose load steps collapse the spread; each
 	// analyzer moves only the line it fits, and no interaction shows: all
 	// three on moves the union and no more. Measured against all off:
 	//
 	//   - The saturation line, 29 outputs. Over those recordings the mu falls
-	//     on 222 of 294 moved cycles, to x0.858 at the lowest, and rises by at
+	//     on 222 of 298 moved cycles, to x0.858 at the lowest, and rises by at
 	//     most 3.0 %, DefaultTierSafeMargin. Decode demand moves x0.933 to
 	//     x1.120; in whole replicas of supply the decode requirement is higher
 	//     on one cycle and lower on none. lines.csv loses the publishes of the
@@ -253,6 +253,9 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 		"throughput-sweep-restart/warm-pool-pressure.csv", "throughput-sweep/composite-release.csv",
 		"throughput-sweep/composite-results.csv", "throughput-sweep/lines.csv",
 		"throughput-sweep/results.csv", "throughput-sweep/variant-capacities.csv",
+		"ttft-staircase-b-on/composite-results.csv", "ttft-staircase-b-on/composite-roles.csv",
+		"ttft-staircase-b-on/lines.csv", "ttft-staircase-b-on/results.csv",
+		"ttft-staircase-b-on/variant-capacities.csv",
 	},
 	slo.SwitchITLTierHysteresis: {
 		"ols-sweep-slo-restart/slo-published.csv", "ols-sweep-slo-restart/variant-capacities.csv",
@@ -1120,6 +1123,12 @@ var switchBase = withDigests(staircaseBase, map[string]string{
 	"throughput-sweep/lines.csv":                      "f55781cb4b727f97f56ab8e1611213f0e92f4c11f76a816323877d1ff101e834",
 	"throughput-sweep/variant-capacities.csv":         "4dddae1473f723feaeabe6ce16b5cc8e3cce8e188df255a08ab1ba2a5808db3e",
 	"throughput-sweep/warm-pool-pressure.csv":         "87ea51257f009bbc7fc85aefda7bd014568a94ccdc29093596a4083b455e979b",
+	// Issue #495's staircase outputs, every switch of replaySwitches off, at bef629924.
+	"ttft-staircase-b-on/composite-results.csv":  "5cd25e0d0b1dc60385ccadfd7898f4528cbafbbb0cbd71da8854bd287936cd89",
+	"ttft-staircase-b-on/composite-roles.csv":    "1b7e97c61bfa58d2e513692b315751d6d3515fdcd767082d2440eaa7540485f3",
+	"ttft-staircase-b-on/lines.csv":              "38728de29b3e63458dfdb0c7293dfeef385402fb353ce28cd88df33ba232d22d",
+	"ttft-staircase-b-on/results.csv":            "6d9d32f9a37f382e0693cd42b2993bf3ad6c82e180243094a767c98689ccb373",
+	"ttft-staircase-b-on/variant-capacities.csv": "69cbc99387df181e10a4f3bfb3e8c80e1f2f761716a6129847946d2d53b60755",
 })
 
 // The slow tests of this package run in parallel with each other (each

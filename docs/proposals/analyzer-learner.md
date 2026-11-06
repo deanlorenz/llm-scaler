@@ -1222,7 +1222,7 @@ After it, on the same replays:
 | throughput | 5 | 1 | x0.803, x1.000 |
 
 The x1.249 is a key's first full fit, on a staircase, which no dwell delays. The
-mu falls on 222 of 294 moved cycles and rises by at most 3.0 %. Decode demand
+mu falls on 222 of 298 moved cycles and rises by at most 3.0 %. Decode demand
 moves x0.933 to x1.120. In whole replicas of supply the decode requirement is
 higher on one cycle and lower on none. The two lowest cycles of decode demand
 are where main's line stepped to a full fit; the latch held that step, and main's
