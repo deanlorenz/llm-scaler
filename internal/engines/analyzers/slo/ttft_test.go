@@ -130,14 +130,14 @@ func TestTTFTFleet_FIsLearnedAtItsOwnCount(t *testing.T) {
 	// minutes, and the assumed f is used.
 	in.pods = 4
 	fl, _ = ttftFleet(in, 4)
-	assert.Equal(t, fFloor, fl.Prefill.Imbalance)
+	assert.Equal(t, whatif.ImbalanceFloor, fl.Prefill.Imbalance)
 	assert.True(t, fl.Prefill.ImbalanceAssumed)
 	assert.Equal(t, 4, fl.Prefill.Replicas)
 
 	// P1's F, a median over every count, is never what is priced.
 	in.est.F = 3.9
 	fl, _ = ttftFleet(in, 4)
-	assert.Equal(t, fFloor, fl.Prefill.Imbalance)
+	assert.Equal(t, whatif.ImbalanceFloor, fl.Prefill.Imbalance)
 }
 
 // Test 5: the assumed f, its floor and its clamp; one pod gives no f.
@@ -501,7 +501,7 @@ func TestTTFT_PromptCVPeakIsTheGammas(t *testing.T) {
 		assert.InDelta(t, at, promptCVPeak(percent), 0.03, "p%d", percent)
 	}
 	assert.Equal(t, 2.22, promptCVPeak(90))
-	assert.Equal(t, maxMeasuredPromptCV, promptCVPeak(94))
+	assert.Equal(t, whatif.PromptCVStop, promptCVPeak(94))
 	assert.Equal(t, 0.0, promptCVPeak(40))
 }
 

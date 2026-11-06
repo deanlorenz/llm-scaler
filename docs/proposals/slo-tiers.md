@@ -194,7 +194,7 @@ data:
     slo:
       tpot: {target: 100ms}                  # a mean
       ttft: {target: 3s, percentile: 90}     # a percentile; observed only (TTFT enforce is step 2c)
-      flowControl: disabled                  # S1: the EPP's flow-control gate, declared (not parsed yet)
+      flowControl: disabled                  # S1: the EPP's flow-control gate, declared
       mode: enforce                          # phase 1: not parsed yet, ignored today
 ```
 

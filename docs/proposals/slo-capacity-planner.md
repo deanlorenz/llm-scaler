@@ -828,7 +828,8 @@ TTFT: the decode answers are as they were.
 Every assumed input is named on the `assumed` row, and in `ttft.assumed` in the
 JSON, the two whole-rate assumptions among them: `--prefill-variant` gives one
 variant the whole rate, and with several decode variants each is priced at the
-model's whole rate, as S1 prices decode.
+model's whole rate, as S1 prices decode. The assumed figures are S1's own: both
+read them from `internal/signals/whatif/ttft_assumed.go`.
 
 Two more flags are S1's (#486):
 

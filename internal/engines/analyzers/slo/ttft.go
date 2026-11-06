@@ -42,9 +42,6 @@ import (
 const SwitchTTFTPrice = "slo-ttft-price"
 
 const (
-	// routingBoundShare is the f / N_p at which one pod takes the work and
-	// more pods would mostly sit idle behind the router. Not measured.
-	routingBoundShare = 0.8
 	// decodeBoundRatio is how far the prefill side's own rate must exceed
 	// the full rate for decode to count as setting it: any decode wait lowers
 	// the full rate a little, and reading that as a hold would stop S2
