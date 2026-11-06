@@ -1,12 +1,17 @@
 # The install variables' prefix. Once it differs from the legacy one, a variable
-# still using the legacy prefix stops the run: read by nothing, it would install
-# into the default namespace without a word. Remove one release after the rename.
+# still with an old name stops the run: read by nothing, it would install into
+# the default namespace, or install a controller DEPLOY_ said not to, without a
+# word. The legacy_env_set line is generated: go run ./hack/rename --print-env-guard.
+# Remove this block and its check one release after the rename.
 LEGACY_ENV_PREFIX := $(strip WVA_) # rename:keep
 ENV_PREFIX := WVA_
 ifneq ($(ENV_PREFIX),$(strip $(LEGACY_ENV_PREFIX)))
-legacy_env_set := $(filter $(strip $(LEGACY_ENV_PREFIX))%,$(.VARIABLES))
-ifneq ($(legacy_env_set),)
-$(error $(legacy_env_set): renamed, use the $(ENV_PREFIX) prefix and unset the old names)
+legacy_env_set := $(filter WVA_% %_WVA,$(.VARIABLES)) $(foreach v,$(.VARIABLES),$(if $(findstring _WVA_,$(v)),$(v))) # rename:keep
+ifneq ($(strip $(legacy_env_set)),)
+$(error $(strip $(legacy_env_set)): renamed, see the rename guide and unset the old names)
+endif
+ifeq ($(INSTALL_PHASE),wva) # rename:keep
+$(error INSTALL_PHASE=wva was renamed to INSTALL_PHASE=scaling-manager) # rename:keep
 endif
 endif
 
