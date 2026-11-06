@@ -4,8 +4,9 @@
 #
 # The alert says scaling decisions run on stale data, so it counts only the
 # queries decisions read. A learner_recording query feeds only a learner
-# recording (docs/proposals/analyzer-learner.md, 2.9): its failures show on
-# the counter and do not raise the alert.
+# recording (docs/proposals/analyzer-learner.md, 2.9), and a ttft_inputs query
+# only the shadow TTFT pricing: their failures show on the counter and do not
+# raise the alert.
 rule_files:
   - rules.yaml
 evaluation_interval: 1m
@@ -19,6 +20,8 @@ tests:
         values: '0+10x30'
       - series: 'wva_metrics_collection_errors_total{namespace="wva",pod="wva-a",query_type="learner_recording",reason="timeout"}'
         values: '0+10x30'
+      - series: 'wva_metrics_collection_errors_total{namespace="wva",pod="wva-a",query_type="ttft_inputs",reason="timeout"}'
+        values: '0+10x30'
     alert_rule_test:
       - eval_time: 3m
         alertname: WVAMetricsCollectionFailing
@@ -29,10 +32,12 @@ tests:
           - exp_labels: {severity: warning, query_type: router_latency, reason: timeout}
 
   # 2. A recording whose every query fails, with the scaling queries
-  #    healthy, never fires.
+  #    healthy, never fires. Nor do the TTFT pricing's.
   - interval: 1m
     input_series:
       - series: 'wva_metrics_collection_errors_total{namespace="wva",pod="wva-a",query_type="learner_recording",reason="timeout"}'
+        values: '0+60x30'
+      - series: 'wva_metrics_collection_errors_total{namespace="wva",pod="wva-a",query_type="ttft_inputs",reason="timeout"}'
         values: '0+60x30'
       - series: 'wva_metrics_collection_errors_total{namespace="wva",pod="wva-a",query_type="kv_cache",reason="timeout"}'
         values: '0x30'

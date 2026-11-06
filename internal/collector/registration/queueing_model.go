@@ -146,8 +146,8 @@ func RegisterQueueingModelQueries(sourceRegistry *source.SourceRegistry) {
 
 	registerSGLangQueueingModelQueries(registry)
 
-	// What the TTFT model learns from, recorded; of them only the queue
-	// minimum is read yet, by the prefill observation (ttft_inputs.go).
+	// What the TTFT model learns from (ttft_inputs.go): recorded, and three
+	// of them read every cycle in a namespace with a TTFT target.
 	registerTTFTInputQueries(registry)
 }
 

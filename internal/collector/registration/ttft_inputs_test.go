@@ -35,6 +35,25 @@ func builtQueries(t *testing.T, engine inferenceengine.Engine, names ...string) 
 	return out
 }
 
+// The computed-token histogram is over the window of the computed-token rate
+// the mean is read from, each rank once however often its target is scraped,
+// and vLLM's alone: SGLang publishes no per-stage figure.
+func TestComputedTokensBucketsQuery(t *testing.T) {
+	q := builtQueries(t, inferenceengine.EngineVLLM, QueryComputedTokensBuckets, QueryPrefillComputedTokenRate)
+	got := q[QueryComputedTokensBuckets]
+	want := `sum by (model_name, instance, pod, le) (max by (model_name, instance, pod, engine, le) (` +
+		`rate(vllm:request_prefill_kv_computed_tokens_bucket{namespace="ns"}[1m])))`
+	if got != want {
+		t.Errorf("query:\n got %s\nwant %s", got, want)
+	}
+	if !strings.Contains(q[QueryPrefillComputedTokenRate], "[1m]") {
+		t.Errorf("the mean's window moved: %s", q[QueryPrefillComputedTokenRate])
+	}
+	if IsEngineSpecific(QueryComputedTokensBuckets) {
+		t.Error("registered per engine: SGLang has no such series")
+	}
+}
+
 // Each TTFT input query reads the series 2.9 names, under the name the engine
 // exposes, over the window its mean partner uses, grouped so the collector
 // can key it to a pod and a model.

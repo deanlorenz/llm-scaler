@@ -1,7 +1,9 @@
 package learnreplay
 
 import (
+	"bytes"
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -26,6 +28,54 @@ func goldenState(t *testing.T, fixture string, cycle int) *State {
 	st, err := StateAt(context.Background(), raw, Options{}, StateQuery{Cycle: cycle})
 	require.NoError(t, err)
 	return st
+}
+
+// A recording made since Q1 reaches the state with a spread, and one made before
+// reads as none. No golden has the histogram, so the prompt histogram of one,
+// under the field's name, stands in for it.
+func TestStateAt_ReadsTheHistogramFromTheRows(t *testing.T) {
+	gz, err := os.ReadFile(filepath.Join(goldenDir, ttftSaturatedFixture, RecordingName))
+	require.NoError(t, err)
+	raw, err := gunzip(gz)
+	require.NoError(t, err)
+	carrying := bytes.ReplaceAll(raw, []byte("PromptTokensBuckets"), []byte("ComputedTokensBuckets"))
+	require.NotEqual(t, raw, carrying, "the golden holds no prompt histogram to stand in")
+
+	st, err := StateAt(context.Background(), carrying, Options{}, StateQuery{Cycle: 0})
+	require.NoError(t, err)
+	require.Len(t, st.Prefill, 1)
+	got := st.Prefill[0].PromptWindow.Spread()
+	assert.False(t, got.Assumed)
+	assert.True(t, got.Clamped, "this run's prompts pass the histogram's last bound: %+v", got)
+
+	before := goldenState(t, ttftSaturatedFixture, 0)
+	assert.True(t, before.Prefill[0].PromptWindow.Spread().Assumed)
+}
+
+// A row's histogram reaches the state with its cycle's rates, Serving rows
+// only, beside the prompt it is the spread of.
+func TestTTFTSamples_CarryTheHistogram(t *testing.T) {
+	inf := math.Inf(1)
+	row := func(ready bool) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{VariantName: "pre", Ready: ready, RequestRate: 1, RequestRateKnown: true,
+			PrefillComputedTokenRate: 2000, PrefillComputedTokenRateKnown: true,
+			ComputedTokensBuckets: []domain.LengthBucket{{UpperBound: 5000, Rate: 1}, {UpperBound: inf, Rate: 1}}}
+	}
+	in := domain.AnalyzerInput{ReplicaMetrics: []domain.ReplicaMetrics{row(true), row(true), row(false)},
+		VariantStates: []domain.VariantReplicaState{{VariantName: "pre", Role: domain.RolePrefill}}}
+	s := newTTFTSamples()
+	// What the slo analyzer's window reads from the same rows.
+	var same whatif.PromptWindow
+	start := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	for i := range whatif.PromptWindowMinCycles {
+		assert.True(t, same.Spread().Assumed, "before cycle %d", i)
+		at := start.Add(time.Duration(i) * time.Minute)
+		s.note(in, i, at)
+		same.Note(in.ReplicaMetrics, i, at)
+	}
+	assert.Equal(t, same.Spread(), s.prompts["pre"].Spread())
+	assert.False(t, same.Spread().Assumed)
+	assert.Equal(t, whatif.PromptWindowMinCycles, func() int { _, _, _, n := s.prompts["pre"].Prompt(); return n }())
 }
 
 // The figures P2's comparison reads from each run's analyzer log, read here
@@ -97,14 +147,15 @@ func pdInput(rows ...domain.ReplicaMetrics) domain.AnalyzerInput {
 // with no traffic does not read as a prompt of nothing.
 func TestTTFTSamples_Prompt(t *testing.T) {
 	s := newTTFTSamples()
-	s.note(pdInput(prefillRow("p0", 1000, 1)), 1)
-	s.note(pdInput(prefillRow("p0", 9000, 3)), 2)
-	s.note(pdInput(prefillRow("p0", 0, 0)), 3)
-	tokens, from, to, cycles := promptOf(s.prompts["pre"])
+	s.note(pdInput(prefillRow("p0", 1000, 1)), 1, time.Time{})
+	s.note(pdInput(prefillRow("p0", 9000, 3)), 2, time.Time{})
+	s.note(pdInput(prefillRow("p0", 0, 0)), 3, time.Time{})
+	tokens, from, to, cycles := s.prompts["pre"].Prompt()
 	assert.InDelta(t, 2500, tokens, 1e-9)
 	assert.Equal(t, []int{1, 2, 2}, []int{from, to, cycles})
 
-	got, _, _, n := promptOf(nil)
+	var none *whatif.PromptWindow
+	got, _, _, n := none.Prompt()
 	assert.Zero(t, got)
 	assert.Zero(t, n)
 }
@@ -116,8 +167,8 @@ func TestTTFTSamples_ReadsServingRowsOnly(t *testing.T) {
 	notReady.Ready = false
 	bridge := prefillRow("p2", 100000, 1)
 	bridge.FromWarmPool = true
-	s.note(pdInput(prefillRow("p0", 2000, 1), notReady, bridge), 1)
-	tokens, _, _, _ := promptOf(s.prompts["pre"])
+	s.note(pdInput(prefillRow("p0", 2000, 1), notReady, bridge), 1, time.Time{})
+	tokens, _, _, _ := s.prompts["pre"].Prompt()
 	assert.InDelta(t, 2000, tokens, 1e-9)
 	require.NotNil(t, s.shares["pre"])
 	assert.Equal(t, 1, s.shares["pre"].pods)
@@ -129,7 +180,7 @@ func TestTTFTSamples_ReadsServingRowsOnly(t *testing.T) {
 func TestTTFTSamples_RawShare(t *testing.T) {
 	share := func(rows ...domain.ReplicaMetrics) (float64, float64, bool) {
 		s := newTTFTSamples()
-		s.note(pdInput(rows...), 1)
+		s.note(pdInput(rows...), 1, time.Time{})
 		return s.shares["pre"].read()
 	}
 	// Four Ready pods, one unread: 3000 over 5000/4.
@@ -143,10 +194,10 @@ func TestTTFTSamples_RawShare(t *testing.T) {
 	assert.Zero(t, got, "one pod has no share")
 
 	s := newTTFTSamples()
-	s.note(pdInput(prefillRow("p0", 900, 1), prefillRow("p1", 100, 1)), 1) // 1.8, on two pods
-	s.note(pdInput(prefillRow("p0", 500, 1)), 2)                           // one pod: restarts
-	s.note(pdInput(prefillRow("p0", 300, 1), prefillRow("p1", 200, 1)), 3) // two pods: restarts, 1.2
-	s.note(pdInput(prefillRow("p0", 400, 1), prefillRow("p1", 200, 1)), 4) // 1.33
+	s.note(pdInput(prefillRow("p0", 900, 1), prefillRow("p1", 100, 1)), 1, time.Time{}) // 1.8, on two pods
+	s.note(pdInput(prefillRow("p0", 500, 1)), 2, time.Time{})                           // one pod: restarts
+	s.note(pdInput(prefillRow("p0", 300, 1), prefillRow("p1", 200, 1)), 3, time.Time{}) // two pods: restarts, 1.2
+	s.note(pdInput(prefillRow("p0", 400, 1), prefillRow("p1", 200, 1)), 4, time.Time{}) // 1.33
 	largest, least, full := s.shares["pre"].read()
 	assert.InDelta(t, 4.0/3, largest, 1e-9)
 	assert.InDelta(t, 1.2, least, 1e-9)
@@ -154,14 +205,14 @@ func TestTTFTSamples_RawShare(t *testing.T) {
 
 	// An idle tail forgets nothing: S1 appends only the cycles that read one.
 	for c := 5; c < 5+2*whatif.TTFTWindowCycles; c++ {
-		s.note(pdInput(prefillRow("p0", 0, 0), prefillRow("p1", 0, 0)), c)
+		s.note(pdInput(prefillRow("p0", 0, 0), prefillRow("p1", 0, 0)), c, time.Time{})
 	}
 	largest, _, full = s.shares["pre"].read()
 	assert.InDelta(t, 4.0/3, largest, 1e-9)
 	assert.False(t, full)
 
 	for c := 20; c < 20+whatif.TTFTWindowCycles; c++ {
-		s.note(pdInput(prefillRow("p0", 300, 1), prefillRow("p1", 200, 1)), c)
+		s.note(pdInput(prefillRow("p0", 300, 1), prefillRow("p1", 200, 1)), c, time.Time{})
 	}
 	largest, least, full = s.shares["pre"].read()
 	assert.InDelta(t, 1.2, largest, 1e-9)
@@ -173,25 +224,25 @@ func TestTTFTSamples_RawShare(t *testing.T) {
 // cycle's prompt, each mean weighted by the rows' request rates.
 func TestTTFTSamples_EngineTTFTIsAPair(t *testing.T) {
 	s := newTTFTSamples()
-	s.note(pdInput(prefillRow("p0", 8000, 1), decodeRow("d0", 0.1, 1), decodeRow("d1", 0.3, 3)), 1) // 0.25 at 8000
-	s.note(pdInput(prefillRow("p0", 2000, 1), decodeRow("d0", 0.05, 1)), 2)                         // 0.05 at 2000
+	s.note(pdInput(prefillRow("p0", 8000, 1), decodeRow("d0", 0.1, 1), decodeRow("d1", 0.3, 3)), 1, time.Time{}) // 0.25 at 8000
+	s.note(pdInput(prefillRow("p0", 2000, 1), decodeRow("d0", 0.05, 1)), 2, time.Time{})                         // 0.05 at 2000
 	require.Len(t, s.engineTTFT["dec"], 2)
 	assert.InDelta(t, 0.25, s.engineTTFT["dec"][0].Seconds, 1e-9)
 	assert.InDelta(t, 8000, s.engineTTFT["dec"][0].PromptTokens, 1e-9)
 
 	// No prompt in the cycle: nothing to pair it with, an empty slot.
-	s.note(pdInput(prefillRow("p0", 0, 0), decodeRow("d0", 9, 1)), 3)
+	s.note(pdInput(prefillRow("p0", 0, 0), decodeRow("d0", 9, 1)), 3, time.Time{})
 	require.Len(t, s.engineTTFT["dec"], 3)
 	assert.Zero(t, s.engineTTFT["dec"][2])
 
 	// Rows with no request rate read equally.
 	u := newTTFTSamples()
 	d0, d1 := decodeRow("d0", 0.1, 0), decodeRow("d1", 0.3, 0)
-	u.note(pdInput(prefillRow("p0", 2000, 1), d0, d1), 1)
+	u.note(pdInput(prefillRow("p0", 2000, 1), d0, d1), 1, time.Time{})
 	assert.InDelta(t, 0.2, u.engineTTFT["dec"][0].Seconds, 1e-9)
 
 	// The last 5 cycles, not the last 5 readings: idle cycles age a figure out.
-	idle := func(c int) { s.note(pdInput(prefillRow("p0", 0, 0), decodeRow("d0", 0, 0)), c) }
+	idle := func(c int) { s.note(pdInput(prefillRow("p0", 0, 0), decodeRow("d0", 0, 0)), c, time.Time{}) }
 	idle(10)
 	idle(11)
 	idle(12)
@@ -208,7 +259,7 @@ func TestTTFTSamples_ZeroReadingsAreSkipped(t *testing.T) {
 	zero.AvgKVTransferTime, zero.AvgKVTransferTimeKnown = 0, true
 	d0 := decodeRow("d0", 0.1, 1)
 	d0.AvgKVTransferTime, d0.AvgKVTransferTimeKnown = 0.02, true
-	s.note(pdInput(prefillRow("p0", 2000, 1), d0, zero), 1)
+	s.note(pdInput(prefillRow("p0", 2000, 1), d0, zero), 1, time.Time{})
 	assert.InDelta(t, 0.1, s.engineTTFT["dec"][0].Seconds, 1e-12)
 	assert.InDelta(t, 0.02, s.transfers["dec"][0], 1e-12)
 }
@@ -298,7 +349,7 @@ func TestTTFTSamples_Transfer(t *testing.T) {
 	d0 := decodeRow("d0", 0.1, 1)
 	d0.AvgKVTransferTime, d0.AvgKVTransferTimeKnown = 0.02, true
 	d1 := decodeRow("d1", 0.1, 1)
-	s.note(pdInput(prefillRow("p0", 2000, 1), d0, d1), 1)
+	s.note(pdInput(prefillRow("p0", 2000, 1), d0, d1), 1, time.Time{})
 	require.Len(t, s.transfers["dec"], 1)
 	assert.InDelta(t, 0.02, s.transfers["dec"][0], 1e-12)
 }

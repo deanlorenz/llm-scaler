@@ -6,6 +6,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
+	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
 )
 
 // The learner recorder's wiring (docs/proposals/analyzer-learner.md, 2.4).
@@ -56,9 +57,14 @@ func (e *Engine) stopLearnerRecording() {
 // learner recording reads on exactly when the recorder is writing this
 // cycle: not when recording is off, and not once its cap or an error has
 // stopped it (learnrec.Recorder.Active). It is the one place the collector
-// learns whether to issue them, and the cycle's EndCycle turns them off.
-func (e *Engine) beginCollectorCycle() {
+// learns whether to issue them, and the cycle's EndCycle turns them off. It
+// names the namespaces of modelGroups that price TTFT too, whose collection
+// reads the TTFT pricing's inputs with or without a recording.
+func (e *Engine) beginCollectorCycle(
+	modelGroups map[string][]llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
+) {
 	e.ReplicaMetricsCollector.BeginRecordingCycle(e.learnRec.Active())
+	e.ReplicaMetricsCollector.ReadTTFTInputsIn(e.ttftNamespaces(modelGroups))
 }
 
 // attachLearnerRecorder hands rec, nil included, to the capacity store and

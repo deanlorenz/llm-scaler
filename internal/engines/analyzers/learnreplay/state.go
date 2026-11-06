@@ -145,7 +145,7 @@ type MeasuredShape struct {
 
 // shapeCycles is how many of a variant's latest cycles with traffic its
 // shape is taken over: five minutes at the default 15 s cycle.
-const shapeCycles = 20
+const shapeCycles = whatif.PromptWindowCycles
 
 // shapeSample is one cycle's shape of a variant, and its request rate.
 type shapeSample struct {
@@ -214,7 +214,7 @@ func StateAt(ctx context.Context, recording []byte, opts Options, q StateQuery) 
 			windows = append(windows, w)
 		}
 		noteShapes(shapes, in.ReplicaMetrics, n)
-		ttft.note(in, n)
+		ttft.note(in, n, ev.Now)
 		if n == cycle {
 			st = r.stateOf(in, n, ev.Now, shapes)
 			r.fillTTFT(st, in, ttft)

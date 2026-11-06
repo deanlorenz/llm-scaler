@@ -478,7 +478,7 @@ func wiCycle(t *testing.T, ctx context.Context, e *Engine, base *clocktesting.Fa
 	models []string, byModel map[string][]wiVariant) {
 	t.Helper()
 	base.SetTime(at)
-	e.beginCollectorCycle()
+	e.beginCollectorCycle(nil)
 	defer e.ReplicaMetricsCollector.EndCycle()
 	e.beginSLOCycle()
 	defer e.clock.Pin()()

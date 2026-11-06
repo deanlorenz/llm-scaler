@@ -492,8 +492,12 @@ type ReplicaMetrics struct {
 	// they existed reads back and is written again byte for byte.
 	//
 	// They are recorded as read, for a not-Ready Pod too, and only while a
-	// learner recording is on (collector SetRecordTTFTInputs); off, every
-	// one is zero and unknown. Neither guard that cleans a row's timings
+	// learner recording is on (collector BeginRecordingCycle), but for
+	// QueueMin, AvgKVTransferTime and ComputedTokensBuckets, which are also
+	// read every cycle in a namespace with a TTFT target (collector
+	// ReadTTFTInputsIn). Otherwise each is zero and unknown, and a pod that
+	// exports the series not at all reads the same: unknown, never zero.
+	// Neither guard that cleans a row's timings
 	// reaches them: the not-Ready guard (attributeInstance) drops AvgITL,
 	// AvgTTFT and AvgServiceTime and their bits, and the uptime guard drops
 	// an AvgTTFT or AvgServiceTime longer than the Pod has run; the
@@ -529,9 +533,10 @@ type ReplicaMetrics struct {
 	PromptTokensBuckets []LengthBucket `learnrec:"omitzero"`
 	// ComputedTokensBuckets is the per-request histogram of computed prefill
 	// tokens, the prompt net of prefix hits. vLLM
-	// request_prefill_kv_computed_tokens_bucket. No collector fills it yet
-	// (Q1, docs/proposals/slo-capacity-planner.md); the slo analyzer reads
-	// the prompt's spread from it where a row carries it. Nil when absent.
+	// request_prefill_kv_computed_tokens_bucket, over [1m] like
+	// PrefillComputedTokenRate. The slo analyzer and the what-if CLI read the
+	// prompt's spread from it where a row carries it (whatif.ReadPromptSpread).
+	// Nil when absent.
 	ComputedTokensBuckets []LengthBucket `learnrec:"omitzero"`
 	// OutputTokensBuckets is the output-length histogram, tokens per
 	// request, over [5m] like AvgOutputTokens: the buckets

@@ -46,6 +46,7 @@ var perPodVLLMQueries = []string{
 	QueryRequestRate,
 	QueryGenerationTokenRate,
 	QueryPrefillComputedTokenRate,
+	QueryComputedTokensBuckets,
 }
 
 // builtPerPodQueries returns the query the registry builds for each of
@@ -140,8 +141,11 @@ func TestPerPodQueriesFoldDataParallelRanks(t *testing.T) {
 		QueryRequestRate:              "sum " + perPod + perRank + "rate(",
 		QueryGenerationTokenRate:      "sum " + perPod + perRank + "rate(",
 		QueryPrefillComputedTokenRate: "sum " + perPod + perRank + "rate(",
-		QueryMaxRankKvCacheUsage:      "max " + perPod + "max_over_time(",
-		QueryMaxRankQueueLength:       "max " + perPod + "max_over_time(",
+		// A histogram: each bound folds as the rate does.
+		QueryComputedTokensBuckets: "sum by (model_name, instance, pod, le) (" +
+			"max by (model_name, instance, pod, engine, le) (rate(",
+		QueryMaxRankKvCacheUsage: "max " + perPod + "max_over_time(",
+		QueryMaxRankQueueLength:  "max " + perPod + "max_over_time(",
 		QueryCacheConfigInfo: "count by (instance, pod, num_gpu_blocks, block_size) " +
 			"(max by (instance, pod, num_gpu_blocks, block_size, engine) (",
 		// The waiting count by reason folds as the queue does.

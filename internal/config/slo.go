@@ -141,6 +141,13 @@ func (s *SLOPolicy) Validate() error {
 	return nil
 }
 
+// PricesTTFT reports whether the policy runs the TTFT pricing: a TTFT target,
+// and the SLO analyzer that reads it. A target with the analyzer unlisted is
+// read by nothing.
+func (c ScalingPolicy) PricesTTFT() bool {
+	return c.SLOAnalyzerListed() && c.SLO != nil && c.SLO.TTFT != nil
+}
+
 // SLOAnalyzerListed reports whether the policy runs the SLO analyzer.
 func (c ScalingPolicy) SLOAnalyzerListed() bool {
 	return c.AnalyzerEnabled(sloAnalyzerName)

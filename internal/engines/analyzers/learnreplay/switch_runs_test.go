@@ -230,6 +230,19 @@ var replaySwitches = map[string][]string{
 		"ols-sweep-slo/slo-published.csv", "ols-sweep-slo-restart/slo-published.csv",
 	},
 
+	// Q1 of the TTFT track (docs/proposals/slo-capacity-planner.md, the PR
+	// plan): the collector reads the computed-token histogram every cycle, and
+	// S1's cv is measured where a row carries one. It moves no golden: no
+	// committed recording carries the histogram. Its unit tests hold it
+	// (heldBy), and a recording made since replays both ways.
+	slo.SwitchTTFTMeasuredSpread: nil,
+	// Q1 also reads the KV transfer time every cycle. The recordings have
+	// always carried the field, so a replay read it already, and off replays
+	// what production published before Q1. Measured off alone against all on,
+	// it moves nothing either: both S1 goldens price with no transfer reading
+	// to drop. Its unit test holds it (heldBy).
+	slo.SwitchTTFTMeasuredTransfer: nil,
+
 	// Learner PR 5c, on main after 5b (602054e98): the replicaStartSeconds
 	// seed is the prior (SwitchStartReadsSeed), and the first starts blend
 	// with it (SwitchStartBlendsFirstSamples). Measured, each alone against
@@ -667,6 +680,17 @@ var heldBy = map[string][]heldTest{
 	saturation.SwitchPrefillAQuadratic: {
 		{"../saturation", "TestPrefillAQuad_TheRecordingsThroughAnalyze"},
 		{"../saturation", "TestPrefillAQuad_TheSwitchFitsTheCurve"},
+	},
+	// Q1's measured spread: the first runs the switch on and off through
+	// Analyze, and asserts the flag and that the price moves.
+	slo.SwitchTTFTMeasuredSpread: {
+		{"../slo", "TestTTFT_TheMeasuredSpreadSwitch"},
+		{"../slo", "TestTTFT_AMeasuredSpreadThroughAnalyze"},
+	},
+	// Q1's transfer term: on, a real reading clears TransferOmitted; off, or
+	// with no reading, it stands.
+	slo.SwitchTTFTMeasuredTransfer: {
+		{"../slo", "TestTTFT_TransferOmittedStandsUntilAReading"},
 	},
 	// Issue #275's lift: an aggregated figure sizes once the GPS check has
 	// agreed. Both run the switch on and fail with it off: the first checks

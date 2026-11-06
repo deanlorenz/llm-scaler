@@ -42,10 +42,10 @@ const SwitchPrefillCapacityObserve = "prefill-capacity-observe"
 // minute. Off, neither goes, and V_P comes only from the two lower-bound
 // sources, as P1 shipped. It moves no golden output: the observation writes
 // no state any output reads, and no committed recording carries a queue
-// minimum. The collector reads the queue minimum only while a learner
-// recording is on (collector SetRecordTTFTInputs); with none on, no row
-// carries one and no new busy minute is read, though those already read
-// stay V_P's source for prefill.BusyWindow.
+// minimum. The collector reads the queue minimum in a namespace with a TTFT
+// target (collector ReadTTFTInputsIn) and while a learner recording is on;
+// elsewhere no row carries one and no new busy minute is read, though those
+// already read stay V_P's source for prefill.BusyWindow.
 const SwitchPrefillBusyMinutes = "prefill-busy-minutes"
 
 // SwitchPrefillAQuadratic is the replay switch for the curved fit of the
@@ -254,7 +254,7 @@ func (c *cycle) observePrefill() {
 			c.gpusByVariant[variant], params)
 		// queueMinPods counts the pods that read a queue minimum whether or
 		// not the switch feeds them: with busyMinutesOn, a zero says the
-		// collector read none (no learner recording is on).
+		// collector read none (no TTFT target here and no recording on).
 		queueMin := prefill.QueueMins(rows[variant])
 		queueMinPods := len(queueMin)
 		var kvFullPods map[string]bool
