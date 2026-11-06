@@ -37,6 +37,9 @@ func TestPropertyJudgementNegativeControls(t *testing.T) {
 	for name, rows := range map[string][]LedgerRow{
 		"a row naming no case":     {*row, {ID: "edges/x/gone", Class: "edges", Learner: "x", Expect: "k", Finding: "f", Measured: "m", Owner: "open"}},
 		"a row with no expect":     {{ID: c.ID(), Class: "edges", Learner: "x", Finding: "f", Measured: "m", Owner: "open"}},
+		"a row with no owner":      {{ID: c.ID(), Class: "edges", Learner: "x", Expect: "k", Finding: "f", Measured: "m"}},
+		"a row a plan's PR owns":   {{ID: c.ID(), Class: "edges", Learner: "x", Expect: "k", Finding: "f", Measured: "m", Owner: "PR 3"}},
+		"an owner with a tail":     {{ID: c.ID(), Class: "edges", Learner: "x", Expect: "k", Finding: "f", Measured: "m", Owner: "#495 soon"}},
 		"a row on another learner": {{ID: c.ID(), Class: "edges", Learner: "z", Expect: "k", Finding: "f", Measured: "m", Owner: "open"}},
 		"a row listed twice":       {*row, *row},
 		"rows out of order":        {{ID: "z", Class: "edges", Learner: "x", Expect: "k", Finding: "f", Measured: "m", Owner: "open"}, *row},
@@ -45,8 +48,12 @@ func TestPropertyJudgementNegativeControls(t *testing.T) {
 			t.Errorf("%s: the ledger check passed", name)
 		}
 	}
-	if errs := CheckLedger([]LedgerRow{*row}, cases); len(errs) != 0 {
-		t.Errorf("a matching ledger is clean: %v", errs)
+	for _, owner := range []string{"open", "#495"} {
+		ok := *row
+		ok.Owner = owner
+		if errs := CheckLedger([]LedgerRow{ok}, cases); len(errs) != 0 {
+			t.Errorf("a matching ledger owned by %s is clean: %v", owner, errs)
+		}
 	}
 	if _, err := RunCase(func(uint64) error { return errors.New("no rig") }, []uint64{1}); err == nil {
 		t.Error("an infrastructure error was counted as a violation")

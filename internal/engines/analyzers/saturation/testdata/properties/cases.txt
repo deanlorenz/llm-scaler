@@ -181,10 +181,13 @@ transient/itl/idle-rows-positive-evidence
 transient/itl/joiner-warmup
 transient/itl/joiner-warmup-nondefault
 transient/itl/restart-same-name
+transient/k2/fall-moved-off
 transient/k2/load-step
+transient/k2/rate-without-residency
 transient/k2/restart-same-name
 transient/k2/slow-fill
 transient/mu/filling-token-rate
+transient/settle/lent-again
 transient/shape-hold/wobble-in-band
 transient/slo-itl/controller-restart-warmup
 transient/slo-itl/idle-rows-positive-evidence

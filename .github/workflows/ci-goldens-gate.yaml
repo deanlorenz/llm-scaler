@@ -1,0 +1,45 @@
+name: CI - Goldens Gate
+
+# Fails a pull request that moves a golden and does not name it in its goldens:
+# section (docs/proposals/analyzer-learner.md 2.5).
+#
+# A workflow of its own, because it needs the `edited` event, so that correcting
+# the section re-runs it. ci-pr-checks.yaml must not take that event: every edit
+# of a title or body would start the e2e jobs again, and cancel the ones running.
+#
+# The body is untrusted. pull_request, never pull_request_target, so a fork's PR
+# runs with a read-only token and no secrets. The body reaches the script through
+# an env var only: an expression inside `run:` is pasted into the shell's text.
+# hack/check-goldens-section.sh, run by `make lint-deploy-scripts`, holds this
+# file to all of that.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+    branches:
+      - main
+      - dev
+      # Patch lines (release-0.10): a fix to one is checked like a fix to main.
+      - 'release-*'
+
+concurrency:
+  group: ci-goldens-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  goldens-section:
+    runs-on: ubuntu-latest
+    steps:
+      # The merge commit GitHub makes for the PR, and its first parent, the base.
+      - name: Checkout source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Check the goldens section
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: bash deploy/ci-pr-checks/goldens-section.sh HEAD^1 HEAD
