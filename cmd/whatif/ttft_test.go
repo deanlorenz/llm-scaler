@@ -927,6 +927,9 @@ func pdRichServer(t *testing.T) *promtest.Server {
 	}
 	srv.Add(q(registration.QueryFlowControlPoolModels), promtest.Series{Value: stepped(func(int) float64 { return 0 }),
 		Labels: map[string]string{"inference_pool": "pool-m", "model_name": "m", "target_model_name": "m"}})
+	// The same gauge, by model: what says the gate is on.
+	srv.Add(q(registration.QuerySchedulerQueueSize), promtest.Series{Value: stepped(func(int) float64 { return 0 }),
+		Labels: map[string]string{"model_name": "m", "target_model_name": "m", "namespace": sweepNS}})
 	return srv
 }
 
