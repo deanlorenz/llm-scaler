@@ -528,17 +528,22 @@ func TestStashEviction_NamesAKeyWithNoWindowLeft(t *testing.T) {
 	})
 }
 
-// The keys a forget names are mu's own shape, not the stash's.
-func TestMuForget_KeysAreWindowKeys(t *testing.T) {
+// The keys a forget names are window keys, not the stash's, and a key with a
+// live window and a stash is named once.
+func TestForget_KeysAreWindowKeysNamedOnce(t *testing.T) {
 	r, key := muForgetRig(t, true)
 	assert.False(t, strings.Contains(key, "#"), "premise: a live window's key")
+	k2 := firstKey(r.a)
 	r.a.mu.Lock()
 	r.a.throughputStash[stashKey(key, "other-args")] = stashedThroughput{window: r.a.saturatedThroughput[key]}
+	r.a.k2Stash[stashKey(k2, "other-args")] = r.a.computeCapacityHistory[k2]
 	r.a.mu.Unlock()
 	r.a.ForgetVariant("test-ns", "test-model", "v", "token-1")
 	r.a.mu.Lock()
 	assert.Empty(t, r.a.throughputStash, "the stash goes with mu")
 	got := r.a.muForgotten["test-ns|test-model"]["v"]
+	gotK2 := r.a.k2Forgotten["test-ns|test-model"]["v"]
 	r.a.mu.Unlock()
 	assert.Equal(t, []learn.Forgotten{{Key: key, By: learn.ByOperator}}, got)
+	assert.Equal(t, []learn.Forgotten{{Key: k2, By: learn.ByOperator}}, gotK2)
 }

@@ -142,7 +142,7 @@ func TestRetainLearnerSeriesKeepsOnlyWhatIsKnown(t *testing.T) {
 	}
 	seed()
 	emitter.RetainLearnerSeries(func(namespace, modelID, variant string) bool {
-		return !(modelID == "m" && variant == "v")
+		return modelID != "m" || variant != "v"
 	})
 	if got := countSeries(t, registry, lastAdmittedSeries); got != 2 {
 		t.Fatalf("after the variant: series = %d, want 2", got)
