@@ -98,8 +98,9 @@ func (a *ThroughputAnalyzer) admission(p itlPolicy, namespace, modelID string) i
 // variantEngine is what the line's admission reads of one variant's engine
 // parameters in the capacity store (engineOf): the arguments its rows were
 // produced under, and the batch cap one engine rank states, with where it
-// came from. The zero value is a variant the store does not know: no
-// arguments and no cap, which admits nothing above the band.
+// came from; and whether it is rolling out. The zero value is a variant the
+// store does not know: no arguments and no cap, which admits nothing above
+// the band.
 type variantEngine struct {
 	// args is capacity.EngineParams.ArgsTag.
 	args string
@@ -108,6 +109,10 @@ type variantEngine struct {
 	// batchCapNone when nothing states one.
 	batchCap       int64
 	batchCapSource string
+	// rollout is capacity.Record.InRollout, or the variant's rows reporting
+	// more than one revision (domain.RevisionsMixed): a reading may be an old
+	// pod's.
+	rollout bool
 }
 
 // Where a stated sequence cap came from, as the slo and saturation analyzers
@@ -122,16 +127,18 @@ const (
 // runs before observe takes a.mu and takes only the store's lock, so the
 // cycle never holds the two at once. A variant the store does not know, or
 // every variant when the analyzer has no store, reads as no arguments and
-// no cap.
+// no cap, and rolling out only if its rows say so.
 func (a *ThroughputAnalyzer) engineOf(namespace, modelID string, rows []domain.ReplicaMetrics) map[string]variantEngine {
 	out := make(map[string]variantEngine)
+	mixed := domain.RevisionsMixed(rows)
 	for _, m := range rows {
 		if _, done := out[m.VariantName]; done {
 			continue
 		}
-		e := variantEngine{batchCapSource: batchCapNone}
+		e := variantEngine{batchCapSource: batchCapNone, rollout: mixed[m.VariantName]}
 		if a.store != nil {
 			if rec := a.store.Get(namespace, modelID, m.VariantName); rec != nil {
+				e.rollout = e.rollout || rec.InRollout()
 				p := rec.EngineParams
 				e.args = p.ArgsTag()
 				if c := p.StatedBatchCap(); c > 0 {

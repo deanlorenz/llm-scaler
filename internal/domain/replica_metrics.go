@@ -114,9 +114,9 @@ type ReplicaMetrics struct {
 	// Pod carries none or could not be read.
 	//
 	// A variant whose replicas report more than one is mid-rollout, whatever
-	// its scale target's status says: the saturation analyzer then holds every
-	// saturated reading back from the variant's windows, since it may be an
-	// old pod's (saturation.revisionsMixed). The status cannot say it for a
+	// its scale target's status says: the analyzers then hold every reading
+	// back from the variant's windows and ITL lines, since it may be an old
+	// pod's (RevisionsMixed). The status cannot say it for a
 	// LeaderWorkerSet whose controller has acted on some groups but not yet
 	// set UpdateInProgress, or is down.
 	Revision string
@@ -793,6 +793,26 @@ func (m ReplicaMetrics) BusiestRankTokens() int64 {
 		busiest = float64(m.TotalKvCapacityTokens)
 	}
 	return max(int64(busiest), m.TokensInUse)
+}
+
+// RevisionsMixed names the variants whose own replicas -- warm-pool bridges
+// aside, which run the pool's template -- report more than one pod template
+// revision (ReplicaMetrics.Revision). A replica that reports none is not
+// counted: an unknown is not a second revision.
+func RevisionsMixed(rows []ReplicaMetrics) map[string]bool {
+	first := map[string]string{}
+	mixed := map[string]bool{}
+	for _, rm := range rows {
+		if rm.FromWarmPool || rm.Revision == "" {
+			continue
+		}
+		if seen, ok := first[rm.VariantName]; !ok {
+			first[rm.VariantName] = rm.Revision
+		} else if seen != rm.Revision {
+			mixed[rm.VariantName] = true
+		}
+	}
+	return mixed
 }
 
 // ReplicaMetricsMetadata contains freshness information for replica metrics

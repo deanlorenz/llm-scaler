@@ -69,6 +69,10 @@ type ThroughputAnalyzer struct {
 	// itlAdmitsAtCap is the replay switch of learner PR 4b-3 (admission.go):
 	// SwitchITLAdmitsAtSequenceCap. On by the constructor.
 	itlAdmitsAtCap bool
+	// itlRolloutGuard is SwitchITLRolloutGuard and itlForgetsOnNewArgs
+	// SwitchITLForgetsOnNewArguments (itl_line.go). On by the constructor.
+	itlRolloutGuard     bool
+	itlForgetsOnNewArgs bool
 	// itlForgetReachesLine is the replay switch of the forget (forget.go):
 	// SwitchITLForgetReachesTheLine. On by the constructor.
 	itlForgetReachesLine bool
@@ -126,6 +130,12 @@ type variantState struct {
 	// nothing: such a cycle has no line, not the last cycle's.
 	reading    itl.Reading
 	hasReading bool
+	// lineArgs is the engine arguments the line was learned under, "" when
+	// unknown (lineUnderArgsLocked), and rollout whether the line took no
+	// rows this cycle because the variant is rolling out, which names a
+	// silence (silenceCause).
+	lineArgs string
+	rollout  bool
 	// shapeChanged is set by a shape change and cleared when the line is
 	// next live, and everLive once the line has been live: what names the
 	// cause of a silent line (silenceCause). SwitchITLSteadyGate only.
@@ -167,6 +177,8 @@ func NewThroughputAnalyzer() *ThroughputAnalyzer {
 		itlRestartUnderName:   true,
 		itlIdleOnEvidence:     true,
 		itlFiniteOnly:         true,
+		itlRolloutGuard:       true,
+		itlForgetsOnNewArgs:   true,
 		itlAdmitsAtCap:        true,
 		itlForgetReachesLine:  true,
 		ownSettle:             settle.NewTracker(),
@@ -203,24 +215,25 @@ func (a *ThroughputAnalyzer) observeDefaultBand(
 	modelID, namespace string,
 	metrics []domain.ReplicaMetrics,
 ) map[string]SanityReport {
-	return a.observe(ctx, now, modelID, namespace, metrics, func(string) itl.Admission {
-		return itl.Admission{MinK: itl.DefaultMinObservableK, MaxK: itl.DefaultMaxObservableK}
+	return a.observe(ctx, now, modelID, namespace, metrics, func(string) (itl.Admission, bool) {
+		return itl.Admission{MinK: itl.DefaultMinObservableK, MaxK: itl.DefaultMaxObservableK}, false
 	})
 }
 
-// observe is Observe with each variant's admission (admissionFor): the KV
-// band [MinK, MaxK] a reading must fall in is the policy band
-// (analyzerTuning.itlBand), which Analyze passes, as the saturation and slo
-// analyzers read them. The parent's window (SwitchITLSteadyGate off) reads
+// observe is Observe with each variant's admission and whether it is rolling
+// out (lineFor): the KV band [MinK, MaxK] a reading must fall in is the policy
+// band (analyzerTuning.itlBand), which Analyze passes, as the saturation and
+// slo analyzers read them. The parent's window (SwitchITLSteadyGate off) reads
 // only the band, and takes no capped replica above it; the line on
 // itl.Tracker reads the whole admission, the sequence cap included
-// (SwitchITLAdmitsAtSequenceCap).
+// (SwitchITLAdmitsAtSequenceCap), under the arguments the variant runs, and
+// is offered no rows mid-rollout (SwitchITLRolloutGuard).
 func (a *ThroughputAnalyzer) observe(
 	ctx context.Context,
 	now time.Time,
 	modelID, namespace string,
 	metrics []domain.ReplicaMetrics,
-	admissionFor func(variant string) itl.Admission,
+	lineFor func(variant string) (itl.Admission, bool),
 ) map[string]SanityReport {
 	if err := ctx.Err(); err != nil {
 		return nil
@@ -296,12 +309,18 @@ func (a *ThroughputAnalyzer) observe(
 			}
 		}
 
-		adm := admissionFor(variantName)
+		adm, rolling := lineFor(variantName)
 		state.batchCap, state.batchCapSource = adm.MaxNumSeqs, adm.MaxNumSeqsSource
 		// On the shared tracker (SwitchITLSteadyGate, itl_line.go) the
 		// tracker judges each row; the window below is left as it was.
 		if a.itlSteadyGate {
-			state.reading = a.lines.Observe(key, variantName, freshRows(variantMetrics), adm, now)
+			a.lineUnderArgsLocked(key, state, adm.Args, now)
+			rows := freshRows(variantMetrics)
+			state.rollout = rolling && a.itlRolloutGuard
+			if state.rollout {
+				rows = nil
+			}
+			state.reading = a.lines.Observe(key, variantName, rows, adm, now)
 			a.paths.count(state.reading)
 			state.hasReading = true
 			continue
@@ -442,8 +461,8 @@ func (a *ThroughputAnalyzer) analyze(
 	// store here, before observe takes a.mu (engineOf).
 	adm := a.admission(itlPolicyOf(input.Config), input.Namespace, input.ModelID)
 	engines := a.engineOf(input.Namespace, input.ModelID, ownMetrics)
-	a.observe(ctx, now, input.ModelID, input.Namespace, ownMetrics, func(variant string) itl.Admission {
-		return a.lineAdmission(adm, input.Namespace, input.ModelID, engines[variant])
+	a.observe(ctx, now, input.ModelID, input.Namespace, ownMetrics, func(variant string) (itl.Admission, bool) {
+		return a.lineAdmission(adm, input.Namespace, input.ModelID, engines[variant]), engines[variant].rollout
 	})
 
 	byVariant := groupByVariant(ownMetrics)

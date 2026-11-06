@@ -493,7 +493,7 @@ func (c *cycle) fitLines() {
 	// itl.Model carries neither the tier nor the sample count, so there is
 	// nothing to tie-break on here yet; that is a known gap, not a property.
 	sort.Strings(variants)
-	mixed := revisionsMixed(c.input.ReplicaMetrics)
+	mixed := domain.RevisionsMixed(c.input.ReplicaMetrics)
 	for _, variant := range variants {
 		// Decode, and an aggregated variant (itlLineRole, issue #432); never
 		// prefill. ITL is the latency between GENERATED tokens, and
@@ -706,7 +706,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 	// replica-capacity-summary: derived-mu says it at perReplicaLogLevel only.
 	muMissing := make(map[string]string)
 	c.reportedMu = make(map[string][]float64)
-	mixed := revisionsMixed(c.input.ReplicaMetrics)
+	mixed := domain.RevisionsMixed(c.input.ReplicaMetrics)
 	// Priced on the queue decode capacity drains: on decode of a P/D model,
 	// requests waiting for their KV from prefill are not one
 	// (decodeCapacityView), except on a replica at its sequence cap. The

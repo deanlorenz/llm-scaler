@@ -132,6 +132,10 @@ type Analyzer struct {
 	// judges an absence by (settle.Tolerance), as the saturation analyzer's.
 	settleInterval time.Duration
 
+	// itlRolloutGuard is SwitchITLRolloutGuard (rollout.go): on from the
+	// constructor; a replay turns it off (SetSwitchesForReplay).
+	itlRolloutGuard bool
+
 	// prefillEstimates is where P1's prefill estimates are read
 	// (WithPrefillEstimates, prefill_estimates.go); nil when none was given.
 	prefillEstimates PrefillEstimates
@@ -207,6 +211,7 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		itlWaitsAfterRestart: true,
 		itlKeepsSettle:       true,
 		itlFiniteOnly:        true,
+		itlRolloutGuard:      true,
 		itlRestartUnderName:  true,
 		itlIdleOnEvidence:    true,
 		itlForgetReachesLine: true,
@@ -504,7 +509,7 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	a.oneSided(&adm, tpotTarget, a.priorScope(key, args, input.VariantStates))
 	// The fill is clamped to the band the line is fitted over.
 	band := whatif.FillBand{Lo: adm.MinK, Hi: adm.MaxK}
-	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, adm, now)
+	line, source, r := a.fitLine(key, a.lineRows(input, fleet, vs.VariantName), vs.VariantName, adm, now)
 	d.line, d.source, d.band = r, source, band
 	if !(tpotTarget > 0) {
 		return vc, nil, d
@@ -927,10 +932,14 @@ type fleetReading struct {
 	// fallback when the router reports no arrival rate.
 	requestRate float64
 	rows        []domain.ReplicaMetrics
+	// mixed names the variants whose replicas report more than one revision
+	// (domain.RevisionsMixed).
+	mixed map[string]bool
 }
 
 func readFleet(input domain.AnalyzerInput) fleetReading {
-	f := fleetReading{ready: make(map[string]int), rows: input.ReplicaMetrics}
+	f := fleetReading{ready: make(map[string]int), rows: input.ReplicaMetrics,
+		mixed: domain.RevisionsMixed(input.ReplicaMetrics)}
 	f.variants = append(f.variants, input.VariantStates...)
 	sort.Slice(f.variants, func(i, j int) bool { return f.variants[i].VariantName < f.variants[j].VariantName })
 	roles := make(map[string]string, len(f.variants))

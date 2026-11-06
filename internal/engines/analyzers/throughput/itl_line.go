@@ -63,6 +63,24 @@ const itlReasonT2Held = "T2-held"
 // (SwitchITLSteadyGate; itl.Admission.AboveBandFallback).
 const itlReasonT2AboveBand = "T2-above-band"
 
+// SwitchITLRolloutGuard is the replay switch for the line's rollout guard
+// (issue #481). On, while the variant's scale target rolls out
+// (capacity.Record.InRollout) or its replicas report more than one revision
+// (domain.RevisionsMixed), the line is offered no rows and fits from what it
+// holds, as the saturation analyzer's: a reading may be an old pod's, and it
+// would be judged against the new engine's sequence cap. Off, as before, every
+// fresh row is offered. Only on the tracker (SwitchITLSteadyGate).
+const SwitchITLRolloutGuard = "throughput-itl-rollout-guard"
+
+// SwitchITLForgetsOnNewArguments is the replay switch for the line under new
+// engine arguments (issue #481). On, a change of the variant's arguments
+// (capacity.EngineParams.ArgsTag) forgets what the tracker learned of the key,
+// keeping the replicas' traces, as the slo line's linesUnderArgs does: the
+// window and B of the old engine. Off, as before, only a held slope ends on a
+// change of arguments, and the window goes on being fitted for up to
+// itl.DefaultObservationMaxAge. Only on the tracker (SwitchITLSteadyGate).
+const SwitchITLForgetsOnNewArguments = "throughput-itl-forgets-on-new-arguments"
+
 // ITLWriteBand is how far a variant's A or B must move from the value
 // learner-write last logged, as a fraction of that value, before it logs
 // the line again: the saturation analyzer's band (saturation.ITLWriteBand).
@@ -90,6 +108,8 @@ func (a *ThroughputAnalyzer) switchFields() map[string]*bool {
 		SwitchITLRestartUnderName:             &a.itlRestartUnderName,
 		SwitchITLIdleOnEvidence:               &a.itlIdleOnEvidence,
 		SwitchITLReadsFinitePodMean:           &a.itlFiniteOnly,
+		SwitchITLRolloutGuard:                 &a.itlRolloutGuard,
+		SwitchITLForgetsOnNewArguments:        &a.itlForgetsOnNewArgs,
 		SwitchITLAdmitsAtSequenceCap:          &a.itlAdmitsAtCap,
 		SwitchITLForgetReachesTheLine:         &a.itlForgetReachesLine,
 	}
@@ -124,6 +144,24 @@ func (a *ThroughputAnalyzer) lineAdmission(adm itl.Admission, namespace, modelID
 		adm.OneSidedAboveKSat = !a.capPinsDefaultB
 	}
 	return adm
+}
+
+// lineUnderArgsLocked forgets what the tracker learned of key when the
+// variant runs under other engine arguments than the ones its line was
+// learned under (SwitchITLForgetsOnNewArguments), keeping the replicas'
+// traces, as a forget does (forget.go). There is no stash: a rollback relearns
+// its line, as on the slo line. Unknown arguments change nothing. Called with
+// a.mu held; the tracker's lock is taken under it, as observe's sweep takes it.
+func (a *ThroughputAnalyzer) lineUnderArgsLocked(key string, state *variantState, args string, now time.Time) {
+	if !a.itlForgetsOnNewArgs || args == "" {
+		return
+	}
+	prev := state.lineArgs
+	state.lineArgs = args
+	if prev == "" || prev == args {
+		return
+	}
+	a.lines.SweepKeepingTraces(now, func(k string) bool { return k == key })
 }
 
 // freshRows is rows less those whose metrics are stale: the tracker judges
@@ -169,6 +207,9 @@ const (
 	// silenceShapeChange: the request shape changed, which empties the
 	// window and drops the held slope, and the new shape has not fitted.
 	silenceShapeChange = "shape-change"
+	// silenceRollout: the variant is rolling out, so the line takes no rows
+	// (SwitchITLRolloutGuard), and what it holds gives no line.
+	silenceRollout = "rollout"
 	// silenceAboveBandUnderKSat: every reading this cycle was above the
 	// band at a k under itl.DefaultKSat: the band gets none, and the
 	// above-band fallback keeps none.
@@ -191,6 +232,8 @@ func silenceCause(state *variantState, r itl.Reading) string {
 		return silenceFitDeclined
 	case state.shapeChanged:
 		return silenceShapeChange
+	case state.rollout:
+		return silenceRollout
 	case r.Offered == 0 && r.AboveBand > 0 && r.AboveBandUnderKSat == r.AboveBand:
 		return silenceAboveBandUnderKSat
 	case !state.everLive:

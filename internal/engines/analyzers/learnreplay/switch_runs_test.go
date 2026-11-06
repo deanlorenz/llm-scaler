@@ -141,6 +141,14 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 
 	saturation.SwitchPrefillCapacityObserve: nil,
 
+	// #481: the throughput and slo lines take no rows in a rollout, and the
+	// throughput line forgets under new arguments. None moves a golden: no
+	// recording holds a rollout or a change of arguments under one variant's
+	// rows. Their unit tests hold them (heldBy).
+	throughput.SwitchITLRolloutGuard:          nil,
+	throughput.SwitchITLForgetsOnNewArguments: nil,
+	slo.SwitchITLRolloutGuard:                 nil,
+
 	// #495: mu on learn's list of learners
 	// (saturation.SwitchMuForgetReported). It moves no golden: a forget and
 	// an eviction drop the same entries either way, and only the report's
@@ -674,6 +682,19 @@ var heldBy = map[string][]heldTest{
 		{"../slo", "TestTTFT_TheDecodeTermWindow"},
 		{"../slo", "TestTTFT_TheDecodeTermSwitchOnALine"},
 		{"../slo", "TestTTFT_TheRouterMeanReachesTheWindow"},
+	},
+	// #481: each runs the switch on and off through Analyze and asserts both.
+	throughput.SwitchITLRolloutGuard: {
+		{"../throughput", "TestRollout_ThePublishedRolloutOffersNoRows"},
+		{"../throughput", "TestRollout_MixedRevisionsOfferNoRows"},
+		{"../throughput", "TestRollout_AnOldPodIsNotJudgedAgainstTheNewCap"},
+	},
+	throughput.SwitchITLForgetsOnNewArguments: {
+		{"../throughput", "TestRollout_NewArgumentsForgetTheLine"},
+	},
+	slo.SwitchITLRolloutGuard: {
+		{"../slo", "TestRollout_ThePublishedRolloutOffersNoRows"},
+		{"../slo", "TestRollout_MixedRevisionsOfferNoRows"},
 	},
 	// #495: each runs the switch on and off and asserts both (the keys
 	// reported and the logged value gone on; neither off).
