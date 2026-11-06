@@ -1,6 +1,9 @@
 # What-if capacity: from an SLO to a rate, and from replicas to an SLO
 
-**Status:** proposal, 2026-11-02. Nothing here is built. The decode half reuses
+**Status:** proposal, 2026-11-02. `cmd/whatif` is built, both questions from a
+recording or from Prometheus: see [the CLI reference](#cli-reference) and
+[what is measured](#measured-on-the-goldens). Per-bucket answers, aggregated TTFT
+(M1) and the controller's handler are not. The decode half reuses
 arithmetic the controller runs today. The TTFT model is on its own page,
 [end-to-end TTFT](slo-capacity-planner-ttft.md). The recorder fields this work
 needs are in [the learner rules](analyzer-learner.md#29-recorder-fields-for-ttft-and-capture),
