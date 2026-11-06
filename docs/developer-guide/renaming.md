@@ -58,14 +58,22 @@ that.
 ## What stays
 
 - Binary and compressed files, symlinks, submodules and untracked files.
-- Other projects' names: upstream repository links, `ig-wva`, and text about the
-  other product, including the upstream side of `docs/guides/from-upstream-wva`
-  and its note that releases up to v0.8 installed the CRD.
+- Other projects' names: upstream repository links and issues, other forks,
+  `ig-wva`, and text about the other product.
 - llm-d-benchmark's own names: its scenario `wva` and `variantAutoscaling` keys, `context.wva_namespace`,
   and the text `patch_harness.sh` anchors on in its source.
 - The two old-release learned-state documents, and their writer in the test that
   reads them.
 - Images published under the old owner, until they are republished.
+
+## The file written by hand
+
+`docs/guides/from-upstream-wva/` uses both projects' names in one sentence, and
+no rule can tell them apart, so it is class `manual`. The tool does not rewrite
+these two files: it lays down `hack/rename/overlay/<path>.overlay`, with only the
+held rows run over it, so `--code-moved` still reaches their links. It writes the
+same bytes on every run, so the no-op check holds. Change the guide in the overlay
+until the rename has run.
 
 ## How Go is rewritten
 
@@ -96,7 +104,14 @@ are expected values that have to move with the code they check.
 The rendered overlays stay inside every limit: the longest Service name is 50
 characters and the longest port name 10.
 
-An X.509 common name holds 64 characters. The new Service name would leave room
-for a namespace of 28, so the tool shortens the common name to
-`llmsm-external-scaler.<ns>.svc`, which fits up to 38. Verification reads the
-SANs, not the common name.
+- **Scaler common name:** an X.509 common name holds 64 characters. The new
+  Service name would leave room for a namespace of 28, so the tool shortens the
+  common name to `llmsm-external-scaler.<ns>.svc`, which fits a namespace of 38.
+  Verification reads the SANs. A tenant's controller namespace takes the short
+  form too: `llmsm-<ns>` fits an `<ns>` of 32, where `scaling-manager-<ns>` would
+  fit 22.
+- **ScaledObject names:** KEDA names the HPA `keda-hpa-<ScaledObject>` and refuses
+  one over 63, so a ScaledObject name holds 54. The generated names use the short
+  form, so a workload name holds 48 with `<workload>-llmsm`, and a pool name 38 with
+  `llmsm-warm-pool-<pool>`. Past that, `llmsm_check_so_name` stops the install with
+  the name in the message.

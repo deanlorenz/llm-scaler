@@ -58,9 +58,8 @@ type Rule struct {
 	// Replace is the replacement for the claimed text, with ${name} groups as
 	// in regexp.Expand. Ignored when Fn is set or the action is Keep.
 	Replace string
-	// Fn computes the replacement from the claimed text and what stands before
-	// it on the same line.
-	Fn func(claimed, before string) string
+	// Fn computes the replacement from the claimed text and where it stands.
+	Fn func(claimed string, c FnContext) string
 	// Action is what happens to the claimed text.
 	Action Action
 	// Paths limits the rule to paths matching one of these globs (see
@@ -76,6 +75,27 @@ type Rule struct {
 
 	re *regexp.Regexp
 	m  int
+}
+
+// FnContext is what a rule's Fn knows about where its text stands.
+type FnContext struct {
+	// Before is what precedes the text on its line.
+	Before string
+	// Prev is the line above, comment marks and spaces off. Empty after a
+	// blank line, and at the start of a file or a comment block.
+	Prev string
+	// Markdown says a # at the start of a line is a heading, not a comment.
+	Markdown bool
+}
+
+// Heading reports whether the text opens a Markdown heading.
+func (c FnContext) Heading() bool {
+	return c.Markdown && strings.HasPrefix(c.Before, "#") && strings.Trim(c.Before, "# ") == ""
+}
+
+// StartsGoDoc reports whether the text is the first word of a Go comment line.
+func (c FnContext) StartsGoDoc() bool {
+	return c.Prev == "" && strings.TrimSpace(c.Before) == "//"
 }
 
 // IdentRule maps a whole Go identifier. Identifiers are mapped by name, never
@@ -174,6 +194,10 @@ type Engine struct {
 	CodeMoved  bool
 	Stats      *Stats
 	residualRe *regexp.Regexp
+	// prevComment is the comment line before the one being rewritten, in a
+	// comment block: RewriteGo sees each comment on its own.
+	prevComment string
+	markdown    bool
 	// verify is verifyGo, as a field so a test can prove it decides the result.
 	verify func(p string, before, after []byte) error
 }
@@ -214,6 +238,7 @@ func (e *Engine) RewriteText(p, class, ctx string, src []byte, line int) []byte 
 	if !e.mentionsOld(src) {
 		return src
 	}
+	e.markdown = strings.HasSuffix(p, ".md")
 	var spans []Span
 	claimed := make([]bool, len(src))
 	for i := range e.Rules {
@@ -270,7 +295,12 @@ func (e *Engine) replacement(r *Rule, src []byte, loc []int, start, end int) str
 	}
 	if r.Fn != nil {
 		ls := bytes.LastIndexByte(src[:start], '\n') + 1
-		return r.Fn(claimed, string(src[ls:start]))
+		prev := e.prevComment
+		if ls > 0 {
+			pl := bytes.LastIndexByte(src[:ls-1], '\n') + 1
+			prev = strings.TrimRight(string(src[pl:ls-1]), "\r")
+		}
+		return r.Fn(claimed, FnContext{Before: string(src[ls:start]), Prev: strings.Trim(prev, " \t/#*>"), Markdown: e.markdown})
 	}
 	return string(r.re.Expand(nil, []byte(r.Replace), src, loc))
 }

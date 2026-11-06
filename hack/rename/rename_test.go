@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -70,13 +72,11 @@ func TestRewriteText(t *testing.T) {
 		{"a dotted name is not the harness schema", "hack/x.sh", "scaler.wva-ctl.svc", "scaler.scaling-manager-ctl.svc"},
 		{"history is in scope", docsDir + "proposals/a.md", "WVA and wva_foo and wva-bar", "The scaling manager and llmsm_foo and scaling-manager-bar"},
 		{"a file name in history moves", docsDir + "plans/a.md", "see proposals/wva-keda-external-scaler.md", "see proposals/scaling-manager-keda-external-scaler.md"},
-		{"the other product stays", docsDir + "proposals/a.md", "upstream WVA #1003", "upstream WVA #1003"},
 		{"a before a consonant", docsDir + "a.md", "a WVA here", "a scaling manager here"},
 		{"an drops its n", docsDir + "a.md", "an wva-x here", "a scaling-manager-x here"},
 		{"a before a name said el", docsDir + "a.md", "a wva_x metric and a `WVA_NS`", "an llmsm_x metric and an `LLMSM_NS`"},
 		{"the kind in text", docsDir + "a.md", "the VariantAutoscaling and its VariantAutoscalingSpec", "the Variant and its variant.Spec"},
 		{"a qualified kind in text", docsDir + "a.md", "variant.VariantAutoscalingStatus", "variant.Status"},
-		{"the CRD note stays", "docs/guides/from-upstream-wva/README.md", "Releases up to v0.8 installed the VariantAutoscaling CRD.", "Releases up to v0.8 installed the VariantAutoscaling CRD."},
 		{"the harness key stays", "hack/benchmark/scenarios/guides/a.yaml", "      variantAutoscaling:", "      variantAutoscaling:"},
 		{"after own", docsDir + "a.md", "the scenario's own WVA install", "the scenario's own scaling manager install"},
 		{"after both", docsDir + "a.md", "both WVA roles", "both scaling manager roles"},
@@ -86,6 +86,23 @@ func TestRewriteText(t *testing.T) {
 		{"an alert prefix in a query", docsDir + "a.md", `select(.labels.alertname | startswith("WVA"))`, `select(.labels.alertname | startswith("LLMSM"))`},
 		{"an alert regex", docsDir + "a.md", `alertname=~"WVA.*"`, `alertname=~"LLMSM.*"`},
 		{"a name ending in -a is not an article", "hack/x.sh", "tenant-a WVA_QUOTAS", "tenant-a LLMSM_QUOTAS"},
+		{"the other product stays", docsDir + "proposals/a.md", "upstream WVA #1003", "upstream WVA #1003"},
+		{"an adjective keeps its article", docsDir + "a.md", "a wrong WVA namespace", "a wrong scaling manager namespace"},
+		{"a continuation is not a sentence start", "deploy/x.sh", "# it reaches\n# WVA next", "# it reaches\n# the scaling manager next"},
+		{"a new sentence on a new line is", "deploy/x.sh", "# it stopped.\n# WVA next", "# it stopped.\n# The scaling manager next"},
+		{"a comment hash is not a heading", "deploy/x.sh", "# WVA next", "# The scaling manager next"},
+		{"a generated name takes the short suffix", "deploy/x.sh", "name: ${target}-wva", "name: ${target}-llmsm"},
+		{"a make target takes the word", docsDir + "a.md", "make deploy-wva", "make deploy-scaling-manager"},
+		{"a pool name takes the short prefix", "deploy/x.sh", "wva-warm-pool-${POOL_NAME}", "llmsm-warm-pool-${POOL_NAME}"},
+		{"a tenant namespace takes the short prefix", docsDir + "a.md", "`LLMSM_NS=wva-<ns>`", "`LLMSM_NS=llmsm-<ns>`"},
+		{"the common name keeps its variable", "deploy/lib/scaler_tls.sh", `serving "wva-external-scaler.${WVA_NS}.svc"`, `serving "llmsm-external-scaler.${LLMSM_NS}.svc"`},
+		{"the cert-manager common name too", "deploy/lib/scaler_tls.sh", "wva-x\ncommonName: ${dns1}", "scaling-manager-x\ncommonName: llmsm-external-scaler.${LLMSM_NS}.svc"},
+		{"the controller regex is anchored", "deploy/grafana/x.json", `deployment=~\".*workload-variant-autoscaler.*|wva-controller-manager\"`, `deployment=~\"scaling-manager-controller-manager\"`},
+		{"another person's fork stays", docsDir + "proposals/a.md", "### `deanlorenz/llm-d-workload-variant-autoscaler` -- a fork", "### `deanlorenz/llm-d-workload-variant-autoscaler` -- a fork"},
+		{"an upstream issue stays", docsDir + "proposals/a.md", "[llm-d WVA #1003](x)", "[llm-d WVA #1003](x)"},
+		{"the launcher owner stays", docsDir + "guides/warm-pool/install.md", "from `ghcr.io/ev-shindin`.", "from `ghcr.io/ev-shindin`."},
+		{"a harness flag stays", "hack/benchmark/scenarios/guides/workload-autoscaling.yaml", "pass --wva to it", "pass --wva to it"},
+		{"the old CRD is not a Variant CRD", docsDir + "a.md", "the VariantAutoscaling CRD and a VariantAutoscaling reconciler", "the old CRD and the old reconciler"},
 		{"a recorded document stays", "internal/engines/steadystate/testdata/learned-state/v0.10.0-v1.json", `{"namespace":"wva-system"}`, `{"namespace":"wva-system"}`},
 		{"a namespace called wva is not the harness schema", "hack/x.sh", "wva-external-scaler.wva.svc", "scaling-manager-external-scaler.scaling-manager.svc"},
 		{"a shell default moves whole", "deploy/x.sh", "${POLICY_NS:-wva-policy}", "${POLICY_NS:-scaling-manager-policy}"},
@@ -131,7 +148,11 @@ func TestCodeMovedTurnsHeldRowsOn(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, c := range cases {
-		if got := string(e.RewriteText(docsDir+"a.md", ClassDocs, CtxText, []byte(c.in), 0)); got != c.want {
+		p := docsDir + "a.md"
+		if strings.Contains(c.in, "IMAGE_TAG_BASE ?=") {
+			p = "Makefile"
+		}
+		if got := string(e.RewriteText(p, ClassDocs, CtxText, []byte(c.in), 0)); got != c.want {
 			t.Errorf("%q: got %q, want %q", c.in, got, c.want)
 		}
 	}
@@ -444,7 +465,7 @@ func InactiveVariantAutoscalingByModel()              {}
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"llmdvariant.Spec", "[]llmdvariant.Variant `json:\"items\"`", "// variant.List holds them.",
+	for _, want := range []string{"llmdvariant.Spec", "[]llmdvariant.Variant `json:\"items\"`", "// List holds them.",
 		"func GroupVariantsByModel(variants []T)", "func readyVariants()", "func ActiveVariants()", "func InactiveVariantsByModel()"} {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("missing %q in:\n%s", want, out)
@@ -477,5 +498,54 @@ func TestSweepGivesEveryHitAReason(t *testing.T) {
 	}
 	if err := run([]string{"--root", dir, "--report", filepath.Join(t.TempDir(), "r.md"), "--sweep"}, io.Discard); err == nil {
 		t.Error("--sweep passed with a hit that has no reason")
+	}
+}
+
+// TestReplacementsNameRealGroups catches a literal $ in a Replace: regexp.Expand
+// reads ${LLMSM_NS} as a group that does not exist and writes nothing.
+func TestReplacementsNameRealGroups(t *testing.T) {
+	ref := regexp.MustCompile(`\$\$|\$\{?(\w+)\}?`)
+	rules, err := compileRules(RulesFor(DefaultTargets, []string{"wva_a"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rules {
+		for _, m := range ref.FindAllStringSubmatch(r.Replace, -1) {
+			if m[0] == "$$" {
+				continue
+			}
+			if _, err := strconv.Atoi(m[1]); err == nil {
+				continue
+			}
+			if r.re.SubexpIndex(m[1]) < 0 {
+				t.Errorf("rule %s: %s in Replace is not a group", r.Name, m[0])
+			}
+		}
+	}
+}
+
+func TestManualFileIsLaidDownAndHeld(t *testing.T) {
+	const manual = "docs/guides/from-upstream-wva/README.md"
+	dir := repo(t, map[string]string{
+		manual: "half renamed WVA\r\n",
+		"hack/rename/overlay/" + manual + ".overlay": "see https://github.com/ev-shindin/llm-scaling-manager/tree/main/x\n",
+	})
+	report := filepath.Join(t.TempDir(), "r.md")
+	if err := run([]string{"--root", dir, "--report", report, "--apply"}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, filepath.FromSlash(manual)))
+	if string(b) != "see https://github.com/ev-shindin/llm-scaling-manager/tree/main/x\r\n" {
+		t.Errorf("overlay: %q", b)
+	}
+	if err := run([]string{"--root", dir, "--report", report, "--expect-noop", "--sweep"}, io.Discard); err != nil {
+		t.Errorf("second run: %v", err)
+	}
+	if err := run([]string{"--root", dir, "--report", report, "--code-moved", "--apply"}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(filepath.Join(dir, filepath.FromSlash(manual)))
+	if !bytes.Contains(b, []byte("llm-d-incubation/llm-d-scaling-manager/tree/main/x")) {
+		t.Errorf("the held rows did not reach the overlay: %q", b)
 	}
 }

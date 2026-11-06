@@ -103,8 +103,17 @@ var binaryExtensions = []string{
 // scalerTLS mints the external scaler's certificates.
 var scalerTLS = []string{"deploy/lib/scaler_tls.sh"}
 
-// upstreamGuide is the guide for moving from the other product.
-var upstreamGuide = []string{"docs/guides/from-upstream-wva/**"}
+// manualFiles are not rewritten: each is replaced by the file of that name under
+// overlayDir, written by hand. A guide about moving from the other product uses
+// both sets of names in one sentence, and no rule can tell them apart. The
+// overlay is in the pre-move form; the held rows run over it, so --code-moved
+// still reaches its links.
+var manualFiles = []string{
+	"docs/guides/from-upstream-wva/README.md",
+	"docs/guides/from-upstream-wva/guide.yaml",
+}
+
+const overlayDir = "hack/rename/overlay/"
 
 // keepWholeFiles keep every old name except the module path. The page about the
 // rename has to name what it renames.
@@ -132,6 +141,8 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		// Links and paths into other repositories. They name someone else's
 		// content, so renaming them breaks them.
 		kept("keep-upstream-fork", "external", `github\.com/lionelvillard/[^\s)\]"'`+"`"+`>]*`, "another person's fork"),
+		{Name: "hold-proxy-source", Class: "repo-link", Pattern: `https://github\.com/llm-d/llm-d-workload-variant-autoscaler`, Replace: "https://github.com/" + newRepoSlug,
+			Action: HoldUntilMoved, Paths: []string{"Dockerfile.warmpool-proxy"}, Why: "the source label of an image built here"},
 		kept("keep-upstream-url", "external", `https?://github\.com/llm-d/llm-d-workload-variant-autoscaler[^\s)\]"'`+"`"+`>]*`, "the upstream repository: issue and pull links must keep resolving"),
 		// The Go module path: the one switch. It runs before every other
 		// keep, because a kept file still has to import the renamed module.
@@ -141,7 +152,8 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		{Name: "module-path-docs", Class: "module", Pattern: `github\.com/llm-d/llm-d-workload-variant-autoscaler/(?:internal|api|cmd|test|pkg)\b`,
 			Fn: moduleSwap(t.Module), Contexts: []string{CtxText}},
 
-		kept("keep-upstream-slug", "external", `llm-d/llm-d-workload-variant-autoscaler`, "names the repository this project forked from"),
+		kept("keep-upstream-slug", "external", `[\w.-]+/llm-d-workload-variant-autoscaler`, "names the repository this project forked from, or another fork of it"),
+		kept("keep-upstream-work", "external", `\[llm-d[^\]\n]*#[0-9]+\]|WVA paper|WVA use case doc|keeps WVA's core idea`, "work and writing of the other project"),
 		kept("keep-ig-wva", "external", `(?:github\.com/llm-d-incubation/)?ig-wva`, "a separate repository"),
 		kept("keep-llmd-docs", "external", `llm-d\.ai/docs/architecture/Components/workload-variant-autoscaler|README\.wva\.md`, "a page in another project's docs"),
 		kept("keep-upstream-prose", "external", `(?i:llm-d's) (?:workload-variant-autoscaler|WVA)(?: \(WVA\))?|workload-variant-autoscaler \(WVA\)|still named WVA|[Uu]pstream WVA|WVA upstream`, "names the other product"),
@@ -175,6 +187,8 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		kept("keep-warmpool-proxy", "image", `ghcr\.io/ev-shindin/(?:llm-scaler/)?warmpool-proxy`, "pinned by digest; no image exists under the new owner (see the report)"),
 		kept("keep-fma-image", "image", `ghcr\.io/ev-shindin/(?:dual-pods-controller|fma-launcher)|ev-shindin/llm-d-fast-model-actuation|ev-shindin/vllm-conf`, "another project's image or fork"),
 		kept("keep-old-repo-name", "repo-link", `github\.com/ev-shindin/llm-scaler/[^\s)\]"'`+"`"+`>]*`, "a numbered link on the repository's earlier name"),
+		{Name: "keep-manual-file", Class: "manual", Pattern: residualPattern, Action: Keep, Paths: manualFiles,
+			Why: "rewritten by hand: laid down from hack/rename/overlay"},
 		{Name: "keep-other-product-paths", Class: "external", Pattern: `from-upstream-wva`, Action: Keep,
 			Contexts: []string{CtxText, CtxComment, CtxString, CtxPath}, Why: "this guide is about the other product, so its name stays"},
 
@@ -183,12 +197,6 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		{Name: "keep-positioning-doc", Class: "external", Pattern: `\bWVA\b`, Action: Keep,
 			Paths: []string{"docs/proposals/capacity-planner-positioning.md"}, Why: "names the other product"},
 
-		// The upstream guide talks about two installs at once: upstream's names
-		// on upstream's objects stay, and this project's names move.
-		{Name: "keep-guide-upstream-line", Class: "external", Pattern: `(?m)^.*\b(?:kubectl|helm) [^\n]*(?:<upstream-namespace>|workload-variant-autoscaler).*$`, Action: Keep,
-			Paths: upstreamGuide, Why: "a command against the upstream install"},
-		{Name: "keep-guide-upstream-names", Class: "external", Pattern: `a workload-variant-autoscaler chart|test\("\^wva-"\)|wva-(?:manager|metrics|epp-metrics)-[a-z-]*(?:role|reader|binding)\b|wva-metrics-reader\b|wva-manager-config|\bWVA\b|\bwva_`, Action: Keep,
-			Paths: upstreamGuide, Why: "names of the upstream install, or the other product"},
 		{Name: "keep-owners", Class: "person", Pattern: `ev-shindin`, Action: Keep, Paths: []string{"OWNERS"}, Why: "a GitHub login"},
 
 		// Links that record something on the old repository: the new one does
@@ -198,7 +206,10 @@ func RulesFor(t Targets, metrics []string) []Rule {
 
 		// Held until the code, the issues and the images are in the new home.
 		held("hold-image", `ghcr\.io/ev-shindin/llm-scaling-manager`, newImage, "the image does not exist under the new name until CI publishes it there"),
-		held("hold-image-base", `(?:^|[^\w/.-])(?P<m>ghcr\.io/ev-shindin)(?:$|[^\w/-])`, "ghcr.io/llm-d-incubation", "the Makefile's image base"),
+		{Name: "hold-image-base", Class: "repo-link", Pattern: `(?:^|[^\w/.-])(?P<m>ghcr\.io/ev-shindin)(?:$|[^\w/-])`, Replace: "ghcr.io/llm-d-incubation", Action: HoldUntilMoved,
+			Paths: []string{"Makefile"}, Why: "the Makefile's image base"},
+		{Name: "keep-launcher-owner", Class: "image", Pattern: `ghcr\.io/ev-shindin`, Action: Keep,
+			Paths: []string{"docs/guides/warm-pool/install.md", "docs/proposals/fma-post-mortem.md"}, Why: "the launcher image stays with its owner"},
 		held("hold-image-suffix", `\$\(IMAGE_TAG_BASE\)/llm-scaling-manager`, "$$(IMAGE_TAG_BASE)/"+newName, "the Makefile's image name"),
 		held("hold-repo-url", `github\.com(?P<sep>[/:])ev-shindin/llm-scaling-manager`, "github.com${sep}"+newRepoSlug, "a link or a remote: resolves only after the move"),
 		held("hold-packages", `github\.com/users/ev-shindin/packages\?repo_name=llm-scaling-manager`, "github.com/orgs/llm-d-incubation/packages?repo_name="+newName, "the package page"),
@@ -214,6 +225,8 @@ func RulesFor(t Targets, metrics []string) []Rule {
 			"llm-d-benchmark's scenario schema"),
 		{Name: "keep-harness-scenario-key", Class: "external", Pattern: `(?:^|[\s\x60])(?P<m>wva):`, Action: Keep,
 			Paths: []string{"hack/benchmark/scenarios/**"}, Why: "the wva block of llm-d-benchmark's scenario schema"},
+		{Name: "keep-harness-step", Class: "external", Pattern: `--wva\b|28_wva-[a-z_.-]*`, Action: Keep,
+			Paths: []string{"hack/benchmark/scenarios/**"}, Why: "a flag and a step of llm-d-benchmark"},
 		{Name: "keep-harness-attribute", Class: "external", Pattern: `\bwva_namespace\b`, Action: Keep,
 			Paths: []string{"hack/benchmark/patch_harness.sh", "hack/check-harness-teardown.sh"}, Why: "context.wva_namespace is an attribute of llm-d-benchmark's context"},
 		{Name: "keep-harness-anchor", Class: "external", Pattern: `WVA teardown skipped|WVA was never installed`, Action: Keep,
@@ -228,8 +241,8 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		// does not fit. Verification reads the SANs, so the common name can be
 		// shorter than the Service: these keep every namespace up to 38 working.
 		{Name: "tls-common-name-ca", Class: "tls", Pattern: `(?P<k>CN=|commonName: )wva-external-scaler-ca\.`, Replace: "${k}llmsm-scaler-ca.", Paths: scalerTLS},
-		{Name: "tls-common-name-leaf", Class: "tls", Pattern: `serving "wva-external-scaler\.\$\{WVA_NS\}\.svc"`, Replace: `serving "llmsm-external-scaler.${LLMSM_NS}.svc"`, Paths: scalerTLS},
-		{Name: "tls-common-name-cert-manager", Class: "tls", Pattern: `commonName: \$\{dns1\}`, Replace: "commonName: llmsm-external-scaler.${LLMSM_NS}.svc", Paths: scalerTLS},
+		{Name: "tls-common-name-leaf", Class: "tls", Pattern: `serving "wva-external-scaler\.\$\{WVA_NS\}\.svc"`, Replace: `serving "llmsm-external-scaler.$${LLMSM_NS}.svc"`, Paths: scalerTLS},
+		{Name: "tls-common-name-cert-manager", Class: "tls", Pattern: `commonName: \$\{dns1\}`, Replace: "commonName: llmsm-external-scaler.$${LLMSM_NS}.svc", Paths: scalerTLS},
 
 		// An article in front of a name whose first sound changes. Only the
 		// article is claimed; the name goes on to its own row. wva- and
@@ -238,12 +251,10 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		{Name: "article-before-consonant", Class: "prose", Pattern: `(?:^|[\s(*"'])(?P<m>[Aa]n) \x60?(?:wva-|workload-variant)`, Fn: articleA},
 		{Name: "article-before-vowel-sound", Class: "prose", Pattern: `(?:^|[\s(*"'])(?P<m>[Aa]) \x60?(?:wva_|WVA[A-Z_])`, Fn: articleAn},
 
-		// The in-memory struct that was a CRD, in comments, strings and text. The
-		// history note is the one place the name stays: those releases did ship it.
-		{Name: "keep-crd-history", Class: "external", Pattern: `Releases up to v0\.8 installed the VariantAutoscaling CRD|variantautoscalings(?:\.llmd\.ai| -A)`, Action: Keep,
-			Paths: upstreamGuide, Why: "releases up to v0.8 did install this CRD"},
+		// The in-memory struct that was a CRD, in comments, strings and text.
 		{Name: "keep-harness-variant-key", Class: "external", Pattern: `\bvariantAutoscaling\b`, Action: Keep,
 			Paths: []string{"hack/benchmark/scenarios/**"}, Why: "a key of llm-d-benchmark's scenario schema"},
+		{Name: "variant-old-crd", Class: "variant", Pattern: `\b(?P<art>[Tt]he |[Aa] )?VariantAutoscaling (?P<k>CRD|CR|reconciler|controller)\b`, Fn: oldCRD},
 		{Name: "variant-kind-qualified", Class: "variant", Pattern: `\.(?P<m>VariantAutoscaling(?:ConfigSpec|Spec|Status|List))\b`, Fn: variantBare},
 		{Name: "variant-kind-spec", Class: "variant", Pattern: `(?:^|[^.\w])(?P<m>VariantAutoscaling(?:ConfigSpec|Spec|Status|List))\b`, Fn: variantDotted},
 		{Name: "variant-word-by-model", Class: "variant", Pattern: `VariantAutoscaling(ByModel)\b`, Replace: "Variants$1"},
@@ -254,6 +265,16 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		{Name: "variant-lower-plural", Class: "variant", Pattern: `\bvariantAutoscalings\b`, Replace: "variants"},
 		{Name: "variant-lower", Class: "variant", Pattern: `\bvariantAutoscaling\b`, Replace: "variantObj"},
 		{Name: "variant-lowercase-kind", Class: "variant", Pattern: `\bvariantautoscalings?\b`, Replace: "variants"},
+
+		// A controller regex that must not reach the warm-pool Deployments.
+		{Name: "dashboard-controller-regex", Class: "dashboard", Pattern: `\.\*workload-variant-autoscaler\.\*\|wva-controller-manager`, Replace: kubeName + "-controller-manager"},
+
+		// Names with a length budget. KEDA refuses an HPA name over 63, and an HPA
+		// is keda-hpa-<ScaledObject>, so what is added to a workload's name comes
+		// off the workload's. A tenant's controller namespace goes into the
+		// scaler's X.509 common name, which holds 64.
+		{Name: "budget-warm-pool", Class: "k8s-object", Pattern: `\bwva-warm-pool\b`, Replace: "llmsm-warm-pool"},
+		{Name: "budget-tenant-namespace", Class: "k8s-object", Pattern: `\bwva-<(?P<n>ns|namespace|tenant)>`, Replace: "llmsm-<${n}>"},
 
 		// Metrics and alert names.
 		{Name: "metric-name", Class: "metric", Pattern: metricPattern(metrics), Replace: metricPre + "${s}"},
@@ -282,7 +303,8 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		{Name: "underscore-inner", Class: "word", Pattern: `_wva_`, Replace: "_scaling_manager_"},
 		pathToo(Rule{Name: "underscore-suffix", Class: "word", Pattern: `_wva\b`, Replace: "_scaling_manager"}),
 		pathToo(Rule{Name: "kube-prefix", Class: "k8s-object", Pattern: `\bwva-`, Replace: kubeName + "-"}),
-		pathToo(Rule{Name: "kube-suffix", Class: "k8s-object", Pattern: `-wva\b`, Replace: "-" + kubeName}),
+		pathToo(Rule{Name: "kube-suffix-word", Class: "k8s-object", Pattern: `(?P<w>deploy|two-variant|vs)-wva\b`, Replace: "${w}-" + kubeName}),
+		pathToo(Rule{Name: "kube-suffix", Class: "k8s-object", Pattern: `-wva\b`, Replace: "-llmsm"}),
 		{Name: "dir-word", Class: "k8s-object", Pattern: `/wva\b`, Replace: "/" + kubeName},
 		pathToo(Rule{Name: "dot-word", Class: "word", Pattern: `\bwva\.`, Replace: kubeName + "."}),
 		{Name: "bare-word", Class: "word", Pattern: `\bwva\b`, Replace: kubeName},
@@ -294,6 +316,7 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		{Name: "prose-dashboard-title", Class: "prose", Pattern: `\bWVA Operational Dashboard`, Replace: "Scaling Manager Operational Dashboard"},
 		{Name: "prose-hyphen", Class: "prose", Pattern: `\bWVA-`, Replace: "scaling-manager-"},
 		{Name: "alert-prefix-literal", Class: "alert", Pattern: `"WVA"|\bWVA\.\*|\bWVA\[`, Fn: alertPrefix},
+		{Name: "prose-adjective", Class: "prose", Pattern: `\b([Tt]he|[Aa]n?) ([a-z][a-z-]*) WVA\b`, Replace: "$1 $2 scaling manager"},
 		{Name: "prose-the", Class: "prose", Pattern: `\b([Tt])he WVA\b`, Replace: "${1}he scaling manager"},
 		{Name: "prose-a", Class: "prose", Pattern: `\b([Aa])n? WVA\b`, Replace: "${1} scaling manager"},
 		{Name: "prose-determiner", Class: "prose", Pattern: `\b(?i:every|each|any|this|that|our|your|no|one|another|per|missing|secondary|new|old|other|second|own|its|their|whose|both|all|several|two|three|many|most|some|multiple) WVAs?\b`, Fn: proseDeterminer},
@@ -312,7 +335,8 @@ func RulesFor(t Targets, metrics []string) []Rule {
 // stutter: variant.Spec, not variant.VariantSpec. The import aliases carry the old
 // kind and an API version the package does not have.
 var identRules = []IdentRule{
-	{Name: "ident-import-alias", Class: "go-ident", Pattern: `^(?:wvav1alpha1|llmdVariantAutoscalingV1alpha1)$`, Replace: "llmdvariant"},
+	{Name: "ident-import-alias", Class: "go-ident", Pattern: `^(?:wvav1alpha1|llmdVariantAutoscalingV1alpha1|llmdOptv1alpha1|llmdv1alpha1|vav1alpha1)$`, Replace: "llmdvariant"},
+	{Name: "ident-prometheus-alias", Class: "go-ident", Pattern: `^wvaprom$`, Replace: "prometheusutil"},
 	{Name: "ident-variant-spec", Class: "go-variant", Pattern: `^VariantAutoscaling(ConfigSpec|Spec|Status|List)$`, Replace: "$1"},
 	{Name: "ident-variant-by-model", Class: "go-variant", Pattern: `VariantAutoscaling(ByModel)$`, Replace: "Variants$1"},
 	{Name: "ident-variant-group", Class: "go-variant", Pattern: `^(Test)?GroupVariantAutoscaling`, Replace: "${1}GroupVariants"},
@@ -346,7 +370,7 @@ func metricPattern(metrics []string) string {
 }
 
 // renameFileWord is the new form of an old word inside a file name.
-func renameFileWord(claimed, _ string) string {
+func renameFileWord(claimed string, _ FnContext) string {
 	r := strings.NewReplacer("infra_wva", "infra_scaling_manager", "wva_threshold", "scaling_manager_threshold",
 		"wva_saturation_v2_config", "saturation_v2_config", "dump_wva_", "dump_scaling_manager_",
 		"tail_wva_", "tail_scaling_manager_", "wva", kubeName)
@@ -355,17 +379,21 @@ func renameFileWord(claimed, _ string) string {
 
 // variantDotted and variantBare name a type of internal/variant in text: outside
 // Go code it needs its package to read, and after a dot it already has one.
-func variantDotted(claimed, _ string) string {
-	return "variant." + strings.TrimPrefix(claimed, "VariantAutoscaling")
+func variantDotted(claimed string, c FnContext) string {
+	bare := strings.TrimPrefix(claimed, "VariantAutoscaling")
+	if c.StartsGoDoc() {
+		return bare
+	}
+	return "variant." + bare
 }
 
-func variantBare(claimed, _ string) string {
+func variantBare(claimed string, _ FnContext) string {
 	return strings.TrimPrefix(claimed, "VariantAutoscaling")
 }
 
 // proseDeterminer keeps the word before WVA and drops the article the bare word
 // would take.
-func proseDeterminer(claimed, _ string) string {
+func proseDeterminer(claimed string, _ FnContext) string {
 	head, _, _ := strings.Cut(claimed, " ")
 	if strings.HasSuffix(claimed, "s") {
 		return head + " scaling managers"
@@ -375,16 +403,25 @@ func proseDeterminer(claimed, _ string) string {
 
 // alertPrefix is WVA as the prefix of alert names in a query: code, so it takes
 // the prefix they now have, not the prose form.
-func alertPrefix(claimed, _ string) string {
+func alertPrefix(claimed string, _ FnContext) string {
 	return strings.Replace(claimed, "WVA", "LLMSM", 1)
 }
 
-func articleA(claimed, _ string) string  { return claimed[:1] }
-func articleAn(claimed, _ string) string { return claimed + "n" }
+// oldCRD names what no longer exists without inventing a Variant CRD.
+func oldCRD(claimed string, _ FnContext) string {
+	head, kind := "the", claimed[strings.LastIndex(claimed, " ")+1:]
+	if strings.HasPrefix(claimed, "The") {
+		head = "The"
+	}
+	return head + " old " + kind
+}
+
+func articleA(claimed string, _ FnContext) string  { return claimed[:1] }
+func articleAn(claimed string, _ FnContext) string { return claimed + "n" }
 
 // moduleSwap keeps what follows the module path and swaps the path itself.
-func moduleSwap(target string) func(string, string) string {
-	return func(claimed, _ string) string {
+func moduleSwap(target string) func(string, FnContext) string {
+	return func(claimed string, _ FnContext) string {
 		for _, old := range oldModules {
 			if rest, ok := strings.CutPrefix(claimed, old); ok {
 				return target + rest
@@ -394,18 +431,30 @@ func moduleSwap(target string) func(string, string) string {
 	}
 }
 
-// proseWVA is "the scaling manager", capitalised where a sentence starts.
-func proseWVA(_, before string) string {
-	trimmed := strings.TrimRight(before, " \t*_`\"'>([")
-	line := strings.TrimLeft(before, " \t")
-	switch {
-	case strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "#!") && strings.TrimLeft(line, "# ") == "":
+// proseWVA is "the scaling manager", capitalised where a sentence starts. A word
+// at the start of a line starts a sentence only if the line above ended one.
+func proseWVA(_ string, c FnContext) string {
+	if c.Heading() {
 		return "Scaling manager"
-	case strings.HasSuffix(trimmed, "//") || strings.HasSuffix(trimmed, "#") || strings.HasSuffix(trimmed, "|"),
-		strings.HasSuffix(trimmed, "-"), trimmed == "":
+	}
+	trimmed := strings.TrimRight(c.Before, " \t*_`\"'>([")
+	if trimmed == "" || isCommentLead(trimmed) {
+		if c.Prev != "" && !endsSentence(c.Prev) {
+			return "the scaling manager"
+		}
 		return "The scaling manager"
-	case strings.HasSuffix(trimmed, ".") || strings.HasSuffix(trimmed, "!") || strings.HasSuffix(trimmed, "?") || strings.HasSuffix(trimmed, ":"):
+	}
+	switch {
+	case strings.HasSuffix(trimmed, "|"), strings.HasSuffix(trimmed, "-"), endsSentence(trimmed):
 		return "The scaling manager"
 	}
 	return "the scaling manager"
+}
+
+func isCommentLead(s string) bool {
+	return strings.Trim(s, " \t/#*") == ""
+}
+
+func endsSentence(s string) bool {
+	return strings.HasSuffix(s, ".") || strings.HasSuffix(s, "!") || strings.HasSuffix(s, "?") || strings.HasSuffix(s, ":")
 }

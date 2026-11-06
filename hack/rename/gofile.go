@@ -87,10 +87,13 @@ func (e *Engine) RewriteGo(p, class string, src []byte) ([]byte, error) {
 		return true
 	})
 	for _, group := range file.Comments {
+		e.prevComment = ""
 		for _, c := range group.List {
 			text(CtxComment, c.Pos(), c.Text)
+			e.prevComment = c.Text
 		}
 	}
+	e.prevComment = ""
 	if len(edits) == 0 {
 		return src, nil
 	}
