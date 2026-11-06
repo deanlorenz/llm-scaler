@@ -303,7 +303,7 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		{Name: "underscore-inner", Class: "word", Pattern: `_wva_`, Replace: "_scaling_manager_"},
 		pathToo(Rule{Name: "underscore-suffix", Class: "word", Pattern: `_wva\b`, Replace: "_scaling_manager"}),
 		pathToo(Rule{Name: "kube-prefix", Class: "k8s-object", Pattern: `\bwva-`, Replace: kubeName + "-"}),
-		pathToo(Rule{Name: "kube-suffix-word", Class: "k8s-object", Pattern: `(?P<w>deploy|two-variant|vs)-wva\b`, Replace: "${w}-" + kubeName}),
+		pathToo(Rule{Name: "kube-suffix-word", Class: "k8s-object", Pattern: `(?P<w>deploy|two-variant|vs|external-scaler|manager)-wva\b`, Replace: "${w}-" + kubeName}),
 		pathToo(Rule{Name: "kube-suffix", Class: "k8s-object", Pattern: `-wva\b`, Replace: "-llmsm"}),
 		{Name: "dir-word", Class: "k8s-object", Pattern: `/wva\b`, Replace: "/" + kubeName},
 		pathToo(Rule{Name: "dot-word", Class: "word", Pattern: `\bwva\.`, Replace: kubeName + "."}),
@@ -408,10 +408,18 @@ func alertPrefix(claimed string, _ FnContext) string {
 }
 
 // oldCRD names what no longer exists without inventing a Variant CRD.
-func oldCRD(claimed string, _ FnContext) string {
+func oldCRD(claimed string, c FnContext) string {
 	head, kind := "the", claimed[strings.LastIndex(claimed, " ")+1:]
 	if strings.HasPrefix(claimed, "The") {
 		head = "The"
+	}
+	// The sentence may have its article on the line above.
+	words := strings.Fields(c.Prev)
+	if isCommentLead(strings.TrimSpace(c.Before)) && len(words) > 0 {
+		switch strings.ToLower(words[len(words)-1]) {
+		case "the", "a", "an":
+			return "old " + kind
+		}
 	}
 	return head + " old " + kind
 }

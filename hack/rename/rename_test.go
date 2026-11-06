@@ -103,6 +103,8 @@ func TestRewriteText(t *testing.T) {
 		{"the launcher owner stays", docsDir + "guides/warm-pool/install.md", "from `ghcr.io/ev-shindin`.", "from `ghcr.io/ev-shindin`."},
 		{"a harness flag stays", "hack/benchmark/scenarios/guides/workload-autoscaling.yaml", "pass --wva to it", "pass --wva to it"},
 		{"the old CRD is not a Variant CRD", docsDir + "a.md", "the VariantAutoscaling CRD and a VariantAutoscaling reconciler", "the old CRD and the old reconciler"},
+		{"no doubled article across a line", "deploy/x.sh", "# wait until the\n# VariantAutoscaling CRD goes", "# wait until the\n# old CRD goes"},
+		{"a name built from a namespace", "hack/x.sh", "wva-external-scaler-wva", "scaling-manager-external-scaler-scaling-manager"},
 		{"a recorded document stays", "internal/engines/steadystate/testdata/learned-state/v0.10.0-v1.json", `{"namespace":"wva-system"}`, `{"namespace":"wva-system"}`},
 		{"a namespace called wva is not the harness schema", "hack/x.sh", "wva-external-scaler.wva.svc", "scaling-manager-external-scaler.scaling-manager.svc"},
 		{"a shell default moves whole", "deploy/x.sh", "${POLICY_NS:-wva-policy}", "${POLICY_NS:-scaling-manager-policy}"},
