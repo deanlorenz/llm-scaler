@@ -38,7 +38,7 @@ from a recording, from a live Prometheus with no controller installed, or
 | **Decode** | Reuses the ITL line and the SLO analyzer's TPOT pricing unchanged, moved to a `signals` package so a CLI can call them. A per-request TPOT percentile is the mean times a ratio `R_q` learned from the router's per-request TPOT histogram. Decode admission is a birth-death chain over the batch cap's slots. |
 | **TTFT** | Per-pod queue with the measured imbalance; the router's flow-control queue only above the rate where it starts holding requests; prefill capacity as a token throughput from sources that cannot over-state it; parts combined by convolution and an optimised union bound. See [end-to-end TTFT](slo-capacity-planner-ttft.md). |
 | **Packaging** | `internal/signals/whatif` and `internal/signals/prefill`, an adapter `internal/whatifsource`, a CLI `cmd/whatif`. |
-| **Validated** | Decode against the goldens; TTFT on a fixed-replica staircase, flow control off and on. TTFT prints UNVALIDATED until then. |
+| **Validated** | TPOT is measured against the goldens: [the table](#measured-on-the-goldens), 6 of 8 lines the planner answers on in bound. The decode knee and prefill's own latency are not validated: no golden has the data. TTFT on a fixed-replica staircase, flow control off and on, prints UNVALIDATED until a run passes. |
 | **Refuses** | With no evidence for a term, rather than guessing. |
 
 ## A session
@@ -430,6 +430,68 @@ pass mark (goldens scale out):
 
 A check with no data is **SKIPPED with a reason**, never passed. TTFT's pass mark
 is [the staircase](slo-capacity-planner-ttft.md#ground-truth-and-the-staircase).
+
+### Measured on the goldens
+
+`TestDecodeValidation_OnTheGoldens` does this over all 23 goldens, the four staircase
+ones among them, and freezes every line in
+`internal/engines/analyzers/learnreplay/testdata/decode-validation.txt`: 56 lines,
+one per variant. Green means the figures did not move. It is not a pass, and a row
+past its bound stays in the file as `OUT`.
+
+Nothing here tunes the model. The error is predicted minus measured, so above 0 the
+line reads slow on TPOT and fast on the knee. A figure needs at least 5 rows.
+
+| Golden | Tier at the freeze | Mean TPOT error | Rows | Against ±10% | Knee error | Windows | Against ±15% |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `ols-sweep` | pinned-B | -3.9% | 87 | in | SKIPPED: 2 windows | | |
+| `ols-sweep-slo` | pinned-B | +10.6% | 33 | **out** | +69.8% | 7 | **out** |
+| `ols-sweep-slo-restart` | pinned-B | +5.0% | 54 | in | +107.6% | 5 | **out** |
+| `throughput-sweep` | pinned-B | +3.8% | 33 | in | SKIPPED: none off a ramp | | |
+| `throughput-sweep-restart` | pinned-B | +50.1% | 124 | **out** | SKIPPED: none off a ramp | | |
+| `mu-paths` variant-01 (synthetic) | ols | -4.9% | 76 | in | +76.3% | 38 | **out** |
+| `mu-paths` variant-02 (synthetic) | ols | -9.8% | 95 | in | +44.4% | 19 | **out** |
+| `mu-paths` variant-03 (synthetic) | ols | 0.0% | 57 | in | SKIPPED: none off a ramp | | |
+
+**On a line the planner refuses** (`PinnedDefaultB`, or held from one), so the tool
+prints no TPOT there and this is the line's error, not an answer's. All knees here
+are SKIPPED for that refusal, or for no saturated window off a ramp:
+
+| Golden | Mean TPOT error | Rows | Against ±10% |
+| --- | --- | --- | --- |
+| `e1` model-02, model-03 | -3.0%, +59.9% | 327, 244 | in, **out** |
+| `e1-tuned` model-02, model-03 | -4.8%, +75.2% | 311, 244 | in, **out** |
+| `mu-paths` variant-04 (synthetic) | 0.0% | 57 | in |
+| `start-seed-restart-2` variant-01, variant-02 | +101.5%, +99.4% | 65, 23 | **out**, **out** |
+| `ttft-staircase-b-off` | -18.7% | 210 | **out** |
+| `ttft-staircase-b-on` | -22.1% | 227 | **out** |
+| `ttft-staircase-c-on` | -21.2% | 227 | **out** |
+| `ttft-three-pods` | -9.4% | 237 | in |
+
+**What it says.**
+
+- **Mean TPOT:** 6 of the 8 lines the planner answers on are in bound, of 19 lines
+  with a figure. Three of the six are synthetic, so the real runs are 3 of 5.
+  `throughput-sweep-restart` reads 50.1% slow; no cause was read from this run.
+- **Decode knee:** four figures, all out, from 44.4% to 107.6% high. Two are
+  synthetic. The other two are `ols-sweep-slo` runs, recorded before `QueueMin`, so
+  a "saturated window" is a queue seen at one instant, not a busy minute. Treat the
+  knee as not validated: no golden saturates a line the planner answers on, off a
+  ramp, for 5 windows or more with `QueueMin` read.
+- **Prefill's own latency:** no figure. All 16 prefill variants are SKIPPED: P1
+  refuses `V_P` on 14 (`NoPrefillCapacity`) and `a` on 2 (`TooFewLowLoadMinutes`) at
+  the freeze. `TestDecodeValidation_ThePrefillArithmetic` holds the check's arithmetic
+  on built rows; that is arithmetic, not validation.
+- **The staircase** has no line the planner answers on at the freeze. `-a-off` has no
+  line at all, and the other three are on the default intercept, reading 18.7% to
+  22.1% fast. So the four staircase goldens validate nothing of decode.
+
+The rules the page leaves open, chosen here: the row is the unit, as `AvgITL` and
+`generation_tokens` are per pod; a line is asked at the row's fill, clamped to the
+band as an answer is; the knee is read at the row's own shape, on one replica, against
+that replica's tokens, off a ramp by [the line check's rule](#the-line-check-as-built);
+a saturated window is `QueueMin` above 0, or on a recording without it a queue above 0
+at the cycle. No committed recording speculates, so `AvgITL` is per token on all of them.
 
 **Property cases**, in `internal/signals/whatif` (`property_test.go`, in the
 package so the chain's Erlang C case reaches its solver), each
