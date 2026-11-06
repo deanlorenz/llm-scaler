@@ -24,6 +24,9 @@ Two things decide whether the report comes back populated:
   reporting what it chose on stderr. It will not narrow below 1s, since log timestamps are
   second-granularity and a cycle straddling a second boundary would then split in two.
 
+The sample below predates the `Restored` column, which sits after `Priority` and names the
+learners whose lines that cycle say `restored: true`, or `-`.
+
 ---
 
 # K1/K2 Capacity Decision Report

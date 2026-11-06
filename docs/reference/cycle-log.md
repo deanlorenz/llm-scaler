@@ -284,11 +284,21 @@ unseen long enough to be forgotten). It says what the learners begin with:
 At most one line per learned key per cycle, when its figure is set for the
 first time, moves more than its band from the value last logged (k2: 2 %), or
 has not logged for 10 minutes: `learner` (`k2`), `variant`, `role`, `key`,
-`value`, `previousValue`, `firstWrite`, `source`, `samples`, and `pods`: the
-pods whose readings were admitted this cycle, lowest reading first, at most 16,
+`value`, `previousValue`, `firstWrite`, `source`, `samples`, `restored`, and
+`pods`: the pods whose readings were admitted this cycle, lowest reading first, at most 16,
 each with its `reading`, `timeBase`, `passedBy` (the admission test it passed),
 `settledForSeconds` and `queueOverThreshold` (its busiest rank's queue over
 the saturation threshold); `podsOmitted` counts the rest.
+
+`restored` is `true`, for `k2`, `mu`, `itl` and `start` alike, while the figure
+came from the snapshot and the learner has admitted no reading under the key
+since the controller restarted. `source` stays what it was: a restore is a
+field, not a source. A `k2-decision` line at `P2-hist` carries `restored` too.
+For `mu` an exact repeat of the last reading is not admitted, so a fleet whose
+rate does not move stays `restored` while it serves. `itl` is `true` while its
+window has kept no reading, on a line priced from the restored intercept or
+held slope; an intercept put back after a rollback of engine arguments reads
+`false`, restored or not.
 
 For `learner` `mu` the key is the throughput key, `value` the service rate
 the variant was priced at (requests per second), and `source` where it came

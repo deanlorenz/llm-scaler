@@ -76,6 +76,15 @@ func GroupVariantAutoscalingByModel(
 	return groups
 }
 
+// KnownVariantAutoscalings is every variant the controller knows of, at any
+// replica count: the set ActiveVariantAutoscaling and
+// InactiveVariantAutoscaling divide. It reads the registry and nothing else, so
+// no failed read of a scale target can make a variant look gone. A variant
+// leaves it when KEDA stops calling about its ScaledObject (registry.DefaultTTL).
+func KnownVariantAutoscalings(ctx context.Context, reg *registry.Registry) []wvav1alpha1.VariantAutoscaling {
+	return readyVariantAutoscalings(ctx, reg)
+}
+
 // ActiveVariantAutoscaling retrieves all VariantAutoscaling resources that are ready for optimization
 // and have at least one target replica.
 // Returns a slice of deep-copied VariantAutoscaling objects.

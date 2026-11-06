@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 	llmdOptv1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -117,6 +119,7 @@ var (
 	learnedStateRelaxed      *prometheus.GaugeVec
 	learnedStateK2Source     *prometheus.GaugeVec
 	learnedStateK2Age        *prometheus.GaugeVec
+	learnedStateLastAdmitted *prometheus.GaugeVec
 	learnedStateRestores     *prometheus.CounterVec
 	learnedStateErrors       *prometheus.CounterVec
 	learnedStateBytes        prometheus.Gauge
@@ -197,6 +200,8 @@ func InitMetrics(registry prometheus.Registerer) error {
 	learnedRelaxedLabels := []string{constants.LabelNamespace, constants.LabelModelName, constants.LabelVariantName}
 	// learnedK2Labels: one series per variant; role and source are
 	// determined by the variant this cycle, so they add no cardinality.
+	learnerLabels := []string{constants.LabelNamespace, constants.LabelModelName, constants.LabelVariantName,
+		constants.LabelRole, constants.LabelLearner}
 	learnedK2Labels := []string{constants.LabelNamespace, constants.LabelModelName, constants.LabelVariantName,
 		constants.LabelRole, constants.LabelSource}
 	// engineConfigLabels: the key learned state is filed under -- model,
@@ -233,6 +238,7 @@ func InitMetrics(registry prometheus.Registerer) error {
 		learnedBorrowLabels = append(learnedBorrowLabels, constants.LabelControllerInstance)
 		learnedRelaxedLabels = append(learnedRelaxedLabels, constants.LabelControllerInstance)
 		learnedK2Labels = append(learnedK2Labels, constants.LabelControllerInstance)
+		learnerLabels = append(learnerLabels, constants.LabelControllerInstance)
 		unmeasuredQueueLabels = append(unmeasuredQueueLabels, constants.LabelControllerInstance)
 		variantAtMaxLabels = append(variantAtMaxLabels, constants.LabelControllerInstance)
 		modelScalingBlockedLabels = append(modelScalingBlockedLabels, constants.LabelControllerInstance)
@@ -350,6 +356,13 @@ func InitMetrics(registry prometheus.Registerer) error {
 			Help: "Seconds since the k2 a variant is priced on was last measured -- written, not read: a figure in use every cycle is read every cycle and still ages. The variant's own window for source P1-obs and P2-hist, the donor's for P2-borrow, the window the previous figure came from for P2-prior; absent for P3-k2, P4-k1, P1-obs-unadmitted and k1-bound, where no measured k2 prices the replica. Keeps its last value through a cycle whose collection or analysis failed.",
 		},
 		learnedK2Labels,
+	)
+	learnedStateLastAdmitted = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: constants.WVALearnedStateLastAdmittedTimestampSeconds,
+			Help: "When the reading newest in the key that priced a variant was admitted, in Unix seconds, per learner (k2, mu, itl, start). time() minus it is the age of the evidence, and it keeps growing through a stalled analyzer or a parked model. 0 when the figure has no stamp: as old as can be. A cycle in which no key priced the variant keeps the last value; the series goes when the key is forgotten or evicted with none in its place, or the variant or model goes.",
+		},
+		learnerLabels,
 	)
 	learnedStateRestores = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -994,7 +1007,7 @@ func InitMetrics(registry prometheus.Registerer) error {
 		return fmt.Errorf("failed to register %s: %w", constants.WVAEngineConfig, err)
 	}
 	for _, c := range []prometheus.Collector{learnedStateBorrowed, learnedStateRelaxed, learnedStateK2Source, learnedStateK2Age,
-		learnedStateRestores, learnedStateErrors, learnedStateBytes, learnedStateBudget, learnedStateDropped} {
+		learnedStateLastAdmitted, learnedStateRestores, learnedStateErrors, learnedStateBytes, learnedStateBudget, learnedStateDropped} {
 		if err := registry.Register(c); err != nil {
 			return fmt.Errorf("failed to register a learned-state metric: %w", err)
 		}
@@ -2336,6 +2349,154 @@ func (m *MetricsEmitter) DeleteLearnedStateBorrowsForModel(namespace, modelID st
 		}
 	}
 	learnedBorrowsMu.Unlock()
+}
+
+// learnerSeriesID names one variant's series of one learner.
+type learnerSeriesID struct {
+	namespace, modelID, variant, learner string
+}
+
+// learnerSeries is what RecordLearnerReports last published under an ID: the
+// role label, and the key the figure came from and the variant's scale target,
+// which no label carries.
+type learnerSeries struct {
+	role, key string
+	target    LearnerTarget
+}
+
+// LearnerTarget is the workload a variant scales. It outlives the variant's
+// registry entry, so that a variant gone from the registry can be told from a
+// variant nobody has called about lately.
+type LearnerTarget struct {
+	Kind, Name string
+}
+
+// LearnerVariant is one variant with a last-admitted series, and its scale
+// target, zero if none was known when a series was published.
+type LearnerVariant struct {
+	Namespace, ModelID, Variant string
+	Target                      LearnerTarget
+}
+
+// learnerPublished holds what RecordLearnerReports last published, guarded by
+// learnerPublishedMu.
+var (
+	learnerPublishedMu sync.Mutex
+	learnerPublished   = map[learnerSeriesID]learnerSeries{}
+)
+
+// RecordLearnerReports applies each report to its variant's
+// wva_learned_state_last_admitted_timestamp_seconds series. A report with a
+// PricingKey sets the series from that key, so a change of key needs nothing
+// more. One without leaves it alone, unless it says the key last published
+// was forgotten: then the series goes. A learner that has stopped pricing a
+// variant keeps showing how old its evidence is, and only a forgotten key is
+// no longer evidence. No report at all, on a cycle whose Analyze failed, also
+// leaves it alone: that is what keeps time() minus it honest through a stall.
+//
+// targetOf names a variant's scale target, and may be nil. A series keeps the
+// target it had when targetOf has none.
+func (m *MetricsEmitter) RecordLearnerReports(reports []learn.Report, targetOf func(namespace, variant string) LearnerTarget) {
+	if learnedStateLastAdmitted == nil {
+		return
+	}
+	for _, r := range reports {
+		id := learnerSeriesID{namespace: r.Namespace, modelID: r.ModelID, variant: r.Variant, learner: r.Learner}
+		learnerPublishedMu.Lock()
+		prev, had := learnerPublished[id]
+		switch {
+		case r.PricingKey != "":
+			target := prev.target
+			if targetOf != nil {
+				if t := targetOf(r.Namespace, r.Variant); t.Name != "" {
+					target = t
+				}
+			}
+			learnerPublished[id] = learnerSeries{role: r.Role, key: r.PricingKey, target: target}
+		case had && slices.Contains(learn.Keys(r.Forgotten), prev.key):
+			delete(learnerPublished, id)
+		default:
+			learnerPublishedMu.Unlock()
+			continue
+		}
+		learnerPublishedMu.Unlock()
+		if r.PricingKey != "" {
+			learnedStateLastAdmitted.With(id.labels(r.Role)).Set(unixSeconds(r.LastAdmitted))
+		}
+		if had && (r.PricingKey == "" || prev.role != r.Role) {
+			learnedStateLastAdmitted.Delete(id.labels(prev.role))
+		}
+	}
+}
+
+// labels is the series' labels under role.
+func (id learnerSeriesID) labels(role string) prometheus.Labels {
+	l := prometheus.Labels{
+		constants.LabelNamespace:   id.namespace,
+		constants.LabelModelName:   id.modelID,
+		constants.LabelVariantName: id.variant,
+		constants.LabelRole:        role,
+		constants.LabelLearner:     id.learner,
+	}
+	if controllerInstance != "" {
+		l[constants.LabelControllerInstance] = controllerInstance
+	}
+	return l
+}
+
+// unixSeconds is t in Unix seconds, and 0 for a zero t: a Unix time of the
+// year 1 would read as a bug, and 0 reads as old as can be.
+func unixSeconds(t time.Time) float64 {
+	if t.IsZero() {
+		return 0
+	}
+	return float64(t.UnixMilli()) / 1000
+}
+
+// LearnerVariants is every variant with a last-admitted series, once each,
+// sorted, with the scale target recorded for it.
+func (m *MetricsEmitter) LearnerVariants() []LearnerVariant {
+	learnerPublishedMu.Lock()
+	defer learnerPublishedMu.Unlock()
+	byName := map[[3]string]LearnerVariant{}
+	for id, s := range learnerPublished {
+		name := [3]string{id.namespace, id.modelID, id.variant}
+		v, ok := byName[name]
+		if !ok {
+			v = LearnerVariant{Namespace: id.namespace, ModelID: id.modelID, Variant: id.variant}
+		}
+		if v.Target.Name == "" {
+			v.Target = s.target
+		}
+		byName[name] = v
+	}
+	out := make([]LearnerVariant, 0, len(byName))
+	for _, name := range slices.SortedFunc(maps.Keys(byName), func(x, y [3]string) int { return slices.Compare(x[:], y[:]) }) {
+		out = append(out, byName[name])
+	}
+	return out
+}
+
+// RetainLearnerSeries removes the last-admitted series of every variant known
+// does not report true for. The caller's test is whether the variant still
+// exists, not whether it is running: unlike the k2-source series these describe
+// the evidence, not this cycle's pricing, and it ages on through a park.
+func (m *MetricsEmitter) RetainLearnerSeries(known func(namespace, modelID, variant string) bool) {
+	gone := map[learnerSeriesID]string{}
+	learnerPublishedMu.Lock()
+	for id, s := range learnerPublished {
+		if !known(id.namespace, id.modelID, id.variant) {
+			gone[id] = s.role
+			delete(learnerPublished, id)
+		}
+	}
+	learnerPublishedMu.Unlock()
+	if learnedStateLastAdmitted == nil {
+		return
+	}
+	for id, role := range gone {
+		learnedStateLastAdmitted.Delete(id.labels(role))
+	}
 }
 
 // AddLearnedStateRestores counts restored variants by outcome.

@@ -160,6 +160,9 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		SwitchBatchCapDerivedMu:    &a.batchCapDerivedMu,
 		SwitchITLPerToken:          &a.itlPerToken,
 
+		// #495: mu on learn's list of learners (mu_learner.go).
+		SwitchMuForgetReported: &a.muForgetReported,
+
 		// Learner PR 5b: the start guard opens on distinct Pods
 		// (start_est.go).
 		SwitchStartConfirmsByDistinctPod: &a.startConfirmsByPod,

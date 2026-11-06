@@ -720,10 +720,11 @@ func TestTTFTFloor(t *testing.T) {
 	relNear(t, "mean floor", m.Floor, 0.0126+1000.0/30000+d.Line.ITLAt(d.Band.Lo), 1e-12)
 }
 
-// within runs f under a short deadline: a refusal that went missing lets the
-// queue run past saturation, where its scale is infinite and the quantile
-// search does not return, and that must fail here by name rather than as the
-// whole package's timeout.
+// within runs f under a deadline: a refusal that went missing lets the queue run
+// past saturation, where its scale is infinite and the quantile search does not
+// return, and that must fail here by name rather than as the whole package's
+// timeout. The deadline is generous: a call that takes under a second alone took
+// over 5 s on a loaded machine, and a slow machine is not a hang.
 func within(t *testing.T, what string, f func() Result) Result {
 	t.Helper()
 	done := make(chan Result, 1)
@@ -731,8 +732,8 @@ func within(t *testing.T, what string, f func() Result) Result {
 	select {
 	case r := <-done:
 		return r
-	case <-time.After(5 * time.Second):
-		t.Fatalf("%s: no result within 5 s", what)
+	case <-time.After(60 * time.Second):
+		t.Fatalf("%s: no result within 60 s", what)
 		return nil
 	}
 }

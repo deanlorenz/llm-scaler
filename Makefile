@@ -3092,6 +3092,9 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# they selected the controller by, so a pool Pod's log was read as the
 	@# controller's -- and the selector parses perfectly.
 	@bash hack/check-benchmark-controller-pod.sh
+	@echo "Checking the k1/k2 report's Restored column..."
+	@# Fixture events through render_report: a restore is a field, not a source.
+	@bash hack/check-k2-decisions-restored.sh
 	@echo "Checking model identification..."
 	@# Same shape as the check above, on the parsers that name the model every
 	@# ScaledObject is written for. `bash -n` sees none of it: a --served-model-name

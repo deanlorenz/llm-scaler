@@ -529,6 +529,16 @@ across a restart, are otherwise visible only in the logs.
   ```
   An old figure is not wrong by itself: a fleet sized correctly does not saturate either. The alert says where to look; a measurement is renewed only by a burst that saturates a replica.
 
+### `wva_learned_state_last_admitted_timestamp_seconds`
+- **Type**: Gauge
+- **Description**: When the reading newest in the key that priced a variant was admitted, in Unix seconds, per learner. Read it as `time() - x`, the age of the evidence. Unlike `wva_learned_state_k2_age_seconds` it is a time, not an age, so it keeps growing through a stalled analyzer, a failed collection or a parked model. After a controller restart a restored figure shows a time older than the restart until its learner admits a reading; `restored: true` on its [`learner-write`](cycle-log.md#learner-write---v3) lines says the same. Each learner has its own meaning of admitted: `k2` a saturated reading, `mu` a completion rate written beside it (an exact repeat is not one, and mu's freshness is a different clock, logged and not published here), `itl` a reading its window kept, `start` a replica start. An ITL line whose window has aged out, or holds nothing since a restart, rests on a held slope and reads when that slope was fitted. 0 means the figure has no stamp, as old as can be: a start estimate restored from a document without one, or an ITL line on an intercept with no slope. On a cycle no key priced the variant, the series keeps its last value. It goes when that key is forgotten (`llm-d.ai/forget-learned-state`) or evicted with no key in its place, including a key whose only window was set aside under other engine arguments, and when the variant is really gone: missing from the variants KEDA has called about, and its scale target (Deployment or LeaderWorkerSet) is deleted or being deleted. A variant or model parked at zero replicas keeps it, and so does a variant KEDA has stopped calling about while its scale target stands: a KEDA outage or a typo in a trigger does not resolve an alert on this series. A read of the target that fails, Forbidden included, keeps it. In every case a variant missing that way for 24 hours loses the series, so a ScaledObject deleted with its Deployment left behind ends there.
+- **Labels**: `namespace` (scraped as `exported_namespace`), `model_name`, `variant_name`, `role`, `learner` (`k2`, `mu`, `itl`, `start`). At most four series per variant: no key, bucket or pod is a label. A decode variant has all four once each has priced it; a prefill variant has no `itl`.
+- **Use Case**: Evidence that has stopped renewing, whatever the reason:
+  ```promql
+  time() - wva_learned_state_last_admitted_timestamp_seconds{learner="mu"} > 86400
+  ```
+  An old figure is not wrong by itself: a fleet sized correctly does not saturate, and k2 and mu are measured only at saturation.
+
 ### `wva_learned_state_restores_total`
 - **Type**: Counter
 - **Description**: Variants whose restored learned state was checked against their engine configuration after a controller restart (`LEARNED_STATE_SNAPSHOT`, see [configuration](configuration.md#learned-state-across-a-restart)), counted on the variant's first cycle.
