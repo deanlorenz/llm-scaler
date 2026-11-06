@@ -42,6 +42,18 @@ func TestSLORouterQueries(t *testing.T) {
 		t.Errorf("TTFT query must rate inside the sum: %s", ttft)
 	}
 	for name, metric := range map[string]string{
+		QuerySLORouterTTFTSum:   "llm_d_epp_request_ttft_seconds_sum",
+		QuerySLORouterTTFTCount: "llm_d_epp_request_ttft_seconds_count",
+	} {
+		q := build(name)
+		// As the buckets: a non-streaming TTFT is the whole request.
+		for _, want := range []string{metric, `streaming="true"`, `namespace="ns"`, "sum by (model_name, target_model_name)", "[" + SLORouterWindow + "]"} {
+			if !strings.Contains(q, want) {
+				t.Errorf("%s lacks %q: %s", name, want, q)
+			}
+		}
+	}
+	for name, metric := range map[string]string{
 		QuerySLORouterTPOTSum:   "llm_d_epp_request_streaming_tpot_seconds_sum",
 		QuerySLORouterTPOTCount: "llm_d_epp_request_streaming_tpot_seconds_count",
 	} {

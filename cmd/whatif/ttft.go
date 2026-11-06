@@ -53,7 +53,7 @@ const (
 // The closing note's measured halves. The figures are the frozen P2 table's
 // (TestTTFTFrozen_TheNotesFigures, learnreplay).
 const (
-	ttftNoteOpen     = "TTFT is UNVALIDATED until the staircase run (M2) and is not a bound: "
+	ttftNoteOpen     = "TTFT is UNVALIDATED until a fresh frozen run passes, and is not a bound: "
 	ttftNoteAssumed  = "at the assumed prompt cv %s it read 1.1x to 4.1x the router's percentile on the P2 recordings; at the sent spread (cv 0.06) up to 34%% under it."
 	ttftNoteMeasured = "at the sent spread (cv 0.06) it read up to 34% under the router's percentile on the P2 recordings."
 )
@@ -83,6 +83,8 @@ func (f *answerFlags) checkTTFT() error {
 		return usagef("--input-bucket: per-bucket answers are not built (the planner's M1)")
 	case f.set["assume-vp"] && !(f.assumeVP > 0 && finite(f.assumeVP)):
 		return usagef("--assume-vp %g, want a finite throughput above 0, in prompt tokens per second", f.assumeVP)
+	case f.set["assume-router-hop"] && f.assumeRouterHop < 0:
+		return usagef("--assume-router-hop %s, want a duration of 0 or more", f.assumeRouterHop)
 	case f.prefill < 0:
 		return usagef("--prefill %d, want 0 (the recorded count) or more", f.prefill)
 	case f.ttftFlagged() && f.set["headroom"] && f.question == replicasQuestion && !(f.headroom > 0 && f.headroom < 1):
@@ -95,7 +97,7 @@ func (f *answerFlags) checkTTFT() error {
 
 // ttftFlagged reports whether any flag asks about TTFT.
 func (f *answerFlags) ttftFlagged() bool {
-	return slices.ContainsFunc([]string{"ttft", "ttft-percentile", "assume-vp", "prefill", "prefill-variant"},
+	return slices.ContainsFunc([]string{"ttft", "ttft-percentile", "assume-vp", "assume-router-hop", "prefill", "prefill-variant"},
 		func(name string) bool { return f.set[name] })
 }
 
@@ -137,7 +139,7 @@ func (t *ttftQuestion) policyPercentile(st *learnreplay.State) {
 func (f *answerFlags) rateTTFT() (*ttftQuestion, error) {
 	if f.ttft == "" {
 		if f.ttftFlagged() {
-			return nil, usagef("--ttft-percentile, --assume-vp, --prefill and --prefill-variant need a --ttft target on slo-to-rate")
+			return nil, usagef("--ttft-percentile, --assume-vp, --assume-router-hop, --prefill and --prefill-variant need a --ttft target on slo-to-rate")
 		}
 		return nil, nil
 	}
@@ -191,6 +193,11 @@ type pricedFleet struct {
 	// variant names the prefill variant, and q is the percentile asked.
 	variant string
 	q       float64
+	// assumedHop is the hop --assume-router-hop supplied, nil with none.
+	assumedHop *time.Duration
+	// promptAssumed is a prompt --assume-input-tokens supplied: no reading of
+	// the decode rows' prompt says what its prefix hits are.
+	promptAssumed bool
 	// assumedVP is a V_P --assume-vp supplied.
 	assumedVP bool
 	// flags are the fleet's own, beside P3's.
@@ -304,6 +311,10 @@ func (f *answerFlags) fleetFor(st *learnreplay.State, ps *learnreplay.PrefillSta
 	}
 	pf.fleet.Prefill = p
 	f.prefillShape(pf, ps)
+	if f.set["assume-router-hop"] {
+		pf.assumedHop = &f.assumeRouterHop
+	}
+	pf.promptAssumed = f.set["assume-input-tokens"]
 	pf.decodeSide()
 	pf.flowControl(st)
 	pf.assume("Poisson arrivals")
@@ -467,6 +478,9 @@ func (pf *pricedFleet) effectivePrompt(il float64) float64 {
 	return pf.pv.shape.ILeff
 }
 
+// sideOmitted is an input left out of the price.
+const sideOmitted = "omitted"
+
 // decodeSide is decode's part of the TTFT: the decode variant's line when
 // it prices, else the decode engine's measured TTFT, which holds the KV pull
 // (TTFTFleet.DecodeTTFT), else nothing, flagged by P3.
@@ -474,13 +488,14 @@ func (pf *pricedFleet) decodeSide() {
 	pf.in.TransferSecondsPerToken = pf.fleet.Prefill.TransferSecondsPerToken
 	pf.in.TransferSource = shapeMeasured
 	if pf.in.TransferSecondsPerToken == 0 {
-		pf.in.TransferSource = "omitted"
+		pf.in.TransferSource = sideOmitted
 	}
 	if pf.pv != nil {
 		if _, ok := whatif.KneeRate(pf.pv.decode).(whatif.Answer); ok {
 			d := pf.pv.decode
 			pf.fleet.Decode = &d
 			pf.in.DecodeSide = "line"
+			pf.decodeTerm()
 			return
 		}
 		pf.fleet.DecodeTTFT = pf.pv.state.DecodeTTFT.EngineTTFT
@@ -492,7 +507,88 @@ func (pf *pricedFleet) decodeSide() {
 		pf.in.DecodeTTFTPromptTokens = pf.fleet.DecodeTTFT.PromptTokens
 		return
 	}
-	pf.in.DecodeSide = "omitted"
+	pf.in.DecodeSide = sideOmitted
+}
+
+// decodeTerm is the term on the decode line: what the recording's cycles
+// taught the variant, each input with no fit named as assumed.
+func (pf *pricedFleet) decodeTerm() {
+	t := pf.pv.state.DecodeTTFT.Term
+	if pf.promptAssumed {
+		t.WholePromptTokens = 0
+	}
+	pf.fleet.DecodeTerm = &t
+	pf.in.DecodeTermSource = shapeMeasured
+	pf.in.DecodeTermRefused, pf.in.RouterHopRefused = string(t.EngineRefused), string(t.HopRefused)
+	switch {
+	case t.EngineOmitted:
+		pf.in.DecodeTermSource = sideOmitted
+		pf.assume("decode term omitted (no fit, %s, and no quiet decode row): T_xfer + ITL stands for it", t.EngineRefused)
+	case t.StepAssumed:
+		pf.in.DecodeTermSource = shapeAssumed
+		pf.in.TransferSource = termHoldsTransfer
+		pf.assume("decode TTFT %.1f ms held from a quiet row, slope %s on ITL above %.2f ms (no fit: %s)",
+			1000*t.Engine.Base, num(t.PerStep), 1000*t.FromITL, t.EngineRefused)
+	default:
+		pf.in.TransferSource = termHoldsTransfer
+	}
+	pf.in.DecodeBaseSeconds, pf.in.DecodePerTokenSeconds = t.Engine.Base, t.Engine.PerToken
+	pf.in.DecodeHeldPromptTokens, pf.in.DecodeFromITLSeconds = t.Engine.HeldPromptTokens, t.FromITL
+	pf.in.DecodePerStep = t.PerStep
+	pf.in.RouterHopSource = shapeMeasured
+	switch {
+	case pf.assumedHop != nil:
+		if !t.HopAssumed {
+			learned := t.Hop.Base
+			pf.in.RouterHopLearnedBaseSeconds = &learned
+		}
+		t.Hop, t.HopAssumed = whatif.PromptLine{Base: pf.assumedHop.Seconds()}, true
+		pf.fleet.DecodeTerm = &t
+		pf.in.RouterHopSource = shapeAssumed
+		pf.assume("router hop %s (--assume-router-hop)", pf.assumedHop)
+	case t.HopAssumed:
+		pf.in.RouterHopSource = shapeAssumed
+		pf.assume("router hop %.0f ms (no fit: %s); --assume-router-hop supplies one", 1000*t.Hop.Base, t.HopRefused)
+	}
+	pf.in.RouterHopBaseSeconds, pf.in.RouterHopPerTokenSeconds = t.Hop.Base, t.Hop.PerToken
+	pf.in.RouterHopHeldPromptTokens = t.Hop.HeldPromptTokens
+}
+
+// termHoldsTransfer is T_xfer's source with a D priced: the term holds the pull.
+const termHoldsTransfer = "held by the decode term, not priced"
+
+// assumedMove is the move, either way, past which an assumed term is said to
+// decide an answer. Stated: past it the operator should read the term first.
+const assumedMove = 1.25
+
+// noteAssumedTerm says on the assumed row when the decode term's assumed parts
+// alone decide r: a refusal the fleet would answer, or a figure they move by
+// assumedMove or more. price is the question asked of the fleet.
+func (pf *pricedFleet) noteAssumedTerm(r whatif.Result, price func(whatif.TTFTFleet) whatif.Result) {
+	if pf.refused != nil {
+		return
+	}
+	plain, ok := whatif.WithoutAssumedTerms(pf.fleet)
+	if !ok {
+		return
+	}
+	figure := func(r whatif.Result) float64 {
+		switch v := r.(type) {
+		case whatif.Answer:
+			return v.Value
+		case whatif.TTFT:
+			return v.Seconds
+		}
+		return 0
+	}
+	with, without := figure(r), figure(price(plain))
+	switch {
+	case !(without > 0):
+	case !(with > 0):
+		pf.assume("an assumed decode term alone decides this refusal: without it the answer is %.4g", without)
+	case with >= assumedMove*without || without >= assumedMove*with:
+		pf.assume("an assumed decode term moves this answer from %.4g to %.4g", without, with)
+	}
 }
 
 // flowControl is flow control inferred from its series: S1's rule with
@@ -536,7 +632,7 @@ func (pf *pricedFleet) describe() {
 	b.WriteString(")")
 	switch pf.in.DecodeSide {
 	case "line":
-		b.WriteString("; decode by its line")
+		fmt.Fprintf(&b, "; decode by its line, term %s, hop %s", pf.in.DecodeTermSource, pf.in.RouterHopSource)
 	case sideDecodeEngine:
 		fmt.Fprintf(&b, "; decode engine TTFT %.1f ms at %s tokens, measured", 1000*pf.fleet.DecodeTTFT.Seconds, num(round(pf.fleet.DecodeTTFT.PromptTokens)))
 	default:
@@ -591,7 +687,8 @@ func (pf *pricedFleet) qualify(r whatif.Result) whatif.Result {
 	return withFlags(r, add)
 }
 
-// withFlags is r with each of add it does not carry; a refusal has none.
+// withFlags is r with each of add it does not carry; a refusal keeps only what
+// its term rests on (Unanswerable.Flags).
 func withFlags(r whatif.Result, add []whatif.Flag) whatif.Result {
 	merged := func(flags []whatif.Flag) []whatif.Flag {
 		flags = slices.Clone(flags)
@@ -662,7 +759,9 @@ func (pf *pricedFleet) atOperatingPoint(q ttftQuestion, query whatif.ReplicasQue
 		}
 	}
 	pf.in.Rate = &o.rate
-	o.ttft = pf.priced(func(fl whatif.TTFTFleet) whatif.Result { return whatif.TTFTAt(fl, o.rate, q.q) })
+	price := func(fl whatif.TTFTFleet) whatif.Result { return whatif.TTFTAt(fl, o.rate, q.q) }
+	o.ttft = pf.priced(price)
+	pf.noteAssumedTerm(o.ttft, price)
 	return o, query
 }
 

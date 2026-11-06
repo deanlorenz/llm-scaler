@@ -93,10 +93,15 @@ func Reasons() []Reason {
 }
 
 // Unanswerable is a refused question: the Reason, and a Detail naming the
-// input that caused it.
+// input that caused it. Flags are what the refusal rests on, where that is more
+// than its input (a TTFT floor's decode term). AssumedTermDecides says an
+// assumed part of that term alone refused it: the target stands above the floor
+// with it taken out, so the refusal says nothing of the fleet.
 type Unanswerable struct {
-	Reason Reason
-	Detail string
+	Reason             Reason
+	Detail             string
+	Flags              []Flag
+	AssumedTermDecides bool
 }
 
 func (Unanswerable) result() {}

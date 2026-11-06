@@ -1171,6 +1171,19 @@ a demand term declares:
 | restart | an unpersisted latch restores to the safe-side choice. The mu latch does since PR 3 ([the mu choice](#the-mu-choice)) |
 | tuning | dwell is tuned on noise with the gauges' real autocorrelation, not iid noise, which over-counts flips |
 
+Declared rows:
+
+| Choice | Set | Clear | Dwell | Safe side | Restart |
+| --- | --- | --- | --- | --- | --- |
+| The TTFT decode term: a fit of D, and of R, against its fall-back (`prefill.fitLatch`) | 30 cycles in a row of a fit that stands (`FitSetCycles`): 7.5 min at 15 s | 15 cycles in a row of refusals (`FitClearCycles`), holding the last fit until then | 30 cycles on the fall-back, since one refused cycle restarts the set | The fall-back, the higher-priced source on every case read. The old sum floors either side | Not persisted: comes up on the fall-back, as does a sweep on a change of engine |
+
+The term's latch is tuned on AR(1) noise at phi 0.9 around a crossing, one reversal
+per excursion at a noise of 0.3 of the excursion (`TestLatch_OneReversalPerExcursion`,
+each edge), about 9 flips with none. At 0.5 the simulation reads a mean of 2.0 flips
+and a worst of 4. **The noise is assumed:** phi 0.9 is not measured on the fit's own
+series.
+This latch is its own: the ITL tier's (#495) is private to its tracker.
+
 The rows as built are in the developer guide's
 [set, clear and dwell table](../developer-guide/saturation-analyzer.md#set-clear-and-dwell).
 

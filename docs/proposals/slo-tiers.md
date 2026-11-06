@@ -820,6 +820,7 @@ P3's on the answer.
 | `ArrivalCV2` | 0, Poisson (P3's open question 5), flagged `AssumedPoissonArrivals`: an S1 flag, since P3 has none for it. Poisson over-promises on bursty traffic. Lifted by the staircase's bursty bucket ([which bucket lifts which flag](slo-capacity-planner-ttft.md#ground-truth-and-the-staircase)) |
 | `TransferSecondsPerToken` | Measured: the mean of the R1 field `AvgKVTransferTime` over Ready decode rows with `AvgKVTransferTimeKnown`, divided by `E[I_eff]`. Run 2 recorded it on 374 of 386 decode rows. `TransferOmitted` (0 passed) only where no decode row carries one. With no decode line and `DecodeTTFT` measured, P3 does not price it (the decode engine's TTFT holds the pull) |
 | `DecodeTTFT` | With no decode line only: the decode variant's measured `AvgTTFT` and the prompt it was read at ([below](#3-what-s1-passes-to-ttftat-and-rateforttft)); 0 when no row carries it (`DecodeTTFTUnmeasured`) |
+| `DecodeTerm` | With a decode line: `D` and `R` as the variant's window has learned them, flagged when assumed ([the decode term](slo-capacity-planner-ttft.md#as-built-the-decode-term)). Switch `slo-ttft-decode-term`; off, the old sum |
 | `Decode` | The model's decode variant, from the inputs S1 already prices TPOT with: its line, band, capacity tokens, `KVreq`, `O`, batch cap times ranks, and Ready replicas `N_d`. Only when the model has exactly one decode variant and its line prices (`own` or `pinned`; not `pinned-default`, `no-line` or `declined`) |
 | `FlowControl` | The tier's `slo.flowControl` when it is set ([below](#the-flow-control-state)): `enabled` passes `FlowControlOn`, `disabled` passes `FlowControlOff`. Unset, it is inferred from the series: on when the router's flow-control queue series exists for the model, `FlowControlNoSeries` (flagged `FlowControlInferredOff`) otherwise. On always carries the upstream detector thresholds 5 and 0.8, which this repository's install leaves unchanged, so P3's `FlowControlUnknown` cannot arise |
 | The rate | The model's arrival rate times the variant's share of the Ready prefill replicas |
@@ -1041,7 +1042,7 @@ by name.
 | Metric | Labels beyond those | Meaning |
 | --- | --- | --- |
 | `wva_slo_predicted_ttft_seconds` | — | `TTFTAt` at the variant's current rate, at the objective's percentile. Present when priced and when `decode-bound` or `routing-bound`; absent when `TTFTAt` refuses (the target is then unmet, `wva_slo_ttft_unmet`). On P2's goldens it reads low at light load, up to about 34% under the router's p90: not a bound |
-| `wva_slo_ttft_unmet` | — | `1` when the current rate misses the target: the prediction is above it, or `TTFTAt` refused at or over the prefill knee or the decode onset, or the current rate is above the prefill flow-control onset; `0` when met; absent when not priced |
+| `wva_slo_ttft_unmet` | — | `1` when the current rate misses the target: the prediction is above it, or `TTFTAt` refused at or over the prefill knee or the decode onset, or the current rate is above the prefill flow-control onset, or the target is below the floor; `0` when met; absent when not priced, and when only an assumed decode term puts the floor over the target |
 | `wva_slo_ttft_replica_requests_per_second` | — | `RateForTTFT` ÷ `N_p` at the current count. Absent unless the reason is `priced` |
 | `wva_slo_ttft_vp_source` | `vp_source` | `1` for where `V_P` came from (`busy-minutes`, `peak-under-queue`, `back-pressure-bound`, `none`), `0` for the others. Present whenever the variant is evaluated |
 | `wva_slo_ttft_reason` | `reason` | `1` for the reason from `RateForTTFT` at the current count, `0` for the others. `priced`; S1's own: `no-estimate`, `no-decode-side`, `decode-bound`, `routing-bound`; and P3's refusals in kebab case: `no-prefill-capacity`, `no-fixed-latency`, `no-imbalance`, `no-prefill-replicas`, `no-decode-replicas`, `no-capacity`, `no-batch-cap`, `above-decode-onset`, `saturated`, `target-below-floor`, `no-traffic`, `too-many-slots`, `input-invalid`. `flow-control-unknown` is not among them: S1 always passes thresholds, so P3 cannot return it |
@@ -1050,7 +1051,7 @@ by name.
 The flag series zero-fills a fixed list, `constants.SLOTTFTFlags`, in this
 order: P3's TTFT flags (`UnvalidatedTTFT`, `AssumedVP`, `VPLowerBound`,
 `VPAboveSlopeBound`, `AssumedImbalance`, `AssumedPromptSpread`,
-`TransferOmitted`, `DecodeSideOmitted`, `DecodeTTFTUnmeasured`, `DecodeEngineMeasured`, `VPScaledToPrompt`, `VPShapeMoved`, `FlowControlInferredOff`,
+`TransferOmitted`, `DecodeSideOmitted`, `DecodeTTFTUnmeasured`, `DecodeEngineMeasured`, `DecodeTermOmitted`, `DecodeStepSlopeAssumed`, `RouterHopAssumed`, `DecodeTermFloored`, `DecodeTermPrefixHits`, `VPScaledToPrompt`, `VPShapeMoved`, `FlowControlInferredOff`,
 `AboveFlowControlOnset`, `HeldByDecodeAdmission`, `DecodeOnsetUnchecked`),
 the decode flags a TTFT answer can carry (`BelowFittedBand`,
 `KVBoundSlots`), and S1's (`AssumedPoissonArrivals`,
@@ -1163,6 +1164,11 @@ asserted.
     read 1.5% above the served `V_P` on run 2 at 37k; lifted when a second
     measured point confirms it);
   - `TransferOmitted`, raised only when no transfer time was measured;
+  - `DecodeTermOmitted`, `DecodeTermFloored` or `DecodeTermPrefixHits`, where
+    the old, lower sum stands or the term reads low;
+  - `RouterHopAssumed`: its 20 ms comes from one small model, and a larger one
+    could exceed it. `DecodeStepSlopeAssumed` is not on the list: it holds a
+    measured figure and takes the slope that asks for more;
   - `AssumedPoissonArrivals`, until the staircase's bursty bucket passes;
   - `AboveFlowControlOnset` on the rate answer, where the per-pod model is
     not proven conservative;
@@ -1391,7 +1397,8 @@ P2](slo-capacity-planner-ttft.md#as-built-p3-after-p2), 7 each at p90 and p95:
    stays `RateForTTFT`'s, as test 16 says, so this is what names that state.
 5. **The unmet contract.** `wva_slo_ttft_unmet` reads 1 for a refused rate and
    for `target-below-floor` at any rate, each with no prediction; 0 only with
-   a prediction; absent otherwise. Every refusal reason blanks the prediction.
+   a prediction; absent otherwise, which includes a floor only an assumed decode
+   term puts over the target. Every refusal reason blanks the prediction.
 6. **Flow control is inferred from `SchedulerQueue` alone**, collected every
    cycle. `FlowControlPools` is filled only while a learner recording is on, so
    reading it would have made a replay differ from production

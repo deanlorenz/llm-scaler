@@ -65,6 +65,11 @@ type DecodeTTFTState struct {
 	// TransferSeconds is the mean KV transfer time over the rows that read
 	// one, over the latest shapeCycles cycles with a reading; 0 with none.
 	TransferSeconds float64
+	// Term is decode's part with a line, as S1 would have learned it over the
+	// cycles through this one. It reads the rows with no settle tracker, so a
+	// pod still warming up is admitted; the prompt-drift gate keeps most of it
+	// out.
+	Term whatif.DecodeTerm
 }
 
 // shareWindow is a prefill variant's raw shares at its current pod count. A
@@ -102,11 +107,13 @@ type ttftSamples struct {
 	shares     map[string]*shareWindow
 	engineTTFT map[string][]whatif.DecodeTTFT
 	transfers  map[string][]float64
+	terms      map[string]*prefill.DecodeTermWindow
 }
 
 func newTTFTSamples() *ttftSamples {
 	return &ttftSamples{prompts: map[string]*whatif.PromptWindow{}, shares: map[string]*shareWindow{},
-		engineTTFT: map[string][]whatif.DecodeTTFT{}, transfers: map[string][]float64{}}
+		engineTTFT: map[string][]whatif.DecodeTTFT{}, transfers: map[string][]float64{},
+		terms: map[string]*prefill.DecodeTermWindow{}}
 }
 
 // keepLast is s with v appended, holding the last n.
@@ -227,6 +234,40 @@ func (t *ttftSamples) note(in domain.AnalyzerInput, cycle int, at time.Time) {
 	}
 }
 
+// noteTerm folds one cycle, read at now, into each decode variant's readings
+// of the decode term, as S1 does (slo.noteDecodeTerm). args is a variant's
+// engine arguments, "" unknown.
+func (t *ttftSamples) noteTerm(in domain.AnalyzerInput, now time.Time, args func(variant string) string) {
+	roles := rolesOf(in)
+	var pre []domain.ReplicaMetrics
+	for _, rm := range in.ReplicaMetrics {
+		if domain.CanonicalRole(roles[rm.VariantName]) == domain.RolePrefill {
+			pre = append(pre, rm)
+		}
+	}
+	prompt, _ := prefill.MeanEffectivePrompt(pre, false)
+	for v, role := range roles {
+		if domain.CanonicalRole(role) != domain.RoleDecode {
+			continue
+		}
+		w := t.terms[v]
+		if w == nil {
+			w = prefill.NewDecodeTermWindow()
+			t.terms[v] = w
+		}
+		accelerator := ""
+		for _, vs := range in.VariantStates {
+			if vs.VariantName == v {
+				accelerator = vs.AcceleratorName
+			}
+		}
+		w.Under(accelerator, args(v))
+		w.Observe(prefill.DecodeTermCycle{Now: now, Prefill: pre, Decode: rowsOfVariant(in.ReplicaMetrics, v),
+			PromptTokens: prompt, Router: in.RouterLatency,
+			RouterHeld: in.SchedulerQueue != nil && in.SchedulerQueue.QueueSize > 0})
+	}
+}
+
 // rawShare is one cycle's f_raw: the busiest of pods over the mean, a pod with
 // no rate counting as one that computed nothing, which reads high, the
 // permitted side. False with fewer than two pods or no rate on any.
@@ -274,6 +315,11 @@ func (r *replayer) fillTTFT(st *State, in domain.AnalyzerInput, t *ttftSamples) 
 	for i := range st.Variants {
 		vs := &st.Variants[i]
 		vs.DecodeTTFT.EngineTTFT = largestTTFT(t.engineTTFT[vs.Variant])
+		var est prefill.DecodeTermEstimate
+		if w := t.terms[vs.Variant]; w != nil {
+			est = w.Estimate()
+		}
+		vs.DecodeTTFT.Term = whatif.TermFromEstimate(est)
 		if xs := t.transfers[vs.Variant]; len(xs) > 0 {
 			sum := 0.0
 			for _, x := range xs {

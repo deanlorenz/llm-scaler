@@ -113,36 +113,46 @@
         "arrivalsSource": "assumed",
         "transferSource": "omitted",
         "decodeSide": "line",
+        "decodeTermRefused": "TooFewDecodeMinutes",
+        "routerHopRefused": "NoRouterMean",
+        "routerHopBaseSeconds": 0.02,
+        "decodeTermSource": "omitted",
+        "routerHopSource": "assumed",
         "flowControl": "off, inferred",
         "assumed": [
           "V_P 30000 tok/s (--assume-vp)",
           "prompt 1000 tokens (--assume-input-tokens)",
           "prompt cv 2 (no computed-prompt histogram)",
+          "decode term omitted (no fit, TooFewDecodeMinutes, and no quiet decode row): T_xfer + ITL stands for it",
+          "router hop 20 ms (no fit: NoRouterMean); --assume-router-hop supplies one",
           "flow control off (no queue series)",
-          "Poisson arrivals"
+          "Poisson arrivals",
+          "an assumed decode term moves this answer from 1.187 to 0.2506"
         ]
       },
       "results": {
         "rate": {
           "answer": {
-            "value": 1.1873353849712105,
+            "value": 0.25063609988609226,
             "unit": "r/s",
             "basis": {
-              "fill": 0.022512357250687086,
+              "fill": 0.004523186773091,
               "kneeRate": 13.313632625239457,
-              "floor": 0.17460685106698073,
+              "floor": 0.19460685106698072,
               "uncapped": 0,
               "boundBy": [
                 "TTFT"
               ],
               "tier": "ols",
-              "prefillOnlyRate": 1.1873353849712105
+              "prefillOnlyRate": 0.25063609988609226
             },
             "flags": [
               "UnvalidatedTTFT",
               "AssumedVP",
               "AssumedPromptSpread",
               "TransferOmitted",
+              "DecodeTermOmitted",
+              "RouterHopAssumed",
               "FlowControlInferredOff",
               "BelowFittedBand",
               "AssumedShape",
@@ -158,7 +168,7 @@
       "results": {
         "rate": {
           "answer": {
-            "value": 1.1873353849712105,
+            "value": 0.25063609988609226,
             "unit": "r/s",
             "basis": {
               "fill": 0,
@@ -175,6 +185,8 @@
               "AssumedVP",
               "AssumedPromptSpread",
               "TransferOmitted",
+              "DecodeTermOmitted",
+              "RouterHopAssumed",
               "FlowControlInferredOff",
               "BelowFittedBand",
               "AssumedShape",
@@ -186,5 +198,5 @@
     }
   ],
   "exitCode": 0,
-  "note": "estimate from 15 readings (cycles 197-220) of a 226-cycle recording, not a guarantee; see basis (-o json); TTFT is UNVALIDATED until the staircase run (M2) and is not a bound: at the assumed prompt cv 2 it read 1.1x to 4.1x the router's percentile on the P2 recordings; at the sent spread (cv 0.06) up to 34% under it. V_P ASSUMED."
+  "note": "estimate from 15 readings (cycles 197-220) of a 226-cycle recording, not a guarantee; see basis (-o json); TTFT is UNVALIDATED until a fresh frozen run passes, and is not a bound: at the assumed prompt cv 2 it read 1.1x to 4.1x the router's percentile on the P2 recordings; at the sent spread (cv 0.06) up to 34% under it. V_P ASSUMED."
 }

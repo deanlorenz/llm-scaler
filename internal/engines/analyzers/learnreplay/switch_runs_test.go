@@ -132,6 +132,13 @@ import (
 // state an output reads there; S1b's TTFT pricing reads the estimate it
 // stashes. Its unit tests hold it (heldBy).
 var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
+	// The decode term of a TTFT on a decode line. It moves no golden, the
+	// four staircase goldens included: those list slo and price each cycle, but
+	// none of their cycles holds an a, so S1 stops at no-fixed-latency before a
+	// line is priced. Its unit tests hold it
+	// (heldBy); the CLI, which has no switch, moves its own goldens.
+	slo.SwitchTTFTDecodeTerm: nil,
+
 	saturation.SwitchPrefillCapacityObserve: nil,
 
 	// #495: mu on learn's list of learners
@@ -704,6 +711,16 @@ func withSeams(more, rows map[string][]string) map[string][]string {
 // test that holds the same on either side is a control, not a hold, and is
 // not listed here.
 var heldBy = map[string][]heldTest{
+	// The decode term: the first prices one fleet on and off and asserts both
+	// (the term and its flags on, the old sum unflagged off); the second runs
+	// the switch through Analyze (a window kept on, none off). The third has
+	// no window to read with the switch off.
+	slo.SwitchTTFTDecodeTerm: {
+		{"../slo", "TestTTFT_TheDecodeTermSwitch"},
+		{"../slo", "TestTTFT_TheDecodeTermWindow"},
+		{"../slo", "TestTTFT_TheDecodeTermSwitchOnALine"},
+		{"../slo", "TestTTFT_TheRouterMeanReachesTheWindow"},
+	},
 	// #495: each runs the switch on and off and asserts both (the keys
 	// reported and the logged value gone on; neither off).
 	saturation.SwitchMuForgetReported: {

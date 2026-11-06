@@ -178,6 +178,83 @@ func TestCollectRouterLatency_SkipsUnreadableBoundsAndKeepsTPOTAlone(t *testing.
 	assert.Equal(t, 1.0, got.TPOTCountRate)
 }
 
+// TestCollectRouterLatency_ReadsTheTTFTMean pins the router's mean TTFT, which
+// the decode term's hop is read from: a model reached under both labels sums
+// into one pair, and with either query failed there is no pair, as for TPOT.
+func TestCollectRouterLatency_ReadsTheTTFTMean(t *testing.T) {
+	sum := func(v float64) *source.MetricResult {
+		return &source.MetricResult{Values: []source.MetricValue{
+			{Labels: map[string]string{seriesTargetModelLabel: "model-a"}, Value: v},
+			{Labels: map[string]string{"model_name": "model-a"}, Value: v},
+			{Labels: map[string]string{seriesTargetModelLabel: "model-b"}, Value: 99},
+		}}
+	}
+	collect := func(s, c *source.MetricResult) *domain.RouterLatency {
+		mockSource := &mockMetricsSource{
+			refreshFunc: func(_ context.Context, _ source.RefreshSpec) (map[string]*source.MetricResult, error) {
+				return map[string]*source.MetricResult{
+					registration.QuerySLORouterTTFTBuckets: {Values: []source.MetricValue{
+						{Labels: map[string]string{seriesTargetModelLabel: "model-a", "le": "0.1"}, Value: 1},
+					}},
+					registration.QuerySLORouterTTFTSum:   s,
+					registration.QuerySLORouterTTFTCount: c,
+				}, nil
+			},
+		}
+		collector := NewReplicaMetricsCollector(mockSource, nil, nil, nil, nil)
+		collector.BeginCycle()
+		defer collector.EndCycle()
+		collector.ReadTTFTInputsIn(map[string]bool{"ns": true})
+		return collector.CollectRouterLatency(context.Background(), "model-a", "ns")
+	}
+	got := collect(sum(0.5), sum(5))
+	require.NotNil(t, got)
+	assert.Equal(t, 1.0, got.TTFTSumRate)
+	assert.Equal(t, 10.0, got.TTFTCountRate)
+
+	failed := &source.MetricResult{Error: errors.New("query timed out")}
+	got = collect(failed, sum(5))
+	require.NotNil(t, got, "the buckets still stand")
+	assert.Zero(t, got.TTFTSumRate, "half a pair is no mean")
+	assert.Zero(t, got.TTFTCountRate)
+	got = collect(sum(0.5), failed)
+	assert.Zero(t, got.TTFTSumRate)
+	assert.Zero(t, got.TTFTCountRate)
+}
+
+// The mean is the TTFT pricing's, so it is issued with its other inputs: a
+// namespace with no TTFT target, and no recording, pays nothing for it.
+func TestCollectRouterLatency_TheMeanIsIssuedWithTheTTFTInputs(t *testing.T) {
+	asked := func(prepare func(*ReplicaMetricsCollector)) map[string]int {
+		src := &askingSource{}
+		c := NewReplicaMetricsCollector(src, nil, nil, nil, nil)
+		prepare(c)
+		c.CollectRouterLatency(context.Background(), "model-a", "ns")
+		c.EndCycle()
+		return src.asked
+	}
+	for name, c := range map[string]struct {
+		prepare func(*ReplicaMetricsCollector)
+		want    bool
+	}{
+		"outside a cycle": {func(*ReplicaMetricsCollector) {}, false},
+		"a cycle of no TTFT target": {func(c *ReplicaMetricsCollector) {
+			c.BeginCycle()
+			c.ReadTTFTInputsIn(map[string]bool{"other": true})
+		}, false},
+		"a cycle of a TTFT target": {func(c *ReplicaMetricsCollector) {
+			c.BeginCycle()
+			c.ReadTTFTInputsIn(map[string]bool{"ns": true})
+		}, true},
+		"a recording": {func(c *ReplicaMetricsCollector) { c.BeginRecordingCycle(true) }, true},
+	} {
+		got := asked(c.prepare)
+		assert.Contains(t, got, registration.QuerySLORouterTTFTBuckets, name)
+		assert.Equal(t, c.want, got[registration.QuerySLORouterTTFTSum] > 0, name)
+		assert.Equal(t, c.want, got[registration.QuerySLORouterTTFTCount] > 0, name)
+	}
+}
+
 // TestCollectRouterLatency_CountsAFailedQuery pins that a failed query is
 // counted, so a Prometheus outage is not read as a router that is not scraped.
 // The failure is carried the way the real Prometheus source carries it: on

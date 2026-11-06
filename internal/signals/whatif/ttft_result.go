@@ -44,10 +44,9 @@ func ttftReasons() []Reason {
 
 // The flags the TTFT model raises.
 const (
-	// UnvalidatedTTFT is on every TTFT figure. The model is built against
-	// closed-form queueing values and synthetic fleets only; the prefill-
-	// stress recording (P2) and the staircase run (M2) have not scored it,
-	// so no TTFT figure has been checked against a measured one. On P2's
+	// UnvalidatedTTFT is on every TTFT figure. Repeat 1 of the staircase run
+	// (M2) failed the form before the decode term. That run chose the term,
+	// so it cannot validate it: validation is a fresh frozen run. On P2's
 	// goldens it reads low at light load, up to about 34% under the router's
 	// p90: not a bound.
 	UnvalidatedTTFT Flag = "UnvalidatedTTFT"
@@ -84,6 +83,29 @@ const (
 	// not a hold: the term's known biases (its spread, its rate) are stated on
 	// the TTFT page and gated with UnvalidatedTTFT.
 	DecodeEngineMeasured Flag = "DecodeEngineMeasured"
+	// DecodeTermOmitted is a TTFT on a decode line with no fit of the decode
+	// engine's TTFT and no reading of it: the old sum T_xfer + ITL(k_d) stands
+	// for D, and the answer over-promises by the difference (DecodeTerm). On
+	// the staircase run the old sum left out 13 to 101 ms.
+	DecodeTermOmitted Flag = "DecodeTermOmitted"
+	// DecodeStepSlopeAssumed is a TTFT on a decode line with no fit of the
+	// decode engine's TTFT: its measured figure is held, and rises by
+	// AssumedDecodeStepSlope from the ITL it was measured at. It never reads
+	// under the old sum (DecodeTerm).
+	DecodeStepSlopeAssumed Flag = "DecodeStepSlopeAssumed"
+	// RouterHopAssumed is a TTFT on a decode line with no settled fit of the hop
+	// between the router and the engines: R is AssumedRouterHopSeconds, or the
+	// operator's (--assume-router-hop).
+	RouterHopAssumed Flag = "RouterHopAssumed"
+	// DecodeTermFloored is a headline or a floor where the decode term read
+	// under the old sum T_xfer + ITL(k_d), which stands in its place. The term
+	// holds what was measured of the pull and the step, so a term under the old
+	// sum is wrong: this says its fit or its prompt does not hold here.
+	DecodeTermFloored Flag = "DecodeTermFloored"
+	// DecodeTermPrefixHits is a TTFT on a decode line with prefix hits past
+	// MaterialPrefixHitShare: D goes with the whole prompt, which the KV pull
+	// moves, and is priced at E[I_eff], so it reads low, down to the old sum.
+	DecodeTermPrefixHits Flag = "DecodeTermPrefixHits"
 	// DecodeTTFTUnmeasured is a TTFT priced with no decode line and no
 	// measured decode-engine TTFT: decode's part, the KV pull and its first
 	// token, is left out, and the answer over-promises by it (by 25% to 65%
@@ -133,8 +155,8 @@ const (
 // TTFTBasis is what a TTFT rate rests on, beside the decode fields of Basis
 // (Fill, BoundBy, Tier), which keep their meanings.
 type TTFTBasis struct {
-	// Floor is the TTFT floor at the target's percentile (or the mean):
-	// a + I_q*(1/V_P + kappa/BW) + ITL(band.Lo), in seconds.
+	// Floor is the TTFT floor at the target's percentile (or the mean), in
+	// seconds: TTFT.Floor.
 	Floor float64
 	// KneeRate is the lower of the roles' knees, in requests per second over
 	// the fleet: the prefill knee, or decode's where that is lower.
@@ -165,11 +187,10 @@ type TTFT struct {
 	// pod queues for itself and Pooled is a bound, not an estimate.
 	Pooled float64
 	// Floor is the lowest TTFT any number of replicas reaches at this
-	// percentile: a + I_q * (1/V_P + T_xfer per token) + ITL(band.Lo), the
-	// last term only with a decode side (the decode engine's measured TTFT
-	// with none). V_P is the unmargined one, rescaled to the prompt: there
-	// is no queue at no load.
-
+	// percentile: a + I_q/V_P plus decode's part at no load, which on a
+	// decode line is the DecodeTerm at the line's ITL at fill 0 (the decode
+	// engine's measured TTFT with no line). V_P is the unmargined one,
+	// rescaled to the prompt: there is no queue at no load.
 	Floor float64
 	// DecodeShare is beta, the share 1 - q of the tail given to the decode
 	// admission wait by the optimised split; 0 for the mean.
@@ -220,17 +241,24 @@ type TTFTParts struct {
 	// It is the worst pod's mean, not the fleet's: the mean TTFT (Seconds at
 	// q = 0) is the mean a request on the busiest pod sees.
 	EngineWait float64
-	// OwnPrefill is a + E[I_eff]/V_P, plus the transfer when one is given.
+	// OwnPrefill is a + E[I_eff]/V_P, plus the part of decode's term that
+	// goes with the prompt: T_xfer on the old sum, the per-token parts of D
+	// and R with a DecodeTerm. It follows the prompt's quantile.
 	OwnPrefill float64
 	// DecodeWait is W_decode, the admission chain's mean wait.
 	DecodeWait float64
 	// FirstStep is ITL(k_d), decode's first step at its closed-form fill,
-	// read at the band's bottom below it; 0 with no decode line.
+	// read at the band's bottom below it, on the old sum alone: 0 with a
+	// DecodeTerm that holds a D, or with no decode line.
 	FirstStep float64
-	// DecodeEngine is the decode engine's measured TTFT at the prompt
-	// (TTFTFleet.DecodeTTFT), in place of T_xfer and FirstStep with no
-	// decode line; 0 with one, or unmeasured.
+	// DecodeEngine is the decode engine's TTFT: with a DecodeTerm its part
+	// that does not go with the prompt, D less OwnPrefill's share; with no
+	// decode line the measured figure at the prompt (TTFTFleet.DecodeTTFT).
+	// 0 on the old sum, or unmeasured.
 	DecodeEngine float64
+	// RouterHop is the fixed part of R, the hop between the router and the
+	// engines; 0 with no DecodeTerm.
+	RouterHop float64
 }
 
 // Onsets are the rates, in requests per second over the fleet, at which EPP

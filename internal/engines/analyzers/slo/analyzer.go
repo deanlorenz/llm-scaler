@@ -146,11 +146,16 @@ type Analyzer struct {
 	// ttftMeasuredTransfer SwitchTTFTMeasuredTransfer (ttft.go): on from the
 	// constructor; a replay turns them off (SetSwitchesForReplay).
 	ttftMeasuredSpread, ttftMeasuredTransfer bool
+	// ttftDecodeTerm is SwitchTTFTDecodeTerm (ttft.go): on from the
+	// constructor; a replay turns it off (SetSwitchesForReplay).
+	ttftDecodeTerm bool
 	// imbalance is each prefill variant's raw shares and decodeTTFT each
 	// decode variant's measured TTFT, keyed namespace|model|variant, for the
-	// TTFT pricing (ttft_fleet.go). Under mu.
-	imbalance  map[string]*imbalanceWindow
-	decodeTTFT map[string]*decodeTTFTWindow
+	// TTFT pricing (ttft_fleet.go); decodeTerms is each decode variant's
+	// readings of D and R, keyed the same. Under mu.
+	imbalance   map[string]*imbalanceWindow
+	decodeTTFT  map[string]*decodeTTFTWindow
+	decodeTerms map[string]*decodeTermWindow
 	// prompts is each prefill variant's prompt window (ttft.go), under the
 	// same key, from the first row to carry a computed-token histogram.
 	prompts map[string]*promptSpreadWindow
@@ -215,9 +220,11 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 
 		ttftMeasuredSpread:   true,
 		ttftMeasuredTransfer: true,
+		ttftDecodeTerm:       true,
 		imbalance:            make(map[string]*imbalanceWindow),
 		prompts:              make(map[string]*promptSpreadWindow),
 		decodeTTFT:           make(map[string]*decodeTTFTWindow),
+		decodeTerms:          make(map[string]*decodeTermWindow),
 	}
 }
 
@@ -364,12 +371,14 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 		}
 	}
 
-	// After the loop, whatever order the variants sort in: a prefill variant
-	// reads its decode variant's line.
-	snap.TTFT = a.priceTTFTVariants(logger, input, cfg, fleet, decodeLines, now)
-
 	var j judged
 	snap.Objectives, j.Latency, j.RouterCalled = a.judge(ctx, input, cfg.SLO)
+
+	// After the loop, whatever order the variants sort in: a prefill variant
+	// reads its decode variant's line. After the judge: the decode term reads
+	// the router's mean it collected.
+	snap.TTFT = a.priceTTFTVariants(logger, input, cfg, fleet, decodeLines, j.Latency, now)
+
 	// A window that covered a wake or a starting replica is not judged: the
 	// requests in it waited out capacity no steady-state sizing could have had
 	// ready. The request count is still published, and the reason is.
@@ -792,6 +801,12 @@ func (a *Analyzer) evictStale(now time.Time) Evicted {
 			ev.TTFTWindows++
 		}
 	}
+	for key, w := range a.decodeTerms {
+		if now.Sub(w.seen) > a.stateTimeout {
+			delete(a.decodeTerms, key)
+			ev.TTFTWindows++
+		}
+	}
 	for key, w := range a.prompts {
 		if now.Sub(w.seen) > a.stateTimeout {
 			delete(a.prompts, key)
@@ -849,6 +864,9 @@ func (a *Analyzer) noteVariantsPresent(namespace, modelID string, variantNames [
 			w.seen = now
 		}
 		if w := a.decodeTTFT[ttftWindowKey(namespace, modelID, name)]; w != nil {
+			w.seen = now
+		}
+		if w := a.decodeTerms[ttftWindowKey(namespace, modelID, name)]; w != nil {
 			w.seen = now
 		}
 		if w := a.prompts[ttftWindowKey(namespace, modelID, name)]; w != nil {

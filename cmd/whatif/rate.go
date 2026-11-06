@@ -156,9 +156,11 @@ func sloToRate(ctx context.Context, args []string, out, warn io.Writer) error {
 
 // priceTTFT prices the prefill role's rate at the target, and the fleet's.
 func (a *rateAnswer) priceTTFT(t ttftQuestion, headroom float64) {
-	a.ttft = a.fleet.priced(func(fl whatif.TTFTFleet) whatif.Result {
+	price := func(fl whatif.TTFTFleet) whatif.Result {
 		return whatif.RateForTTFT(fl, whatif.TTFTTarget{Seconds: t.seconds, Percentile: t.q})
-	})
+	}
+	a.ttft = a.fleet.priced(price)
+	a.fleet.noteAssumedTerm(a.ttft, price)
 	a.fleetRate = fleetRate(t, headroom, a.result, a.ttft)
 }
 

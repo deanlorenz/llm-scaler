@@ -159,8 +159,9 @@ func TestRecordOnlyQueries_FailureCountedOnceUnderItsOwnType(t *testing.T) {
 		want, wantRead := 0.0, 0.0
 		if recording {
 			// 6 per pod, 2 router histograms, 3 pool queries; and the 3 per
-			// pod the TTFT pricing reads, under their own type.
-			want, wantRead = 11, 3
+			// pod and 2 router queries the TTFT pricing reads, under their
+			// own type.
+			want, wantRead = 11, 5
 		}
 		assert.Equal(t, want, errorsOfType(t, registry, constants.QueryTypeLearnerRecording), "recording %v", recording)
 		assert.Equal(t, wantRead, errorsOfType(t, registry, constants.QueryTypeTTFTInputs), "recording %v", recording)
@@ -181,6 +182,7 @@ func TestCollectRouterLatency_RefreshErrorCountedPerIssuedQuery(t *testing.T) {
 	assert.Nil(t, c.CollectRouterLatency(context.Background(), "model-a", "ns"))
 	c.EndCycle()
 	assert.Equal(t, 3.0, errorsOfType(t, registry, constants.QueryTypeRouterLatency))
+	assert.Equal(t, 2.0, errorsOfType(t, registry, constants.QueryTypeTTFTInputs))
 	assert.Equal(t, 2.0, errorsOfType(t, registry, constants.QueryTypeLearnerRecording))
 }
 

@@ -143,6 +143,86 @@ func pdInput(rows ...domain.ReplicaMetrics) domain.AnalyzerInput {
 		{VariantName: "pre", Role: domain.RolePrefill}, {VariantName: "dec", Role: domain.RoleDecode}}}
 }
 
+// A window learns the term from the rows a golden holds: each staircase phase,
+// one prompt length, gives a slope and a base past the latch, with no router
+// mean recorded. The figures are the page's.
+func TestGoldens_TheDecodeTermIsLearned(t *testing.T) {
+	t.Parallel() // reads the goldens, writes nowhere
+	for fixture, want := range map[string]struct{ base, step float64 }{
+		"ttft-staircase-a-off": {0.0031866, 7.0469},
+		"ttft-staircase-b-off": {0.0392244, 6.6086},
+		"ttft-staircase-b-on":  {0.0406247, 6.4443},
+		"ttft-staircase-c-on":  {0.0354927, 8.0912},
+	} {
+		st := goldenState(t, fixture, 0)
+		i := slices.IndexFunc(st.Variants, func(v VariantState) bool { return domain.CanonicalRole(v.Role) == domain.RoleDecode })
+		require.GreaterOrEqual(t, i, 0, fixture)
+		term := st.Variants[i].DecodeTTFT.Term
+		assert.False(t, term.StepAssumed, fixture)
+		assert.False(t, term.EngineOmitted, fixture)
+		assert.InDelta(t, want.base, term.Engine.Base, 1e-6, fixture)
+		assert.InDelta(t, want.step, term.PerStep, 1e-3, fixture)
+		assert.True(t, term.HopAssumed, fixture)
+		assert.Equal(t, prefill.NoRouterMean, term.HopRefused, fixture)
+	}
+}
+
+// The state's term is what the cycles teach: with no reading it is omitted,
+// with a reading and no fit held and assumed, and a sweep of step times is the
+// fit.
+func TestTTFTSamples_TheTerm(t *testing.T) {
+	term := func(s *ttftSamples) whatif.DecodeTerm {
+		return whatif.TermFromEstimate(s.terms["dec"].Estimate())
+	}
+	args := func(string) string { return "" }
+	row := func(step float64) domain.ReplicaMetrics {
+		r := decodeRow("d0", 0.03+5*step, 10)
+		r.AvgITL, r.AvgITLKnown, r.AvgInputTokens, r.AvgInputTokensRecent = step, true, 1000, 1000
+		r.CapacityQueueKnown = true
+		return r
+	}
+	s := newTTFTSamples()
+	in := pdInput(prefillRow("p0", 1000, 1))
+	s.note(in, 1, time.Unix(0, 0))
+	s.noteTerm(in, time.Unix(0, 0), args)
+	assert.True(t, term(s).EngineOmitted)
+
+	in = pdInput(prefillRow("p0", 1000, 1), row(0.003))
+	s.note(in, 2, time.Unix(60, 0))
+	s.noteTerm(in, time.Unix(60, 0), args)
+	held := term(s)
+	assert.True(t, held.StepAssumed)
+	assert.InDelta(t, 0.003, held.FromITL, 1e-12)
+
+	for i := range 12 + prefill.FitSetCycles {
+		in = pdInput(prefillRow("p0", 1000, 1), row(0.002+float64(i%6)*0.002))
+		s.note(in, 3+i, time.Unix(int64(120+60*i), 0))
+		s.noteTerm(in, time.Unix(int64(120+60*i), 0), args)
+	}
+	fit := term(s)
+	assert.False(t, fit.StepAssumed)
+	assert.InDelta(t, 5, fit.PerStep, 1e-6)
+	assert.True(t, fit.HopAssumed, "this recording holds no router mean")
+
+	// A held router teaches no hop, here as in S1.
+	busy := newTTFTSamples()
+	for i := range 60 {
+		rows := pdInput(prefillRow("p0", 1000, 1), row(0.003))
+		for j := range rows.ReplicaMetrics {
+			rows.ReplicaMetrics[j].AvgTTFT, rows.ReplicaMetrics[j].AvgTTFTKnown = 0.05, true
+		}
+		rows.RouterLatency = &domain.RouterLatency{WindowSeconds: 300, TTFTSumRate: 2, TTFTCountRate: 10}
+		rows.SchedulerQueue = &domain.SchedulerQueueMetrics{QueueSize: 2}
+		busy.noteTerm(rows, time.Unix(int64(15*i), 0), args)
+	}
+	assert.Equal(t, prefill.TooFewHopWindows, term(busy).HopRefused)
+
+	// New engine arguments start the variant's readings again.
+	s.noteTerm(in, time.Unix(6000, 0), func(string) string { return "a" })
+	s.noteTerm(in, time.Unix(6060, 0), func(string) string { return "b" })
+	assert.Equal(t, prefill.TooFewDecodeMinutes, term(s).EngineRefused)
+}
+
 // The prompt is computed tokens over requests across the cycles, and a cycle
 // with no traffic does not read as a prompt of nothing.
 func TestTTFTSamples_Prompt(t *testing.T) {
