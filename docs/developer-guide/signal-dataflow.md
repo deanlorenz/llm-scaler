@@ -258,7 +258,8 @@ line is not this physics) and `A·0.85 + B > 0`. A full fit needs
 samples clustered at one `k` fix an intercept, not a slope. Short of the
 spread, with 10 readings, `itl.Tracker` fits the slope alone with the intercept
 pinned to the key's last full fit, or to `DefaultBaselineSec` before it has
-one: on a balanced fleet that is the normal case.
+one: on a balanced fleet that is the normal case. The choice between the two is
+latched ([set, clear and dwell](saturation-analyzer.md#set-clear-and-dwell)).
 
 `GPSErrorPct` compares `TokenRate` against the observed `GenerationTokenRate`
 and **reports without acting**: a disagreement means the line is suspect, not

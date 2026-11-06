@@ -444,3 +444,23 @@ func TestStateAt_TheBandBracketsTheControllersLineOnAScopedPrior(t *testing.T) {
 	require.True(t, band.Band.Lo <= ctrl+1e-12 && ctrl <= band.Band.Hi+1e-12, "the band does not bracket the controller's line")
 	require.Less(t, plain.Band.Hi, ctrl, "negative control: without the admission the band reached the controller's line")
 }
+
+// A full fit kept under the set values by the tier latch (issue #495) is
+// refitted by the clear values: the same line, not the pinned fit.
+func TestVariantState_ALatchedFullFitIsRefitted(t *testing.T) {
+	obs := make([]itl.Observation, 0, 19)
+	for i := range 19 {
+		k := 0.46 + 0.015*float64(i)
+		obs = append(obs, itl.Observation{K: k, ITLSec: 0.03*k + 0.0025})
+	}
+	line, ok := itl.Fit(obs)
+	require.True(t, ok)
+	vs := VariantState{Tier: whatif.TierOLS, Line: line, Readings: itl.KeyReadings{All: obs, Steady: obs, OLSLatched: true}}
+	vs.refit()
+	require.True(t, vs.Refitted, "a latched full fit was not refitted")
+	require.Equal(t, whatif.TierOLS, vs.Tier)
+
+	off := VariantState{Tier: whatif.TierOLS, Line: line, Readings: itl.KeyReadings{All: obs, Steady: obs}}
+	off.refit()
+	require.Equal(t, whatif.TierPinnedB, off.Tier, "negative control: unlatched, the spread is under the set value")
+}

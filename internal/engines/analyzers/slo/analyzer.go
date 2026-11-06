@@ -127,6 +127,9 @@ type Analyzer struct {
 	// itlOneSidedAtCap is SwitchITLOneSidedAtCap (issue #467, one_sided.go):
 	// on from the constructor; a replay turns it off (SetSwitchesForReplay).
 	itlOneSidedAtCap bool
+	// itlTierHysteresis is SwitchITLTierHysteresis (issue #495,
+	// tier_hysteresis.go): on, the line's tier is latched.
+	itlTierHysteresis bool
 	// settleInterval is the controller's optimize interval
 	// (WithOptimizationInterval), zero until set: what the line's own trace
 	// judges an absence by (settle.Tolerance), as the saturation analyzer's.
@@ -215,6 +218,7 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		itlIdleOnEvidence:    true,
 		itlForgetReachesLine: true,
 		itlOneSidedAtCap:     true,
+		itlTierHysteresis:    true,
 
 		ttftPrice: true,
 
@@ -345,6 +349,7 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 				// Which line, and what it was fitted from: the window's key,
 				// the coefficients, and what the window was offered and held.
 				"lineKey", key, "lineA", d.line.Model.A, "lineB", d.line.Model.B, "lineTier", d.line.Tier,
+				"tierHeld", d.line.TierHeld,
 				// A held slope reads pinned or pinned-default on the metric
 				// like a fit made this cycle; these say it is an old one.
 				"lineSlopeHeld", d.line.SlopeHeld, "lineSlopeAge", d.line.SlopeAge(now),
@@ -510,6 +515,8 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	// default B prices under the truth: priced one-sided until B is learned
 	// (one_sided.go).
 	a.oneSided(&adm, tpotTarget, a.priorScope(key, args, input.VariantStates))
+	a.tierPrice(&adm, tpotTarget, capacityInputs{tokens: fleet.capacityTokens(vs.VariantName, params),
+		kvPerRequest: fleet.shape.KVreq, ranks: fleet.engineRanks(vs.VariantName)}, params)
 	// The fill is clamped to the band the line is fitted over.
 	band := whatif.FillBand{Lo: adm.MinK, Hi: adm.MaxK}
 	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, adm, now)
@@ -619,6 +626,7 @@ func (a *Analyzer) fitLine(key string, rows []domain.ReplicaMetrics, variant str
 	a.mu.Lock()
 	a.seen[key] = now
 	a.mu.Unlock()
+	adm.TierHysteresis = a.tierHysteresisOn()
 	r := a.lines.Observe(key, variant, rows, adm, now)
 	a.paths.countFit(r.Tier)
 	switch {

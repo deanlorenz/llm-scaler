@@ -36,7 +36,7 @@
           "fromCycle": 197,
           "toCycle": 220,
           "resamples": 200,
-          "tierChanges": 22
+          "tierChanges": 10
         },
         "fillBand": {
           "lo": 0.15,
@@ -73,8 +73,8 @@
             "value": 13.313632625239457,
             "unit": "r/s",
             "band": {
-              "lo": 13.197597408371012,
-              "hi": 13.38329834080583
+              "lo": 13.18472151374838,
+              "hi": 13.380814723824889
             },
             "basis": {
               "fill": 0.732421875,
@@ -87,7 +87,6 @@
               "tier": "ols"
             },
             "flags": [
-              "LineNearGate",
               "AssumedShape",
               "OutputSpreadUnread",
               "ExtrapolatedFill"
@@ -99,8 +98,8 @@
             "value": 11.316587731453538,
             "unit": "r/s",
             "band": {
-              "lo": 11.217957797115359,
-              "hi": 11.375803589684955
+              "lo": 11.207013286686124,
+              "hi": 11.373692515251156
             },
             "basis": {
               "fill": 0.4740967917873882,
@@ -113,7 +112,6 @@
               "tier": "ols"
             },
             "flags": [
-              "LineNearGate",
               "AssumedShape",
               "OutputSpreadUnread"
             ]
@@ -124,8 +122,8 @@
             "value": 0.0036607509947803553,
             "unit": "s",
             "band": {
-              "lo": 0.003646523903932082,
-              "hi": 0.0036965490906630907
+              "lo": 0.0036463320177845945,
+              "hi": 0.0036982043841233066
             },
             "basis": {
               "fill": 0.4740967917873882,
@@ -136,7 +134,6 @@
               "tier": "ols"
             },
             "flags": [
-              "LineNearGate",
               "AssumedShape",
               "OutputSpreadUnread"
             ]
@@ -147,8 +144,8 @@
             "value": 0.004758976293214462,
             "unit": "s",
             "band": {
-              "lo": 0.004740481075111707,
-              "hi": 0.004805513817862018
+              "lo": 0.004740231623119973,
+              "hi": 0.004807665699360299
             },
             "basis": {
               "fill": 0.4740967917873882,
@@ -160,7 +157,6 @@
             },
             "flags": [
               "AssumedTPOTRatio",
-              "LineNearGate",
               "AssumedShape",
               "OutputSpreadUnread"
             ]
