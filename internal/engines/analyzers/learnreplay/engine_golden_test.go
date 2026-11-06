@@ -111,12 +111,11 @@ func TestEngineGoldens_WithoutTheEngineFixtureNoEnginePathRuns(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, c.Problems, "the analyzer goldens alone still reproduce")
 	// Pinned: an engine path a cluster golden starts or stops reaching moves
-	// this list, a reviewed change. The throughput line's held slope is the
-	// engine fixture's alone too (learner PR 4b-1): its light load after a
-	// fitted line is the only one long enough for the window to age out.
+	// this list, a reviewed change. The throughput line's held slope left it
+	// with the tier dwell (issue #495): throughput-sweep reaches that path.
 	want := []string{steadystate.PathCompositeExternalResult, steadystate.PathCompositeGrace,
 		steadystate.PathCompositeReplicaClamped, steadystate.PathWarmPoolSupply,
-		settlePathPrefix + string(settle.Lent), throughput.PathITLHeld}
+		settlePathPrefix + string(settle.Lent)}
 	require.Len(t, c.Uncovered, len(want), strings.Join(c.Uncovered, "\n"))
 	for _, p := range want {
 		assert.Contains(t, strings.Join(c.Uncovered, "\n"), "learner path "+p+":")
@@ -238,4 +237,19 @@ func replayHeadBefore(t *testing.T, rec []byte, cut time.Time) *Report {
 	require.NoError(t, err)
 	require.Empty(t, head.Failed())
 	return head
+}
+
+// The light-load hold is not the tier dwell's: with the latch off, the engine
+// fixture's throughput line still holds its slope through the light load after
+// a fitted line, where the window ages out. throughput-sweep's floor on the
+// held path counts only dwell holds, so this keeps the other one.
+func TestEngineGoldens_TheThroughputLineHoldsThroughLightLoad(t *testing.T) {
+	rec := readGoldenRecording(t, engineFixture)
+	for _, on := range []bool{false, true} {
+		rep, err := Replay(context.Background(), rec, Options{Mode: Normal, Switches: map[string]map[string]bool{
+			PackageThroughput: {throughput.SwitchITLTierHysteresis: on}}})
+		require.NoError(t, err)
+		t.Logf("latch %v: held %d", on, rep.Paths[throughput.PathITLHeld])
+		assert.Positive(t, rep.Paths[throughput.PathITLHeld], "latch %v: the line held nothing through the light load", on)
+	}
 }

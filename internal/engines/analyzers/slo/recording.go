@@ -139,6 +139,9 @@ func (a *Analyzer) switchFields() map[string]*bool {
 		// is unlearned (one_sided.go).
 		SwitchITLOneSidedAtCap: &a.itlOneSidedAtCap,
 
+		// The ITL line's tier latch (issue #495).
+		SwitchITLTierHysteresis: &a.itlTierHysteresis,
+
 		// S1: each prefill variant priced against the TTFT target, in shadow
 		// (ttft.go).
 		SwitchTTFTPrice:            &a.ttftPrice,

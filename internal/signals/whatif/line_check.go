@@ -50,7 +50,7 @@ type LineCheck struct {
 // itl.DefaultGPSMismatchThresholdPct. A check with no row compared is no
 // mismatch, and no pass: Compared says which it is.
 func (c LineCheck) Mismatch() bool {
-	return c.Compared > 0 && c.MedianErrorPct > itl.DefaultGPSMismatchThresholdPct
+	return c.MedianErrorPct > itl.DefaultGPSMismatchThresholdPct
 }
 
 // CheckLine prices each row off a ramp on d's line, capacity and cap, at the

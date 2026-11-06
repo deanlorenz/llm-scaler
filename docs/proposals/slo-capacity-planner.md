@@ -461,10 +461,10 @@ line reads slow on TPOT and fast on the knee. A figure needs at least 5 rows.
 | Golden | Tier at the freeze | Mean TPOT error | Rows | Against ±10% | Knee error | Windows | Against ±15% |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `ols-sweep` | pinned-B | -3.9% | 87 | in | SKIPPED: 2 windows | | |
-| `ols-sweep-slo` | pinned-B | +10.6% | 33 | **out** | +69.8% | 7 | **out** |
-| `ols-sweep-slo-restart` | pinned-B | +5.0% | 54 | in | +107.6% | 5 | **out** |
-| `throughput-sweep` | pinned-B | +3.8% | 33 | in | SKIPPED: none off a ramp | | |
-| `throughput-sweep-restart` | pinned-B | +50.1% | 124 | **out** | SKIPPED: none off a ramp | | |
+| `ols-sweep-slo` | held | +10.5% | 33 | **out** | +70.1% | 7 | **out** |
+| `ols-sweep-slo-restart` | pinned-B | -8.5% | 54 | in | +103.4% | 5 | **out** |
+| `throughput-sweep` | held | +3.5% | 33 | in | SKIPPED: none off a ramp | | |
+| `throughput-sweep-restart` | held | +50.1% | 124 | **out** | SKIPPED: none off a ramp | | |
 | `mu-paths` variant-01 (synthetic) | ols | -4.9% | 76 | in | +76.3% | 38 | **out** |
 | `mu-paths` variant-02 (synthetic) | ols | -9.8% | 95 | in | +44.4% | 19 | **out** |
 | `mu-paths` variant-03 (synthetic) | ols | 0.0% | 57 | in | SKIPPED: none off a ramp | | |
@@ -489,7 +489,7 @@ are SKIPPED for that refusal, or for no saturated window off a ramp:
 - **Mean TPOT:** 6 of the 8 lines the planner answers on are in bound, of 19 lines
   with a figure. Three of the six are synthetic, so the real runs are 3 of 5.
   `throughput-sweep-restart` reads 50.1% slow; no cause was read from this run.
-- **Decode knee:** four figures, all out, from 44.4% to 107.6% high. Two are
+- **Decode knee:** four figures, all out, from 44.4% to 103.4% high. Two are
   synthetic. The other two are `ols-sweep-slo` runs, recorded before `QueueMin`, so
   a "saturated window" is a queue seen at one instant, not a busy minute. Treat the
   knee as not validated: no golden saturates a line the planner answers on, off a
