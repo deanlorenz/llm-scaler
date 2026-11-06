@@ -144,6 +144,7 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 	return map[string]*bool{
 		SwitchK2ReadsSettle:        &a.k2ReadsSettle,
 		SwitchK2WaitsAfterRestart:  &a.k2WaitsAfterRestart,
+		SwitchK2WaitsAfterRollout:  &a.k2WaitsAfterRollout,
 		SwitchMuRepeatIsUse:        &a.muRepeatIsUse,
 		SwitchMuUnknownAgeSafe:     &a.muUnknownAgeSafe,
 		SwitchMuLatchRestoresSafe:  &a.muLatchRestoresSafe,

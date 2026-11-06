@@ -41,6 +41,15 @@ const SwitchK2ReadsSettle = "k2-reads-the-settle-tracker"
 // taken as established unless its Pod's Ready time is under a window old.
 const SwitchK2WaitsAfterRestart = "k2-waits-after-controller-restart"
 
+// SwitchK2WaitsAfterRollout is the replay switch for k2's wait after a
+// rollout (analyzer-learner.md, 4.2 and 4.3): on, a new template revision
+// under a key already seen (settle.RolledOut) starts the replica's wait, as a
+// new Ready time does; off, as before, only a Ready time or a first sight
+// starts one. A rollout under a new Ready time already waited, so this moves
+// only a revision that arrives with the Ready time unchanged or unread. Read
+// only on the tracker (SwitchK2ReadsSettle).
+const SwitchK2WaitsAfterRollout = "k2-waits-after-a-rollout"
+
 // WithSettleView sets the settle tracker k2's joined test reads: the
 // engine's, which it observes at the top of every cycle. Call it before the
 // analyzer is used. Without it the analyzer observes a tracker of its own.
@@ -129,6 +138,9 @@ func settleModel(namespace, modelID string) string {
 //     aged from its first Ready row after the last one that was not. A Pod
 //     that left the rotation and came back with no Ready time to say so
 //     has restarted as far as anything can tell.
+//   - A new revision under the same key (settle.RolledOut) starts the wait
+//     too, from when the tracker saw it (SwitchK2WaitsAfterRollout). A k2
+//     written low here is permanent (analyzer-learner.md, 3.4).
 //
 // With SwitchK2WaitsAfterRestart off, a first sight on the analyzer's first
 // cycle for the model does not count, as before the tracker: a controller
@@ -176,6 +188,9 @@ func (a *SaturationAnalyzer) k2Joined(in k2SettleInput, firstCycle, now time.Tim
 	}
 	if back := settlerow.ReadyAgain(trace); back.After(first) {
 		first = back
+	}
+	if a.k2WaitsAfterRollout && r.Reason == settle.RolledOut && r.Since.After(first) {
+		first = r.Since
 	}
 	if !a.k2WaitsAfterRestart && !first.After(firstCycle) {
 		first = time.Time{}

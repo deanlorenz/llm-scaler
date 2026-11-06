@@ -149,6 +149,12 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	throughput.SwitchITLForgetsOnNewArguments: nil,
 	slo.SwitchITLRolloutGuard:                 nil,
 
+	// #495: k2 waits after a rollout under a key already seen
+	// (saturation.SwitchK2WaitsAfterRollout). It moves no golden: no recording
+	// changes a replica's revision under its name. Its unit test holds it
+	// (heldBy).
+	saturation.SwitchK2WaitsAfterRollout: nil,
+
 	// #495: mu on learn's list of learners
 	// (saturation.SwitchMuForgetReported). It moves no golden: a forget and
 	// an eviction drop the same entries either way, and only the report's
@@ -682,6 +688,11 @@ var heldBy = map[string][]heldTest{
 		{"../slo", "TestTTFT_TheDecodeTermWindow"},
 		{"../slo", "TestTTFT_TheDecodeTermSwitchOnALine"},
 		{"../slo", "TestTTFT_TheRouterMeanReachesTheWindow"},
+	},
+	// #495: it runs the switch on and off and asserts both (a window of
+	// refusals on, read at once off).
+	saturation.SwitchK2WaitsAfterRollout: {
+		{"../saturation", "TestK2Rollout_ANewRevisionWaitsAWindow"},
 	},
 	// #481: each runs the switch on and off through Analyze and asserts both.
 	throughput.SwitchITLRolloutGuard: {

@@ -347,6 +347,9 @@ type SaturationAnalyzer struct {
 	// them off (SetSwitchesForReplay).
 	k2ReadsSettle       bool
 	k2WaitsAfterRestart bool
+	// k2WaitsAfterRollout is SwitchK2WaitsAfterRollout (settle_view.go): on
+	// from the constructor; a replay turns it off (SetSwitchesForReplay).
+	k2WaitsAfterRollout bool
 	// muRepeatIsUse, muUnknownAgeSafe and muLatchRestoresSafe are mu's
 	// replay switches (mu_learner.go): SwitchMuRepeatIsUse,
 	// SwitchMuUnknownAgeSafe and SwitchMuLatchRestoresSafe. On from the
@@ -661,6 +664,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		itlForgotten:           make(map[string]map[string][]learn.Forgotten),
 		k2ReadsSettle:          true,
 		k2WaitsAfterRestart:    true,
+		k2WaitsAfterRollout:    true,
 		muRepeatIsUse:          true,
 		muUnknownAgeSafe:       true,
 		muLatchRestoresSafe:    true,
