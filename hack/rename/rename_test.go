@@ -78,6 +78,13 @@ func TestRewriteText(t *testing.T) {
 		{"a qualified kind in text", docsDir + "a.md", "variant.VariantAutoscalingStatus", "variant.Status"},
 		{"the CRD note stays", "docs/guides/from-upstream-wva/README.md", "Releases up to v0.8 installed the VariantAutoscaling CRD.", "Releases up to v0.8 installed the VariantAutoscaling CRD."},
 		{"the harness key stays", "hack/benchmark/scenarios/guides/a.yaml", "      variantAutoscaling:", "      variantAutoscaling:"},
+		{"after own", docsDir + "a.md", "the scenario's own WVA install", "the scenario's own scaling manager install"},
+		{"after both", docsDir + "a.md", "both WVA roles", "both scaling manager roles"},
+		{"after whose", docsDir + "a.md", "a dashboard whose WVA panels", "a dashboard whose scaling manager panels"},
+		{"a plural after several", docsDir + "a.md", "several WVAs", "several scaling managers"},
+		{"running takes the article", docsDir + "a.md", "a tenant running WVA", "a tenant running the scaling manager"},
+		{"an alert prefix in a query", docsDir + "a.md", `select(.labels.alertname | startswith("WVA"))`, `select(.labels.alertname | startswith("LLMSM"))`},
+		{"an alert regex", docsDir + "a.md", `alertname=~"WVA.*"`, `alertname=~"LLMSM.*"`},
 		{"a recorded document stays", "internal/engines/steadystate/testdata/learned-state/v0.10.0-v1.json", `{"namespace":"wva-system"}`, `{"namespace":"wva-system"}`},
 		{"a namespace called wva is not the harness schema", "hack/x.sh", "wva-external-scaler.wva.svc", "scaling-manager-external-scaler.scaling-manager.svc"},
 		{"a shell default moves whole", "deploy/x.sh", "${POLICY_NS:-wva-policy}", "${POLICY_NS:-scaling-manager-policy}"},
@@ -446,9 +453,9 @@ func InactiveVariantAutoscalingByModel()              {}
 
 func TestSweepGivesEveryHitAReason(t *testing.T) {
 	dir := repo(t, map[string]string{
-		"hack/rename/x.go":                   "// wva\n",
-		"docs/guides/from-upstream-wva/a.md": "text\n",
-		"docs/a.md":                          "upstream WVA and newValue and a stray xWVAx\n",
+		"hack/rename/x.go":                        "// wva\n",
+		docsDir + "guides/from-upstream-wva/a.md": "text\n",
+		docsDir + "a.md":                          "upstream WVA and newValue and a stray xWVAx\n",
 	})
 	e := newEngine(t)
 	files, err := trackedFiles(dir)

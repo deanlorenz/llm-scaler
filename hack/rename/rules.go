@@ -168,7 +168,7 @@ func RulesFor(t Targets, metrics []string) []Rule {
 
 		// Images and people that are not this repository.
 		kept("keep-warmpool-proxy", "image", `ghcr\.io/ev-shindin/(?:llm-scaler/)?warmpool-proxy`, "pinned by digest; no image exists under the new owner (see the report)"),
-		kept("keep-fma-image", "image", `ghcr\.io/ev-shindin/(?:dual-pods-controller|fma-launcher)|ev-shindin/llm-d-fast-model-actuation`, "another project's image or fork"),
+		kept("keep-fma-image", "image", `ghcr\.io/ev-shindin/(?:dual-pods-controller|fma-launcher)|ev-shindin/llm-d-fast-model-actuation|ev-shindin/vllm-conf`, "another project's image or fork"),
 		kept("keep-old-repo-name", "repo-link", `github\.com/ev-shindin/llm-scaler/[^\s)\]"'`+"`"+`>]*`, "a numbered link on the repository's earlier name"),
 		{Name: "keep-other-product-paths", Class: "external", Pattern: `from-upstream-wva`, Action: Keep,
 			Contexts: []string{CtxText, CtxComment, CtxString, CtxPath}, Why: "this guide is about the other product, so its name stays"},
@@ -288,9 +288,10 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		{Name: "prose-py-ident", Class: "word", Pattern: `\bWVA(?P<x>\s*=\s*re\.|\.(?:match|search|sub)\()`, Replace: "LLMSM${x}", Paths: []string{"**/*.py"}},
 		{Name: "prose-dashboard-title", Class: "prose", Pattern: `\bWVA Operational Dashboard`, Replace: "Scaling Manager Operational Dashboard"},
 		{Name: "prose-hyphen", Class: "prose", Pattern: `\bWVA-`, Replace: "scaling-manager-"},
+		{Name: "alert-prefix-literal", Class: "alert", Pattern: `"WVA"|\bWVA\.\*|\bWVA\[`, Fn: alertPrefix},
 		{Name: "prose-the", Class: "prose", Pattern: `\b([Tt])he WVA\b`, Replace: "${1}he scaling manager"},
 		{Name: "prose-a", Class: "prose", Pattern: `\b([Aa])n? WVA\b`, Replace: "${1} scaling manager"},
-		{Name: "prose-determiner", Class: "prose", Pattern: `\b([Ee]very|[Ee]ach|[Aa]ny|[Tt]his|[Tt]hat|[Oo]ur|[Yy]our|[Nn]o|[Oo]ne|[Aa]nother|[Pp]er|[Mm]issing|[Ss]econdary|[Nn]ew|[Oo]ld|(?i:other)|[Ss]econd) WVA\b`, Replace: "${1} scaling manager"},
+		{Name: "prose-determiner", Class: "prose", Pattern: `\b(?i:every|each|any|this|that|our|your|no|one|another|per|missing|secondary|new|old|other|second|own|its|their|whose|both|all|several|two|three|many|most|some|multiple) WVAs?\b`, Fn: proseDeterminer},
 		{Name: "prose-plural", Class: "prose", Pattern: `\bWVAs\b`, Replace: "scaling managers"},
 		{Name: "prose-hyphen-after", Class: "prose", Pattern: `-WVA\b`, Replace: "-scaling-manager"},
 		{Name: "prose-word", Class: "prose", Pattern: `\bWVA\b`, Fn: proseWVA},
@@ -355,6 +356,22 @@ func variantDotted(claimed, _ string) string {
 
 func variantBare(claimed, _ string) string {
 	return strings.TrimPrefix(claimed, "VariantAutoscaling")
+}
+
+// proseDeterminer keeps the word before WVA and drops the article the bare word
+// would take.
+func proseDeterminer(claimed, _ string) string {
+	head, _, _ := strings.Cut(claimed, " ")
+	if strings.HasSuffix(claimed, "s") {
+		return head + " scaling managers"
+	}
+	return head + " scaling manager"
+}
+
+// alertPrefix is WVA as the prefix of alert names in a query: code, so it takes
+// the prefix they now have, not the prose form.
+func alertPrefix(claimed, _ string) string {
+	return strings.Replace(claimed, "WVA", "LLMSM", 1)
 }
 
 func articleA(claimed, _ string) string  { return claimed[:1] }
