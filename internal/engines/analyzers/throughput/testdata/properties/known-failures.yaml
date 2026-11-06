@@ -11,7 +11,8 @@
 #
 # id is class/learner/case, as the test names it; rows are sorted by id.
 # measured is the fail rate over the case's seeds and the first failure, when
-# the row was written. owner is the learner PR that clears the row.
+# the row was written. owner is what clears the row: an issue ("#391"), or
+# "open".
 #
 # Empty since learner PR 4b-3 removed its last row,
 # edges/throughput-itl/sequence-cap (the cap admission).
