@@ -26,6 +26,8 @@ func k2Cases() []propCase {
 		{class: classTransient, learner: "k2", name: "load-step", family: familyDirect, tuning: tunedDefault, check: checkK2LoadStep(nil)},
 		{class: classTransient, learner: "k2", name: "restart-same-name", family: familyDirect, tuning: tunedDefault, check: checkK2Restart(nil)},
 		{class: classTransient, learner: "k2", name: "slow-fill", family: familyTimeBase, tuning: tunedDefault, check: checkK2Fill(nil)},
+		{class: classTransient, learner: "k2", name: "fall-moved-off", family: familyDirect, tuning: tunedDefault, check: checkK2Fall(nil)},
+		{class: classTransient, learner: "k2", name: "rate-without-residency", family: familyDirect, tuning: tunedDefault, check: checkK2RateEscape(nil)},
 		{class: classFirstSample, learner: "k2", name: "second-reading", family: familyDirect, tuning: tunedDefault, check: checkK2FirstSample},
 		{class: classStale, learner: "k2", name: "converges-to-truth", family: familyDirect, tuning: tunedDefault, check: checkK2Tracks},
 		{class: classMissing, learner: "k2", name: "unknown-gauges", family: familyDirect, tuning: tunedDefault, check: checkK2UnknownGauges},
@@ -85,6 +87,59 @@ func checkK2LoadStep(policy func(*config.ScalingPolicy)) func(uint64) error {
 		}
 		after := rig.k2("")
 		return holds(relErr(after, before) <= 1e-9, kindTransient, "a load step's reading moved k2 %.0f -> %.0f", before, after)
+	}
+}
+
+// checkK2Fall is TestK2Settle_AFallIsNotSettling with seeded levels: a replica
+// queued at low occupancy, with no rate on record, is admitted on the flat
+// test; then its residency falls by more than half under the same queue. That
+// is traffic moved off it, not a limit, and the reading is refused.
+func checkK2Fall(policy func(*config.ScalingPolicy)) func(uint64) error {
+	return func(seed uint64) error {
+		r := propRand(seed)
+		rig := newPropRig()
+		rig.policy = policy
+		level := 45_000 * (1 + 0.05*r.Float64())
+		for range 7 {
+			if err := rig.runK2(k2Reading{int64(level * (1 + 0.01*r.Float64())), 40, 0, propCycle}); err != nil {
+				return err
+			}
+		}
+		before := rig.k2("")
+		if !(before > 0) {
+			return violation(kindNotLearned, "no k2 on record before the fall: the flat readings were not admitted")
+		}
+		if err := rig.runK2(k2Reading{int64(level * 0.44), 40, 0, propCycle}); err != nil {
+			return err
+		}
+		after := rig.k2("")
+		return holds(relErr(after, before) <= 1e-9, kindTransient, "a fall moved k2 %.0f -> %.0f", before, after)
+	}
+}
+
+// checkK2RateEscape is TestK2Settle_ARateWithoutTheResidencyIsNotALimit with
+// seeded levels: a replica completing at the rate on record but holding a
+// fifth of the k2 on record, under a queue deeper than its batch, is filling.
+// The rate alone does not admit it, and the reading is refused.
+func checkK2RateEscape(policy func(*config.ScalingPolicy)) func(uint64) error {
+	return func(seed uint64) error {
+		r := propRand(seed)
+		rig := newPropRig()
+		rig.policy = policy
+		full := int64(270_000 * (1 + 0.05*r.Float64()))
+		if err := rig.runK2(k2Reading{full, 30, 6, propCycle}, k2Reading{full, 30, 6, 50 * time.Second},
+			k2Reading{12_000, 0, 0.0024, propCycle}); err != nil {
+			return err
+		}
+		before := rig.k2("")
+		if !(before > 0) {
+			return violation(kindNotLearned, "no k2 on record before the fill: the saturated reading was not admitted")
+		}
+		if err := rig.runK2(k2Reading{full / 5, 160, 5.8, propCycle}); err != nil {
+			return err
+		}
+		after := rig.k2("")
+		return holds(relErr(after, before) <= 1e-9, kindTransient, "a rate without the residency moved k2 %.0f -> %.0f", before, after)
 	}
 }
 

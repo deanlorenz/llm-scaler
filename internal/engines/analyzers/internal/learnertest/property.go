@@ -6,6 +6,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -262,9 +263,14 @@ func LoadLedger(t testing.TB, path string) map[string]*LedgerRow {
 	return out
 }
 
+// ledgerOwner is the form a ledger row's owner takes: an issue, or "open". It
+// holds the form only and reads no tracker, so a closed issue passes. It keeps
+// out a plan's PR, which two rows still named after that PR closed.
+var ledgerOwner = regexp.MustCompile(`^(#[0-9]+|open)$`)
+
 // CheckLedger holds the ledger's rows to the registered cases: each names a
-// case, agrees with its class and learner, carries every field, is listed
-// once, and the rows are sorted by id.
+// case, agrees with its class and learner, carries every field, has an owner
+// in ledgerOwner's form, is listed once, and the rows are sorted by id.
 func CheckLedger(rows []LedgerRow, cases []Case) []error {
 	byID := make(map[string]Case, len(cases))
 	for _, c := range cases {
@@ -280,7 +286,9 @@ func CheckLedger(rows []LedgerRow, cases []Case) []error {
 		}
 		seen[r.ID] = true
 		if r.Expect == "" || r.Finding == "" || r.Measured == "" || r.Owner == "" {
-			errs = append(errs, fmt.Errorf("ledger: %s needs an expected kind, a finding, a measured result and an owner (a PR, or \"open\")", r.ID))
+			errs = append(errs, fmt.Errorf("ledger: %s needs an expected kind, a finding, a measured result and an owner (an issue, or \"open\")", r.ID))
+		} else if !ledgerOwner.MatchString(r.Owner) {
+			errs = append(errs, fmt.Errorf("ledger: %s is owned by %q: an owner is an issue (\"#394\") or \"open\", not a plan's PR", r.ID, r.Owner))
 		}
 		c, ok := byID[r.ID]
 		switch {

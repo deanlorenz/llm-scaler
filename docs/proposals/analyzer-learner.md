@@ -1,12 +1,14 @@
 # Shared rules for the analyzers' learners
 
 - **Review:** Revision 6 was reviewed in five rounds by four reviewers; all
-  four: good enough (round 5). Revision 7 is under review.
-- **Status:** revision 7. PR 1 (the settle tracker) is implemented on
-  `feat/learner-settle-tracker`; the later PRs are proposed. Revision 6 merged as
-  #286. Revision 7 re-checks it against main 3515c6ccd, after #282, #283,
-  #288, #293, #294, #298, #302, #303, #306, #329, #331 and #361 merged, and
-  describes main as it is now. Line numbers are main's at that commit.
+  four: good enough (round 5).
+- **Status:** built. The PRs of [section 7](#7-migration) have merged and #341 is
+  closed. What this document asks for and main does not do yet is listed in
+  #495. The notes below are each PR's decisions, as it made them, and read in
+  the future tense where the PR came first. Revision 6 merged as
+  #286. Revision 7 re-checked it against main 3515c6ccd, after #282, #283,
+  #288, #293, #294, #298, #302, #303, #306, #329, #331 and #361 merged. Line
+  numbers are main's at that commit.
   [Shipped behaviour each PR must keep](#shipped-behaviour-each-pr-must-keep)
   lists what those PRs fixed that a later step could undo.
 - **Since revision 7:** #345 step 1 landed: one analyzer registry, and one
@@ -266,7 +268,7 @@ The numbers in this document are their defaults.
 | - | --- | --- | --- | --- | --- | --- |
 | 1 | ITL line `ITL(k) = A·k + B`, saturation analyzer | `internal/signals/itl/`, wired in `D/analyze.go` | Ready, not a bridge, finite ITL > 0, k > 0. k inside the policy KV band (`analyzerTuning.itlBand`), or above it when the replica's batch is at its sequence cap (`max_num_seqs`, lowered by `--max-num-active-seqs`, #331) with preemption at most `itlBand.capMaxPreemptionRate` (`internal/signals/itl/admission.go`, #293). Each reading goes to the main window, the main and steady windows, or nowhere (see [Admission shapes](#33-admission-shapes)). A reading taken while its replica settles (joined, or load returned after idle, under `steadyGate.steadyFor`, 2 min) is stamped and kept out of the pinned fit | OLS on the steady window at ≥ 10 rows spread ≥ 0.30. Otherwise A = k-weighted mean of `ITL − B` over unstamped readings, B pinned. Fewer than `steadyGate.minSettledSamples` (3) such readings, or fewer than 10 in the window at all (light or overloaded load ages them out): the last A is held (`SlopeHeld`), up to `BucketRetention` after its fit and under the same args; a held line is not republished to row 2. A < 0 refused | Main 20 rows / 30 min. Steady 40 rows, carried `steadyGate.carry` (5 min) past the main window. Swept 24 h unseen. Args change stashes B | B, its stash, and the held slope (`ITLSlopes`, #329): without it a restart under light load had no line and sized by KV occupancy alone (issue #316) |
 | 2 | Shared and borrowed ITL line | `D/analyzer.go` `publishLine`/`borrowLine` | `EnableLearnedStateReuse` (off), same fingerprint | none | Ages on last write. May hold a fleet, never order one | yes |
-| 3 | k2, KV at saturation | `D/replica_capacity.go` `k2Chain`, `D/k2_settle.go`, `D/keys.go` | Queue ≥ threshold; downstream not saturated; not a bridge; not mid-rollout; under the physical ceiling. Joined under 1 min, counted from the later of the Pod's Ready time and the first sight of that Ready time (`noteReady`, `D/k2_settle.go:197`, #288): refused. When queue × footprint exceeds what the busiest rank holds, also: rate ≥ `k2Settle.rateFraction` (0.7) of mu on record **and** residency ≥ 0.7 of k2 on record, **or** residency within ±`k2Settle.maxRise` (25 %) of the reading 1 min back with the queue standing on every cycle. On decode of a P/D model, the queue k2 reads is the engine's own deferred queue, rewritten before k2 reads it (`D/pd_decode_queue.go`, #294, #306) | Mean of a 10-sample window. Admitted readings raise it as well as lower it. The first admitted reading prices at once | Key: the fleet's output length for decode and aggregated, its bucket held by a band (smoothed over 10 min, 3 % past the boundary, or 20 % past it for 2 min; #396); prefill's own average. 24 h write gap starts a new episode. Evicted 7 d after last read | yes, with args tags and stash |
+| 3 | k2, KV at saturation | `D/replica_capacity.go` `k2Chain`, `D/k2_settle.go`, `D/keys.go` | Queue ≥ threshold; downstream not saturated; not a bridge; not mid-rollout; under the physical ceiling. Joined under 1 min, counted from the later of the Pod's Ready time and the first sight of that Ready time (`k2Joined`, `D/settle_view.go`, on the settle tracker; #288): refused. When queue × footprint exceeds what the busiest rank holds, also: rate ≥ `k2Settle.rateFraction` (0.7) of mu on record **and** residency ≥ 0.7 of k2 on record, **or** residency within ±`k2Settle.maxRise` (25 %) of the reading 1 min back with the queue standing on every cycle. On decode of a P/D model, the queue k2 reads is the engine's own deferred queue, rewritten before k2 reads it (`D/pd_decode_queue.go`, #294, #306) | Mean of a 10-sample window. Admitted readings raise it as well as lower it. The first admitted reading of an empty window waits for a second, from a later cycle (`D/k2_confirm.go`, #392): it is held aside, labelled `P1-obs-unconfirmed`, and its cycle is priced at most at the reading. A window that holds readings, or was restored, takes each at once | Key: the fleet's output length for decode and aggregated, its bucket held by a band (smoothed over 10 min, 3 % past the boundary, or 20 % past it for 2 min; #396); prefill's own average. 24 h write gap starts a new episode. Evicted 7 d after last read | yes, with args tags and stash |
 | 4 | Borrowed k2 (lower bound) | `D/k2_borrow.go` | Only when lower than the variant's own k2. KV total within 3 % | none | Held 30 min, then relaxed **upward** over 6 h of serving time. Re-arms on an args change or a figure ≥ 20 % lower | yes |
 | 5 | Measured mu | `D/throughput_floor.go`, `D/throughput_admission.go` | Only on a P1-obs k2 write, so it inherits k2's joined test. RequestRate > 0. Not filling: generated tokens at most `admission.maxTokensOverCompletions` (1.15x) completions × output length. Not under half the highest rate a Ready replica of the variant served, its own included (`servedBounds`). Not under `muChoice.minMeasuredOfDerived` (0.5) of derived, unless the same pod read that low on every saturated cycle for 2 min | One sample a minute. Within the minute a reading rewrites the last sample: max per pod, **mean** across pods (`meanOf`, `D/throughput_floor.go`, #282): a fleet serves the sum of its replicas' rates | See [the mu choice](#the-mu-choice) below. Evicted 7 d after last read | window yes, choice no |
 | 6 | Derived mu | `D/mu_from_itl.go` `deriveMu` | none: a formula on #1 per replica | none | As fresh as the line | no |
@@ -275,7 +277,7 @@ The numbers in this document are their defaults.
 | 9 | Decode-saturation memory | `D/roles.go` `roleSaturated` | One full decode pod gates prefill learning (the #282 fix that changed this was reverted, 7ab00fa8c). Bridges count | none | 1 min | no |
 | 10 | Idle room | `D/idle_room.go` | Decode only. Idle on every reading for 2 min, no gap > 1 min, not a bridge. A run starts under the idle line and goes on under 1.4 times it (#396) | none | Run resets on a non-idle reading | no |
 | 11 | Floor arrival rate, trust and backlog memory | `D/throughput_floor.go`, `internal/signals/floor/` | none | Blend from 0.5 to 0.8 of resident demand. A queue counts as grown past a noise band over a minute. An engine's own queue is capped at what it drains (mu × T) **only while it stands**; while the role's backlog grows it is charged in full (round 4) | Last cycle's backlog per role; `backlogGrew` remembers 1 min, so the full charge outlives growth by up to a minute (an over-order) | no |
-| 12 | Replica start time | `D/start_est.go` | Each pod once, not a bridge, 0–3600 s. A sample over 3x the estimate is refused until 3 such, counted per variant **per rejected sample**: three outlier pods in one cycle exhaust the guard, and one pod repeating passes on its fourth cycle | EWMA α 0.3. The first sample replaces the 70 s default (`DefaultReplicaStartSeconds`, `D/start_est.go:191`). The ScaledObject's `replicaStartSeconds` is reserved and read by nothing today ([trigger reference](../reference/scaledobject-trigger.md)) | Seen pods not persisted: after a restart every running pod is folded again. The floor reads it as a min per role, share pacing as a max | yes |
+| 12 | Replica start time | `D/start_est.go` | Each pod once, not a bridge, 0–3600 s. A sample over 3x the estimate is refused until 3 distinct Pods have reported one (`startConfirmPods`, 5b), so one Pod repeating never opens the guard | EWMA α 0.3, and the first sample replaces the prior. The prior is the ScaledObject's `replicaStartSeconds` seed (5c, [trigger reference](../reference/scaledobject-trigger.md)), else the 70 s default (`DefaultReplicaStartSeconds`). With a seed and no sample, sizing reads the seed; with neither, the floor does not project. Under 3 counted Pods the published figure blends the prior with their mean, held in half to twice the seed, and sizing reads the largest of the blend, the mean and the EWMA | Counted Pods' Ready times are persisted (`StartCounted`, 5d): after a restart a Pod with the same Ready time is not folded again, and any other is. The floor reads it as a min per role, share pacing as a max | yes |
 | 13 | SLO analyzer line | `internal/engines/analyzers/slo/` | Its own ITL tracker, same rules as #1 | Same as #1 | 24 h unseen | no |
 | 14 | Share need history | `internal/engines/allocation/utilization_share_ledger.go` `RecordNeeds`, `PeakNeed`, `PeakKnown` | A peak needs two readings in a row. After a restart a full swing window before a peak is known | Mean over the swing window. Step detector `ShareStepSpread` 0.25 | Trimmed to the window | yes, `wva-utilization-share-history` |
 | 15 | Share release time | same file, `MeasuredRelease` | Completed releases | 90th percentile of recent releases, needs ≥ 3 | Recent releases only | no |
@@ -722,6 +724,21 @@ section does not name. The check also runs on the PR's `edited` event, so
 correcting the `goldens:` section re-runs it. Goldens are written only by the
 `make` target, never by hand.
 
+As built (#495), the check is `.github/workflows/ci-goldens-gate.yaml`, which runs
+`deploy/ci-pr-checks/goldens-section.sh`. `hack/check-goldens-section.sh` tests it
+on fixture PRs from `make lint-deploy-scripts`. The section is a strict line
+format, set out in [testing](../developer-guide/testing.md#the-goldens-section),
+not Markdown: two reviews found paths through a Markdown parser written in bash,
+and the check is for honest mistakes, since a PR runs its own copy of it. So the
+pasted summary goes under the next heading, not in the section. The check watches
+more than this rule's replay outputs: also the `cmd/whatif` goldens and schema,
+`goldens.yaml`, and each `recording.jsonl.gz`, so a retaken recording or a new
+fixture is named too. It compares file names only. The direction and the pasted
+summary stay with the reviewer, and nothing machine-checks them. Run on the 77
+PRs merged since #388, with their real bodies and changed paths, the 46 that moved
+no golden pass. The 31 that moved one fail, because their bodies predate the
+format, so that count says nothing about the format.
+
 **Per-path counters must be above zero.** P1-obs admitted, mu samples written,
 mu yields (served, sibling, stale), OLS cycles, pinned cycles, instant-KV
 rows, input rows with a known ReadySince, and from PR 1 on the settle
@@ -763,7 +780,7 @@ class below runs on it as well as on direct inputs.
 | First sample | one reading does not set a figure that a second, identifying reading would move by more than the band |
 | Stale value | from identifying data **at N ≥ 2**, the figure converges (catches A3: B stuck at 6 ms) |
 | Missing and duplicated values | a missing gauge (presence false), a single missed row, and two rows for one pod each leave the figure where it was. A series doubled inside PromQL reaches the analyzer as one value at 2x: that is the heterogeneity case here, and a collector test |
-| Contamination **paired with** heterogeneity | a **state-flagged** contaminant is dropped, and a genuinely slower replica with no flag moves the estimate by its weight under the declared estimand. A learner using a value estimator allowed by [section 5](#5-fits-exclude-by-state-then-fit-untrimmed) (half the served max, `siblingMuTolerance` of the siblings' lower median) runs the heterogeneity case with the deviation it declares, on the side it declares. Where that side is the risky one (half the served max; the sibling yield), the learner declares the deviation at which it starts to over-price, and the case goes into the known-failures ledger with PR 3 as its owner. Mu's fold across pods is the mean (#282), the declared estimand, so one slow pod at N in {4, 16} (for example {1, 1, 1, 0.5}) is a **passing** case: 0b commits it as a guard, not a ledger row |
+| Contamination **paired with** heterogeneity | a **state-flagged** contaminant is dropped, and a genuinely slower replica with no flag moves the estimate by its weight under the declared estimand. A learner using a value estimator allowed by [section 5](#5-fits-exclude-by-state-then-fit-untrimmed) (half the served max, `siblingMuTolerance` of the siblings' lower median) runs the heterogeneity case with the deviation it declares, on the side it declares. Where that side is the risky one (half the served max; the sibling yield), the learner declares the deviation at which it starts to over-price, and the case goes into the known-failures ledger with an issue as its owner (#495). Mu's fold across pods is the mean (#282), the declared estimand, so one slow pod at N in {4, 16} (for example {1, 1, 1, 0.5}) is a **passing** case: 0b commits it as a guard, not a ledger row |
 | Redistribution invariance | the same fleet load moved between replicas leaves fleet demand and learned figures within a declared tolerance |
 | N-dependence | under iid noise, an estimate's expectation does not depend on N in {1, 2, 4, 16} beyond a declared bias (catches the max across replicas, +13.6 % at 16) |
 | Known truth | with a true mu and k2, the priced capacity is at most truth × (1 + ε) under every family, idle replicas included. At the documented target the steady order equals λ / (mu · target) |
@@ -772,11 +789,14 @@ class below runs on it as well as on direct inputs.
 | Monotonicity | along a trajectory, not only between two static inputs: demand does not fall as lambda or the queue rises, and stays bounded by what the fleet can drain |
 | Edges by enumeration | the operating point is put on **each** threshold below, with noise of the gauges' real autocorrelation. Between declared latched switches the output is Lipschitz in the input, and it reverses at most once per excursion, an excursion being one crossing of the threshold by the **noise-free** generator path |
 
-**Known-failures ledger.** Several classes fail on today's code by design: known
-truth on the time-base family (A5, until #393 cleared it), first sample on k2 and
-start time, N-dependence on the prefill bound's max, and edges on the k2 key
-boundary. 0b commits a ledger of (class, learner, finding,
-measured result, the PR that clears it or "open"). A listed case runs and must
+**Known-failures ledger.** Some classes fail on today's code by design. Those
+listed when 0b landed that have since been cleared are known truth on the
+time-base family (A5, #393), first sample on k2 (#392), first sample on start
+time (`first-sample/start-time/between-sample-and-default`, 86f9cb5f0) and edges
+on the k2 key boundary (#396). 0b commits a ledger of (class, learner, finding,
+measured result, the issue that clears it or "open"), and `CheckLedger` holds
+the owner to that form. It reads no tracker, so a closed issue passes. A listed
+case runs and must
 still fail; a listed case that starts passing fails the build until its row is
 removed. A PR that fixes one removes its row. Nothing is skipped and no
 tolerance is widened to pass a defect.
@@ -827,7 +847,7 @@ not cover a key.
 | Imbalance audit (load moved between replicas) | redistribution invariance |
 | Settle holes: fall, rate escape, restart, idle return, lend | transient, one case per event |
 | Restart fix stubbed | per-path counter "joined refusals with a known ReadySince", required from 0b (the Ready time is on since #288) |
-| "For good" self-sealing low mu | closed-loop probe (PR 3) |
+| "For good" self-sealing low mu | closed-loop probe |
 | k2 adopts its first reading (#392) | first sample |
 | Speculative decoding prices the ITL step as a token (#274) | known truth |
 | KV per request assumes one output length (#276) | known truth |
@@ -836,9 +856,9 @@ not cover a key.
 `D/property_mutants_test.go`, and a test holds it to the mutants. Each
 finding above is in exactly one state:
 
-- **Caught:** 30 findings. For each, a mutant puts the defect back, and its
-  class fails on that mutant. For 21 a mutant runs the production learner
-  (a policy key, rows, or a stub); 9 are caught only by a toy, and the code
+- **Caught:** 34 findings. For each, a mutant puts the defect back, and its
+  class fails on that mutant. For 26 a mutant runs the production learner
+  (a policy key, rows, or a stub); 8 are caught only by a toy, and the code
   table marks them "caught (toy)". "Restart fix stubbed" is caught: its
   mutant stubs the Ready time through the analyzer's `readySince` seam, the
   restart case fails on it, and the per-path counter "joined refusals with a
@@ -861,8 +881,17 @@ finding above is in exactly one state:
   assumes one output length" is caught since #276: a bimodal workload with
   lengths on vLLM's bucket bounds, read through the histogram's bound on
   E[O^2], and with the spread's replay switch off known-truth/k2/output-spread
-  and known-truth/mu/output-spread each fail (19 of 20 seeds). The replay counts that counter and the others of 2.5, and the golden
-  check fails when a counter is zero over every committed golden.
+  and known-truth/mu/output-spread each fail (19 of 20 seeds). "k == 0 unsettles"
+  and the settle holes "fall", "rate escape", "idle return" and "lend" are
+  caught since #495, each on 20 of 20 seeds. A stub mutant turns
+  `Admission.IdleOnEvidence` off, and a scrape that read nothing counts as idle.
+  `k2Settle.maxRise` 1e9 admits a fall, `k2Settle.rateFraction` 1e-9 admits a
+  rate alone, and `steadyGate.idleRows` 1000 leaves load returning with no
+  settle. A rows mutant clears `LentSince`. A lend is held at the tracker
+  (transient/settle/lent-again): no learner reads a bridge, so the balance
+  tracker is its only reader. The replay counts that counter and the others of
+  2.5, and the golden check fails when a counter is zero over every committed
+  golden.
 - **Still escaping:** the rest, listed below. A row is escaping either because
   no mutant reproduces it, or because today's code already fails its class,
   so the defect is a known-failures ledger row (`D/testdata/properties/known-failures.yaml`)
@@ -872,12 +901,10 @@ finding above is in exactly one state:
 
 | finding | why |
 | --- | --- |
-| k == 0 unsettles (#273 A4) | a settle-tracker defect; its negative control is PR 1's (2.3) |
 | Router queue without engine metrics | the missing-values case passes, and no row edit reproduces the pre-fix reading |
 | Demand falls when λ lags a step | the trajectory passes; no pre-fix floor is reproduced |
 | No floor under flow control (#144) | a ledger row for k2; no case drives mu or the floor under flow control |
-| Settle holes: fall, rate escape, idle return, lend | need the settle tracker (PR 1) |
-| "For good" self-sealing low mu | the closed-loop probe (PR 3) |
+| "For good" self-sealing low mu | today's code has it, so no mutant can put it back. `TestClosedLoopProbe_KnownFailing_ASlowReplicaInsideTheServedBoundSealsTheFleet` holds the probe to seeing it. The fix is #495's |
 | Share swing and cancel (#272 F1/F2 and the d3 reviews) | the share ledger (#14, #15) is not recorded or replayed. Out of scope for PR 0 |
 | Alert debounce and sustain (#283 M2/M3) | not a learner |
 | Shape dependence of the ITL line (#275) | no generator models it |
@@ -1041,7 +1068,7 @@ forgets nothing. It moves no golden: no committed recording parks a model
 whole (the acceptance and engine runs' model-02 leaves for good, and is
 never observed again), so it has no switch.
 `TestReplay_ForgetsTheSettleRecordOfAModelParkedWhole` holds it, and
-`TestWhatifCapture` replays the engine's own recording of a model parked
+`TestWhatifCapture_*` replay the engine's own recording of a model parked
 whole to the engine's verdicts.
 
 **Roles and readiness for a past window** cannot come from a kubeconfig, which
@@ -1566,7 +1593,7 @@ source. No metric gains a `restored` label value; a restored figure shows as
 
 | learner | restored? | prices at once? |
 | --- | --- | --- |
-| k2 | yes | yes, as `P2-hist` (or `P2-prior`) |
+| k2 | yes, a held first reading no (#392) | a restored window yes, as `P2-hist` (or `P2-prior`); a reading held when the controller stopped is dropped, and the next one waits for a second |
 | ITL | B, its stash and the held slope (`ITLSlopes`, #329) | yes, from the held slope, within `BucketRetention` and under the same args; otherwise not until refit |
 | mu | window yes, choice no | the window yes; the choice restores to the safe side (PR 3) |
 | start time | yes | yes |
@@ -3189,7 +3216,7 @@ and 2 added:
 | --- | --- |
 | the line through the least at-cap reading, not the mean point | the I tables, the D and slo bias tables |
 | no window cap | `TestBPrior_TheWindowCapsAnOutlierPrior`, the outlier rows, the slo feasibility test |
-| the cap reads at-cap readings only | `TestBPrior_ThePriorLineIsThroughTheMeanAtCapPoint`, the slo feasibility test |
+| the cap reads at-cap readings only | `TestBPrior_ThePriorLineIsThroughTheAnchor`, the slo feasibility test |
 | a learned B may lower the prior (no floor) | `TestBPrior_ALearnedBOnlyRaisesThePrior`, the "3 ms elsewhere" rows |
 | the scope fleet-wide; ignoring the arguments; the accelerator; the role | `TestBPrior_TheScopeIsThePhysicsKey`, the "3 ms elsewhere" rows |
 | M4: published lines dropped from the saturation prior | `TestITLOneSided_APublishedLineOnThePhysicsKeyRaisesThePrior` |
@@ -3590,7 +3617,7 @@ package's first switch, with its own hook (`Tracker.SetSwitchesForReplay`,
   not.
 - **Back-compat.** The document stays v1 and additive. v0.10.1's frozen decoder
   reads a document with both new fields with every field it knows intact
-  (`TestLearnedStateSettle_V0101ReadsADocumentWithSightings`). The v0.10.1 fixture
+  (`TestV0101Decoder_ReadsADocumentWithSightings`). The v0.10.1 fixture
   restored under light load runs on its held slope, and the v0.10.0 one, with no
   slope, restores and has no line, as that release did
   (`TestFrozenDocuments_ALightLoadRestoreRunsOnTheHeldSlope`, the restore-then-run
@@ -3701,8 +3728,9 @@ and the `restored` field have none, because no replay output reads either.
   doubled its input, its max kept it, and `RaiseLast` keeps it past a reset.
 - **The recorder can evict the controller** if pointed at `/tmp`. It is off by
   default and has its own volume and cap.
-- **Open defects this does not fix:** instantaneous k paired with a rate[1m]
-  ITL; shape dependence of the ITL line (#275). Speculative decoding is read
+- **Open defects this does not fix:** shape dependence of the ITL line (#275).
+  An instant k against a rate[1m] ITL is fixed since #393, and 2.7 holds it to
+  a mutant. Speculative decoding is read
   per accepted token in the saturation analyzer since #274; the throughput
   and slo analyzers still read the step time.
 
