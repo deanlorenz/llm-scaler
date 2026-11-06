@@ -559,7 +559,8 @@ func (c *cycle) fitLines() {
 		// arguments it was fitted under (issue #284).
 		adm := itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: atCap.perRank, MaxNumSeqsSource: atCap.source,
 			CapMaxPreemptionRate: c.cfg.ITLCapPreemptionRate(), Steady: c.tune.steadiness(),
-			SlopeHoldFor: c.a.Horizons().BucketRetention, Args: windowArgs(params)}
+			SlopeHoldFor: c.a.Horizons().BucketRetention, Args: windowArgs(params),
+			TierHysteresis: c.a.tierHysteresisOn()}
 		// When each replica's settle began: the engine's settle tracker
 		// (itl_settle.go).
 		c.a.itlSettleAdmission(&adm, c.input.Namespace, c.input.ModelID)
@@ -626,7 +627,11 @@ func (c *cycle) fitLines() {
 			// #467): it carries this variant's at-cap readings and pricing k,
 			// and a sibling borrowing it would be priced on another variant's
 			// evidence. While it is one-sided, nothing is published.
-			if !reading.SlopeHeld && !reading.PinnedAtBPrior {
+			//
+			// Nor is a resting full fit (itl.Reading.Resting): it prices this
+			// key, and a spread that earns no B on the tracker earns none
+			// here, where the prior on B, a borrower and the snapshot read it.
+			if !reading.SlopeHeld && !reading.PinnedAtBPrior && !reading.Resting() {
 				c.a.publishLineFor(physicsKey, variantKey, own, c.a.now(), params.SpeculatesPerStep())
 				if aggOn {
 					c.a.shapePublishedLine(physicsKey, aggG, aggSigma, aggSigmaOK, aggPoint, own.A, c.a.now())

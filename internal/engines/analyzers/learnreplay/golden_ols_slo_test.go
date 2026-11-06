@@ -77,7 +77,10 @@ var olsSLOFloors = []olsSLOFloor{
 	// 14:06:02.55Z, after a cycle at 14:05:47.53Z; declined from 14:03:17Z.
 	// All 143 slo Analyze calls served router latency, and 115 judged TPOT
 	// and 113 TTFT.
-	{fixture: olsSLORestartFixture, satOLS: 45, sloOLS: 45, satPinned: 52, sloPinned: 52,
+	// The floor fell from 45 full fits to 35 with the tier dwell (issue #495):
+	// it refuses a full fit no higher than the pinned fit, and each line takes
+	// 42 of the recording's 52.
+	{fixture: olsSLORestartFixture, satOLS: 35, sloOLS: 35, satPinned: 52, sloPinned: 52,
 		routerServed: 114, judgedTPOT: 92, judgedTTFT: 90,
 		cut: time.Date(2026, 11, 2, 14, 6, 0, 0, time.UTC)},
 }

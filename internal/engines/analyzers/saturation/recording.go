@@ -219,6 +219,9 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		// Issue #467: the ITL line priced one-sided at the sequence cap
 		// while B is unlearned (itl_one_sided.go).
 		SwitchITLOneSidedAtCap: &a.itlOneSidedAtCap,
+
+		// The ITL line's tier latch (issue #495).
+		SwitchITLTierHysteresis: &a.itlTierHysteresis,
 	}
 }
 

@@ -770,6 +770,55 @@ readings are left, the key's last `A` holds (`itl-fit` logs `slopeHeld`), and a
 key with no `A` yet gets no line. `itl-window` reports the marked readings as
 `settling`.
 
+#### Set, clear and dwell
+
+Every threshold that switches a source states three values, the safe side and
+what a restart does ([3.5](../proposals/analyzer-learner.md#35-hysteresis)).
+Add a row when you add such a threshold.
+
+| threshold | set | clear | dwell | safe side | after a restart |
+| --- | --- | --- | --- | --- | --- |
+| ITL tier: full fit or pinned fit (`itl/tier_latch.go`, on the saturation, slo and throughput lines) | 10 steady readings, spread 0.30 of `k` | under 8 steady readings or spread 0.18, or a pinned fit pricing 3 % more | 10 min after the last change, unless the new line prices 3 % more replicas | the line that prices more replicas, from either tier, judged by what the line sustains where the analyzer prices it | the latch is not kept: a key with a restored slope stands at the pinned fit |
+
+**Price.** A line's price is sequences over ITL at the fill the analyzer reads
+(`Admission.PricedRate`). At a fixed fill that is the ITL there. With a TPOT
+target the fill is the line's own, lowered by the batch cap, and it often clamps
+to the band's top for both lines: the ITL there is what tells them apart.
+
+**Resting.** Between the clear and set values the full fit prices its own key's
+line and teaches nothing: it writes neither `B` nor the held slope, and it is not
+published, so the prior on `B`, a sibling's borrow, the shape points and the
+snapshot all stay on the last fit at the set values. It stays only while
+the pinned fit, through a `B` learned at the set values, does not price 3 % more.
+So a resting line prices at most 3 % under the pinned fit.
+
+**Evidence.** The latch goes back to the pinned tier when the steady window
+empties, when the key goes past `DefaultSteadyCarry` without a steady reading,
+and on `ClearWindow`, `ForgetSlope`, `ForgetSlopes` and `ForgetBaselines`.
+
+**Noise.** "At most one reversal per excursion" (analyzer-learner.md 2.6) does not
+hold near the set value, by choice: pricing safety over flip count. On synthetic
+rate[1m] noise the tier changes a median of 7 to 9 times in 4 h at spread 0.26,
+against 38 to 44 with the bare gate. The test bound is 16 on flat paths at spreads
+0.26 to 0.30, 4 at 0.32 and 6 on a two-crossing ramp. Those changes are the resting
+rule leaving for the safe side and the spread setting again. Dropping the rule
+would give one change, and more cycles under the truth
+([3.5](../proposals/analyzer-learner.md#the-itl-tier-as-built-495)). A load step
+collapses the spread past any clear value, so the dwell does that work. The 3 % and
+the 10 min have not been checked on a large fleet.
+
+**While the dwell refuses a change** the log says `tierHeld`: `itl-fit` on the
+saturation line, `slo-variant` (at `-v=3`) on the slo line, and the
+`throughput analyzer: ITL line` summary on the throughput line, which logs only
+when the line goes silent or comes back. Leaving the full fit holds the key's last
+slope (`slopeHeld`), and entering it stays on the pinned fit; the what-if planner
+reads both as `held` and flags `HeldLine`. A key's first full fit does not wait:
+until then, only it can replace the default `B`. A key that has had one waits even
+if its `B` came out at or under zero and was not kept. Once the dwell ends a new
+line may price less than the one it replaces by more than 3 %, as it could before.
+
+`SwitchITLTierHysteresis`, one per analyzer, turns the latch off for a replay.
+
 #### One-sided at the cap (issue #467)
 
 A replica at its stated cap reads above `itl.DefaultKSat`. While the key has
@@ -1662,6 +1711,10 @@ golden output.
 | `DefaultMaxObservableK` | 0.80 | `internal/signals/itl` |
 | `DefaultMinSamples` | 10 | `internal/signals/itl` |
 | `DefaultMinKSpread` | 0.30 | `internal/signals/itl` |
+| `DefaultClearMinSamples` | 8 | `internal/signals/itl` |
+| `DefaultClearKSpread` | 0.18 | `internal/signals/itl` |
+| `DefaultTierDwell` | 10m | `internal/signals/itl` |
+| `DefaultTierSafeMargin` | 0.03 | `internal/signals/itl` |
 | `DefaultSteadyFor` | 2m | `internal/signals/itl` |
 | `DefaultMaxKDrift` | 0.10 | `internal/signals/itl` |
 | `BacklogDrainSeconds` | 60 | `internal/signals/floor` |

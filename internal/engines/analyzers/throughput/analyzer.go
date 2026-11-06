@@ -84,6 +84,9 @@ type ThroughputAnalyzer struct {
 	// itlForgetReachesLine is the replay switch of the forget (forget.go):
 	// SwitchITLForgetReachesTheLine. On by the constructor.
 	itlForgetReachesLine bool
+	// itlTierHysteresis is SwitchITLTierHysteresis (issue #495,
+	// itl_line.go): on, the line's tier is latched.
+	itlTierHysteresis bool
 	// capPinsDefaultB prices readings at the cap through the default B
 	// alone, as 4b-3 first built it (itl.Admission.OneSidedAboveKSat off),
 	// for the tests' negative controls only: set by withCapPinnedAtDefaultB,
@@ -191,6 +194,7 @@ func NewThroughputAnalyzer() *ThroughputAnalyzer {
 		itlForgetsOnNewArgs:   true,
 		itlAdmitsAtCap:        true,
 		itlForgetReachesLine:  true,
+		itlTierHysteresis:     true,
 		ownSettle:             settle.NewTracker(),
 		ownSettled:            make(map[string]time.Time),
 	}

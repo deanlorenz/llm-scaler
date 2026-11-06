@@ -46,10 +46,14 @@ edges/itl/max-k-drift
 edges/itl/max-k-drift-nondefault
 edges/itl/min-settled-samples
 edges/itl/min-settled-samples-nondefault
+edges/itl/ols-clear-spread
 edges/itl/ols-min-rows
 edges/itl/ols-min-spread
+edges/itl/ols-spread-reversals-bounded
 edges/itl/steady-for
 edges/itl/steady-for-nondefault
+edges/itl/tier-dwell
+edges/itl/tier-safe-margin
 edges/itl/window-20-rows
 edges/itl/window-30-min
 edges/k2/episode-gap-24h

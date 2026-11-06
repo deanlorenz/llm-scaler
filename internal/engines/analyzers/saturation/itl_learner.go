@@ -49,7 +49,7 @@ func itlSource(r itl.Reading) learn.Source {
 	switch {
 	case r.Tier == itl.TierOLS:
 		return itlSourceOLS
-	case r.Tier == itl.TierPinnedB && r.SlopeHeld:
+	case r.Tier == itl.TierPinnedB && (r.SlopeHeld || r.TierHeld):
 		return itlSourceHeld
 	case r.Tier == itl.TierPinnedB:
 		return itlSourcePinned

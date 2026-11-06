@@ -43,6 +43,11 @@ import (
 // at any k.
 const SwitchITLSteadyGate = "throughput-itl-steady-gate"
 
+// SwitchITLTierHysteresis is the replay switch for the latch on the line's
+// tier (issue #495, itl.Admission.TierHysteresis). Off, each cycle chooses
+// its tier alone, as before.
+const SwitchITLTierHysteresis = "throughput-itl-tier-hysteresis"
+
 // SwitchITLKeepsWindowOnGPSMismatch is the replay switch for the
 // GPS-mismatch clear (analyzer-learner.md, "The GPS-mismatch clear: dropped
 // in 4b-1"). On: three cycles in a row whose generated-token rate is more
@@ -112,6 +117,7 @@ func (a *ThroughputAnalyzer) switchFields() map[string]*bool {
 		SwitchITLForgetsOnNewArguments:        &a.itlForgetsOnNewArgs,
 		SwitchITLAdmitsAtSequenceCap:          &a.itlAdmitsAtCap,
 		SwitchITLForgetReachesTheLine:         &a.itlForgetReachesLine,
+		SwitchITLTierHysteresis:               &a.itlTierHysteresis,
 	}
 }
 
@@ -136,6 +142,7 @@ func (a *ThroughputAnalyzer) lineAdmission(adm itl.Admission, namespace, modelID
 	adm.AboveBandFallback = !a.noAboveBandFallback
 	adm.AboveBandWaitsAfterRestart = a.aboveBandWaitsAfterRestart
 	adm.Args = e.args
+	adm.TierHysteresis = a.itlTierHysteresis
 	if a.itlAdmitsAtCap && e.batchCap > 0 {
 		adm.MaxNumSeqs, adm.MaxNumSeqsSource = e.batchCap, e.batchCapSource
 		// Readings at the cap sit above DefaultKSat, where a pinned fit
@@ -278,6 +285,7 @@ func noteLineSilence(ctx context.Context, state *variantState, r itl.Reading, re
 	ctrl.LoggerFrom(ctx).Info("throughput analyzer: ITL line", "namespace", namespace, "modelID", modelID,
 		"variant", variant, "silent", silent, "cause", cause, "source", reason,
 		"inBand", r.Offered-r.Capped, "aboveBand", r.AboveBand, "belowBand", r.BelowBand, "settling", r.Settling,
+		"tierHeld", r.TierHeld,
 		"held", r.Held, "aboveBandHeld", r.AboveBandHeld,
 		"atCap", r.Capped, "batchCap", state.batchCap, "batchCapSource", state.batchCapSource,
 		"pinnedAtLeastITL", r.PinnedAtLeastITL)
