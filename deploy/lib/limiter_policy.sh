@@ -559,7 +559,7 @@ WVA_LIVE_LIMITERS=""
 wva_live_limiters() {
     local ns="$1" rc=0 def lim
     WVA_LIVE_LIMITERS=""
-    legacy_cm_capture wva-scaling-policy-config "$ns" -o json || rc=$?
+    kc_capture get configmap wva-scaling-policy-config -n "$ns" -o json || rc=$?
     if [ "$rc" -ne 0 ]; then
         kc_not_found "$KC_ERR" && return 0
         WVA_LIVE_LIMITERS_ERR="$(printf '%s\n' "$KC_ERR" | head -1)"

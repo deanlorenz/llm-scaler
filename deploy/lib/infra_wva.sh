@@ -962,7 +962,7 @@ wva_prometheus_keys() {
 wva_read_live_prometheus_tls() {
     local ns="$1" rc=0 cfg
     WVA_LIVE_PROM_TLS="" WVA_LIVE_SKIP_VERIFY="" WVA_LIVE_CA_PATH="" WVA_LIVE_PROM_URL="" WVA_LIVE_PROM_KEYS="" WVA_LIVE_PROM_TLS_ERR=""
-    legacy_cm_capture wva-manager-config "$ns" -o json || rc=$?
+    kc_capture get configmap wva-manager-config -n "$ns" -o json || rc=$?
     if [ "$rc" -ne 0 ]; then
         if kc_not_found "$KC_ERR"; then
             WVA_LIVE_PROM_TLS=absent
@@ -2171,11 +2171,8 @@ EOF
     # discarded them. Restored below, after the apply.
     local preserved_policy=""
     if [ "${WVA_APPLY_SCOPE:-all}" != "prereqs" ]; then
-        preserved_policy=""
-        if legacy_cm_capture wva-scaling-policy-config "$WVA_NS" -o json; then
-            preserved_policy="$(printf '%s' "$KC_OUT" \
-                | jq -c 'if .data then {data: (.data | del(.default))} else empty end' 2>/dev/null || true)"
-        fi
+        preserved_policy="$(kubectl get configmap wva-scaling-policy-config -n "$WVA_NS" -o json 2>/dev/null \
+            | jq -c 'if .data then {data: (.data | del(.default))} else empty end' 2>/dev/null || true)"
         # `{"data":{}}` is "nothing but default", which needs no restoring.
         [ "$preserved_policy" = '{"data":{}}' ] && preserved_policy=""
 
@@ -2530,14 +2527,20 @@ wva_yaml_scalar() {
 # failure: an unreadable setting is not an absent one. The error goes to
 # WVA_LIVE_PASSIVE_ERR.
 wva_live_get() {
-    local ns="$1" name="$2" path="$3"
-    if legacy_cm_capture "$name" "$ns" -o jsonpath="$path"; then
-        printf '%s' "$KC_OUT"
-        return 0
+    local ns="$1" name="$2" path="$3" out err rc=0
+    err="$(mktemp)"
+    out="$(kubectl get configmap "$name" -n "$ns" -o jsonpath="$path" 2>"$err")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        if grep -q NotFound "$err"; then
+            rm -f "$err"
+            return 0
+        fi
+        WVA_LIVE_PASSIVE_ERR="$name in $ns: $(tr '\n' ' ' <"$err")"
+        rm -f "$err"
+        return 1
     fi
-    kc_not_found "$KC_ERR" && return 0
-    WVA_LIVE_PASSIVE_ERR="$name in $ns: $(printf '%s' "$KC_ERR" | tr '\n' ' ')"
-    return 1
+    rm -f "$err"
+    printf '%s' "$out"
 }
 
 # wva_live_passive reads the passive settings the live controller runs with,
@@ -2553,11 +2556,6 @@ wva_live_passive() {
     cfg="$(wva_live_get "$ns" wva-manager-config '{.data.config\.yaml}')" || return 1
     if [ -n "$cfg" ]; then
         WVA_LIVE_PASSIVE="$(printf '%s\n' "$cfg" | wva_yaml_scalar '.WVA_PASSIVE')"
-        # A ConfigMap written before the rename has the key under its old name.
-        if [ -z "$WVA_LIVE_PASSIVE" ]; then
-            local old_key='.WVA_PASSIVE' # rename:keep
-            WVA_LIVE_PASSIVE="$(printf '%s\n' "$cfg" | wva_yaml_scalar "$old_key")"
-        fi
     fi
     def="$(wva_live_get "$ns" wva-scaling-policy-config '{.data.default}')" || return 1
     if [ -n "$def" ]; then

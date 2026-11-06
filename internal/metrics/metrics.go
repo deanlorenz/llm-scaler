@@ -143,9 +143,6 @@ func GetControllerInstance() string {
 // It reads CONTROLLER_INSTANCE from the environment to optionally add
 // controller instance isolation labels to all emitted metrics.
 func InitMetrics(registry prometheus.Registerer) error {
-	// Everything below registers through this, so every metric is covered.
-	registry = withLegacyNames(registry, os.Getenv(LegacyMetricNamesEnvVar))
-
 	// Read controller instance from environment
 	controllerInstance = os.Getenv(ControllerInstanceEnvVar)
 

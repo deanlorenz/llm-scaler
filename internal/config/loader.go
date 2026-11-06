@@ -156,15 +156,6 @@ func loadConfig(cfg *Config, flagSet *flag.FlagSet, configFilePath string) error
 			return fmt.Errorf("failed to read config file %s: %w", configFilePath, err)
 		}
 		ctrl.Log.Info("Loaded config from file", "path", configFilePath)
-		used, discarded := applyLegacyConfigKeys(v, EnvPrefix)
-		for _, key := range used {
-			ctrl.Log.Info("Config key uses a name that will be removed in the next release: read as the new name",
-				"key", key, "prefix", EnvPrefix)
-		}
-		for _, key := range discarded {
-			ctrl.Log.Info("Config key ignored: the same setting is also present under its new name, which wins",
-				"key", key, "prefix", EnvPrefix)
-		}
 	}
 
 	// Bind environment variables (precedence above config file, below flags)

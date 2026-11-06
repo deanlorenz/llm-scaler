@@ -738,7 +738,7 @@ pl_published_kueue() {
     local cm_ns="$1" limiter="$2" cur="" rc=0 composed
     PL_BORROW_WANTED=unknown
     PL_KUEUE_KEPT_NS=""
-    legacy_cm_capture wva-scaling-policy-config "$cm_ns" -o jsonpath='{.data.default}' || rc=$?
+    kc_capture get configmap wva-scaling-policy-config -n "$cm_ns" -o jsonpath='{.data.default}' || rc=$?
     if [ "$rc" -ne 0 ]; then
         case "$KC_ERR" in
             *NotFound*|*"not found"*) ;;
@@ -1088,9 +1088,7 @@ pl_set_limiter() {
         current="$KC_OUT"
     else
         case "$KC_ERR" in
-            *NotFound*|*"not found"*)   # genuinely absent: create it below
-                legacy_cm_refuse_write wva-scaling-policy-config "$policy_ns"
-                ;;
+            *NotFound*|*"not found"*) : ;;   # genuinely absent: create it below
             *) log_error "could not read the policy ConfigMap in $policy_ns, and this is not a NotFound:
     ${KC_ERR:-kubectl exited $probe_rc}
     Refusing to overwrite a policy this command cannot see." ;;
@@ -1295,7 +1293,7 @@ pl_split_targets() {
 # something else, is "cannot tell" too, never 0.
 pl_declared_limiters() {
     local rc=0 n
-    legacy_cm_capture wva-scaling-policy-config "$1" -o jsonpath='{.data.default}' || rc=$?
+    kc_capture get configmap wva-scaling-policy-config -n "$1" -o jsonpath='{.data.default}' || rc=$?
     if [ "$rc" -ne 0 ]; then
         case "$KC_ERR" in
             *NotFound*|*"not found"*) echo 0; return 0 ;;
@@ -1656,10 +1654,7 @@ disable_physical_limiter() {
         kc_capture get configmap wva-scaling-policy-config -n "$cm_ns" -o name || probe_rc=$?
         if [ "$probe_rc" -ne 0 ]; then
             case "$KC_ERR" in
-                *NotFound*|*"not found"*)
-                    legacy_cm_refuse_write wva-scaling-policy-config "$cm_ns"
-                    continue
-                    ;;
+                *NotFound*|*"not found"*) continue ;;
             esac
             log_error "could not read ${cm_ns}/wva-scaling-policy-config, and this is not a NotFound: ${KC_ERR:-kubectl exited $probe_rc}
     Refusing to report a limiter removed from a policy this command cannot see."

@@ -101,7 +101,7 @@ func (r *ConfigMapReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	isNamespaceLocal := !isGlobal && !isPolicySource && r.shouldWatchNamespaceLocalConfigMap(ctx, namespace)
 
 	if isPolicySource {
-		if slices.Contains(config.ScalingPolicyConfigMapNames(), name) && !r.supersededByCurrentName(ctx, cm, namespace) {
+		if slices.Contains(config.ScalingPolicyConfigMapNames(), name) {
 			// The error is a startup one only (errUnboundedAtStartup), and the
 			// handler has already reported it; a requeue would change nothing.
 			_ = r.handleClusterPolicyConfigMap(ctx, cm)
@@ -160,12 +160,6 @@ func (r *ConfigMapReconciler) handleConfigMapDeletion(ctx context.Context, name,
 	// adding one.
 	if r.Config.PolicyNamespaceIsSeparate() && namespace == r.Config.PolicyNamespace() {
 		if slices.Contains(config.ScalingPolicyConfigMapNames(), name) {
-			// Moving off an old name ends in deleting it, and that must not lift
-			// the bound the new name carries.
-			if other := r.remainingScalingPolicyConfigMap(ctx, namespace, name); other != nil {
-				_ = r.handleClusterPolicyConfigMap(ctx, other)
-				return
-			}
 			// An empty policy, not nil: nil would send the limiter accessors back
 			// to this controller's own namespace, handing limit-setting to whoever
 			// writes that — the party the policy namespace exists to take it from.
@@ -189,49 +183,10 @@ func (r *ConfigMapReconciler) handleConfigMapDeletion(ctx context.Context, name,
 
 	// Remove namespace-local config on deletion. One kind now — the separate
 	// scale-to-zero ConfigMap folded into this one.
-	if slices.Contains(config.ScalingPolicyConfigMapNames(), name) {
-		// As for cluster policy: another name still there is still the config.
-		if other := r.remainingScalingPolicyConfigMap(ctx, namespace, name); other != nil {
-			_ = r.handleScalingPolicyConfigMap(ctx, other, namespace, false)
-			return
-		}
+	if name == config.ScalingPolicyConfigMapName() {
 		r.Config.RemoveNamespaceConfig(namespace)
 		logger.Info("Removed namespace-local saturation config on ConfigMap deletion", "namespace", namespace)
 	}
-}
-
-// remainingScalingPolicyConfigMap returns the scaling-policy ConfigMap that is
-// in force in namespace once deleted is gone: the first name that still exists,
-// current name first, or nil when none does. A read that fails is nil too, which
-// keeps the behaviour a deletion always had.
-func (r *ConfigMapReconciler) remainingScalingPolicyConfigMap(ctx context.Context, namespace, deleted string) *corev1.ConfigMap {
-	for _, name := range config.ScalingPolicyConfigMapNames() {
-		if name == deleted {
-			continue
-		}
-		cm := &corev1.ConfigMap{}
-		err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, cm)
-		if err == nil {
-			return cm
-		}
-		if !apierrors.IsNotFound(err) {
-			log.FromContext(ctx).Info("Could not read the other scaling-policy ConfigMap after a deletion",
-				"configMap", name, "namespace", namespace, "error", err.Error())
-		}
-	}
-	return nil
-}
-
-// warnOldPolicyName says, naming the object, that policy is being read from an
-// old name. It is silent for the current name.
-func warnOldPolicyName(logger logr.Logger, namespace, name string) {
-	current := config.ScalingPolicyConfigMapName()
-	if name == current {
-		return
-	}
-	logger.Info("Reading scaling policy from an old ConfigMap name; the old name is still read but will not be "+
-		"forever. Copy it to the current name, confirm it loaded, then delete the old one.",
-		"using", namespace+"/"+name, "rename to", current)
 }
 
 // shouldWatchNamespaceLocalConfigMap returns true if a namespace-local ConfigMap should be watched.
@@ -273,29 +228,30 @@ func (r *ConfigMapReconciler) shouldWatchNamespaceLocalConfigMap(ctx context.Con
 // configuration, and the old one is inert.
 func (r *ConfigMapReconciler) supersededByCurrentName(ctx context.Context, cm *corev1.ConfigMap, namespace string) bool {
 	logger := log.FromContext(ctx)
-	names := config.ScalingPolicyConfigMapNames()
-	rank := slices.Index(names, cm.GetName())
-	if rank <= 0 {
+	current := config.ScalingPolicyConfigMapName()
+	if cm.GetName() != config.LegacyScalingPolicyConfigMapName || current == config.LegacyScalingPolicyConfigMapName {
 		return false
 	}
 
-	for _, newer := range names[:rank] {
-		var existing corev1.ConfigMap
-		err := r.Get(ctx, client.ObjectKey{Name: newer, Namespace: namespace}, &existing)
-		if err == nil {
-			logger.V(1).Info("Ignoring an old scaling-policy ConfigMap: a newer name exists and takes "+
-				"precedence. Delete the old one once you have confirmed the new one carries everything.",
-				"ignoring", cm.GetName(), "using", newer, "namespace", namespace)
-			return true
-		}
-		if !apierrors.IsNotFound(err) {
-			// Could not tell. Proceed rather than drop the only config we can see.
-			logger.V(1).Info("Could not check for a newer scaling-policy ConfigMap; "+
-				"using the old one", "error", err.Error())
-		}
+	var existing corev1.ConfigMap
+	err := r.Get(ctx, client.ObjectKey{Name: current, Namespace: namespace}, &existing)
+	if err == nil {
+		logger.V(1).Info("Ignoring the pre-rename scaling-policy ConfigMap: one with the current "+
+			"name exists and takes precedence. Delete the old one once you have confirmed the "+
+			"new one carries everything.",
+			"ignoring", cm.GetName(), "using", current, "namespace", namespace)
+		return true
+	}
+	if !apierrors.IsNotFound(err) {
+		// Could not tell. Proceed rather than drop the only config we can see.
+		logger.V(1).Info("Could not check for a current-named scaling-policy ConfigMap; "+
+			"using the pre-rename one", "error", err.Error())
 	}
 
-	warnOldPolicyName(logger, namespace, cm.GetName())
+	logger.Info("Reading scaling policy from the pre-rename ConfigMap name. It outgrew "+
+		"\"saturation\" — it now carries policy tiers, analyzer definitions, limiters and "+
+		"scale-to-zero — so rename it; the old name is still read but will not be forever.",
+		"using", config.LegacyScalingPolicyConfigMapName, "rename to", current)
 	return false
 }
 
