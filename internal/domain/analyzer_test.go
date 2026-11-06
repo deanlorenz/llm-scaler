@@ -3,7 +3,7 @@ package domain
 import "testing"
 
 // Only the scheduler queue says the gate is on: a pool or a wait histogram is
-// filled only while a recording is on, and reads at rate 0 with the gate off.
+// filled only while a recording is on, so neither counts.
 func TestAnalyzerInput_FlowControlSeries(t *testing.T) {
 	buckets := []LatencyBucket{{UpperBound: 1, Rate: 1}}
 	for _, c := range []struct {

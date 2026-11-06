@@ -3,8 +3,10 @@ package whatif
 import "math"
 
 // What the TTFT model's callers, the slo analyzer's S1 and the what-if CLI,
-// pass for an input with no reading (docs/proposals/slo-tiers.md, "S1
-// decisions"). The model itself reads none of them: it prices what it is given.
+// share (docs/proposals/slo-tiers.md, "S1 decisions"): the figures they pass
+// for an input with no reading, the stop they clamp a measured spread to, and
+// the share they raise the routing flags at. The model itself reads none of
+// them: it prices what it is given.
 const (
 	// AssumedPromptCV is the prompt spread with no computed-prompt histogram:
 	// not measured, the top of the spread taken as plausible. No committed

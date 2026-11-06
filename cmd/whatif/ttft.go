@@ -499,7 +499,7 @@ func (pf *pricedFleet) flowControl(st *learnreplay.State) {
 	}
 	pf.fleet.FlowControl = whatif.FlowControl{State: whatif.FlowControlNoSeries}
 	pf.in.FlowControl = "off, inferred"
-	pf.assume("flow control off (no series)")
+	pf.assume("flow control off (no queue series)")
 }
 
 // describe is the fleet's inputs, in a line.

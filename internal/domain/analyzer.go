@@ -96,13 +96,14 @@ type AnalyzerInput struct {
 	FlowControlPools []FlowControlPool
 }
 
-// FlowControlSeries reports whether the router's flow-control series exist for
-// the model at the cycle, the one rule S1 and the what-if CLI infer the gate
-// from. It reads SchedulerQueue alone, which is collected every cycle.
+// FlowControlSeries reports whether the router's flow-control queue series
+// exists for the model at the cycle, the one rule S1 and the what-if CLI infer
+// the gate from. It reads SchedulerQueue alone, which is collected every cycle.
 // FlowControlPools and RouterLatency.FlowControlWaitBuckets are filled only
 // while a learner recording is on, so reading them would make a recorded run
 // price apart from the same run unrecorded. The wait histogram is also not
-// proof: a run with the gate off reads it, at rate 0, for its first minutes.
+// proof of the gate: on runs goldens.yaml describes as flow control off, wait
+// buckets read at rate 0 within a run's first 3 to 4 minutes, cause not known.
 func (in AnalyzerInput) FlowControlSeries() bool {
 	return in.SchedulerQueue != nil
 }

@@ -83,7 +83,7 @@ func TestTTFT_SaysUnvalidatedAndAssumedInTextAndJSON(t *testing.T) {
 		assert.Contains(t, text, "UnvalidatedTTFT")
 		assert.Contains(t, text, "AssumedVP")
 		// Each assumed input is named.
-		for _, name := range []string{"V_P 30000 tok/s (--assume-vp)", "prompt cv 2", "Poisson arrivals", "flow control off (no series)"} {
+		for _, name := range []string{"V_P 30000 tok/s (--assume-vp)", "prompt cv 2", "Poisson arrivals", "flow control off (no queue series)"} {
 			assert.Contains(t, text, name)
 		}
 
@@ -357,7 +357,7 @@ func TestTTFT_FlowControl(t *testing.T) {
 	st := learnedState()
 	pf := fleetOf(t, st, answerFlags{})
 	assert.Equal(t, whatif.FlowControlNoSeries, pf.fleet.FlowControl.State)
-	assert.Contains(t, pf.in.Assumed, "flow control off (no series)")
+	assert.Contains(t, pf.in.Assumed, "flow control off (no queue series)")
 
 	st.FlowControlSeries = true
 	pf = fleetOf(t, st, answerFlags{})

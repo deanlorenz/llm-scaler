@@ -270,11 +270,25 @@ func TestEstimateAt(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// A run with flow control off still reads a wait histogram for its first
-// minutes, every bucket at rate 0: cycle 5 of the short run is one. The state
-// reads no series there, as S1 does.
+// Cycle 5 of the short run holds a wait histogram at rate 0 and no queue, on a
+// run goldens.yaml describes as flow control off. The state reads no queue
+// series there, as S1 does.
 func TestStateAt_AZeroRateWaitHistogramIsNoFlowControl(t *testing.T) {
 	assert.False(t, goldenState(t, ttftOpenShortFixture, 5).FlowControlSeries)
+}
+
+// The acceptance run holds a queue for one model of its three, and the state
+// says so for that model and not for the others.
+func TestStateAt_AQueueIsFlowControl(t *testing.T) {
+	gz, err := os.ReadFile(filepath.Join(goldenDir, "acceptance", RecordingName))
+	require.NoError(t, err)
+	raw, err := gunzip(gz)
+	require.NoError(t, err)
+	for model, want := range map[string]bool{"model-01": true, "model-03": false} {
+		st, err := StateAt(context.Background(), raw, Options{}, StateQuery{ModelID: model})
+		require.NoError(t, err)
+		assert.Equal(t, want, st.FlowControlSeries, model)
+	}
 }
 
 // The transfer is the mean over the rows that read one, and an unread row is
