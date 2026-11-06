@@ -267,7 +267,7 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 		// such reading, where that line's bound no longer holds.
 		logger.V(logging.DEFAULT).Info("itl-fit", "variant", variantName, "tier", "pinned-B",
 			"a", r.Model.A, "b", r.Model.B, "held", r.Held, "baselineLearned", r.BaselineStored,
-			"slopeHeld", r.SlopeHeld, "slopeAge", r.SlopeAge(now), "pinnedAtBPrior", r.PinnedAtBPrior,
+			"slopeHeld", r.SlopeHeld, "tierHeld", r.TierHeld, "slopeAge", r.SlopeAge(now), "pinnedAtBPrior", r.PinnedAtBPrior,
 			"priorBeyondReadings", r.PriorBeyondReadings)
 	case r.Declined:
 		logger.V(logging.DEFAULT).Info("itl-fit-declined", "variant", variantName, "held", r.Held)

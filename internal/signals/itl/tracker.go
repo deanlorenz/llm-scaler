@@ -54,6 +54,9 @@ type Tracker struct {
 	// line (Admission.AboveBandFallback). Empty for a key whose admission
 	// never asked for it.
 	above, aboveSteady map[string]*Window
+	// latches holds, per key, the tier its line stands at under
+	// Admission.TierHysteresis, and since when.
+	latches map[string]tierLatch
 }
 
 // heldSlope is a key's last fitted A, when it was fitted, and the engine
@@ -75,6 +78,7 @@ func NewTracker() *Tracker {
 		restored:    map[string]struct{}{},
 		above:       map[string]*Window{},
 		aboveSteady: map[string]*Window{},
+		latches:     map[string]tierLatch{},
 	}
 }
 
@@ -112,6 +116,10 @@ type Reading struct {
 	SlopeHeld bool
 	// SlopeFittedAt is when the held A was fitted; zero unless SlopeHeld.
 	SlopeFittedAt time.Time
+	// TierHeld is set when the tier dwell refused this cycle's change of tier
+	// (Admission.TierHysteresis): Model is the key's held slope (SlopeHeld),
+	// or the pinned fit where the full fit was refused.
+	TierHeld bool
 	// AboveBandFit is set when Model is the above-band fallback
 	// (Admission.AboveBandFallback): the band gave no line, the key held no
 	// slope it may hold, and A was fitted from the readings above the band.
@@ -156,6 +164,11 @@ type Reading struct {
 	// of Ready, and how far it is from DefaultMinKSpread.
 	SteadySpread float64
 }
+
+// Resting reports a full fit taken between the clear and set values
+// (Admission.TierHysteresis): it prices its own key's line, and teaches nothing.
+// Only a latched key's full fit is short of Ready.
+func (r Reading) Resting() bool { return r.Tier == TierOLS && !r.Ready }
 
 // SlopeAge is how long ago the held A was fitted, zero when none is held:
 // what tells a held line from a fit made this cycle in a log.
@@ -389,19 +402,29 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 		baseline = DefaultBaselineSec
 	}
 	// The fits run outside the lock: they read a copy of the window.
-	c := chooseFit(obs, steadyObs, r.Ready, baseline, s.MinSettledSamples)
+	c := chooseFit(obs, steadyObs, t.fullFitReady(key, r.Ready, steadyObs, adm, now), baseline, s.MinSettledSamples)
+	if adm.TierHysteresis {
+		c, r.TierHeld = t.dwellTier(key, c, tierInputs{obs: obs, steady: steadyObs, baseline: baseline,
+			learned: r.BaselineLearned, set: r.Ready, minSettled: s.MinSettledSamples}, adm, now)
+	}
 	if c.tier == TierOLS {
 		// B is what is remembered as the key's: B is the hardware floor,
 		// A the contention that moves with the workload, kept only for
 		// the pinned fit to hold through a settle. And only a physical,
 		// positive floor -- a negative B pinned into the next fit would
 		// be worse than the constant it replaced.
-		t.mu.Lock()
-		if c.model.B > 0 {
-			t.baselines[key] = c.model.B
+		//
+		// Between the clear and set values (Admission.TierHysteresis) a full
+		// fit prices the line and teaches nothing: that spread earns a slope
+		// good enough to rest on, not a B to pin every later fit to.
+		if r.Ready || !adm.TierHysteresis {
+			t.mu.Lock()
+			if c.model.B > 0 {
+				t.baselines[key] = c.model.B
+			}
+			t.slopes[key] = heldSlope{a: c.model.A, fittedAt: now, args: adm.Args}
+			t.mu.Unlock()
 		}
-		t.slopes[key] = heldSlope{a: c.model.A, fittedAt: now, args: adm.Args}
-		t.mu.Unlock()
 		r.Model, r.Tier = c.model, TierOLS
 		return r
 	}
@@ -701,7 +724,8 @@ type Refitted struct {
 // one-sided as Observe does under that admission while the key has no
 // learned B: the caller passes it for such a key only, with baseline
 // DefaultBaselineSec. Only the one-sided fields are read (OneSidedAt, BPrior,
-// OneSidedTarget, and MinK and MaxK with a target). The zero Admission is
+// OneSidedTarget, and MinK and MaxK with a target), and OLSLatched, which
+// judges the steady readings by the clear values. The zero Admission is
 // the pinned fit alone. Without it a refit of a line Observe priced
 // one-sided pins the default B alone, and prices under the line the
 // controller priced (issue #467).
@@ -709,7 +733,8 @@ func Refit(obs, steady []Observation, baseline float64, minSettled int, oneSided
 	if minSettled <= 0 {
 		minSettled = DefaultMinSettledSamples
 	}
-	c := chooseFit(obs, steady, ready(steady, DefaultMinSamples, DefaultMinKSpread), baseline, minSettled)
+	fullFit := ready(steady, DefaultMinSamples, DefaultMinKSpread) || (oneSided.OLSLatched && clearReady(steady))
+	c := chooseFit(obs, steady, fullFit, baseline, minSettled)
 	out := Refitted{Model: c.model, Tier: c.tier, Hold: c.hold, Read: c.read}
 	if oneSided.OneSidedAboveKSat && c.tier == TierPinnedB {
 		var raised, beyond bool
@@ -980,6 +1005,11 @@ func (t *Tracker) sweep(now time.Time, stale func(key string) bool, keepTraces b
 			delete(t.slopes, key)
 		}
 	}
+	for key := range t.latches {
+		if stale(key) {
+			delete(t.latches, key)
+		}
+	}
 	for key := range t.above {
 		if stale(key) {
 			delete(t.above, key)
@@ -1044,10 +1074,12 @@ func (t *Tracker) forgetKeys(now time.Time, by learn.By, match func(key string) 
 // above the band too, and keeps the key's intercept, its held slope and its
 // replicas' settle traces: the next fit is made from new readings only, and
 // until there are enough the held slope is the line, as on light load. It
-// reports whether the key held any readings.
+// reports whether the key held any readings. The tier latch goes back to the
+// pinned tier: the readings that put it at the full fit are gone.
 func (t *Tracker) ClearWindow(key string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.unlatch(key)
 	had := false
 	for _, m := range []map[string]*Window{t.windows, t.steady, t.above, t.aboveSteady} {
 		if w, ok := m[key]; ok {
@@ -1085,6 +1117,7 @@ func (t *Tracker) ForgetSlope(key string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.slopes, key)
+	t.unlatch(key)
 	t.pruneRestored()
 }
 
@@ -1150,6 +1183,9 @@ func (t *Tracker) ForgetSlopes() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	clear(t.slopes)
+	for key := range t.latches {
+		t.unlatch(key)
+	}
 	t.pruneRestored()
 }
 
@@ -1205,6 +1241,9 @@ type KeyReadings struct {
 	// Above and AboveSteady are the above-band fallback's windows: empty for
 	// a key whose admission never asked for it.
 	Above, AboveSteady []Observation
+	// OLSLatched is set while the key's tier latch stands at the full fit
+	// (Admission.TierHysteresis): a refit judges Steady by the clear values.
+	OLSLatched bool
 }
 
 // Readings is a copy of the readings filed under key; every window is nil
@@ -1216,6 +1255,7 @@ func (t *Tracker) Readings(key string) KeyReadings {
 	return KeyReadings{
 		All: observationsOf(t.windows[key]), Steady: observationsOf(t.steady[key]),
 		Above: observationsOf(t.above[key]), AboveSteady: observationsOf(t.aboveSteady[key]),
+		OLSLatched: t.latches[key].tier == TierOLS,
 	}
 }
 
@@ -1245,5 +1285,8 @@ func (t *Tracker) ForgetBaselines() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	clear(t.baselines)
+	for key := range t.latches {
+		t.unlatch(key)
+	}
 	t.pruneRestored()
 }
