@@ -61,5 +61,6 @@ func RestoreRollingAverage(s RollingAverageSnapshot, maxSize int) (*RollingAvera
 		maxSize:     maxSize,
 		lastUsed:    s.LastUsed,
 		lastWritten: s.LastWritten,
+		restored:    true,
 	}, true
 }

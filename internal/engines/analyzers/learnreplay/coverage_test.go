@@ -83,7 +83,10 @@ var reviewed = map[reflect.Type]buckets{
 		// PrefillEstimate copies a prefill variant's stashed estimate for the
 		// slo analyzer, which the analyzer overwrites every cycle and nothing
 		// restores (prefill_observe.go).
-		readers: []string{"Name", "Horizons", "BorrowTickGap", "PathCounts", "LearnerReports",
+		// TakeLearnerReports hands those reports to the engine's metrics and
+		// keeps none. Nothing the analyzer prices or stores reads them, so
+		// it changes no output, and a replay never takes them.
+		readers: []string{"Name", "Horizons", "BorrowTickGap", "PathCounts", "LearnerReports", "TakeLearnerReports",
 			"ITLReadings", "PricingBatchCap", "ITLOneSided", "PrefillEstimate"},
 		// WithSettleView hands k2 the engine's settle tracker; the replay hands
 		// it its own, observed from the settle events (settle.go).

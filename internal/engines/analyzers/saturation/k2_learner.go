@@ -163,6 +163,7 @@ func (a *SaturationAnalyzer) closeK2Cycle(ctx context.Context, namespace, modelI
 		previous float64
 		first    bool
 		samples  int
+		restored bool
 	}
 	var lines []line
 	a.mu.Lock()
@@ -208,7 +209,7 @@ func (a *SaturationAnalyzer) closeK2Cycle(ctx context.Context, namespace, modelI
 					continue
 				}
 				lines = append(lines, line{variant: variant, key: key, v: v, value: value, previous: last.value,
-					first: !logged, samples: ra.Len()})
+					first: !logged, samples: ra.Len(), restored: ra.Restored()})
 				a.k2Logged[key] = k2Logged{value: value, at: now}
 			}
 		}
@@ -224,7 +225,7 @@ func (a *SaturationAnalyzer) closeK2Cycle(ctx context.Context, namespace, modelI
 			"learner", learn.K2, "modelID", modelID, "namespace", namespace, "variant", l.variant,
 			"role", l.v.role, "key", l.key, "value", int64(l.value), "previousValue", int64(l.previous),
 			"firstWrite", l.first, "source", l.v.source, "samples", l.samples,
-			"pods", pods, "podsOmitted", omitted)
+			"restored", l.restored, "pods", pods, "podsOmitted", omitted)
 	}
 }
 
@@ -272,6 +273,7 @@ func (a *SaturationAnalyzer) sweepLearnerMapsLocked() {
 	// closeK2Cycle never ran) goes with its model too.
 	maps.DeleteFunc(a.k2Cycles, func(m string, _ *k2Cycle) bool { return gone(m) })
 	maps.DeleteFunc(a.k2Forgotten, func(m string, _ map[string][]learn.Forgotten) bool { return gone(m) })
+	maps.DeleteFunc(a.muForgotten, func(m string, _ map[string][]learn.Forgotten) bool { return gone(m) })
 	maps.DeleteFunc(a.learnerStarted, func(m string, _ bool) bool { return gone(m) })
 	maps.DeleteFunc(a.ownSettled, func(m string, _ bool) bool {
 		if !gone(m) {
@@ -338,6 +340,20 @@ func (a *SaturationAnalyzer) LearnerReports() map[string][]learn.Report {
 	return out
 }
 
+// TakeLearnerReports hands over each model's reports, by namespace|model, and
+// keeps none: a model whose next Analyze fails is not published twice, and a
+// forgotten key is reported once. Until the engine takes them the map is
+// overwritten per model each cycle, so it stays bounded with metrics off.
+// Nothing the analyzer prices or stores reads the reports, so taking them
+// changes no decision, and a replay need not take them.
+func (a *SaturationAnalyzer) TakeLearnerReports() map[string][]learn.Report {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := a.learnerReports
+	a.learnerReports = make(map[string][]learn.Report)
+	return out
+}
+
 // forgetLearnerLocked forgets one learner's state for a variant, on an
 // operator's request, and returns how many entries it dropped and whether
 // it has code for the learner: the learners named in learn.Learners are
@@ -349,6 +365,8 @@ func (a *SaturationAnalyzer) forgetLearnerLocked(name, namespace, modelID, varia
 	switch name {
 	case learn.K2:
 		return a.forgetK2Locked(namespace, modelID, variant, by), true
+	case learn.Mu:
+		return a.forgetMuLocked(namespace, modelID, variant, by), true
 	case learn.ITL:
 		return a.forgetITLLocked(namespace, modelID, variant, by), true
 	case learn.Start:
@@ -375,7 +393,6 @@ func (a *SaturationAnalyzer) forgetK2Locked(namespace, modelID, variant string, 
 			keys = append(keys, key)
 		}
 	}
-	sort.Strings(keys)
 	for _, key := range keys {
 		delete(a.computeCapacityHistory, key)
 		n++
@@ -390,8 +407,11 @@ func (a *SaturationAnalyzer) forgetK2Locked(namespace, modelID, variant string, 
 		if strings.HasPrefix(key, prefix) {
 			delete(a.k2Stash, key)
 			n++
+			keys = append(keys, stashedKey(key))
 		}
 	}
+	slices.Sort(keys)
+	keys = slices.Compact(keys)
 	for key := range a.k2Logged {
 		if strings.HasPrefix(key, prefix) {
 			delete(a.k2Logged, key)
@@ -409,18 +429,78 @@ func (a *SaturationAnalyzer) forgetK2Locked(namespace, modelID, variant string, 
 	return n
 }
 
+// stashedKey is the window key of a stash key (stashKey): the key a report
+// named when the window was live.
+func stashedKey(key string) string {
+	base, _, _ := strings.Cut(key, "#")
+	return base
+}
+
+// stashHolds reports whether stash holds a window of key under any arguments.
+func stashHolds[V any](stash map[string]V, key string) bool {
+	for k := range stash {
+		if stashedKey(k) == key {
+			return true
+		}
+	}
+	return false
+}
+
+// noteStashesGoneLocked reports the keys whose last window was a stash the
+// sweep just evicted, as forgotten by eviction. A key that still holds a live
+// window or another stash is not forgotten: it can still price. Callers hold
+// a.mu.
+func (a *SaturationAnalyzer) noteStashesGoneLocked(k2, mu []string) {
+	note := func(key string, file func(ns, model, variant string)) {
+		if name, model, ok := variantOfKey(key); ok {
+			if ns, variant, ok := strings.Cut(name, "/"); ok {
+				file(ns, model, variant)
+			}
+		}
+	}
+	slices.Sort(k2)
+	for _, key := range slices.Compact(k2) {
+		if _, live := a.computeCapacityHistory[key]; live || stashHolds(a.k2Stash, key) {
+			continue
+		}
+		note(key, func(ns, model, variant string) {
+			a.noteForgottenLocked(ns, model, variant, []string{key}, learn.ByEvicted)
+		})
+	}
+	if !a.muForgetReported {
+		return
+	}
+	slices.Sort(mu)
+	for _, key := range slices.Compact(mu) {
+		if _, live := a.saturatedThroughput[key]; live || isPrefillBoundKey(key) || stashHolds(a.throughputStash, key) {
+			continue
+		}
+		note(key, func(ns, model, variant string) {
+			fileForgotten(a.muForgotten, ns+"|"+model, variant, []string{key}, learn.ByEvicted)
+		})
+	}
+}
+
 // noteForgottenLocked files keys of a variant as forgotten, by by, for the
 // variant's next report. Callers hold a.mu.
 func (a *SaturationAnalyzer) noteForgottenLocked(namespace, modelID, variant string, keys []string, by learn.By) {
+	fileForgotten(a.k2Forgotten, namespace+"|"+modelID, variant, keys, by)
+}
+
+// fileForgotten adds keys of a variant to pending, a learner's keys forgotten
+// per namespace|model and variant since the variant's last report. A key
+// already pending stays as it was filed: a report names a key once.
+func fileForgotten(pending map[string]map[string][]learn.Forgotten, model, variant string, keys []string, by learn.By) {
 	if len(keys) == 0 {
 		return
 	}
-	model := namespace + "|" + modelID
-	if a.k2Forgotten[model] == nil {
-		a.k2Forgotten[model] = map[string][]learn.Forgotten{}
+	if pending[model] == nil {
+		pending[model] = map[string][]learn.Forgotten{}
 	}
 	for _, k := range keys {
-		a.k2Forgotten[model][variant] = append(a.k2Forgotten[model][variant], learn.Forgotten{Key: k, By: by})
+		if !slices.Contains(learn.Keys(pending[model][variant]), k) {
+			pending[model][variant] = append(pending[model][variant], learn.Forgotten{Key: k, By: by})
+		}
 	}
 }
 

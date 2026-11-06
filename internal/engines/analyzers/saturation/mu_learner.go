@@ -44,6 +44,17 @@ const (
 	muTimeBase = "rate[1m]"
 )
 
+// SwitchMuForgetReported is the replay switch for mu on learn's list of
+// learners: Forget reaches it by name (forgetMuLocked), what learner-write
+// last logged of its keys goes with them, and each key forgotten or evicted
+// is reported on the variant's next report. Off, its windows go with the
+// variant's other maps (dropVariantLocked), as before: the entries dropped
+// are the same, nothing is reported, and the next learner-write reads the
+// value logged before the forget as its previous one, or stays silent inside
+// the band. On from the constructor; a replay turns it off
+// (SetSwitchesForReplay).
+const SwitchMuForgetReported = "mu-forget-reported"
+
 // Mu's admission outcomes and yields, the reasons its Report counts.
 const (
 	muReasonSampled             learn.Reason = "sampled"
@@ -212,12 +223,13 @@ func (a *SaturationAnalyzer) closeMuCycle(ctx context.Context, namespace, modelI
 	now := a.now()
 	model := namespace + "|" + modelID
 	type line struct {
-		variant string
-		v       *muVariantCycle
-		p       muPriced
-		last    muLogged
-		logged  bool
-		samples int
+		variant  string
+		v        *muVariantCycle
+		p        muPriced
+		last     muLogged
+		logged   bool
+		samples  int
+		restored bool
 	}
 	var lines []line
 	a.mu.Lock()
@@ -227,15 +239,28 @@ func (a *SaturationAnalyzer) closeMuCycle(ctx context.Context, namespace, modelI
 		a.muCycles[model] = c
 	}
 	c.priced = map[string]muPriced{}
-	variants := make([]string, 0, len(c.variants))
+	pending := a.muForgotten[model]
+	delete(a.muForgotten, model)
+	variants := make([]string, 0, len(c.variants)+len(pending))
 	for name := range c.variants {
 		variants = append(variants, name)
+	}
+	for name := range pending {
+		if _, ok := c.variants[name]; !ok {
+			variants = append(variants, name)
+		}
 	}
 	slices.Sort(variants)
 	for _, variant := range variants {
 		v := c.variants[variant]
+		if v == nil {
+			// Forgotten with nothing priced this cycle: filed to say so.
+			a.learnerReports[model] = append(a.learnerReports[model], learn.Report{Learner: learn.Mu,
+				Namespace: namespace, ModelID: modelID, Variant: variant, Forgotten: pending[variant]})
+			continue
+		}
 		r := learn.Report{Learner: learn.Mu, Namespace: namespace, ModelID: modelID, Variant: variant,
-			Role: v.role, Counts: v.counts, Writes: v.writes}
+			Role: v.role, Counts: v.counts, Writes: v.writes, Forgotten: pending[variant]}
 		rate, source := variantServiceRate(variant, caps)
 		if source == "" || !(rate > 0) {
 			a.learnerReports[model] = append(a.learnerReports[model], r)
@@ -247,10 +272,10 @@ func (a *SaturationAnalyzer) closeMuCycle(ctx context.Context, namespace, modelI
 		p := muPriced{key: v.key, source: source, rate: rate}
 		c.priced[variant] = p
 		r.Source = learn.Source(source)
-		samples := 0
+		samples, restored := 0, false
 		if ra, ok := a.saturatedThroughput[v.key]; ok && ra.Len() > 0 {
 			r.PricingKey, r.Samples, r.LastAdmitted = v.key, ra.Len(), ra.LastWritten()
-			samples = ra.Len()
+			samples, restored = ra.Len(), ra.Restored()
 		}
 		a.learnerReports[model] = append(a.learnerReports[model], r)
 		last, logged := a.muLogged[v.key]
@@ -258,7 +283,7 @@ func (a *SaturationAnalyzer) closeMuCycle(ctx context.Context, namespace, modelI
 			now.Sub(last.at) < LearnerHeartbeat {
 			continue
 		}
-		lines = append(lines, line{variant: variant, v: v, p: p, last: last, logged: logged, samples: samples})
+		lines = append(lines, line{variant: variant, v: v, p: p, last: last, logged: logged, samples: samples, restored: restored})
 		a.muLogged[v.key] = muLogged{value: rate, source: source, at: now}
 	}
 	a.mu.Unlock()
@@ -270,8 +295,65 @@ func (a *SaturationAnalyzer) closeMuCycle(ctx context.Context, namespace, modelI
 			"learner", learn.Mu, "modelID", modelID, "namespace", namespace, "variant", l.variant,
 			"role", l.v.role, "key", l.p.key, "value", l.p.rate, "previousValue", l.last.value,
 			"firstWrite", !l.logged, "source", l.p.source, "previousSource", l.last.source,
-			"samples", l.samples, "pods", pods, "podsOmitted", omitted)
+			"samples", l.samples, "restored", l.restored, "pods", pods, "podsOmitted", omitted)
 	}
+}
+
+// muMapsLocked lists what mu keeps per throughput key, the maps its forget
+// reaches. The prefill bound files its own windows in the same maps and is
+// not mu: isMuKey leaves them to the variant's other maps. Callers hold a.mu.
+func (a *SaturationAnalyzer) muMapsLocked() []learnedMap {
+	return []learnedMap{
+		registered("saturatedThroughput", scopeK2Key, a.saturatedThroughput),
+		registered("throughputSampledAt", scopeK2Key, a.throughputSampledAt),
+		registered("throughputLastRead", scopeK2Key, a.throughputLastRead),
+		registered("throughputPodReads", scopeK2Key, a.throughputPodReads),
+		registered("throughputMuChoice", scopeK2Key, a.throughputMuChoice),
+		registered("throughputWindowArgs", scopeK2Key, a.throughputWindowArgs),
+		registered("throughputStash", scopeK2Key, a.throughputStash),
+		registered("throughputHeld", scopeK2Key, a.throughputHeld),
+	}
+}
+
+// forgetMuLocked forgets mu's state for one variant: its windows under every
+// key, what is kept beside them, and what learner-write last logged of them,
+// so the next line is a first write. Each window's key is reported forgotten,
+// by by, on the variant's next report. It returns how many entries it
+// dropped, the logged values not counted, as the variant's forget counted
+// them before mu was on learn's list. With SwitchMuForgetReported off it
+// forgets nothing here. Callers hold a.mu.
+func (a *SaturationAnalyzer) forgetMuLocked(namespace, modelID, variant string, by learn.By) int {
+	if !a.muForgetReported {
+		return 0
+	}
+	prefix := namespace + "|" + variant + "|" + modelID + "|"
+	isMuKey := func(k string) bool { return strings.HasPrefix(k, prefix) && !isPrefillBoundKey(k) }
+	var keys []string
+	for key := range a.saturatedThroughput {
+		if isMuKey(key) {
+			keys = append(keys, key)
+		}
+	}
+	// A window put aside under other arguments is the key's too: the key may
+	// be the one last published, and nothing else would name it.
+	for key := range a.throughputStash {
+		if isMuKey(key) {
+			keys = append(keys, stashedKey(key))
+		}
+	}
+	slices.Sort(keys)
+	keys = slices.Compact(keys)
+	n := 0
+	for _, m := range a.muMapsLocked() {
+		n += m.dropIf(isMuKey)
+	}
+	for key := range a.muLogged {
+		if isMuKey(key) {
+			delete(a.muLogged, key)
+		}
+	}
+	fileForgotten(a.muForgotten, namespace+"|"+modelID, variant, keys, by)
+	return n
 }
 
 // muWritePods is a learner-write line's pods for mu: at most

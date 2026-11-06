@@ -1103,11 +1103,13 @@ func (a *SaturationAnalyzer) k2Chain(
 	var histAvg float64
 	var histLen int
 	var histAge time.Duration
+	var histRestored bool
 	if ra, ok := a.computeCapacityHistory[historyKey]; ok {
 		histAvg = ra.Average()
 		histLen = ra.Len()
 		now := a.now()
 		histAge = ra.WriteAgeAt(now)
+		histRestored = ra.Restored()
 		ra.TouchAt(now)
 	}
 	a.mu.Unlock()
@@ -1125,7 +1127,7 @@ func (a *SaturationAnalyzer) k2Chain(
 			"priority", capacity.K2SrcHistorical.String(), "historyKey", historyKey,
 			"queueLength", queueLen, "queueThreshold", queueThreshold,
 			"k2", int64(histAvg), "historyWindowLen", histLen,
-			"historyAgeSeconds", int64(histAge.Seconds()))
+			"historyAgeSeconds", int64(histAge.Seconds()), "restored", histRestored)
 		return int64(histAvg), capacity.K2SrcHistorical, k2Borrow{}
 	}
 
