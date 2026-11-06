@@ -47,11 +47,11 @@ func TestRewriteText(t *testing.T) {
 		{"prose in a table", docsDir + "a.md", "| WVA | x |", "| The scaling manager | x |"},
 		{"project name", docsDir + "a.md", "use llm-scaling-manager here", "use llm-d-scaling-manager here"},
 
-		{"annotation stays", "config/x.yaml", "wva.llmd.ai/policy-namespace: a", "wva.llmd.ai/policy-namespace: a"},
-		{"policy namespace stays", "deploy/x.sh", "ns=wva-policy", "ns=wva-policy"},
-		{"a longer name is not the policy namespace", "deploy/x.sh", "wva-policy-reader", "scaling-manager-policy-reader"},
-		{"learned state stays", docsDir + "a.md", "ConfigMap `wva-learned-state`", "ConfigMap `wva-learned-state`"},
-		{"its role moves", docsDir + "a.md", "`wva-learned-state-role`", "`scaling-manager-learned-state-role`"},
+		{"a key domain moves", "config/x.yaml", "wva.llmd.ai/policy-namespace: a", "scaling-manager.llmd.ai/policy-namespace: a"},
+		{"so does its escaped form", "deploy/x.sh", `{.metadata.labels.wva\.llmd\.ai/x}`, `{.metadata.labels.scaling-manager\.llmd\.ai/x}`},
+		{"and the other spelling", "deploy/x.sh", "wva.llm-d.ai/pool", "scaling-manager.llm-d.ai/pool"},
+		{"the policy namespace moves", "deploy/x.sh", "ns=wva-policy", "ns=scaling-manager-policy"},
+		{"learned state moves", docsDir + "a.md", "ConfigMap `wva-learned-state`", "ConfigMap `scaling-manager-learned-state`"},
 		{"upstream issue stays", docsDir + "a.md", "https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1139", "https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1139"},
 		{"other repository stays", docsDir + "a.md", "see ig-wva", "see ig-wva"},
 		{"proxy image stays", "config/x.yaml", "ghcr.io/ev-shindin/llm-scaler/warmpool-proxy:v11", "ghcr.io/ev-shindin/llm-scaler/warmpool-proxy:v11"},
@@ -61,23 +61,22 @@ func TestRewriteText(t *testing.T) {
 		{"held link before the move", docsDir + "a.md", "https://github.com/ev-shindin/llm-scaling-manager/blob/main/x.md", "https://github.com/ev-shindin/llm-scaling-manager/blob/main/x.md"},
 		{"held image before the move", "config/x.yaml", "ghcr.io/ev-shindin/llm-scaling-manager:main", "ghcr.io/ev-shindin/llm-scaling-manager:main"},
 		{"a fork's clone URL is held", docsDir + "a.md", "git clone https://github.com/<you>/llm-scaling-manager.git", "git clone https://github.com/<you>/llm-scaling-manager.git"},
-		{"an applied-by mark stays", "deploy/x.sh", "llm-d.ai/applied-by=wva-epp-metrics-auth", "llm-d.ai/applied-by=wva-epp-metrics-auth"},
-		{"so do the bindings named after it", "hack/x.sh", "crb wva-epp-metrics-auth-apps-0000aaaa", "crb wva-epp-metrics-auth-apps-0000aaaa"},
+		{"an applied-by mark moves", "deploy/x.sh", "llm-d.ai/applied-by=wva-epp-metrics-auth", "llm-d.ai/applied-by=scaling-manager-epp-metrics-auth"},
+		{"with the bindings named after it", "hack/x.sh", "crb wva-epp-metrics-auth-apps-0000aaaa", "crb scaling-manager-epp-metrics-auth-apps-0000aaaa"},
+		{"the field manager moves", "deploy/x.sh", "--field-manager=llm-scaling-manager", "--field-manager=llm-d-scaling-manager"},
+		{"a node directory moves", docsDir + "a.md", "/mnt/local/wva-weights", "/mnt/local/scaling-manager-weights"},
 		{"the harness schema stays", "Makefile", `select(has("wva")) | .wva.hpa.minReplicas`, `select(has("wva")) | .wva.hpa.minReplicas`},
 		{"its key stays", "hack/benchmark/scenarios/guides/a.yaml", "    wva:\n      enabled: true\n", "    wva:\n      enabled: true\n"},
 		{"a value in that file still moves", "hack/benchmark/scenarios/guides/a.yaml", "name: wva-a", "name: scaling-manager-a"},
 		{"the harness text stays", "hack/benchmark/patch_harness.sh", `if "WVA was never installed" not in second:`, `if "WVA was never installed" not in second:`},
 		{"a dotted name is not the harness schema", "hack/x.sh", "scaler.wva-ctl.svc", "scaler.scaling-manager-ctl.svc"},
+		{"a recorded document stays", "internal/engines/steadystate/testdata/learned-state/v0.10.0-v1.json", `{"namespace":"wva-system"}`, `{"namespace":"wva-system"}`},
 		{"a namespace called wva is not the harness schema", "hack/x.sh", "wva-external-scaler.wva.svc", "scaling-manager-external-scaler.scaling-manager.svc"},
-		{"a shell default keeps the policy namespace", "deploy/x.sh", "${POLICY_NS:-wva-policy}", "${POLICY_NS:-wva-policy}"},
-		{"so does the unset-only form", "deploy/x.sh", "${POLICY_NS-wva-policy}", "${POLICY_NS-wva-policy}"},
-		{"the assign form", "deploy/x.sh", "${POLICY_NS:=wva-policy}", "${POLICY_NS:=wva-policy}"},
-		{"an HPA metric index keeps the wire name", "hack/x.sh", "s0-wva-desired-replicas", "s0-wva-desired-replicas"},
-		{"a longer index too", "hack/x.sh", "s12-wva-desired-replicas", "s12-wva-desired-replicas"},
-		{"a word before a hyphen still means a longer name", "deploy/x.sh", "tenant-wva-policy", "tenant-scaling-manager-policy"},
-		{"as does a word ending in an s and a digit", "deploy/x.sh", "class0-wva-policy", "class0-scaling-manager-policy"},
+		{"a shell default moves whole", "deploy/x.sh", "${POLICY_NS:-wva-policy}", "${POLICY_NS:-scaling-manager-policy}"},
+		{"so does the unset-only form", "deploy/x.sh", "${POLICY_NS-wva-policy}", "${POLICY_NS-scaling-manager-policy}"},
+		{"the assign form", "deploy/x.sh", "${POLICY_NS:=wva-policy}", "${POLICY_NS:=scaling-manager-policy}"},
+		{"an HPA metric index moves with its metric", "hack/x.sh", "s0-wva-desired-replicas", "s0-scaling-manager-desired-replicas"},
 		{"the harness attribute stays", "hack/benchmark/patch_harness.sh", `"wva_namespace"`, `"wva_namespace"`},
-		{"a marked line stays", "Makefile", "A := WVA_ # rename:keep", "A := WVA_ # rename:keep"},
 		{"a hyphen-free word stays out of residual", docsDir + "a.md", "newValue windowVariants", "newValue windowVariants"},
 	}
 	for _, c := range cases {
@@ -195,7 +194,7 @@ func TestRewriteGo(t *testing.T) {
 		"constants.LLMSMDesiredReplicas, llmdv1alpha1.X, pkg.Y",
 		`short                   = "scaling-manager-a"`,
 		`scalingManagerNamespace = "scaling-manager-system"`,
-		`policyName              = "wva-policy"`,
+		`policyName              = "scaling-manager-policy"`,
 		`metric                  = "llmsm_desired_replicas"`,
 		"raw scaling-manager-b\nLLMSM_NS=1",
 		"func f(req int) string {",
@@ -244,24 +243,6 @@ func TestRewriteGoStopsWhenVerifyRefuses(t *testing.T) {
 	e.verify = func(string, []byte, []byte) error { return errors.New("refused") }
 	if _, err := e.RewriteGo("internal/a/a.go", ClassGo, []byte(goFixture)); err == nil {
 		t.Fatal("a rewrite verify refused went through")
-	}
-}
-
-func TestKeepWholeFileStillTakesTheModule(t *testing.T) {
-	const src = "package a\n\nimport \"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/x\"\n\n// wva_ stays.\nconst wvaOld = \"WVA_\"\n\nvar _ = x.Y\n"
-	e := newEngine(t)
-	out, err := e.RewriteGo("internal/config/legacy_env.go", ClassGo, []byte(src))
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(out)
-	if !strings.Contains(s, DefaultTargets.Module+"/internal/x") {
-		t.Errorf("the module path stayed: %s", s)
-	}
-	for _, want := range []string{"// wva_ stays.", `const wvaOld = "WVA_"`} {
-		if !strings.Contains(s, want) {
-			t.Errorf("lost %q: %s", want, s)
-		}
 	}
 }
 
@@ -424,62 +405,5 @@ func TestMixedLineEndingsInGoAreRefused(t *testing.T) {
 	_, err := e.rewriteFile("a.go", ClassGo, []byte("package a\r\n\n// WVA\n"))
 	if err == nil {
 		t.Fatal("a Go file with mixed endings went through gofmt")
-	}
-}
-
-// TestEnvGuardIsCurrent holds the install guard to the rules: what it refuses is
-// what the env rows rename.
-func TestEnvGuardIsCurrent(t *testing.T) {
-	shell, makefile := EnvGuardLines()
-	common, err := os.ReadFile("../../deploy/lib/common.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	mk, err := os.ReadFile("../../Makefile")
-	if err != nil {
-		t.Fatal(err)
-	}
-	mkText := strings.ReplaceAll(string(mk), "\r\n", "\n")
-	commonText := strings.ReplaceAll(string(common), "\r\n", "\n")
-	for _, line := range shell {
-		if !strings.Contains(commonText, "            "+line+"\n") {
-			t.Errorf("deploy/lib/common.sh is missing the generated line %q", line)
-		}
-	}
-	if !strings.Contains(mkText, makefile+"\n") {
-		t.Errorf("the Makefile is missing the generated line %q", makefile)
-	}
-}
-
-// TestEnvGuardRefusesWhatTheRowsRename checks the three shapes through the rows.
-func TestEnvGuardRefusesWhatTheRowsRename(t *testing.T) {
-	cases := map[string]string{
-		"WVA_NS":            "LLMSM_NS",
-		"DEPLOY_WVA":        "DEPLOY_SCALING_MANAGER",
-		"BENCHMARK_WVA_TAG": "BENCHMARK_LLMSM_TAG",
-		"SFZ_WVA_NAMESPACE": "SFZ_LLMSM_NAMESPACE",
-	}
-	for old, want := range cases {
-		e := newEngine(t)
-		if got := string(e.RewriteText("deploy/x.sh", ClassShell, CtxText, []byte(old), 0)); got != want {
-			t.Errorf("%s became %s, want %s", old, got, want)
-		}
-	}
-}
-
-// TestKeptNamesSurviveEveryBoundary puts each name a keep row protects in every
-// context it was seen in, and fails if any comes out changed.
-func TestKeptNamesSurviveEveryBoundary(t *testing.T) {
-	names := []string{"wva-policy", "wva-learned-state", "wva-utilization-share-history",
-		"wva-saturation-scaling-config", "wva-desired-replicas", "wva-setup-prereqs"}
-	wrappers := []string{"%s", " %s ", "\"%s\"", "'%s'", "`%s`", "=%s", "/%s", "${X:-%s}", "${X-%s}", "${X:=%s}", "${X:+%s}", "{%s}", "(%s)", "%s:", "%s,"}
-	for _, name := range names {
-		for _, w := range wrappers {
-			in := strings.ReplaceAll(w, "%s", name)
-			e := newEngine(t)
-			if got := string(e.RewriteText("deploy/x.sh", ClassShell, CtxText, []byte(in), 0)); got != in {
-				t.Errorf("%q became %q", in, got)
-			}
-		}
 	}
 }

@@ -55,10 +55,6 @@ func (e *Engine) RewriteGo(p, class string, src []byte) ([]byte, error) {
 		return true
 	})
 
-	// A whole-file keep holds its identifiers too. Such a file must not name
-	// a renamed identifier from another file, or it stops compiling.
-	keepIdents := matchAny(keepWholeFiles, p)
-
 	var edits []edit
 	text := func(ctx string, pos token.Pos, raw string) {
 		start := off(pos)
@@ -70,9 +66,6 @@ func (e *Engine) RewriteGo(p, class string, src []byte) ([]byte, error) {
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.Ident:
-			if keepIdents {
-				return true
-			}
 			if mapped, rule, ok := e.MapIdent(x.Name); ok {
 				e.Stats.Ident(rule, x.Name, mapped, class, p)
 				start := off(x.Pos())

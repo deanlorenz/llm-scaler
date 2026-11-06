@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"regexp"
 	"strings"
 )
@@ -25,31 +24,6 @@ var DefaultTargets = Targets{
 
 // oldModules are the module paths the module rows replace.
 var oldModules = []string{"github.com/llm-d/llm-d-workload-variant-autoscaler", "github.com/ev-shindin/llm-scaling-manager"}
-
-// The three shapes an old variable name takes. The env rows of the table and the
-// install guard are both built from these, so the guard refuses exactly what the
-// rename moves.
-const (
-	envOldPrefix = "WVA_"
-	envOldInner  = "_WVA_"
-	envOldSuffix = "_WVA"
-	envNewInner  = "_LLMSM_"
-	envNewSuffix = "_SCALING_MANAGER"
-)
-
-// EnvGuardLines are the generated lines of the install guard: the case arms of
-// legacy_env_refuse in deploy/lib/common.sh and the legacy_env_set line of the
-// Makefile. TestEnvGuardIsCurrent holds both equal to this.
-func EnvGuardLines() (shell []string, makefile string) {
-	shell = []string{
-		fmt.Sprintf("%s*) new=%s${name#%s} ;; # rename:keep", envOldPrefix, envPre, envOldPrefix),
-		fmt.Sprintf("*%s*) new=${name/%s/%s} ;; # rename:keep", envOldInner, envOldInner, envNewInner),
-		fmt.Sprintf("*%s) new=${name%%%s}%s ;; # rename:keep", envOldSuffix, envOldSuffix, envNewSuffix),
-	}
-	makefile = fmt.Sprintf("legacy_env_set := $(filter %s%% %%%s,$(.VARIABLES)) $(foreach v,$(.VARIABLES),$(if $(findstring %s,$(v)),$(v))) # rename:keep",
-		envOldPrefix, envOldSuffix, envOldInner)
-	return shell, makefile
-}
 
 const (
 	newRepoSlug = "llm-d-incubation/llm-d-scaling-manager"
@@ -135,25 +109,10 @@ var scalerTLS = []string{"deploy/lib/scaler_tls.sh"}
 // upstreamGuide is the guide for moving from the other product.
 var upstreamGuide = []string{"docs/guides/from-upstream-wva/**"}
 
-// keepWholeFiles keep every old name except the module path, which has to
-// change for the file to compile. These files implement the fall-back to the
-// old names and test it, so the old names in them are the point.
+// keepWholeFiles keep every old name except the module path. The page about the
+// rename has to name what it renames.
 var keepWholeFiles = []string{
-	"internal/metrics/legacy_names.go",
-	"internal/metrics/legacy_names_test.go",
-	"internal/config/legacy_env.go",
-	"internal/config/legacy_env_test.go",
-	"hack/check-legacy-env.sh",
 	"docs/developer-guide/renaming.md",
-	"pr-body-rname.md",
-}
-
-// standalone matches a name standing alone: not part of a longer kebab-case
-// name. A hyphen before it usually means a longer name, with these exceptions:
-// the shell's default-value forms ${X:-name} and ${X-name}, and s0-name, the
-// index KEDA prefixes to an external metric in an HPA.
-func standalone(name string) string {
-	return `(?:^|[^A-Za-z0-9_-]|:-|\$\{[A-Za-z_][A-Za-z0-9_]*-|\bs[0-9]+-)(?P<m>` + regexp.QuoteMeta(name) + `)(?:$|[^A-Za-z0-9_-])`
 }
 
 // RulesFor builds the table. Order is meaning: a row claims its text before
@@ -173,10 +132,6 @@ func RulesFor(t Targets, metrics []string) []Rule {
 	}
 
 	rules := []Rule{
-		// One line, in a file the tool otherwise rewrites, that must stay.
-		{Name: "keep-marked-line", Class: "legacy-alias", Pattern: `(?m)^.*rename:keep.*$`, Action: Keep,
-			Contexts: []string{CtxText}, Why: "marked by hand: the fall-back needs the old name on this line"},
-
 		// Links and paths into other repositories. They name someone else's
 		// content, so renaming them breaks them.
 		kept("keep-upstream-fork", "external", `github\.com/lionelvillard/[^\s)\]"'`+"`"+`>]*`, "another person's fork"),
@@ -197,18 +152,19 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		// What an older release wrote, kept as it wrote it: a test reads these
 		// to prove the new code still understands them.
 		{Name: "keep-recorded-fixture", Class: "testdata", Pattern: residualPattern, Action: Keep, Contexts: []string{CtxText},
-			Paths: []string{"internal/engines/steadystate/testdata/learned-state/**", "internal/engines/allocation/testdata/main-era-composed-policy.yaml"},
+			Paths: []string{"internal/engines/steadystate/testdata/learned-state/**"},
 			Why:   "written by an older release: the test is that this still loads"},
 
-		// Two tests whose fixture value is load-bearing. The first asserts a sorted
-		// result, and the new name sorts before team-a where the old one sorted
-		// after it. The second must match the writer inside a recorded document.
-		{Name: "keep-sort-order-fixture", Class: "testdata", Pattern: `wva-system`, Action: Keep, Contexts: []string{CtxString},
-			Paths: []string{"cmd/cache_namespaces_test.go"}, Why: "the expected order depends on this string's sort position"},
-		{Name: "keep-sort-order-shell-fixture", Class: "testdata", Pattern: `wva-ctl`, Action: Keep,
-			Paths: []string{"hack/check-watch-namespace-list.sh"}, Why: "the expected list is sorted, and the new name sorts before team-a"},
+		// The test that reads those documents has to name their writer.
 		{Name: "keep-recorded-writer", Class: "testdata", Pattern: `wva-system|wva-controller-[a-z0-9-]*`, Action: Keep, Contexts: []string{CtxString},
-			Paths: []string{"internal/engines/steadystate/learned_state_backcompat_test.go"}, Why: "must equal the writer in the recorded document"},
+			Paths: []string{"internal/engines/steadystate/learned_state_backcompat_test.go"}, Why: "must equal the writer inside the recorded document"},
+
+		// Two fixtures assert a sorted list, and the new name sorts before team-a
+		// where the old one sorted after it. Any name that still sorts last works.
+		{Name: "fixture-sort-order-go", Class: "testdata", Pattern: `wva-system`, Replace: "zz-system", Contexts: []string{CtxString},
+			Paths: []string{"cmd/cache_namespaces_test.go"}},
+		{Name: "fixture-sort-order-shell", Class: "testdata", Pattern: `wva-ctl`, Replace: "zz-ctl",
+			Paths: []string{"hack/check-watch-namespace-list.sh"}},
 
 		// Files that keep their names, so what links to them keeps the name too.
 		{Name: "keep-history-file-names", Class: "file-ref", Pattern: `proposals/wva-[a-z-]+\.md|wva-vs-keda-scaling-study|wva-external-scaler-(?:proposal|alternative)|exp[0-9a-z]+_wva\.png`, Action: Keep,
@@ -268,24 +224,9 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		{Name: "keep-harness-anchor", Class: "external", Pattern: `WVA teardown skipped|WVA was never installed`, Action: Keep,
 			Paths: []string{"hack/benchmark/patch_harness.sh", "hack/check-harness-teardown.sh"}, Why: "text in llm-d-benchmark's source that the patcher anchors on"},
 
-		// Persisted or in-cluster names that stay. Each is a decision in the
-		// report; change Action to Rename here to take the other side.
-		kept("keep-annotation-domain", "persisted", `wva\.llm-?d\.ai`, "label and annotation keys sit on users' objects; a new key silently drops namespace exclusions and policy grants"),
-		kept("keep-policy-namespace", "persisted", standalone("wva-policy"), "a fixed namespace admins created and granted; the name is the security boundary"),
-		kept("keep-learned-state", "persisted", standalone("wva-learned-state"), "holds learned state: a new name starts the fleet from nothing"),
-		kept("keep-share-history", "persisted", standalone("wva-utilization-share-history"), "holds the utilization-share ledger history"),
-		kept("keep-legacy-policy-cm", "persisted", standalone("wva-saturation-scaling-config"), "already a legacy name, read as a fall-back"),
-		kept("keep-applied-by", "persisted", standalone("wva-setup-prereqs"), "a mark on applied objects that undeploy selects on"),
-		kept("keep-epp-auth", "persisted", `wva-epp-metrics-auth`, "the same kind of mark; the EPP role and its per-namespace bindings carry the word and are matched by name"),
-		kept("keep-metric-wire-name", "persisted", standalone("wva-desired-replicas"), "the external metric name in every KEDA-built HPA"),
-		kept("keep-node-dir", "persisted", `/mnt/local/wva`, "a directory on GPU nodes that holds downloaded weights"),
-		kept("keep-field-manager", "persisted", `--field-manager=llm-scaling-manager`, "server-side-apply owner of existing fields"),
-
-		// Sentences that state the old naming as fact. The keep row is what makes
-		// the second run a no-op: the new sentence names the old prefix.
-		{Name: "keep-claim-result", Class: "prose-claim", Pattern: "the old `wva_` names are published", Action: Keep, Why: "this tool's own sentence"},
+		// A sentence that states the old naming as fact.
 		{Name: "claim-keeps-names", Class: "prose-claim", Pattern: "Kubernetes objects, make targets and metrics keep their `wva-` / `wva_` names(?:\\r?\\nfrom upstream, which is the only naming to change in dashboards)?",
-			Replace: "Metrics use the `llmsm_` prefix; the old `wva_` names are published as well for one release"},
+			Replace: "Kubernetes objects, make targets and metrics have their own names here, not upstream's"},
 
 		// An X.509 common name holds 64 characters, and the longer service name
 		// leaves room for a namespace of only 28, which the old default of 34
@@ -302,18 +243,19 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		{Name: "camel-embedded", Class: "word", Pattern: `([a-z])WVA([A-Z]\w*|\b)`, Replace: "${1}ScalingManager$2"},
 
 		// Environment variables.
-		{Name: "env-prefix", Class: "env", Pattern: `\b` + envOldPrefix, Replace: envPre},
-		{Name: "env-after-escape", Class: "env", Pattern: `\\[a-z"](?P<m>` + envOldPrefix + `)`, Replace: envPre},
-		{Name: "env-inner", Class: "env", Pattern: envOldInner, Replace: envNewInner},
-		{Name: "env-suffix", Class: "env", Pattern: envOldSuffix + `\b`, Replace: envNewSuffix},
+		{Name: "env-prefix", Class: "env", Pattern: `\bWVA_`, Replace: envPre},
+		{Name: "env-after-escape", Class: "env", Pattern: `\\[a-z"](?P<m>WVA_)`, Replace: envPre},
+		{Name: "env-inner", Class: "env", Pattern: `_WVA_`, Replace: "_LLMSM_"},
+		{Name: "env-suffix", Class: "env", Pattern: `_WVA\b`, Replace: "_SCALING_MANAGER"},
 
 		// The project's names.
 		{Name: "project-name-title", Class: "project", Pattern: `Workload[- ]Variant[- ]Autoscaler(?: \(WVA\))?`, Replace: newName},
 		{Name: "project-name-bare", Class: "project", Pattern: `llm-scaling-manager`, Replace: newName},
 		pathToo(Rule{Name: "kube-long-name", Class: "k8s-object", Pattern: `workload-variant-autoscaler`, Replace: kubeName}),
+		{Name: "key-domain", Class: "k8s-object", Pattern: `wva(?P<a>\\?\.)llm(?P<b>-?)d(?P<c>\\?\.)ai`, Replace: kubeName + "${a}llm${b}d${c}ai"},
 		{Name: "go-style-word", Class: "word", Pattern: `\bwva([A-Z])`, Replace: "scalingManager$1"},
 		{Name: "pascal-word", Class: "word", Pattern: `\bWva([A-Z])`, Replace: "ScalingManager$1"},
-		kept("keep-test-word", "fixture", `\bwvax\b`, "a fixture word with no meaning"),
+		{Name: "fixture-word", Class: "testdata", Pattern: `\bwvax\b`, Replace: "smx"},
 		{Name: "e2e-word", Class: "word", Pattern: `e2ewva`, Replace: "e2e-scaling-manager"},
 		pathToo(Rule{Name: "underscore-word-file", Class: "file-ref", Pattern: `infra_wva|dump_wva_|tail_wva_|wva_threshold|wva_saturation_v2_config`, Fn: renameFileWord}),
 		{Name: "underscore-prefix", Class: "word", Pattern: `\bwva_`, Replace: metricPre},
