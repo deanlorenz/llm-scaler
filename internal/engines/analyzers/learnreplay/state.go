@@ -70,9 +70,8 @@ type State struct {
 	// question reads it (state_ttft.go).
 	Prefill []PrefillState
 	// FlowControlSeries says the router's flow-control series exist for the
-	// model at the cycle: the scheduler queue, a pool joined to the model, or
-	// its wait histogram. False is no series, which a scrape gap reads as
-	// too.
+	// model at the cycle, by S1's rule (domain.AnalyzerInput.FlowControlSeries).
+	// False is no series, which a scrape gap reads as too.
 	FlowControlSeries bool
 }
 

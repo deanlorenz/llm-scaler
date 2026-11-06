@@ -270,15 +270,11 @@ func TestEstimateAt(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// Each of the router's flow-control series says it is on; a nil router
-// latency, or one with no wait histogram, says nothing.
-func TestFlowControlSeries(t *testing.T) {
-	assert.False(t, flowControlSeries(domain.AnalyzerInput{}))
-	assert.False(t, flowControlSeries(domain.AnalyzerInput{RouterLatency: &domain.RouterLatency{}}))
-	assert.True(t, flowControlSeries(domain.AnalyzerInput{SchedulerQueue: &domain.SchedulerQueueMetrics{}}))
-	assert.True(t, flowControlSeries(domain.AnalyzerInput{FlowControlPools: []domain.FlowControlPool{{}}}))
-	assert.True(t, flowControlSeries(domain.AnalyzerInput{RouterLatency: &domain.RouterLatency{
-		FlowControlWaitBuckets: []domain.LatencyBucket{{UpperBound: 1, Rate: 1}}}}))
+// A run with flow control off still reads a wait histogram for its first
+// minutes, every bucket at rate 0: cycle 5 of the short run is one. The state
+// reads no series there, as S1 does.
+func TestStateAt_AZeroRateWaitHistogramIsNoFlowControl(t *testing.T) {
+	assert.False(t, goldenState(t, ttftOpenShortFixture, 5).FlowControlSeries)
 }
 
 // The transfer is the mean over the rows that read one, and an unread row is

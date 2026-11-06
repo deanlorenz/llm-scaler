@@ -835,15 +835,17 @@ func TestTTFT_FlowControlThroughAnalyze(t *testing.T) {
 	assert.Equal(t, constants.SLOTTFTReasonNoDecodeSide, r.one(t).Reason, "on, with no decode side")
 }
 
-// FlowControlPools is filled only while a learner recording is on. The state
-// reads SchedulerQueue alone, so a run recorded and the same run unrecorded
-// price alike, which is what lets a replay stand for production.
+// FlowControlPools and the wait histogram are filled only while a learner
+// recording is on. The state reads SchedulerQueue alone, so a run recorded and
+// the same run unrecorded price alike, which is what lets a replay stand for
+// production.
 func TestTTFT_TheFlowControlStateDoesNotDependOnARecording(t *testing.T) {
 	for _, queue := range []*domain.SchedulerQueueMetrics{nil, {}} {
 		r := newTTFTRig(ttftEstimate(), prefillRows("pre", 4000))
 		r.in.SchedulerQueue = queue
 		unrecorded := r.one(t)
 		r.in.FlowControlPools = []domain.FlowControlPool{{}}
+		r.in.RouterLatency = &domain.RouterLatency{FlowControlWaitBuckets: []domain.LatencyBucket{{UpperBound: 1, Rate: 1}}}
 		recorded := r.one(t)
 		assert.Equal(t, unrecorded.Reason, recorded.Reason)
 		assert.Equal(t, unrecorded.Flags, recorded.Flags)

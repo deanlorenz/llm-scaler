@@ -1384,7 +1384,8 @@ P2](slo-capacity-planner-ttft.md#as-built-p3-after-p2), 7 each at p90 and p95:
 6. **Flow control is inferred from `SchedulerQueue` alone**, collected every
    cycle. `FlowControlPools` is filled only while a learner recording is on, so
    reading it would have made a replay differ from production
-   (`TestTTFT_TheFlowControlStateDoesNotDependOnARecording`). `AvgKVTransferTime`
+   (`TestTTFT_TheFlowControlStateDoesNotDependOnARecording`). The what-if CLI
+   reads the same rule, `domain.AnalyzerInput.FlowControlSeries`. `AvgKVTransferTime`
    still differs that way: it is recorded and not collected, so `TransferOmitted`
    stands in production until Q1.
 7. **Flags.** `PromptSpreadAbovePeak` and `ImbalanceNotSustained` join the list.

@@ -270,10 +270,7 @@ func (a *Analyzer) priceTTFTVariants(logger logr.Logger, input domain.AnalyzerIn
 	}
 	target := whatif.TTFTTarget{Seconds: cfg.SLO.TTFT.Target.Seconds(), Percentile: float64(cfg.SLO.TTFTPercentile()) / 100}
 	statistic := "p" + strconv.Itoa(cfg.SLO.TTFTPercentile())
-	// From SchedulerQueue alone, which is collected every cycle: FlowControlPools
-	// is filled only while a learner recording is on, and reading it would make
-	// the state depend on that.
-	flow, mismatch := flowControlState(cfg.SLO, input.SchedulerQueue != nil)
+	flow, mismatch := flowControlState(cfg.SLO, input.FlowControlSeries())
 	if mismatch {
 		logger.V(logging.VERBOSE).Info("slo.flowControl contradicts the router's flow-control series; priced as declared",
 			"modelID", input.ModelID, "namespace", input.Namespace, "declared", string(cfg.SLO.FlowControl),

@@ -292,7 +292,7 @@ func (r *replayer) fillTTFT(st *State, in domain.AnalyzerInput, t *ttftSamples) 
 			vs.DecodeTTFT.TransferSeconds = sum / float64(len(xs))
 		}
 	}
-	st.FlowControlSeries = flowControlSeries(in)
+	st.FlowControlSeries = in.FlowControlSeries()
 }
 
 // estimateAt is a variant's estimate read through read, when it was stashed
@@ -317,11 +317,4 @@ func largestTTFT(samples []whatif.DecodeTTFT) whatif.DecodeTTFT {
 		}
 	}
 	return top
-}
-
-// flowControlSeries reports whether any of the router's flow-control series
-// exists for the model at the cycle.
-func flowControlSeries(in domain.AnalyzerInput) bool {
-	return in.SchedulerQueue != nil || len(in.FlowControlPools) > 0 ||
-		(in.RouterLatency != nil && len(in.RouterLatency.FlowControlWaitBuckets) > 0)
 }
