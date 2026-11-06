@@ -238,7 +238,8 @@ name() {
 }
 for bad in '*' '**' '*/*' '?/*' '*.csv' '*/*.csv' '*.gz' '*e*' '*e*/*' '*/*e*' '*/re*.csv' 'ac*/*.csv' '???/*.csv' \
     '*/*csv' '*golden' '*txt' '*/*json' '*/results.csv' '*/lines.csv' 'ttft-*/lines.csv' 'ttft-*/*.csv' \
-    '?tft-open-loop-short.golden' \
+    '?tft-open-loop-short.golden' 'cmd/whatif/testdata/acceptance/results.csv' \
+    'internal/engines/steadystate/testdata/acceptance/results.csv' \
     'acceptance/*' 'acceptance/???' 'acceptance/ab*' '*/*/results.csv' \
     '*.golden' '*.txt' '*.yaml' 'cmd/whatif/testdata/*' 'cmd/whatif/testdata/*.golden' 'cmd/whatif/testdata/*/ttft-open-loop-short.golden' \
     'cmd/*/testdata/ttft-open-loop-short.golden' 'internal/engines/steadystate/testdata/*.txt' \
