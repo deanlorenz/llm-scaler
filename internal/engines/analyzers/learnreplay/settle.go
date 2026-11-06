@@ -63,6 +63,10 @@ import (
 // and the reason.
 const settlePathPrefix = "settle-"
 
+// settlePathRestored counts the restored sightings the tracker installed
+// (settle.Tracker.Restore): not a verdict, since no settle began.
+const settlePathRestored = settlePathPrefix + "restored"
+
 // settlePathNames is the settle tracker's per-path counters, one per reason.
 func settlePathNames() []string {
 	out := make([]string, 0, len(settle.Reasons()))
@@ -198,6 +202,10 @@ func (s *settleReplay) pathCounts() map[string]int64 {
 	out := map[string]int64{}
 	for r, n := range s.tracker.Verdicts() {
 		out[settlePathPrefix+string(r)] = n
+	}
+	// Only when reached: most recordings hold no restored sighting.
+	if n := s.tracker.RestoredCount(); n > 0 {
+		out[settlePathRestored] = n
 	}
 	return out
 }

@@ -131,10 +131,13 @@ func TestExport_EveryRecordedStringIsClassified(t *testing.T) {
 	assert.Empty(t, stale, "table entries no recorded field matches")
 	// Pinned, so a new field is a reviewed change.
 	t.Logf("%d string value sites, %d string-keyed maps", len(values), len(keys))
-	assert.Len(t, values, 133, "string value sites")
+	// 137 since learner PR 5d: settle.RestoreEvent's namespace and model, and
+	// each sighting's Pod and variant.
+	assert.Len(t, values, 137, "string value sites")
 	// 51 since learner PR 5c: LearnedState.StartSamples and StartAdmittedAt,
 	// keyed like StartSeconds, and AnalyzerResult.RoleStartSeeded, by role.
-	assert.Len(t, keys, 51, "string-keyed maps")
+	// 52 since 5d: LearnedState.StartCounted.
+	assert.Len(t, keys, 52, "string-keyed maps")
 }
 
 // canaryRecording is a small recording with one more event, of an owner the

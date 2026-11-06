@@ -87,7 +87,7 @@ func TestReplay_AnEvictCountFailsOnlyFidelity(t *testing.T) {
 
 func TestReplay_SwitchesReachEveryPackage(t *testing.T) {
 	rec := mixedRecording(t)
-	for _, pkg := range []string{PackageSaturation, PackageSLO, PackageThroughput, PackageCapacity} {
+	for _, pkg := range []string{PackageSaturation, PackageSLO, PackageThroughput, PackageCapacity, PackageSettle} {
 		_, err := Replay(context.Background(), rec, Options{Mode: Normal,
 			Switches: map[string]map[string]bool{pkg: {}}})
 		assert.NoError(t, err, "%s: the empty set", pkg)

@@ -60,6 +60,7 @@ var recordedTypes = []reflect.Type{
 	reflect.TypeFor[enginerec.CompositeEvent](),
 
 	reflect.TypeFor[settle.ObserveEvent](),
+	reflect.TypeFor[settle.RestoreEvent](),
 }
 
 // fieldNames is every Go field name of recordedTypes: an object whose keys
@@ -246,6 +247,7 @@ var keyRules = map[string]rule{
 	"LowerBounds": {class: classComposite}, "PriorK2": {class: classComposite},
 	"StartSeconds": {class: classComposite}, "Throughput": {class: classComposite},
 	"StartSamples": {class: classComposite}, "StartAdmittedAt": {class: classComposite},
+	"StartCounted":   {class: classComposite},
 	"ThroughputArgs": {class: classComposite}, "ThroughputStash": {class: classComposite},
 	"VariantSeenAt": {class: classComposite}, "Reports": {class: classComposite},
 

@@ -218,6 +218,16 @@ type SaturationAnalyzer struct {
 	// without this the estimate would converge on whatever the longest-lived
 	// replica measured and the histogram would count cycles rather than starts.
 	startSeenPods map[string]time.Time
+	// startCountedReady is each Pod in startSeenPods's latest Ready time, and
+	// startCountedRestored each Ready time a snapshot held for a Pod no row
+	// of this process has claimed yet (start_est.go,
+	// SwitchStartCountedPodsRestored). Keyed like startSeenPods, and pruned
+	// with it, so a Pod that left is not remembered.
+	startCountedReady    map[string]time.Time
+	startCountedRestored map[string]time.Time
+	// startCountsRestored is SwitchStartCountedPodsRestored: on from the
+	// constructor; a replay turns it off (SetSwitchesForReplay).
+	startCountsRestored bool
 	// startOutliers counts consecutive start-time samples rejected as
 	// implausible for a variant, so a genuine change of hardware is eventually
 	// admitted rather than rejected forever against a stale estimate.
@@ -612,6 +622,9 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		itlLines:               make(map[string]learnedLine),
 		startSeconds:           make(map[string]float64),
 		startSeenPods:          make(map[string]time.Time),
+		startCountedReady:      make(map[string]time.Time),
+		startCountedRestored:   make(map[string]time.Time),
+		startCountsRestored:    true,
 		startOutliers:          make(map[string]int),
 		startOutlierPods:       make(map[string]map[string]startRunPod),
 		startConfirmsByPod:     true,

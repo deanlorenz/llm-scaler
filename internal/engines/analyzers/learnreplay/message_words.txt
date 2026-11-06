@@ -472,6 +472,7 @@ after
 again
 against
 age
+ageSeconds
 aged
 ago
 agree
@@ -855,6 +856,7 @@ did
 differ
 differences
 differs
+digest
 dir
 dirCeilingBytes
 direct
@@ -1520,6 +1522,7 @@ match
 matches
 matrix
 max
+maxAgeSeconds
 maxBytes
 maxHeadroomReplicas
 maxNumActiveSeqs
@@ -2308,11 +2311,14 @@ set
 sets
 setting
 settle
+settle-first-sight-restored
 settle.Hold
 settle.Observe
+settle.Restore
 settleUntil
 settled
 settledForSeconds
+settle|
 settling
 sfz_flow_control_queue_size
 sglang
@@ -2348,6 +2354,7 @@ siblingRate
 siblingRateNow
 side
 sight
+sightings
 sigmaOK
 signal
 silent
@@ -2433,12 +2440,16 @@ start
 start-above-bound
 start-blends-first-samples
 start-confirms-by-distinct-pod
+start-counted-pods-restored
 start-reads-replica-start-seed
 startAdmittedAt
+startCountedReady
+startCountedRestored
 startCycles
 startEstimateSeconds
 startEstimates
 startForgotten
+startKeys
 startLogged
 startOutlierPods
 startOutliers
@@ -2448,6 +2459,7 @@ startSeconds
 startSeedWarned
 startSeenPods
 startSource
+startcounted|
 started
 starting
 starts
