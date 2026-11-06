@@ -273,6 +273,39 @@ func TestShapeOfReadsTheOutputSpread(t *testing.T) {
 	}
 }
 
+// Rows are weighted by their request rate, as the analyzers weight them: 9
+// requests a second of 100 tokens beside 1 of 1000 serve OL 190 and D 3.02, not
+// a plain mean of 550. With no rate read, rows count alike, and a row with no
+// rate beside rows with one has no say.
+func TestNoteShapesWeightsRowsByRequestRate(t *testing.T) {
+	row := func(pod string, rate, ol, in, hit float64, known bool) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{PodName: pod, VariantName: "d", RequestRate: rate, RequestRateKnown: known,
+			AvgInputTokens: in, PrefixCacheHitRate: hit, AvgOutputTokens: ol,
+			AvgOutputTokensSquared: ol * ol, AvgOutputTokensSquaredKnown: true, RunningRequests: 1}
+	}
+	near := func(what string, got, want float64) {
+		t.Helper()
+		if math.Abs(got-want) > 1e-9*max(1, math.Abs(want)) {
+			t.Errorf("%s %g, want %g", what, got, want)
+		}
+	}
+	shapes := map[string][]shapeSample{}
+	noteShapes(shapes, []domain.ReplicaMetrics{row("a", 9, 100, 1000, 0.5, true), row("b", 1, 1000, 2000, 0, true)}, 1)
+	got := shapeOf(shapes["d"])
+	near("OL", got.OutputTokens, 190)
+	near("IL", got.InputTokens, 1100)
+	near("hit", got.PrefixHitRate, 0.45)
+	near("D", got.OutputDispersion, 109000.0/(190*190))
+
+	none := map[string][]shapeSample{}
+	noteShapes(none, []domain.ReplicaMetrics{row("a", 0, 100, 1000, 0, false), row("b", 0, 1000, 1000, 0, false)}, 1)
+	near("OL with no rate", shapeOf(none["d"]).OutputTokens, 550)
+
+	mixed := map[string][]shapeSample{}
+	noteShapes(mixed, []domain.ReplicaMetrics{row("a", 2, 100, 1000, 0, true), row("b", 0, 1000, 1000, 0, false)}, 1)
+	near("OL beside a row with no rate", shapeOf(mixed["d"]).OutputTokens, 100)
+}
+
 // A cycle's bound is its rows' only when every row read one, so that the mean
 // it is set against is the same rows'. A row with no output length is no row
 // of the shape, reading or not.

@@ -127,8 +127,9 @@ and is then priced as 1: the estimate never moves below the `I + O/2` it had
 before, which in that case is the old over-statement, not a new one. The log
 carries the factor as computed. `derived-mu` logs `D` as `outputDispersion`, `k2-decision`
 likewise, and `zero-replica-capacity-estimate` the factor as
-`modelOutputFactor`. The throughput and slo analyzers still price
-`ILeff + OL/2` (#433).
+`modelOutputFactor`. The slo analyzer prices `D` too, behind
+`slo-kv-per-request-output-dispersion`, with no shape-change hold. The
+throughput analyzer still prices `ILeff + OL/2` (#433).
 
 ### Prefix-cache hits stay resident
 

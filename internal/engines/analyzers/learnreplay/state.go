@@ -317,9 +317,18 @@ func cyclesSpanned(readings []itl.Observation, cycleAt map[time.Time]int) (from,
 // shapeCycles cycles with traffic: a row serving requests, or generating
 // tokens, at the cycle.
 func noteShapes(shapes map[string][]shapeSample, rows []domain.ReplicaMetrics, cycle int) {
-	type acc struct{ n, il, ol, squared, read, hit, req float64 }
+	type acc struct {
+		weight, il, ol, squared, hit, req float64
+		unread                            bool
+	}
 	byVariant := map[string]*acc{}
 	traffic := map[string]bool{}
+	rate := func(rm domain.ReplicaMetrics) float64 {
+		if rm.RequestRateKnown && rm.RequestRate > 0 {
+			return rm.RequestRate
+		}
+		return 0
+	}
 	for _, rm := range rows {
 		a := byVariant[rm.VariantName]
 		if a == nil {
@@ -329,28 +338,35 @@ func noteShapes(shapes map[string][]shapeSample, rows []domain.ReplicaMetrics, c
 		if rm.RunningRequests > 0 || rm.RequestRate > 0 || rm.GenerationTokenRate > 0 {
 			traffic[rm.VariantName] = true
 		}
-		if rm.AvgOutputTokens > 0 {
-			a.n++
-			a.il += rm.AvgInputTokens
-			a.ol += rm.AvgOutputTokens
-			a.hit += rm.PrefixCacheHitRate
-			if rm.AvgOutputTokensSquaredKnown && rm.AvgOutputTokensSquared > 0 {
-				a.squared += rm.AvgOutputTokensSquared
-				a.read++
-			}
+		a.req += rate(rm)
+	}
+	// Rows weighted by their request rate, as the analyzers weight them, and
+	// alike when none read one: a busy row of short requests and a quiet one
+	// of long ones are one mean only by what each served.
+	for _, rm := range rows {
+		a := byVariant[rm.VariantName]
+		w := 1.0
+		if a.req > 0 {
+			w = rate(rm)
 		}
-		if rm.RequestRateKnown && rm.RequestRate > 0 {
-			a.req += rm.RequestRate
+		if !(rm.AvgOutputTokens > 0) || !(w > 0) {
+			continue
 		}
+		a.weight += w
+		a.il += w * rm.AvgInputTokens
+		a.ol += w * rm.AvgOutputTokens
+		a.hit += w * rm.PrefixCacheHitRate
+		a.squared += w * rm.AvgOutputTokensSquared
+		a.unread = a.unread || !rm.AvgOutputTokensSquaredKnown || !(rm.AvgOutputTokensSquared > 0)
 	}
 	for v, a := range byVariant {
-		if !traffic[v] || a.n == 0 {
+		if !traffic[v] || a.weight == 0 {
 			continue
 		}
 		s := shapes[v]
-		sample := shapeSample{cycle: cycle, il: a.il / a.n, ol: a.ol / a.n, hit: a.hit / a.n, req: a.req}
-		if a.read == a.n {
-			sample.squared = a.squared / a.n
+		sample := shapeSample{cycle: cycle, il: a.il / a.weight, ol: a.ol / a.weight, hit: a.hit / a.weight, req: a.req}
+		if !a.unread {
+			sample.squared = a.squared / a.weight
 		}
 		s = append(s, sample)
 		if len(s) > shapeCycles {

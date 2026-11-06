@@ -38,9 +38,9 @@ func ttftAt(t *testing.T, f answerFlags, set ...string) (*pricedFleet, whatif.TT
 	return fleets[0], got.(whatif.TTFT)
 }
 
-// Ca^2 reaches the prefill queue: burstier arrivals wait longer, and 1 is
-// Poisson to the last bit, the flag's stated figure included. It is flagged
-// and named, never silently a Poisson answer.
+// Ca^2 reaches the prefill queue: burstier arrivals never wait less, at the
+// default cv too, and 1 is Poisson to the last bit, the flag's stated figure
+// included. It is flagged and named, never silently a Poisson answer.
 func TestArrivalCV2_ReachesThePrefillQueue(t *testing.T) {
 	_, poisson := ttftAt(t, answerFlags{})
 	_, one := ttftAt(t, answerFlags{arrivalCV2: 1}, "arrival-cv2")
@@ -56,6 +56,44 @@ func TestArrivalCV2_ReachesThePrefillQueue(t *testing.T) {
 	assert.Equal(t, shapeAssumed, pf.in.ArrivalsSource)
 	assert.Contains(t, pf.in.Assumed, "arrivals Ca^2 8 (--arrival-cv2)")
 	assert.NotContains(t, pf.in.Assumed, "Poisson arrivals")
+}
+
+// The fleet that showed a burstier arrival priced better than Poisson at the
+// default cv: 300 ms at p95 read 5.26 r/s at Poisson and 5.53 at Ca^2 1.0001, and
+// p95 at 10 r/s read 396.0 ms and 361.5 ms. Kingman's decay outran Poisson's root.
+func TestArrivalCV2_TheWorkedFleetPricesNoBetterThanPoisson(t *testing.T) {
+	rate := func(flags ...string) float64 {
+		out, code := runCmd(t, slices.Concat(workedTTFT("slo-to-rate", "--ttft", "300ms@p95", "-o", "json"), flags)...)
+		require.Equal(t, 0, code, out)
+		for _, r := range decodeOutput(t, out).Roles {
+			if r.Role == "fleet" {
+				return r.Results.Rate.Answer.Value
+			}
+		}
+		t.Fatal(out)
+		return 0
+	}
+	p95 := func(flags ...string) float64 {
+		out, code := runCmd(t, slices.Concat(workedTTFT("replicas-to-slo", "--ttft-percentile", "95", "--rate", "10", "-o", "json"), flags)...)
+		require.Equal(t, 0, code, out)
+		for _, r := range decodeOutput(t, out).Roles {
+			if r.Role == rolePrefill {
+				return r.Results.TTFT.Answer.Value
+			}
+		}
+		t.Fatal(out)
+		return 0
+	}
+	poissonRate, poissonWait := rate(), p95()
+	near(t, "the Poisson rate", poissonRate, 5.26, 0.005)
+	near(t, "the Poisson p95", poissonWait, 0.3960, 0.00005)
+	prevRate, prevWait := poissonRate, poissonWait
+	for _, ca2 := range []string{"1.0001", "2.5", "3", "4", "8"} {
+		gotRate, gotWait := rate("--arrival-cv2", ca2), p95("--arrival-cv2", ca2)
+		assert.LessOrEqual(t, gotRate, prevRate*(1+1e-6), "Ca^2 %s", ca2)
+		assert.GreaterOrEqual(t, gotWait, prevWait*(1-1e-9), "Ca^2 %s", ca2)
+		prevRate, prevWait = gotRate, gotWait
+	}
 }
 
 // Decode's admission is a birth-death chain with no Ca^2: on a decode line
@@ -119,7 +157,7 @@ func TestPromptCV_TheFlagOverrides(t *testing.T) {
 		assert.Contains(t, one.Flags, whatif.AssumedPromptSpread)
 	})
 	t.Run("a cv above the peak is flagged", func(t *testing.T) {
-		_, wide := ttftAt(t, answerFlags{assumePromptCV: 6}, "assume-prompt-cv")
+		_, wide := ttftAt(t, answerFlags{assumePromptCV: 3}, "assume-prompt-cv")
 		assert.Contains(t, wide.Flags, promptSpreadAbovePeak)
 	})
 }
@@ -130,14 +168,63 @@ func TestPromptCV_TheFlagOverrides(t *testing.T) {
 // the answer was not priced at.
 func TestPromptCV_TheNoteQuotesTheTableAtItsOwnCV(t *testing.T) {
 	assumedAt := func(cv float64) *pricedFleet {
-		pf := &pricedFleet{}
-		pf.fleet.Prefill.PromptCV, pf.fleet.Prefill.PromptCVAssumed = cv, true
+		pf := &pricedFleet{statedCV: true}
+		pf.fleet.Prefill.PromptCV, pf.fleet.Prefill.PromptCVAssumed, pf.in.PromptCV = cv, true, cv
 		return pf
 	}
 	assert.Contains(t, footerNote([]*pricedFleet{assumedAt(whatif.AssumedPromptCV)}), "at the assumed prompt cv 2")
 	got := footerNote([]*pricedFleet{assumedAt(1)})
 	assert.NotContains(t, got, "4.1x")
 	assert.Contains(t, got, "at the sent spread (cv 0.06) it read up to 34%")
+
+	// Both rows were read at Poisson arrivals: a stated Ca^2 quotes neither.
+	bursty := assumedAt(whatif.AssumedPromptCV)
+	bursty.in.ArrivalCV2 = 4
+	note := footerNote([]*pricedFleet{bursty})
+	assert.NotContains(t, note, "4.1x")
+	assert.NotContains(t, note, "34%")
+	assert.Contains(t, note, "no recording has checked it at a stated Ca^2")
+}
+
+// A fleet refused before pricing still says what the flags stated, in its
+// assumed row, its flags and its note: none of it may read as dropped, nor quote
+// the row of the cv the flag replaced. Run 4 refuses V_P with no flag for it.
+func TestInputs_ARefusedFleetKeepsTheStatedInputs(t *testing.T) {
+	args := []string{"replicas-to-slo", "--recording", shortRun, "--assume-prompt-cv", "1", "-o", "json"}
+	out, code := runCmd(t, args...)
+	require.Equal(t, 3, code, out)
+	w := decodeOutput(t, out)
+	assert.NotContains(t, w.Note, "at the assumed prompt cv 2")
+	assert.Contains(t, out, "prompt cv 1 (--assume-prompt-cv)")
+	assert.Contains(t, out, string(whatif.AssumedPromptSpread))
+
+	out, code = runCmd(t, "replicas-to-slo", "--recording", shortRun, "--arrival-cv2", "4", "-o", "json")
+	require.Equal(t, 3, code, out)
+	w = decodeOutput(t, out)
+	assert.Contains(t, w.Note, "no recording has checked it at a stated Ca^2")
+	assert.Contains(t, out, "arrivals Ca^2 4 (--arrival-cv2)")
+	assert.Contains(t, out, string(assumedArrivalCV2))
+}
+
+// A floor refusal keeps what the floor rests on: the stated cv sets I_q, and
+// above the peak a larger cv prices a shorter floor. Ca^2 sets no floor.
+func TestInputs_AFloorRefusalKeepsItsFlags(t *testing.T) {
+	asked := workedTTFT("slo-to-rate", "--ttft", "1ms@p90", "--assume-prompt-cv", "3", "--arrival-cv2", "2", "-o", "json")
+	out, code := runCmd(t, asked...)
+	require.Equal(t, 3, code, out)
+	assert.Contains(t, out, "TargetBelowFloor")
+	var refused *wireRefusal
+	for _, r := range decodeOutput(t, out).Roles {
+		if r.Results.Rate != nil && r.Results.Rate.Refused != nil {
+			refused = r.Results.Rate.Refused
+			break
+		}
+	}
+	require.NotNil(t, refused, out)
+	assert.Contains(t, refused.Flags, string(whatif.AssumedPromptSpread))
+	assert.Contains(t, refused.Flags, string(promptSpreadAbovePeak))
+	assert.Contains(t, refused.Flags, string(whatif.AssumedVP))
+	assert.NotContains(t, refused.Flags, string(assumedArrivalCV2))
 }
 
 // The page's figures for the worked question at the inputs it can now state.
@@ -171,7 +258,7 @@ func TestInputs_UsageErrors(t *testing.T) {
 		{"--arrival-cv2", "NaN", "--arrival-cv2"},
 		{"--arrival-cv2", "Inf", "--arrival-cv2"},
 		{"--assume-prompt-cv", "-0.1", "--assume-prompt-cv"},
-		{"--assume-prompt-cv", "10.5", "from 0 to 10"},
+		{"--assume-prompt-cv", "3.1", "from 0 to 3"},
 		{"--assume-prompt-cv", "NaN", "--assume-prompt-cv"},
 		{"--assume-prompt-cv", "Inf", "--assume-prompt-cv"},
 	} {
@@ -251,7 +338,7 @@ func TestOutputSpread_ReachesTheKVPerRequest(t *testing.T) {
 	require.NoError(t, err)
 	pv := variants[0]
 	near(t, "KVreq", pv.decode.KVPerRequest, pv.shape.ILeff+1.5*400/2, 1e-9)
-	assert.NotContains(t, pv.flags, outputSpreadUnread)
+	assert.NotContains(t, pv.flags, whatif.OutputSpreadUnread)
 	assert.Contains(t, pv.shapeText(), "output spread D 1.500 (measured)")
 	assert.Equal(t, 1.5, inputsOf(&f, pv).Shape.OutputDispersion)
 
@@ -260,7 +347,7 @@ func TestOutputSpread_ReachesTheKVPerRequest(t *testing.T) {
 	require.NoError(t, err)
 	pv = variants[0]
 	near(t, "KVreq", pv.decode.KVPerRequest, pv.shape.ILeff+400.0/2, 1e-9)
-	assert.Contains(t, pv.flags, outputSpreadUnread)
+	assert.Contains(t, pv.flags, whatif.OutputSpreadUnread)
 	assert.NotContains(t, pv.shapeText(), "output spread")
 	assert.Zero(t, inputsOf(&f, pv).Shape.OutputDispersion)
 }
@@ -286,5 +373,15 @@ func TestOutputSpread_FromARecording(t *testing.T) {
 	require.Positive(t, priced, out)
 	text, _ := runCmd(t, "replicas-to-slo", "--recording", outputSpreadRun)
 	assert.Contains(t, text, "output spread D ")
-	assert.NotContains(t, text, string(outputSpreadUnread))
+	assert.NotContains(t, text, string(whatif.OutputSpreadUnread))
+}
+
+// With no reading the limit is said in words, on the decode line's flags and on
+// the assumed row of a fleet priced on the line.
+func TestOutputSpread_NoReadingIsNamedInWords(t *testing.T) {
+	text, code := runCmd(t, "replicas-to-slo", "--recording", olsSweep)
+	require.Equal(t, 0, code, text)
+	assert.Contains(t, text, "OutputSpreadUnread (no output-length histogram: KVreq is ILeff + OL/2, which over-promises by 7-44% on a real spread)")
+	pf, _ := ttftAt(t, answerFlags{})
+	assert.Contains(t, pf.in.Assumed, outputSpreadUnreadWords)
 }

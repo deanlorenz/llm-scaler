@@ -54,11 +54,11 @@ const (
 const (
 	// assumedArrivalCV2 is a Ca^2 --arrival-cv2 supplied.
 	assumedArrivalCV2 whatif.Flag = "AssumedArrivalCV2"
-	// outputSpreadUnread is no output-length histogram: KVreq is ILeff + OL/2,
-	// D taken as 1, which over-promises on a real spread (issue #276). A
-	// decode flag, on any answer read from the line.
-	outputSpreadUnread whatif.Flag = "OutputSpreadUnread"
 )
+
+// outputSpreadUnreadWords is whatif.OutputSpreadUnread in words, on the assumed
+// row and the flags line. The limit is shape.WithOutputDispersion's, at IL = 2 OL.
+const outputSpreadUnreadWords = "no output-length histogram: KVreq is ILeff + OL/2, which over-promises by 7-44% on a real spread"
 
 // The closing note's measured halves. The figures are the frozen P2 table's
 // (TestTTFTFrozen_TheNotesFigures, learnreplay).
@@ -66,6 +66,8 @@ const (
 	ttftNoteOpen     = "TTFT is UNVALIDATED until a fresh frozen run passes, and is not a bound: "
 	ttftNoteAssumed  = "at the assumed prompt cv %s it read 1.1x to 4.1x the router's percentile on the P2 recordings; at the sent spread (cv 0.06) up to 34%% under it."
 	ttftNoteMeasured = "at the sent spread (cv 0.06) it read up to 34% under the router's percentile on the P2 recordings."
+	// ttftNoteArrivals stands for both: the P2 table was read at Poisson arrivals.
+	ttftNoteArrivals = "no recording has checked it at a stated Ca^2."
 )
 
 // ttftQuestion is the TTFT a command was asked for.
@@ -93,8 +95,8 @@ func (f *answerFlags) checkTTFT() error {
 		return usagef("--input-bucket: per-bucket answers are not built (the planner's M1)")
 	case f.set["assume-vp"] && !(f.assumeVP > 0 && finite(f.assumeVP)):
 		return usagef("--assume-vp %g, want a finite throughput above 0, in prompt tokens per second", f.assumeVP)
-	case f.set["assume-prompt-cv"] && !(f.assumePromptCV >= 0 && f.assumePromptCV <= whatif.MaxPromptCV):
-		return usagef("--assume-prompt-cv %g, want a finite cv from 0 to %d", f.assumePromptCV, whatif.MaxPromptCV)
+	case f.set["assume-prompt-cv"] && !(f.assumePromptCV >= 0 && f.assumePromptCV <= whatif.PromptCVStop):
+		return usagef("--assume-prompt-cv %g, want a cv from 0 to %g: past that the rate stops falling as the cv rises", f.assumePromptCV, whatif.PromptCVStop)
 	case f.set["arrival-cv2"] && !(f.arrivalCV2 > 0 && finite(f.arrivalCV2)):
 		return usagef("--arrival-cv2 %g, want a finite value above 0: P3 reads 0 as Poisson, not as evenly spaced arrivals", f.arrivalCV2)
 	case f.set["assume-router-hop"] && f.assumeRouterHop < 0:
@@ -215,6 +217,8 @@ type pricedFleet struct {
 	promptAssumed bool
 	// assumedVP is a V_P --assume-vp supplied.
 	assumedVP bool
+	// statedCV is a cv --assume-prompt-cv supplied, in in.PromptCV.
+	statedCV bool
 	// flags are the fleet's own, beside P3's.
 	flags []whatif.Flag
 	// inputsText is where the fleet's inputs came from, for the human
@@ -305,6 +309,35 @@ func aggregatedRefusal(variant string) *whatif.Unanswerable {
 
 // fleetFor reads one fleet, and every input's source, from the state.
 func (f *answerFlags) fleetFor(st *learnreplay.State, ps *learnreplay.PrefillState, q ttftQuestion, pv *pricedVariant) *pricedFleet {
+	pf := f.readFleet(st, ps, q, pv)
+	if pf.refused != nil {
+		f.nameStatedInputs(pf)
+	}
+	return pf
+}
+
+// nameStatedInputs carries what --assume-prompt-cv and --arrival-cv2 asked onto
+// a refused fleet: nothing was priced at them, but the output must not read as
+// though they were dropped, nor quote a figure at the cv the flag replaced.
+func (f *answerFlags) nameStatedInputs(pf *pricedFleet) {
+	r := *pf.refused
+	r.Flags = slices.Clone(r.Flags)
+	if f.set["assume-prompt-cv"] {
+		pf.statedCV = true
+		pf.in.PromptCV, pf.in.PromptCVSource = f.assumePromptCV, shapeAssumed
+		pf.assume("prompt cv %s (--assume-prompt-cv)", num(f.assumePromptCV))
+		r.Flags = append(r.Flags, whatif.AssumedPromptSpread)
+	}
+	if f.set["arrival-cv2"] {
+		pf.in.ArrivalCV2, pf.in.ArrivalsSource = f.arrivalCV2, shapeAssumed
+		pf.assume("arrivals Ca^2 %s (--arrival-cv2)", num(f.arrivalCV2))
+		r.Flags = append(r.Flags, assumedArrivalCV2)
+	}
+	pf.refused = &r
+}
+
+// readFleet is fleetFor before a refusal names the stated inputs.
+func (f *answerFlags) readFleet(st *learnreplay.State, ps *learnreplay.PrefillState, q ttftQuestion, pv *pricedVariant) *pricedFleet {
 	pf := &pricedFleet{pv: pv, q: q.q, flags: []whatif.Flag{assumedPoisson},
 		in: wireTTFT{Percentile: q.q, TargetSeconds: q.seconds, Assumed: []string{}}}
 	if pv != nil {
@@ -331,6 +364,9 @@ func (f *answerFlags) fleetFor(st *learnreplay.State, ps *learnreplay.PrefillSta
 	}
 	pf.promptAssumed = f.set["assume-input-tokens"]
 	pf.decodeSide()
+	if pf.fleet.Decode != nil && pf.pv.state.Shape.OutputDispersion == 0 {
+		pf.assume("%s", outputSpreadUnreadWords)
+	}
 	pf.flowControl(st)
 	f.arrivals(pf)
 	if f.prefillVariant != "" && len(st.Prefill) > 1 {
@@ -491,7 +527,7 @@ func (f *answerFlags) prefillShape(pf *pricedFleet, ps *learnreplay.PrefillState
 	pf.in.PromptCV, pf.in.PromptCVSource = spread.CV, shapeMeasured
 	switch {
 	case f.set["assume-prompt-cv"]:
-		p.PromptCV, p.PromptCVAssumed = f.assumePromptCV, true
+		p.PromptCV, p.PromptCVAssumed, pf.statedCV = f.assumePromptCV, true, true
 		pf.in.PromptCV, pf.in.PromptCVSource = f.assumePromptCV, shapeAssumed
 		if spread.Assumed {
 			pf.assume("prompt cv %s (--assume-prompt-cv)", num(f.assumePromptCV))
@@ -696,13 +732,20 @@ func (pf *pricedFleet) verdict() string {
 // footerNote is the fleets' closing note. The direction turns on the spread:
 // the frozen table's assumed row was read at whatif.AssumedPromptCV, so a
 // measured cv (the collector's Q1), or one --assume-prompt-cv states at any
-// other figure, has only the sent spread's row to go by.
+// other figure, has only the sent spread's row to go by. Both rows were read at
+// Poisson arrivals, so a stated Ca^2 has neither. A refused fleet read no spread
+// of its own, but what its flags stated still rules out a row.
 func footerNote(fleets []*pricedFleet) string {
 	note := ttftNoteOpen + fmt.Sprintf(ttftNoteAssumed, num(whatif.AssumedPromptCV))
-	if slices.ContainsFunc(fleets, func(pf *pricedFleet) bool {
-		p := pf.fleet.Prefill
-		return pf.refused == nil && (!p.PromptCVAssumed || p.PromptCV != whatif.AssumedPromptCV)
-	}) {
+	switch {
+	case slices.ContainsFunc(fleets, func(pf *pricedFleet) bool { return pf.in.ArrivalCV2 > 0 }):
+		note = ttftNoteOpen + ttftNoteArrivals
+	case slices.ContainsFunc(fleets, func(pf *pricedFleet) bool {
+		if pf.statedCV {
+			return pf.in.PromptCV != whatif.AssumedPromptCV
+		}
+		return pf.refused == nil && !pf.fleet.Prefill.PromptCVAssumed
+	}):
 		note = ttftNoteOpen + ttftNoteMeasured
 	}
 	if slices.ContainsFunc(fleets, func(pf *pricedFleet) bool { return pf.assumedVP }) {
@@ -717,7 +760,18 @@ func (pf *pricedFleet) priced(price func(whatif.TTFTFleet) whatif.Result) whatif
 	if pf.refused != nil {
 		return *pf.refused
 	}
-	return pf.qualify(price(pf.fleet))
+	return pf.floorFlags(pf.qualify(price(pf.fleet)))
+}
+
+// floorFlags adds to a floor refusal what S1's side says of the floor: above the
+// peak, a larger cv prices a shorter one.
+func (pf *pricedFleet) floorFlags(r whatif.Result) whatif.Result {
+	u, ok := r.(whatif.Unanswerable)
+	if !ok || u.Reason != whatif.TargetBelowFloor || !slices.Contains(pf.flags, promptSpreadAbovePeak) {
+		return r
+	}
+	u.Flags = append(slices.Clone(u.Flags), promptSpreadAbovePeak)
+	return u
 }
 
 // qualify adds what the fleet says of an answer: the decode variant's flags

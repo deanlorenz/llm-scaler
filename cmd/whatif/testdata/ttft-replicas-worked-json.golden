@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "question": "replicas-to-slo",
   "source": {
     "recording": "../../internal/engines/analyzers/learnreplay/testdata/goldens/ols-sweep/recording.jsonl.gz",
@@ -173,6 +173,7 @@
           "prompt cv 2 (no computed-prompt histogram)",
           "decode term omitted (no fit, TooFewDecodeMinutes, and no quiet decode row): T_xfer + ITL stands for it",
           "router hop 20 ms (no fit: NoRouterMean); --assume-router-hop supplies one",
+          "no output-length histogram: KVreq is ILeff + OL/2, which over-promises by 7-44% on a real spread",
           "flow control off (no queue series)",
           "Poisson arrivals"
         ]

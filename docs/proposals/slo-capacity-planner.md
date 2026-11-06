@@ -92,7 +92,7 @@ Refusals, flags, the standalone mode and exit codes are in the
 | ITL line | `ITL(k) = A·k + B`, inter-token latency against fill `k`, fitted per variant (`internal/signals/itl`) |
 | Tier | Where a line came from: `ols` (full fit), `pinned-B` (slope fitted, intercept held from the last full fit, or 6 ms if none), `held` (last slope kept), `borrowed` (another variant's line) |
 | Line check | The token rate the line predicts at a replica's fill against its reported `generation_tokens` rate (`itl.GPSErrorPct`, 15%; the analyzers call it the GPS check) |
-| `KVreq` | KV tokens one in-flight request holds on average: `ILeff + OL/2`, `ILeff = IL·(1 − hit)` |
+| `KVreq` | KV tokens one in-flight request holds on average: `ILeff + D·OL/2`, `ILeff = IL·(1 − hit)`, `D` the spread of output lengths, 1 with no reading |
 | `V_P` | A prefill pod's prompt-token throughput while it has work |
 | `a` | The fixed latency one request pays on a prefill pod |
 | Batch cap | Most sequences an engine runs: flags, else the `llm-d.ai/max-num-seqs` annotation, else learned (#422, #429) |
@@ -693,8 +693,9 @@ came later: [TTFT, as built](#ttft-as-built).
 - **Output spread.** `KVreq` is `ILeff + D·OL/2`, as the analyzers price it. `D`
   is read over the same 20 cycles, from the cycles whose every row read the
   histogram's bound on `E[O²]`, and an assumed length keeps it: a spread is a
-  figure of the traffic. With no reading `KVreq` is `ILeff + OL/2`, flagged
-  `OutputSpreadUnread`. A larger `D` only lowers a rate and raises a TPOT
+  figure of the traffic. Rows are weighted by request rate, as the analyzers
+  weight them. With no reading `KVreq` is `ILeff + OL/2`, flagged
+  `OutputSpreadUnread` and named in words. A larger `D` only lowers a rate and raises a TPOT
   (`TestOutputSpread_OnlyAsksForMoreReplicas`). Across a change of shape `D` reads
   high, where saturation holds it at 1: that side asks for more replicas. Measured
   on `throughput-sweep`, `D` 1.304 moves the knee from 31.78 to 30.88 r/s, and the
@@ -810,7 +811,7 @@ whatif replicas-to-slo|slo-to-rate --prometheus URL --namespace NS
 - **The JSON** names the window in `source.window` (`prometheus`, the URL's
   scheme and host alone, `from`, `to`, `stepSeconds` and `roles`), and
   `source.recording` is empty. The field is new and optional, absent in
-  recording mode, so `schemaVersion` stays `1`.
+  recording mode, so it took no new `schemaVersion`.
 
 ### TTFT, as built
 
@@ -826,8 +827,8 @@ TTFT: the decode answers are as they were.
 | `--ttft 200ms@p95` | `slo-to-rate`: the end-to-end target, a mean (`200ms`) or a percentile. Without `--tpot`, only TTFT is asked |
 | `--ttft-percentile 90` | `replicas-to-slo`: the percentile. Default: the policy's `slo.ttft`, else 90. On `slo-to-rate`, beside a plain `--ttft` |
 | `--assume-vp 30000` | `V_P`, prompt tokens per second, in place of the learned one, as every `--assume-*` flag overrides the recording. Neither rescaled nor margined |
-| `--assume-prompt-cv 1` | The prompt's `cv`, 0 to 10, in place of the measured one or the default 2, flagged `AssumedPromptSpread`, with any measured figure beside it (`promptCVRead` in the JSON). At 0 the JSON's `promptCV` is absent and `promptCVSource` says `assumed` |
-| `--arrival-cv2 4` | `Ca²` at the prefill queue, above 0, in place of Poisson's 1, flagged `AssumedArrivalCV2`. 0 is refused: P3 reads it as Poisson. Decode's admission chain has no `Ca²`, so on a decode line it stays Poisson, and `AssumedPoissonArrivals` stays. Assumed, and not validated: the one bursty bucket says nothing of the model at any other `Ca²` ([the staircase](slo-capacity-planner-ttft.md#ground-truth-and-the-staircase)) |
+| `--assume-prompt-cv 1` | The prompt's `cv`, 0 to 3, in place of the measured one or the default 2, flagged `AssumedPromptSpread`, with any measured figure beside it (`promptCVRead` in the JSON). At 0 the JSON's `promptCV` is absent and `promptCVSource` says `assumed` |
+| `--arrival-cv2 4` | `Ca²` at the prefill queue, above 0, in place of Poisson's 1, flagged `AssumedArrivalCV2`. 0 is refused: P3 reads it as Poisson. Decode's admission chain has no `Ca²`, so on a decode line it stays Poisson, and `AssumedPoissonArrivals` stays. The closing note then quotes no P2 row: those were read at Poisson. Assumed, and not validated: the one bursty bucket says nothing of the model at any other `Ca²` ([the staircase](slo-capacity-planner-ttft.md#ground-truth-and-the-staircase)) |
 | `--assume-router-hop 8ms` | The hop between the router and the engines, in place of the learned or default one, flagged `RouterHopAssumed` |
 | `--prefill N` | Prefill pods to price; 0 takes the serving pods at the cycle |
 | `--prefill-variant V` | The prefill variant to price, when the model has several: the CLI prices one fleet, and a usage error says so otherwise. It gets the whole rate, named as assumed |
@@ -928,11 +929,10 @@ state (`TestTTFT_VPOrder`), not on a recording.
 prefill role, with each input and its source; `results.ttft`, with `parts`
 beside the value; `basis.prefillOnlyRate`; and `inputs.rateSource` on the decode
 role. A TTFT rate's `basis.floor` and `basis.kneeRate` are the TTFT's. Every key
-is new and absent with no TTFT asked, so `schemaVersion` stays `1`, as for
+is new and absent with no TTFT asked, so it took no new `schemaVersion`, as for
 `source.window`. `ttft.promptCVRead` and `ttft.arrivalCV2` are absent unless their
-flags ask. `inputs.shape.outputDispersion` is absent with no reading, and is the one
-key a recording can gain with no flag; `kvPerRequest` keeps its meaning, the KV one
-resident request holds, so the version stays.
+flags ask. `inputs.shape.outputDispersion` appears on a recording that reads a
+spread, with no flag asking, so `schemaVersion` is `2`.
 
 **Replay.** `learnreplay.State` gains `Prefill`, `FlowControlSeries` and each
 variant's `DecodeTTFT` (`state_ttft.go`). They are read from the cycles' rows and
@@ -947,7 +947,7 @@ four results only `meanTPOT` is kept here):
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "question": "replicas-to-slo",
   "source": {
     "recording": "../../internal/engines/analyzers/learnreplay/testdata/goldens/ols-sweep/recording.jsonl.gz",
@@ -1034,7 +1034,8 @@ four results only `meanTPOT` is kept here):
             },
             "flags": [
               "LineNearGate",
-              "AssumedShape"
+              "AssumedShape",
+              "OutputSpreadUnread"
             ]
           }
         }
@@ -1069,10 +1070,10 @@ To read a figure, for example the mean TPOT in milliseconds:
 whatif replicas-to-slo --recording run.jsonl.gz -o json | jq '.roles[0].results.meanTPOT.answer.value * 1000'
 ```
 
-Every key path, with its JSON type, for `schemaVersion` 1 (the `cmd/whatif`
+Every key path, with its JSON type, for `schemaVersion` 2 (the `cmd/whatif`
 tests hold the wire types to this list):
 
-<!-- whatif-json-schema-v1: begin -->
+<!-- whatif-json-schema-v2: begin -->
 ```
 bands object
 bands.blockCycles number
@@ -1359,7 +1360,7 @@ source.window.roles string
 source.window.stepSeconds number
 source.window.to string
 ```
-<!-- whatif-json-schema-v1: end -->
+<!-- whatif-json-schema-v2: end -->
 
 ## See also
 

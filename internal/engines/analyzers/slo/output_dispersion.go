@@ -16,6 +16,15 @@ package slo
 // only when every one of them read the bound (readFleet). Unlike there it is
 // not held at 1 across a change of shape: this analyzer tracks none. The
 // histogram then reads high, and the side that errs on is more replicas.
+//
+// With no reading a priced decode line says so: whatif.OutputSpreadUnread on the
+// TTFT answer, on S2's no-act list.
+
+// outputSpreadUnread is a fleet whose KV per request read no spread, with the
+// switch on: off, nothing is priced from one, and nothing is said of it.
+func (a *Analyzer) outputSpreadUnread(fleet fleetReading) bool {
+	return a.kvOutputDispersion && fleet.outputDispersion == 0
+}
 
 // SwitchKVPerRequestOutputDispersion is the replay switch for the spread of
 // output lengths in the KV per request on the slo line (issue #276). On, the

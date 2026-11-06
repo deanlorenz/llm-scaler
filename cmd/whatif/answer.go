@@ -91,7 +91,7 @@ func (f *answerFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.ttft, "ttft", "", "the TTFT target of slo-to-rate, end to end: a mean (200ms) or a percentile (200ms@p95)")
 	fs.StringVar(&f.ttftPercentile, "ttft-percentile", "", "the TTFT percentile, in percent (90); on replicas-to-slo, default the policy's, else 90")
 	fs.Float64Var(&f.assumeVP, "assume-vp", 0, "V_P, a prefill pod's prompt tokens per second, in place of the learned one (flagged)")
-	fs.Float64Var(&f.assumePromptCV, "assume-prompt-cv", 0, "the prompt's coefficient of variation, in place of the measured one or the default 2 (flagged)")
+	fs.Float64Var(&f.assumePromptCV, "assume-prompt-cv", 0, "the prompt's coefficient of variation, 0 to 3, in place of the measured one or the default 2 (flagged)")
 	fs.Float64Var(&f.arrivalCV2, "arrival-cv2", 0, "Ca^2, the arrivals' squared coefficient of variation at the prefill queue, in place of Poisson's 1 (flagged)")
 	fs.DurationVar(&f.assumeRouterHop, "assume-router-hop", 0, "the hop between the router and the engines (8ms), in place of the learned or default one (flagged)")
 	fs.IntVar(&f.prefill, "prefill", 0, "prefill replicas to price; 0 takes the recorded count")
@@ -361,7 +361,7 @@ func (f *answerFlags) decodeVariants(st *learnreplay.State) ([]pricedVariant, er
 			pv.flags = append(pv.flags, whatif.AssumedShape)
 		}
 		if vs.Shape.OutputDispersion == 0 {
-			pv.flags = append(pv.flags, outputSpreadUnread)
+			pv.flags = append(pv.flags, whatif.OutputSpreadUnread)
 		}
 		switch vs.Tier {
 		case whatif.TierBorrowed:

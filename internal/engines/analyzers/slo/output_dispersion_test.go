@@ -3,6 +3,7 @@ package slo
 import (
 	"context"
 	"math"
+	"slices"
 	"testing"
 	"time"
 
@@ -10,6 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // dispersionRate warms an analyzer on one aggregated variant, 1000-token
@@ -81,6 +85,61 @@ func TestKVOutputDispersion_NoReadingIsNoSpread(t *testing.T) {
 		}
 	}
 	assert.InDelta(t, 120/0.044, dispersionRate(t, true, knownButZero), 1e-6)
+}
+
+// S2 has to be able to read that the line priced no spread: a priced decode line
+// with no reading carries the flag, one with a reading does not, and neither
+// does a fleet whose decode side is no line. Off, nothing is claimed of it.
+func TestKVOutputDispersion_NoReadingIsFlagged(t *testing.T) {
+	line := &whatif.Decode{}
+	flagged := func(in ttftInputs) bool {
+		_, flags := ttftFleet(in, 1)
+		return slices.Contains(flags, whatif.OutputSpreadUnread)
+	}
+	assert.True(t, flagged(ttftInputs{decode: line, outputSpreadUnread: true}))
+	assert.False(t, flagged(ttftInputs{decode: line}))
+	assert.False(t, flagged(ttftInputs{outputSpreadUnread: true}))
+
+	unread := func(on bool) bool {
+		a := New(nil, nil)
+		require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchKVPerRequestOutputDispersion: on}))
+		return a.outputSpreadUnread(fleetReading{})
+	}
+	assert.True(t, unread(true))
+	assert.False(t, unread(false))
+	assert.False(t, New(nil, nil).outputSpreadUnread(fleetReading{outputDispersion: 1}), "D 1 is a reading")
+}
+
+// Through Analyze: a decode line priced with no reading says so on the TTFT
+// answer, a reading clears it, and the switch off claims nothing.
+func TestTTFT_OutputSpreadOnALine(t *testing.T) {
+	read := func(on bool, spread func(*domain.ReplicaMetrics)) metrics.SLOTTFTReading {
+		rows := func(i int) []domain.ReplicaMetrics {
+			dec := cycleRows("dec", i)
+			for j := range dec {
+				spread(&dec[j])
+			}
+			return append(prefillRows("pre", 4000), dec...)
+		}
+		r := newTTFTRig(ttftEstimate(), rows(0))
+		r.a.store = capacity.NewStore()
+		r.a.store.Update("ns", "m", "dec", capacity.Record{EngineParams: &capacity.EngineParams{MaxNumSeqs: 64}}, ttftNow)
+		r.in.VariantStates = append(r.in.VariantStates, decState)
+		require.NoError(t, r.a.SetSwitchesForReplay(map[string]bool{SwitchKVPerRequestOutputDispersion: on}))
+		var got metrics.SLOTTFTReading
+		for i := range 13 {
+			r.now = r.now.Add(time.Minute)
+			r.in.ReplicaMetrics = rows(i)
+			got = r.one(t)
+		}
+		require.False(t, math.IsNaN(got.Predicted), got.Reason)
+		return got
+	}
+	unread := func(*domain.ReplicaMetrics) {}
+	flag := string(whatif.OutputSpreadUnread)
+	assert.Contains(t, read(true, unread).Flags, flag)
+	assert.NotContains(t, read(true, wide).Flags, flag)
+	assert.NotContains(t, read(false, unread).Flags, flag)
 }
 
 // The spread is read with the shape's weights: 9 requests a second of 100

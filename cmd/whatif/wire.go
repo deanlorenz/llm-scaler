@@ -18,7 +18,7 @@ import (
 // (TestJSONSchemaIsPinned).
 
 // schemaVersion is the version of the JSON output's schema.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // wireOutput is one command's whole JSON output.
 type wireOutput struct {

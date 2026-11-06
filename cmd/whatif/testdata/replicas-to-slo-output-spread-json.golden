@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "question": "replicas-to-slo",
   "source": {
     "recording": "../../internal/engines/analyzers/learnreplay/testdata/goldens/throughput-sweep/recording.jsonl.gz",
@@ -43,9 +43,9 @@
           "hi": 0.7
         },
         "capacityTokens": 131072,
-        "kvPerRequest": 1392.828092727159,
+        "kvPerRequest": 1392.8280927271592,
         "shape": {
-          "inputTokens": 1000.256493832867,
+          "inputTokens": 1000.2564938328671,
           "inputSource": "measured",
           "outputTokens": 602.0198948155494,
           "outputSource": "measured",
@@ -72,7 +72,7 @@
               "hi": 30.961879631240954
             },
             "basis": {
-              "fill": 0.6800918421519331,
+              "fill": 0.6800918421519332,
               "kneeRate": 30.87802159050532,
               "floor": 0,
               "uncapped": 0,
@@ -95,7 +95,7 @@
               "hi": 26.317597686554812
             },
             "basis": {
-              "fill": 0.5191801082329361,
+              "fill": 0.5191801082329363,
               "kneeRate": 30.87802159050532,
               "floor": 0,
               "uncapped": 0,
@@ -115,10 +115,10 @@
             "unit": "s",
             "band": {
               "lo": 0.003085536890793889,
-              "hi": 0.0031023836889834395
+              "hi": 0.00310238368898344
             },
             "basis": {
-              "fill": 0.5191801082329361,
+              "fill": 0.5191801082329363,
               "kneeRate": 30.87802159050532,
               "floor": 0.002221892534461583,
               "uncapped": 0,
