@@ -102,8 +102,7 @@ func (e *Engine) reason(p, line string, start, end int) string {
 	if classify(p) == ClassTool {
 		return reasonTool
 	}
-	switch hit := line[start:end]; {
-	case strings.EqualFold(hit, "wva") && hit != "wva" && hit != "Wva" && hit != "WVA":
+	if hit := line[start:end]; strings.EqualFold(hit, "wva") && hit != "wva" && hit != "Wva" && hit != "WVA" {
 		return reasonPartial
 	}
 	for i := range e.Rules {

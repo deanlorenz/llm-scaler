@@ -85,6 +85,7 @@ func TestRewriteText(t *testing.T) {
 		{"running takes the article", docsDir + "a.md", "a tenant running WVA", "a tenant running the scaling manager"},
 		{"an alert prefix in a query", docsDir + "a.md", `select(.labels.alertname | startswith("WVA"))`, `select(.labels.alertname | startswith("LLMSM"))`},
 		{"an alert regex", docsDir + "a.md", `alertname=~"WVA.*"`, `alertname=~"LLMSM.*"`},
+		{"a name ending in -a is not an article", "hack/x.sh", "tenant-a WVA_QUOTAS", "tenant-a LLMSM_QUOTAS"},
 		{"a recorded document stays", "internal/engines/steadystate/testdata/learned-state/v0.10.0-v1.json", `{"namespace":"wva-system"}`, `{"namespace":"wva-system"}`},
 		{"a namespace called wva is not the harness schema", "hack/x.sh", "wva-external-scaler.wva.svc", "scaling-manager-external-scaler.scaling-manager.svc"},
 		{"a shell default moves whole", "deploy/x.sh", "${POLICY_NS:-wva-policy}", "${POLICY_NS:-scaling-manager-policy}"},

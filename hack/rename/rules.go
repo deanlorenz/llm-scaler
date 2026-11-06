@@ -230,8 +230,8 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		// article is claimed; the name goes on to its own row. wva- and
 		// workload-variant become scaling-manager, a consonant; wva_ and WVAName
 		// become llmsm_ and LLMSMName, said "el".
-		{Name: "article-before-consonant", Class: "prose", Pattern: `\b(?P<m>[Aa]n) \x60?(?:wva-|workload-variant)`, Fn: articleA},
-		{Name: "article-before-vowel-sound", Class: "prose", Pattern: `\b(?P<m>[Aa]) \x60?(?:wva_|WVA[A-Z_])`, Fn: articleAn},
+		{Name: "article-before-consonant", Class: "prose", Pattern: `(?:^|[\s(*"'])(?P<m>[Aa]n) \x60?(?:wva-|workload-variant)`, Fn: articleA},
+		{Name: "article-before-vowel-sound", Class: "prose", Pattern: `(?:^|[\s(*"'])(?P<m>[Aa]) \x60?(?:wva_|WVA[A-Z_])`, Fn: articleAn},
 
 		// The in-memory struct that was a CRD, in comments, strings and text. The
 		// history note is the one place the name stays: those releases did ship it.
