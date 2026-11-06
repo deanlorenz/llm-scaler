@@ -24,6 +24,19 @@ const (
 	// share of at most 1.33 over its loaded cycles, so it held there. At light
 	// load the raw share is chance: the same run read 3.00 at 0.06 r/s.
 	ImbalanceFloor = 1.5
+	// AssumedDecodeStepSlope is the decode engine's TTFT, in seconds, per
+	// second of ITL with no fit of its own (prefill.NoStepSpread: a flat
+	// fleet). Not a constant of any engine. It stands above every slope the
+	// staircase run's six phases fitted, 6.4 to 8.1 on one small model at
+	// 1k and 8k prompts, because an unknown input takes the value that asks
+	// for more.
+	AssumedDecodeStepSlope = 10.0
+	// AssumedRouterHopSeconds is the hop between the router and the engines
+	// with no fit (prefill.NoRouterMean, prefill.TooFewHopWindows,
+	// prefill.NonPositiveHop). Not a constant of any fleet: it stands above the median the
+	// staircase run's phases read, 4.6 ms at 1k prompts and 12.6 ms at 8k. A
+	// longer prompt may hop further, and the answer is flagged either way.
+	AssumedRouterHopSeconds = 0.02
 	// RoutingBoundShare is the f / N_p at which one pod takes the work and
 	// more pods would mostly sit idle behind the router. Not measured.
 	RoutingBoundShare = 0.8

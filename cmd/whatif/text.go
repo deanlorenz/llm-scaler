@@ -64,6 +64,8 @@ func flagsLine(b *strings.Builder, pv pricedVariant, results ...whatif.Result) {
 			}
 		case whatif.TTFT:
 			from = a.Flags
+		case whatif.Unanswerable:
+			from = a.Flags
 		}
 		for _, f := range from {
 			if !slices.Contains(flags, f) {

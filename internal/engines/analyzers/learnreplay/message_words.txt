@@ -122,7 +122,11 @@ Datastore
 DecodeEngineMeasured
 DecodeOnsetUnchecked
 DecodeSideOmitted
+DecodeStepSlopeAssumed
 DecodeTTFTUnmeasured
+DecodeTermFloored
+DecodeTermOmitted
+DecodeTermPrefixHits
 Deleted
 Deployment
 Discarding
@@ -137,6 +141,7 @@ Every
 ExtrapolatedFill
 FMA
 Failed
+FitNotSettled
 Fix
 FlowControlInferredOff
 FlowControlMismatch
@@ -219,6 +224,7 @@ N_dec
 NaN
 Name
 NarrowPromptClusters
+NegativePromptSlope
 NegativeSlopeFit
 NewEngine
 NewTypeInventoryWithUsage
@@ -234,11 +240,17 @@ NoPrefillCapacity
 NoPrefillReplicas
 NoPromptSpread
 NoPromptVariance
+NoRouterMean
 NoShortPrompts
+NoStepSpread
 NoTPOTHistogram
 NoTraffic
+NonPositiveDecodeBase
+NonPositiveDecodePlane
+NonPositiveHop
 NonPositiveIntercept
 NonPositiveSlope
+NonPositiveStepSlope
 NotTriggerScaleUp
 Nothing
 OLS
@@ -317,6 +329,7 @@ Restored
 Retention
 Retrying
 RollingOut
+RouterHopAssumed
 Running
 S
 SATURATION_CONFIG_MAP_NAME
@@ -364,6 +377,8 @@ The
 This
 TierUnstable
 TokenGapPercentile
+TooFewDecodeMinutes
+TooFewHopWindows
 TooFewImbalanceMinutes
 TooFewLowLoadMinutes
 TooFewPromptClusters
@@ -814,6 +829,7 @@ datastore
 days
 decay
 decided
+decides
 decision
 decisionCount
 decisionPath
@@ -826,10 +842,16 @@ decode
 decode-only
 decode-queue-unknown
 decode-style
+decodeBase
+decodeFromITL
+decodeHeldPrompt
+decodePerStep
+decodePerToken
 decodeSaturatedAt
 decodeSaturation
 decodeTTFT
 decodeTTFTPrompt
+decodeTermRefused
 decodeVariant
 deduced
 deeper
@@ -1197,6 +1219,10 @@ holding
 holds
 hole
 holes
+hopBase
+hopHeldPrompt
+hopPerToken
+hopRefused
 horizon
 horizons
 hot-rank-hold
@@ -2417,6 +2443,7 @@ slo-itl-restart-under-its-name-settles
 slo-itl-waits-after-controller-restart
 slo-model
 slo-transient
+slo-ttft-decode-term
 slo-ttft-measured-spread
 slo-ttft-measured-transfer
 slo-ttft-price
@@ -2568,6 +2595,7 @@ tell
 template
 tenants
 tensor_parallel_size
+term
 terminating
 termination
 tesla
