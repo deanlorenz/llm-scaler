@@ -769,13 +769,16 @@ So a resting line prices at most 3 % under the pinned fit.
 empties, when the key goes past `DefaultSteadyCarry` without a steady reading,
 and on `ClearWindow`, `ForgetSlope`, `ForgetSlopes` and `ForgetBaselines`.
 
-**Noise.** On synthetic rate[1m] noise the tier still changes near the set value,
-far less often than the bare gate: at spread 0.26, a median of 7 to 9 changes in
-4 h against 38 to 44. Those changes are the resting rule leaving for the safe side
-and the spread setting again. Dropping the rule would give one change, and more
-cycles under the truth ([3.5](../proposals/analyzer-learner.md#the-itl-tier-as-built-495)).
-A load step collapses the spread past any clear value, so the dwell does that
-work.
+**Noise.** "At most one reversal per excursion" (analyzer-learner.md 2.6) does not
+hold near the set value, by choice: pricing safety over flip count. On synthetic
+rate[1m] noise the tier changes a median of 7 to 9 times in 4 h at spread 0.26,
+against 38 to 44 with the bare gate. The test bound is 16 on flat paths at spreads
+0.26 to 0.30, 4 at 0.32 and 6 on a two-crossing ramp. Those changes are the resting
+rule leaving for the safe side and the spread setting again. Dropping the rule
+would give one change, and more cycles under the truth
+([3.5](../proposals/analyzer-learner.md#the-itl-tier-as-built-495)). A load step
+collapses the spread past any clear value, so the dwell does that work. The 3 % and
+the 10 min have not been checked on a large fleet.
 
 **While the dwell refuses a change** the log says `tierHeld`: `itl-fit` on the
 saturation line, `slo-variant` (at `-v=3`) on the slo line, and the

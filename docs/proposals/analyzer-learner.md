@@ -1224,17 +1224,45 @@ After it, on the same replays:
 The x1.249 is a key's first full fit, on a staircase, which no dwell delays. The
 mu falls on 222 of 298 moved cycles and rises by at most 3.0 %. Decode demand
 moves x0.933 to x1.120. In whole replicas of supply the decode requirement is
-higher on one cycle and lower on none. The two lowest cycles of decode demand
-are where main's line stepped to a full fit; the latch held that step, and main's
-floor order there is not traced further. Variant `TotalDemand` falls to x0.890
-where main held a shape change and this does not: role demand is up x1.06 to x1.08
-on those cycles, so that move is on the safe side. The cost: 250 of 2274 cycles
-refused a tier change.
+higher on one cycle and lower on none. The cost: 250 of 2274 cycles refused a tier
+change.
 
-**The reversal trade.** 2.6 asks for at most one reversal per excursion. With the
-resting rule this does not hold near the set value. It is the choice made, on
-these numbers. All are synthetic: rate[1m] noise, 40 seeds of 4 h from a cold key
-for reversals, and 20 seeds of a key that entered at spread 0.36 and rests for the
+The two lowest cycles of decode demand (x0.933 and x0.937, throughput-sweep-restart
+22:14:20 and 22:14:35) have the mu **lower** than main's and the demand lower too.
+That is the floor's trust blend, not the line. Main's line stepped to a full fit,
+the mu rose 10.67 to 12.52, and the floor's arrival demand fell 105 381 to 90 123.
+Against the 122 872 resident that is a ratio of 0.73, under `trustFraction` 0.8, so
+trust fell to 0.78 and the demand stopped at 131 574, keeping part of the queue's
+charge of 162 108. With the step held the mu is 10.74 and 11.20, the ratio stays
+over 0.8, trust is 1, and the demand is 123 282 and 122 872. So between
+`lagFraction` and `trustFraction` the floor's demand rises with the mu. Main has
+that today, and this change only moved these two cycles out of the band. Both
+readings are two replicas of supply.
+
+Variant `TotalDemand` falls to x0.890 where main held a shape change and this does
+not. `holdFleetFloor` raises a role to `scaleDown` of its supply, 73 400 here, and
+writes the variants' share. With the role already at 79 557 there is nothing to
+raise, so the variant keeps its raw 66 113. The floor writes no variant figure, so
+the variant reads 0.63 of supply while the role reads 0.76. Role demand is what
+scales, and it is up x1.06 to x1.08 on those cycles.
+
+**`SpareFraction`** is `1 - Utilization` of those variants, up to x1.256 on the same
+cycles. Only a retained pool reads it (`warmpool.chooseAwake`, through
+`decision.PressureFor`), to pick which model is awake. Nothing that sizes a fleet
+or lends a replica reads it. `NeedsScaleUp`, from the same figure, does not change
+on any golden cycle. But more spare can change a retained pool's choice, away from
+the safe side: with `warmPoolSwitchSpareThreshold` between 30 and 38, the model
+reads comfortable, not low on spare, so the pool may not wake it, and in a tie on
+urgency the other model wins. That needs a pool with that threshold during a shape
+change. No golden runs one, so its size is not measured. The gap between the
+variant's figure and the role's is main's too, on any cycle the floor raises a role.
+
+**The reversal trade: 2.6's "at most one reversal per excursion" does not hold near
+the set value.** Decided on review of #498: pricing safety over flip count. The
+measured bound is at most 16 reversals in 4 h on flat paths at spreads 0.26 to
+0.30, 4 at 0.32, and 6 on a two-crossing ramp (`ols-spread-reversals-bounded`).
+All of this noise is synthetic: rate[1m] noise, 40 seeds of 4 h from a cold key for
+reversals, and 20 seeds of a key that entered at spread 0.36 and rests for the
 under-the-truth share (cycles more than 3 % under).
 
 | spread, pods | off: reversals (median, max) | built | no resting rule (first build) |
@@ -1267,7 +1295,8 @@ and 6 on the ramp.
 
 What is assumed: the 3 % comes from the 2.8 % above, and 10 min is twice the
 steady carry. A 5 min dwell measured worse (25 flips and a x0.799 step, on the
-first build). Neither value is proven on a large fleet.
+first build). Neither value has been checked on a large fleet: every recording
+here holds 1 or 2 decode replicas.
 
 ### 3.6 Clocks
 
