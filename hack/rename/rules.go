@@ -156,10 +156,13 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		{Name: "keep-recorded-writer", Class: "testdata", Pattern: `wva-system|wva-controller-[a-z0-9-]*`, Action: Keep, Contexts: []string{CtxString},
 			Paths: []string{"internal/engines/steadystate/learned_state_backcompat_test.go"}, Why: "must equal the writer inside the recorded document"},
 
-		// Two fixtures assert a sorted list, and the new name sorts before team-a
-		// where the old one sorted after it. Any name that still sorts last works.
+		// Three fixtures assert a sorted list, and the new name sorts before team-a
+		// where the old one sorted after it. Two can take a name that still sorts
+		// last; the third checks the real namespace, so its expected order moves.
 		{Name: "fixture-sort-order-go", Class: "testdata", Pattern: `wva-system`, Replace: "zz-system", Contexts: []string{CtxString},
 			Paths: []string{"cmd/cache_namespaces_test.go"}},
+		{Name: "fixture-sort-order-grants", Class: "testdata", Pattern: `"tenant-a","wva-policy"`, Replace: `"scaling-manager-policy","tenant-a"`,
+			Paths: []string{"hack/check-policy-namespace-grants.sh"}},
 		{Name: "fixture-sort-order-shell", Class: "testdata", Pattern: `wva-ctl`, Replace: "zz-ctl",
 			Paths: []string{"hack/check-watch-namespace-list.sh"}},
 

@@ -85,7 +85,7 @@ expressions over Go test fixtures cost this repository a reverted refactor.
   unchanged. It does not prove the table is right, because it recomputes each
   string with the same table. Comments are outside it, and imports are compared
   as a set because gofmt sorts them. Whether a renamed string is still correct is
-  for the tests to say: they found two fixtures whose expected order changed with
+  for the tests to say: they found three fixtures whose expected order changed with
   the name.
 
 Strings in test fixtures take the same rules as production strings, because most
