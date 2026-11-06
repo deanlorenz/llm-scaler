@@ -27,7 +27,7 @@ const engineFixture = "engine"
 // the engine layer landed. The others were recorded before it.
 var engineFixtures = []string{engineFixture, "pd-restart", olsFixture, olsSLOFixture, olsSLORestartFixture,
 	ttftThreePodsFixture, ttftSaturatedFixture, ttftOpenLongFixture, ttftOpenShortFixture,
-	startSeedFixture, startSeedRestartFixture, startSeedRestart2Fixture,
+	startSeedFixture, startSeedRestartFixture, startSeedRestart2Fixture, startRestoredFixture,
 	throughputSweepFixture, throughputSweepRestartFixture}
 
 // Each golden that carries engine events lists every engine output, and no

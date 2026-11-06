@@ -152,6 +152,65 @@ func (a *SaturationAnalyzer) installStartLearnerLocked(key string, s LearnedStat
 	}
 }
 
+// installStartCountedLocked installs, beside the restored start estimate of
+// key, the Ready times the document stored for its counted Pods
+// (SwitchStartCountedPodsRestored). Beside an estimate only: a Pod counted
+// into an estimate that was not installed has to be measured again. A time
+// in the future past the skew is not installed: that Pod is folded as a new
+// one. Callers hold a.mu.
+func (a *SaturationAnalyzer) installStartCountedLocked(key string, s LearnedState, now time.Time) {
+	if !a.startCountsRestored {
+		return
+	}
+	for pod, ready := range s.StartCounted {
+		if base, ok := startCountedKeyOf(pod); !ok || base != key || ready.IsZero() {
+			continue
+		}
+		if ready, inTime := notFuture(ready, now); inTime {
+			a.startCountedRestored[pod] = ready
+		}
+	}
+}
+
+// exportStartCountedLocked adds to s the Ready times of the Pods counted into
+// its estimates, and the restored ones no row has claimed yet, beside an
+// estimate only, so a count never outlives it. Callers hold a.mu.
+func (a *SaturationAnalyzer) exportStartCountedLocked(s *LearnedState) {
+	add := func(pod string, ready time.Time) {
+		base, ok := startCountedKeyOf(pod)
+		if !ok {
+			return
+		}
+		if _, measured := s.StartSeconds[base]; !measured {
+			return
+		}
+		if s.StartCounted == nil {
+			s.StartCounted = map[string]time.Time{}
+		}
+		s.StartCounted[pod] = ready
+	}
+	for pod, ready := range a.startCountedRestored {
+		add(pod, ready)
+	}
+	for pod, ready := range a.startCountedReady {
+		add(pod, ready)
+	}
+}
+
+// copyStartCounted copies into dst the Ready times src stores for the Pods
+// of start key.
+func copyStartCounted(dst *LearnedState, src LearnedState, key string) {
+	for pod, ready := range src.StartCounted {
+		if base, ok := startCountedKeyOf(pod); !ok || base != key {
+			continue
+		}
+		if dst.StartCounted == nil {
+			dst.StartCounted = map[string]time.Time{}
+		}
+		dst.StartCounted[pod] = ready
+	}
+}
+
 // forgetStartLocked forgets the start learner's state for one variant: its
 // estimate, sample count, last admitted stamp, restored mark and what
 // learner-write last logged, under every key. Each estimate's key is

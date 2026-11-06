@@ -407,7 +407,9 @@ row is the group leader's, with the latest Ready time over the leader and its
 Ready workers, so a worker restarted alone under `restartPolicy: None` counts
 too) waits again, a
 node clock behind the controller's does not shorten the wait, and after a
-controller restart every replica waits once. A replica unseen for longer than
+controller restart every replica waits once, unless the snapshot gave the
+tracker its sighting (`settle.Tracker.Restore`, `SwitchFirstSightRestored`) and
+its first row is Ready with the same Ready time. A replica unseen for longer than
 the tracker's absence tolerance (1 min, or 2.5 optimize intervals) is a new
 sighting. An analyzer given no view, as a unit test builds one, observes a
 tracker of its own and takes its first cycle's replicas as already watched.
@@ -825,7 +827,8 @@ out is no event.
 A start the key first read on its own first `Observe` is a controller restart
 or a key made anew (a forget, new engine arguments). With
 `Admission.WaitsAfterRestart` it is a settle that runs from the tracker's
-start, so after a controller restart every replica waits `steadyFor` and a key
+start, so after a controller restart every replica waits `steadyFor` (a
+restored sighting's start is the old one, so it does not) and a key
 made anew does not make long-settled replicas wait. Without it, as before 4a,
 such a replica is settled. With the key's own trace (the move off) it reads as
 "every replica on the key's first cycle waits", a key made anew included; only

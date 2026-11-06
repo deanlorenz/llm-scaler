@@ -25,6 +25,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 )
 
 // The saturation analyzer's learned state survives a controller restart in one
@@ -85,6 +86,12 @@ type learnedStateDoc struct {
 	WrittenAt time.Time               `json:"writtenAt"`
 	Writer    learnedStateWriter      `json:"writer"`
 	State     saturation.LearnedState `json:"state"`
+	// Settle is the settle tracker's sightings, per model
+	// (settle.Sighting): first sight survives a restart, so a replica whose
+	// Ready time has not moved does not wait again. Beside State, not in it:
+	// the engine owns the tracker, not the analyzer. A document without it
+	// has every replica wait, as before.
+	Settle map[string][]settle.Sighting `json:"settle,omitempty"`
 }
 
 // learnedStateWriter names the controller that wrote a document. A restore
@@ -251,11 +258,13 @@ func (e *Engine) restoreLearnedState(ctx context.Context, now time.Time) {
 		return
 	}
 	rep := analyzer.RestoreLearnedState(doc.State)
+	sightings := e.restoreSettle(logger, doc, now)
 	logger.Info("Learned state: snapshot restored",
 		"writtenAt", doc.WrittenAt, "writer", doc.Writer.Identity,
 		"pendingVariants", rep.PendingVariants, "itlLines", rep.ITLLines,
 		"aged", rep.Aged, "unusable", rep.Unusable, "unattributable", rep.Unattributable,
-		"lowerBounds", rep.BorrowClocks, "forgotten", rep.Forgotten, "stashed", rep.Stashed)
+		"lowerBounds", rep.BorrowClocks, "forgotten", rep.Forgotten, "stashed", rep.Stashed,
+		"startKeys", rep.StartKeys, "sightings", sightings)
 }
 
 // rejected says why a document will not be restored, or "".
@@ -307,13 +316,19 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 		// The operator deleted it. Written back from memory, the deletion
 		// would undo nothing.
 		analyzer.ForgetLearnedState()
+		e.settleTracker().DropRestored()
 		st.seen, st.lastDigest = false, ""
 		logger.Info("Learned state: the snapshot was deleted; everything learned is forgotten, as after a restart with no store",
 			"configMap", learnedStateConfigMap)
 		return
 	}
 	state := analyzer.ExportLearnedState()
-	digest := learnedStateDigest(state)
+	sightings := e.settleTracker().Sightings()
+	sightingsDigest, err := settleDigest(sightings)
+	if err != nil {
+		logger.Error(err, "Learned state: could not digest the replica sightings; the snapshot is written as if they changed")
+	}
+	digest := learnedStateDigest(state) + sightingsDigest
 	if digest == st.lastDigest && now.Sub(st.lastWriteDone) < learnedStateRefresh {
 		return
 	}
@@ -326,7 +341,7 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 		}
 	}
 	budget := max(min(learnedStateMaxBytes, learnedStateMaxData-others), 0)
-	raw, dropped, err := encodeLearnedState(state, now, budget)
+	raw, dropped, err := encodeLearnedState(state, sightings, now, budget)
 	if err != nil {
 		e.metricsEmitter.IncLearnedStateSnapshotError(metrics.LearnedStateOpWrite)
 		e.reportLearnedStateErr(logger, metrics.LearnedStateOpWrite, err, "Learned state: the snapshot does not fit its bound beside the other versions' documents; not written")
@@ -478,6 +493,20 @@ func learnedStateDigest(s saturation.LearnedState) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// settleDigest identifies the sightings. Their times are fixed per sighting,
+// so a fleet that does not change does not rewrite the document.
+func settleDigest(sightings map[string][]settle.Sighting) (string, error) {
+	if len(sightings) == 0 {
+		return "", nil
+	}
+	raw, err := json.Marshal(sightings)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // sig3 rounds x to three significant figures, for the digest only.
 func sig3(x float64) float64 {
 	v, err := strconv.ParseFloat(strconv.FormatFloat(x, 'g', 3, 64), 64)
@@ -489,14 +518,16 @@ func sig3(x float64) float64 {
 
 // encodeLearnedState encodes the document, leaving out the least recently used
 // entries until it fits the bound, and reports how many it left out. The
-// caller's state is not modified: the trimming works on a copy of its maps.
-func encodeLearnedState(s saturation.LearnedState, now time.Time, budget int) (string, int, error) {
+// caller's state and sightings are not modified: each try of the trim works
+// on a copy.
+func encodeLearnedState(s saturation.LearnedState, sightings map[string][]settle.Sighting, now time.Time, budget int) (string, int, error) {
 	s = cloneLearnedState(s)
 	doc := learnedStateDoc{
 		Version:   learnedStateVersion,
 		WrittenAt: now,
 		Writer:    learnedStateWriter{Namespace: config.SystemNamespace(), Identity: learnedStateIdentity()},
 		State:     s,
+		Settle:    sightings,
 	}
 	raw, err := json.Marshal(doc)
 	if err != nil {
@@ -509,15 +540,15 @@ func encodeLearnedState(s saturation.LearnedState, now time.Time, budget int) (s
 	// it fit: a binary search over how many, each try on a fresh copy, since
 	// a dropped entry cannot be put back. Dropped in chunks of a tenth, a
 	// document one byte over its bound lost a tenth of what it had learned.
-	orig := doc.State
+	orig, origSettle := doc.State, doc.Settle
 	try := func(n int) ([]byte, error) {
-		doc.State = cloneLearnedState(orig)
-		for _, e := range learnedStateEntries(doc.State)[:n] {
+		doc.State, doc.Settle = cloneLearnedState(orig), cloneSightings(origSettle)
+		for _, e := range documentEntries(&doc)[:n] {
 			e.drop()
 		}
 		return json.Marshal(doc)
 	}
-	total := len(learnedStateEntries(orig))
+	total := len(documentEntries(&doc))
 	if raw, err = try(total); err != nil {
 		return "", 0, err
 	}
@@ -562,6 +593,41 @@ func cloneLearnedState(s saturation.LearnedState) saturation.LearnedState {
 		f.Set(c)
 	}
 	return s
+}
+
+// cloneSightings copies the sightings, each model's list with them, so
+// leaving one out of the copy cannot reach the original.
+func cloneSightings(s map[string][]settle.Sighting) map[string][]settle.Sighting {
+	if len(s) == 0 {
+		return nil
+	}
+	out := make(map[string][]settle.Sighting, len(s))
+	for model, list := range s {
+		out[model] = slices.Clone(list)
+	}
+	return out
+}
+
+// documentEntries lists every entry of the document, least recently used
+// first: the state's, and its sightings, spare, oldest first. A sighting left
+// out costs one replica one wait.
+func documentEntries(doc *learnedStateDoc) []learnedStateEntry {
+	out := learnedStateEntries(doc.State)
+	for model, list := range doc.Settle {
+		for _, s := range list {
+			out = append(out, learnedStateEntry{spare: true, at: s.FirstSeen,
+				key: "settle|" + model + "|" + s.VariantName + "|" + s.PodName, drop: func() {
+					doc.Settle[model] = slices.DeleteFunc(doc.Settle[model], func(o settle.Sighting) bool {
+						return o.PodName == s.PodName && o.VariantName == s.VariantName
+					})
+					if len(doc.Settle[model]) == 0 {
+						delete(doc.Settle, model)
+					}
+				}})
+		}
+	}
+	sortLearnedStateEntries(out)
+	return out
 }
 
 // learnedStateEntry is one entry of the state, with the clock that says how
@@ -610,8 +676,14 @@ func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 			delete(s.StartSeconds, k)
 			delete(s.StartSamples, k)
 			delete(s.StartAdmittedAt, k)
+			maps.DeleteFunc(s.StartCounted, func(pod string, _ time.Time) bool { return strings.HasPrefix(pod, k+"|") })
 			maps.DeleteFunc(s.ITLBaselineStash, func(sk string, _ float64) bool { return strings.HasPrefix(sk, k+"#") })
 		}})
+	}
+	// A counted Pod's Ready time goes first: leaving one out costs one Pod
+	// being folded once more after a restart.
+	for k, ready := range s.StartCounted {
+		out = append(out, learnedStateEntry{spare: true, at: ready, key: "startcounted|" + k, drop: func() { delete(s.StartCounted, k) }})
 	}
 	// A put-aside ITL baseline goes with its variant's liveness; one whose
 	// variant left none goes first, as a spent bound does.
@@ -710,6 +782,13 @@ func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 		}
 		out = append(out, learnedStateEntry{at: p.InstalledAt, key: "priork2|" + k, drop: func() { delete(s.PriorK2, k) }})
 	}
+	sortLearnedStateEntries(out)
+	return out
+}
+
+// sortLearnedStateEntries orders entries as they are left out: the spare
+// ones first, each kind by its clock.
+func sortLearnedStateEntries(out []learnedStateEntry) {
 	slices.SortFunc(out, func(a, b learnedStateEntry) int {
 		if a.spare != b.spare {
 			if a.spare {
@@ -719,7 +798,6 @@ func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 		}
 		return cmp.Or(cmp.Compare(a.at.UnixNano(), b.at.UnixNano()), cmp.Compare(a.key, b.key))
 	})
-	return out
 }
 
 // spentBound reports an armed lower bound whose hold and relaxation have run

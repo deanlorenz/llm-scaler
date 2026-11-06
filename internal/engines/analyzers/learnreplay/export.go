@@ -485,8 +485,9 @@ const (
 // saturation.itlLineKeyForRole, told apart from a variant key by its last
 // part: a role, where a variant key has a GPU count), the k2
 // window key (namespace|variant|model|accelerator|GPUs|role|output
-// bucket|qN, saturation's historyKey) and the throughput window key (the
-// same with the input bucket before the output one, throughputKey), and a
+// bucket|qN, saturation's historyKey), the throughput window key (the
+// same with the input bucket before the output one, throughputKey), a counted
+// Pod's key (the variant key|namespace|pod, saturation.startPodKey), and a
 // key of names alone otherwise (namespace/variant).
 //
 // Without the window keys' layouts every part of one was a name: the GPU
@@ -498,6 +499,8 @@ func compositeLayout(parts int) []keyPart {
 		return []keyPart{partName, partName, partName, partAccelerator, partCount}
 	case 4:
 		return []keyPart{partName, partAccelerator, partCount, partFingerprint}
+	case 7:
+		return []keyPart{partName, partName, partName, partAccelerator, partCount, partName, partName}
 	case 8:
 		return []keyPart{partName, partName, partName, partAccelerator, partCount, partShape, partShape, partShape}
 	case 9:

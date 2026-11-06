@@ -417,7 +417,8 @@ the router is not using, and new replicas are routed to no more than the idle
 ones are. A scale-up in progress does not raise it: a replica is not counted
 idle until 2 minutes after it became Ready and the controller first saw it
 Ready. A warm-pool Pod lent to the role counts from when it was lent. After a
-controller restart every replica waits those 2 minutes again. The usual cause is the role's scheduling profile, where
+controller restart every replica waits those 2 minutes again, unless the
+learned-state snapshot is on and its Ready time has not moved. The usual cause is the role's scheduling profile, where
 the largest weight wins ties it should not. With `prefix-cache-scorer: 3`
 against `queue-scorer: 2`, the replica that saw a prefix gets the request
 however busy it is. One measured prefill fleet held 439 queued requests on one
@@ -1102,8 +1103,13 @@ failed reads and writes, and the log says why (logger `learned-state`):
 - `Learned state: no snapshot to restore` -- the first start with the store,
   or after a flush. Expected once.
 - `Learned state: snapshot restored` -- read back; `pendingVariants` wait for
-  their first cycle, and `aged`, `unusable` and `unattributable` count entries
-  not restored. Then, per variant on its first cycle, one of:
+  their first cycle, `aged`, `unusable` and `unattributable` count entries
+  not restored, `startKeys` counts the start estimates read back, and
+  `sightings` the replicas that may skip their wait if their Ready time has
+  not moved. `Learned state: the snapshot is too old to keep its replica
+  sightings` means the controller was away longer than 2 minutes from the last
+  write, or a crash found an older document: every replica waits, as expected.
+  Then, per variant on its first cycle, one of:
   - `learned state restored`;
   - `learned state restored without the ITL baseline: the engine image
     changed, the arguments did not` -- a new release rolled out while the

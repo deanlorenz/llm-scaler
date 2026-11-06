@@ -37,11 +37,11 @@ func TestTheSizeBoundLeavesOutTheFewestEntries(t *testing.T) {
 			Values: []float64{4000}, LastUsed: at, LastWritten: at,
 		}
 	}
-	full, dropped, err := encodeLearnedState(s, now, 1<<30)
+	full, dropped, err := encodeLearnedState(s, nil, now, 1<<30)
 	require.NoError(t, err)
 	require.Zero(t, dropped)
 
-	raw, dropped, err := encodeLearnedState(s, now, len(full)-1)
+	raw, dropped, err := encodeLearnedState(s, nil, now, len(full)-1)
 	require.NoError(t, err)
 	assert.Equal(t, 1, dropped, "one entry over the bound")
 	var doc learnedStateDoc

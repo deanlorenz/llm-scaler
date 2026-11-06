@@ -12,8 +12,10 @@ import (
 // The -o json wire format. The library carries no json tags
 // (internal/signals/whatif); these types are the one place the planner's
 // answers are given names on the wire, and schemaVersion says which names.
-// A change to any field here is a change of schema: bump schemaVersion and
-// the pinned key list in testdata/schema-v<N>.txt (TestJSONSchemaIsPinned).
+// Removing, renaming or retyping a key, or changing its meaning, bumps
+// schemaVersion; a key absent unless a new flag asks for it does not. Either
+// way the pinned key list in testdata/schema-v<N>.txt changes
+// (TestJSONSchemaIsPinned).
 
 // schemaVersion is the version of the JSON output's schema.
 const schemaVersion = 1
@@ -78,12 +80,61 @@ type wireBands struct {
 	HiPercent   float64 `json:"hiPercent"`
 }
 
-// wireRole is one role's answer: for decode, one variant's.
+// wireRole is one role's answer: for decode, one variant's. With a TTFT
+// asked, role prefill is the prefill variant, with its inputs in TTFT, and
+// role fleet (question 1) the fleet's rate, named by its decode variant.
 type wireRole struct {
 	Role    string      `json:"role"`
 	Variant string      `json:"variant"`
 	Inputs  *wireInputs `json:"inputs,omitempty"`
+	TTFT    *wireTTFT   `json:"ttft,omitempty"`
 	Results wireResults `json:"results"`
+}
+
+// wireTTFT is what a TTFT was priced from: each input and where it came
+// from. Assumed names every input the recording did not give, in the words
+// the text prints. An input not reached before a refusal is absent.
+type wireTTFT struct {
+	DecodeVariant string `json:"decodeVariant,omitempty"`
+	// Percentile is q in (0, 1), absent for the mean; TargetSeconds is
+	// question 1's target. Rate is the rate question 2 was priced at, and
+	// RateSource what set it.
+	Percentile    float64  `json:"percentile,omitempty"`
+	TargetSeconds float64  `json:"targetSeconds,omitempty"`
+	Rate          *float64 `json:"rate,omitempty"`
+	RateSource    string   `json:"rateSource,omitempty"`
+	Replicas      int      `json:"replicas,omitempty"`
+	ReplicasFrom  string   `json:"replicasFrom,omitempty"`
+	// VP is V_P, tokens/s, as learned or assumed (VPSource); VPOrigin is P1's
+	// source, and VPPromptTokens the prompt it was read at. VPLearned is P1's
+	// figure an --assume-vp stands in place of.
+	VP                  float64  `json:"vp,omitempty"`
+	VPSource            string   `json:"vpSource,omitempty"`
+	VPOrigin            string   `json:"vpOrigin,omitempty"`
+	VPPromptTokens      float64  `json:"vpPromptTokens,omitempty"`
+	VPLearned           *float64 `json:"vpLearned,omitempty"`
+	FixedLatencySeconds float64  `json:"fixedLatencySeconds,omitempty"`
+	FixedLatencySource  string   `json:"fixedLatencySource,omitempty"`
+	Imbalance           float64  `json:"imbalance,omitempty"`
+	ImbalanceSource     string   `json:"imbalanceSource,omitempty"`
+	PromptTokens        float64  `json:"promptTokens,omitempty"`
+	PromptSource        string   `json:"promptSource,omitempty"`
+	PromptFromCycle     int      `json:"promptFromCycle,omitempty"`
+	PromptToCycle       int      `json:"promptToCycle,omitempty"`
+	PromptCV            float64  `json:"promptCV,omitempty"`
+	PromptCVSource      string   `json:"promptCVSource,omitempty"`
+	ArrivalsSource      string   `json:"arrivalsSource,omitempty"`
+	// TransferSecondsPerToken is T_xfer per prompt token, and TransferSource
+	// measured, omitted, or "decode engine" where that TTFT holds it.
+	TransferSecondsPerToken float64 `json:"transferSecondsPerToken,omitempty"`
+	TransferSource          string  `json:"transferSource,omitempty"`
+	// DecodeSide is how decode's part was priced: line, "decode engine" or
+	// omitted; the two figures are the decode engine's measured pair.
+	DecodeSide             string   `json:"decodeSide,omitempty"`
+	DecodeTTFTSeconds      float64  `json:"decodeTTFTSeconds,omitempty"`
+	DecodeTTFTPromptTokens float64  `json:"decodeTTFTPromptTokens,omitempty"`
+	FlowControl            string   `json:"flowControl,omitempty"`
+	Assumed                []string `json:"assumed"`
 }
 
 // wireInputs is what a variant was priced from.
@@ -100,7 +151,9 @@ type wireInputs struct {
 	ReplicasFrom   string       `json:"replicasFrom"`
 	Headroom       *float64     `json:"headroom,omitempty"`
 	Rate           *float64     `json:"rate,omitempty"`
-	TPOT           *wireTPOT    `json:"tpot,omitempty"`
+	// RateSource says what set Rate where a flag did not: the prefill knee.
+	RateSource string    `json:"rateSource,omitempty"`
+	TPOT       *wireTPOT `json:"tpot,omitempty"`
 }
 
 // wireShape is the traffic shape a variant was priced at: each length
@@ -159,6 +212,8 @@ type wireResults struct {
 	MeanTPOT       *wireResult `json:"meanTPOT,omitempty"`
 	PercentileTPOT *wireResult `json:"percentileTPOT,omitempty"`
 	Rate           *wireResult `json:"rate,omitempty"`
+	// TTFT is the one result with parts, so it has a type of its own.
+	TTFT *wireTTFTResult `json:"ttft,omitempty"`
 }
 
 // wireResult is an answer or a refusal, never both.
@@ -176,6 +231,50 @@ type wireAnswer struct {
 	Flags []string      `json:"flags"`
 }
 
+// wireTTFTResult is a priced TTFT or a refusal, never both.
+type wireTTFTResult struct {
+	Answer  *wireTTFTAnswer `json:"answer,omitempty"`
+	Refused *wireRefusal    `json:"refused,omitempty"`
+}
+
+// wireTTFTAnswer is whatif.TTFT on the wire: the value, its flags, and in
+// Parts what it is made of.
+type wireTTFTAnswer struct {
+	Value float64       `json:"value"`
+	Unit  string        `json:"unit"`
+	Basis wireBasis     `json:"basis"`
+	Flags []string      `json:"flags"`
+	Parts wireTTFTParts `json:"parts"`
+}
+
+// wireTTFTParts is the figures beside the union bound, and its parts' means,
+// in seconds.
+type wireTTFTParts struct {
+	Independent           float64 `json:"independent"`
+	Pooled                float64 `json:"pooled"`
+	DecodeShare           float64 `json:"decodeShare"`
+	EngineWait            float64 `json:"engineWait"`
+	OwnPrefill            float64 `json:"ownPrefill"`
+	DecodeWait            float64 `json:"decodeWait"`
+	FirstStep             float64 `json:"firstStep"`
+	DecodeEngine          float64 `json:"decodeEngine"`
+	PrefillUtilization    float64 `json:"prefillUtilization"`
+	VPMarginApplied       float64 `json:"vpMarginApplied"`
+	WaitScale             float64 `json:"waitScale"`
+	WaitOffset            float64 `json:"waitOffset"`
+	DecodeWaitProbability float64 `json:"decodeWaitProbability"`
+	PrefillKnee           float64 `json:"prefillKnee"`
+	DecodeKnee            float64 `json:"decodeKnee"`
+	// Onsets are the flow-control onsets, absent with flow control off.
+	Onsets *wireOnsets `json:"onsets,omitempty"`
+}
+
+// wireOnsets is whatif.Onsets on the wire: each stage's rate, r/s.
+type wireOnsets struct {
+	Prefill float64 `json:"prefill"`
+	Decode  float64 `json:"decode"`
+}
+
 // wireBasis is whatif.Basis on the wire; a field that does not apply is 0.
 type wireBasis struct {
 	Fill     float64  `json:"fill"`
@@ -184,6 +283,9 @@ type wireBasis struct {
 	Uncapped float64  `json:"uncapped"`
 	BoundBy  []string `json:"boundBy"`
 	Tier     string   `json:"tier"`
+	// PrefillOnlyRate is the rate the prefill side alone allows, on a TTFT
+	// rate; Floor and KneeRate then read the TTFT's (whatif.TTFTBasis).
+	PrefillOnlyRate float64 `json:"prefillOnlyRate,omitempty"`
 }
 
 // wireRefusal is whatif.Unanswerable on the wire.
@@ -218,12 +320,42 @@ func toWire(r whatif.Result, unit string) *wireResult {
 		for _, b := range v.Basis.BoundBy {
 			a.Basis.BoundBy = append(a.Basis.BoundBy, string(b))
 		}
+		if t := v.Basis.TTFT; t != nil {
+			a.Basis.Floor, a.Basis.KneeRate, a.Basis.PrefillOnlyRate = t.Floor, t.KneeRate, t.PrefillOnlyRate
+		}
 		for _, f := range v.Flags {
 			a.Flags = append(a.Flags, string(f))
 		}
 		return &wireResult{Answer: a}
 	case whatif.Unanswerable:
 		return &wireResult{Refused: &wireRefusal{Reason: string(v.Reason), Detail: v.Detail}}
+	}
+	return nil
+}
+
+// toWireTTFT is a priced TTFT or a refusal on the wire.
+func toWireTTFT(r whatif.Result) *wireTTFTResult {
+	switch v := r.(type) {
+	case whatif.TTFT:
+		a := &wireTTFTAnswer{Value: v.Seconds, Unit: unitSeconds, Flags: []string{}, Basis: wireBasis{
+			Floor: v.Floor, KneeRate: v.PrefillKnee, BoundBy: []string{}, Tier: v.Tier,
+		}, Parts: wireTTFTParts{
+			Independent: v.Independent, Pooled: v.Pooled, DecodeShare: v.DecodeShare,
+			EngineWait: v.Parts.EngineWait, OwnPrefill: v.Parts.OwnPrefill, DecodeWait: v.Parts.DecodeWait,
+			FirstStep: v.Parts.FirstStep, DecodeEngine: v.Parts.DecodeEngine,
+			PrefillUtilization: v.PrefillUtilization, VPMarginApplied: v.VPMarginApplied,
+			WaitScale: v.WaitScale, WaitOffset: v.WaitOffset, DecodeWaitProbability: v.DecodeWaitProbability,
+			PrefillKnee: v.PrefillKnee, DecodeKnee: v.DecodeKnee,
+		}}
+		if v.Onsets != (whatif.Onsets{}) {
+			a.Parts.Onsets = &wireOnsets{Prefill: v.Onsets.Prefill, Decode: v.Onsets.Decode}
+		}
+		for _, f := range v.Flags {
+			a.Flags = append(a.Flags, string(f))
+		}
+		return &wireTTFTResult{Answer: a}
+	case whatif.Unanswerable:
+		return &wireTTFTResult{Refused: &wireRefusal{Reason: string(v.Reason), Detail: v.Detail}}
 	}
 	return nil
 }
@@ -248,6 +380,23 @@ func newWireOutput(question string, f *answerFlags, st *learnreplay.State, varia
 			StepSeconds: o.step.Seconds(), Roles: roles}
 	}
 	return w
+}
+
+// addTTFTNote closes the note with what every TTFT answer says of itself;
+// nothing with no TTFT asked.
+func (w *wireOutput) addTTFTNote(fleets []*pricedFleet) {
+	if len(fleets) > 0 {
+		w.Note += "; " + footerNote(fleets)
+	}
+}
+
+// sourcePrefillKnee names the prefill knee as what set an operating rate.
+const sourcePrefillKnee = "headroom x prefill knee"
+
+// wire is the fleet's prefill role.
+func (o operatingTTFT) wire() wireRole {
+	return wireRole{Role: rolePrefill, Variant: o.fleet.variant, TTFT: &o.fleet.in, Results: wireResults{
+		Knee: toWire(o.knee, unitRate), TTFT: toWireTTFT(o.ttft)}}
 }
 
 // inputsOf is the wire's account of what a variant was priced from.

@@ -52,6 +52,7 @@ func TestGoldens_EveryCommittedGoldenReproduces(t *testing.T) {
 		ttftThreePodsFixture: {analyzerSLO}, ttftSaturatedFixture: {analyzerSLO},
 		ttftOpenLongFixture: {analyzerSLO}, ttftOpenShortFixture: {analyzerSLO},
 		startSeedFixture: {analyzerSLO}, startSeedRestartFixture: {analyzerSLO}, startSeedRestart2Fixture: {analyzerSLO},
+		startRestoredFixture:   {analyzerSLO},
 		throughputSweepFixture: {analyzerSLO}, throughputSweepRestartFixture: {analyzerSLO}}, c.NotRun)
 	t.Logf("%d fixtures, rows compared per file: %v; built and never analyzed: %v", c.Fixtures, c.Rows, c.NotRun)
 }
