@@ -413,13 +413,8 @@ func oldCRD(claimed string, c FnContext) string {
 	if strings.HasPrefix(claimed, "The") {
 		head = "The"
 	}
-	// The sentence may have its article on the line above.
-	words := strings.Fields(c.Prev)
-	if isCommentLead(strings.TrimSpace(c.Before)) && len(words) > 0 {
-		switch strings.ToLower(words[len(words)-1]) {
-		case "the", "a", "an":
-			return "old " + kind
-		}
+	if articleAbove(c) {
+		return "old " + kind
 	}
 	return head + " old " + kind
 }
@@ -447,6 +442,9 @@ func proseWVA(_ string, c FnContext) string {
 	}
 	trimmed := strings.TrimRight(c.Before, " \t*_`\"'>([")
 	if trimmed == "" || isCommentLead(trimmed) {
+		if articleAbove(c) {
+			return "scaling manager"
+		}
 		if c.Prev != "" && !endsSentence(c.Prev) {
 			return "the scaling manager"
 		}
@@ -457,6 +455,20 @@ func proseWVA(_ string, c FnContext) string {
 		return "The scaling manager"
 	}
 	return "the scaling manager"
+}
+
+// articleAbove reports whether the text opens a line and the line above ends in
+// an article, so it must not bring one of its own.
+func articleAbove(c FnContext) bool {
+	words := strings.Fields(c.Prev)
+	if len(words) == 0 || !isCommentLead(strings.TrimSpace(c.Before)) {
+		return false
+	}
+	switch strings.ToLower(words[len(words)-1]) {
+	case "the", "a", "an":
+		return true
+	}
+	return false
 }
 
 func isCommentLead(s string) bool {
