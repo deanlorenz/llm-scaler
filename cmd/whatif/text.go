@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
@@ -29,6 +30,39 @@ func boundText(by []whatif.Bound) string {
 		parts[i] = string(b)
 	}
 	return strings.Join(parts, ", ")
+}
+
+// lineMismatch is a line the recording's rows do not support: an answer read
+// from it is printed, flagged, and says how far off the line check read it
+// (checkText). The CLI alone raises it.
+const lineMismatch whatif.Flag = "LineMismatch"
+
+// checkText is the line check as the output prints it, "" with no line. A
+// check that compared nothing says so: an empty result is not a pass.
+func (pv pricedVariant) checkText() string {
+	if pv.state.Line.IsZero() {
+		return ""
+	}
+	c := pv.check
+	if c.Compared == 0 {
+		return fmt.Sprintf("not run: no row off a ramp at fill %.2f or above with a token rate (%d on a ramp)",
+			itl.DefaultGPSMinKForVerification, c.OnRamp)
+	}
+	verdict := "ok"
+	if c.Mismatch() {
+		verdict = "MISMATCH"
+	}
+	return fmt.Sprintf("%s: median %.1f%% off the tokens read, line %s; %d of %d rows past %.0f%%, worst %.1f%%, fill %.2f-%.2f, cycles %d-%d, %d on a ramp left out",
+		verdict, c.MedianErrorPct, directionText(c.SignedErrorPct), c.Past, c.Compared, itl.DefaultGPSMismatchThresholdPct,
+		c.WorstErrorPct, c.FillLo, c.FillHi, c.FromCycle, c.ToCycle, c.OnRamp)
+}
+
+// directionText says which way a line reads, from its signed median error.
+func directionText(signed float64) string {
+	if signed > 0 {
+		return "high"
+	}
+	return "low"
 }
 
 // lineText is the line a variant was priced on, and the fills it was read

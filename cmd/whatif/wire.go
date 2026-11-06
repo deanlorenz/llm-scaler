@@ -214,6 +214,46 @@ type wireLine struct {
 	// another tier (TierUnstable above a tenth).
 	Resamples   int `json:"resamples"`
 	TierChanges int `json:"tierChanges"`
+	// Check is the line against the recording's rows, absent with no line.
+	Check *wireLineCheck `json:"check,omitempty"`
+}
+
+// wireLineCheck is whatif.LineCheck on the wire. Status is ok, mismatch, or
+// not-run where no row could be compared.
+type wireLineCheck struct {
+	Status         string  `json:"status"`
+	Compared       int     `json:"compared"`
+	OnRamp         int     `json:"onRamp"`
+	Past           int     `json:"past"`
+	MedianErrorPct float64 `json:"medianErrorPct"`
+	WorstErrorPct  float64 `json:"worstErrorPct"`
+	SignedErrorPct float64 `json:"signedErrorPct"`
+	FromCycle      int     `json:"fromCycle"`
+	ToCycle        int     `json:"toCycle"`
+}
+
+// The statuses of a line check.
+const (
+	checkOK       = "ok"
+	checkMismatch = "mismatch"
+	checkNotRun   = "not-run"
+)
+
+// wireCheck is the line check on the wire, nil with no line.
+func wireCheck(pv pricedVariant) *wireLineCheck {
+	if pv.state.Line.IsZero() {
+		return nil
+	}
+	c := pv.check
+	w := &wireLineCheck{Status: checkOK, Compared: c.Compared, OnRamp: c.OnRamp, Past: c.Past, MedianErrorPct: c.MedianErrorPct,
+		WorstErrorPct: c.WorstErrorPct, SignedErrorPct: c.SignedErrorPct, FromCycle: c.FromCycle, ToCycle: c.ToCycle}
+	switch {
+	case c.Compared == 0:
+		w.Status = checkNotRun
+	case c.Mismatch():
+		w.Status = checkMismatch
+	}
+	return w
 }
 
 // wireTPOT is the TPOT question: the target (question 1 only), the
@@ -440,7 +480,7 @@ func inputsOf(f *answerFlags, pv pricedVariant) *wireInputs {
 		Line: wireLine{A: pv.decode.Line.A, B: pv.decode.Line.B, Tier: pv.state.Tier,
 			BorrowedFrom: pv.state.BorrowedFrom, Readings: len(pv.state.LineReadings),
 			Resamples: pv.lines.Drawn, TierChanges: pv.lines.TierChanges(),
-			FromCycle: pv.state.ReadingsFrom, ToCycle: pv.state.ReadingsTo},
+			FromCycle: pv.state.ReadingsFrom, ToCycle: pv.state.ReadingsTo, Check: wireCheck(pv)},
 		FillBand:       wireInterval{Lo: pv.decode.Band.Lo, Hi: pv.decode.Band.Hi},
 		CapacityTokens: pv.decode.CapacityTokens, KVPerRequest: pv.decode.KVPerRequest,
 		Shape: wireShape{InputTokens: pv.shape.AvgInputTokens, InputSource: shapeMeasured,

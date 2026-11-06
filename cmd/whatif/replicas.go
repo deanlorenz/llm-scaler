@@ -245,6 +245,7 @@ func writeReplicasText(out io.Writer, f *answerFlags, st *learnreplay.State, var
 		if u, ok := a.slo.KneeRate.(whatif.Unanswerable); ok {
 			fmt.Fprintf(&b, "%-16s%s\n", "decode", refusedText(u))
 			fmt.Fprintf(&b, "%-16s%s\n", "shape", a.pv.shapeText())
+			checkRow(&b, "%-16s%s\n", "line check", a.pv)
 			if a.ttft != nil {
 				a.ttft.writeRows(&b)
 				flagsLine(&b, a.pv, a.ttft.results()...)
@@ -282,6 +283,7 @@ func writeReplicasText(out io.Writer, f *answerFlags, st *learnreplay.State, var
 			a.ttft.writeRows(&b)
 		}
 		fmt.Fprintf(&b, "%-16s%s\n", "shape", a.pv.shapeText())
+		checkRow(&b, "%-16s%s\n", "line check", a.pv)
 		results := []whatif.Result{a.slo.KneeRate, a.slo.Rate, a.slo.MeanTPOT, a.slo.PercentileTPOT}
 		if a.ttft != nil {
 			results = append(results, a.ttft.results()...)
@@ -301,6 +303,13 @@ func writeReplicasText(out io.Writer, f *answerFlags, st *learnreplay.State, var
 	}
 	_, err := io.WriteString(out, b.String())
 	return err
+}
+
+// checkRow prints the line check's row, none with no line.
+func checkRow(b *strings.Builder, layout, label string, pv pricedVariant) {
+	if s := pv.checkText(); s != "" {
+		fmt.Fprintf(b, layout, label, s)
+	}
 }
 
 // tpotRow is one TPOT row: the value in ms, its band, and its basis.

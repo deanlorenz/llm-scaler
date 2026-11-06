@@ -2,5 +2,6 @@ knee            2.01 r/s    decode, band top binds at fill 0.797
 operating rate  1.71 r/s    0.85 x knee (scaleUpThreshold)
 mean TPOT       3.80 ms     [3.78 .. 3.84]   line ols, observed fill up to 0.50
 shape           IL 4569 OL 1855 (measured, cycles 204-223)
+line check      ok: median 2.9% off the tokens read, line low; 0 of 20 rows past 15%, worst 6.7%, fill 0.49-0.56, cycles 42-131, 20 on a ramp left out
 flags: LineNearGate (22/200); ExtrapolatedFill (fill 0.797, 0.295 above the readings)
 estimate from 15 readings (cycles 197-220) of a 226-cycle recording, not a guarantee; see basis (-o json)

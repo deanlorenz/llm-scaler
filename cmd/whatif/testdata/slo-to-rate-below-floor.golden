@@ -1,4 +1,5 @@
 role     est. rate at SLO   bound by                                 basis
 decode   refused: TargetBelowFloor (target 2 ms at or below the floor 2.223 ms)
          shape IL 1000 OL 1000 (assumed)
+         line check ok: median 2.9% off the tokens read, line low; 0 of 20 rows past 15%, worst 6.7%, fill 0.49-0.56, cycles 42-131, 20 on a ramp left out
 estimate from 15 readings (cycles 197-220) of a 226-cycle recording, not a guarantee; see basis (-o json)

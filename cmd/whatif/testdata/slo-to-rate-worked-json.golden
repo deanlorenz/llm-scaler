@@ -36,7 +36,18 @@
           "fromCycle": 197,
           "toCycle": 220,
           "resamples": 200,
-          "tierChanges": 22
+          "tierChanges": 22,
+          "check": {
+            "status": "ok",
+            "compared": 20,
+            "onRamp": 20,
+            "past": 0,
+            "medianErrorPct": 2.9472574202980173,
+            "worstErrorPct": 6.685087836577175,
+            "signedErrorPct": -2.9472574202980173,
+            "fromCycle": 42,
+            "toCycle": 131
+          }
         },
         "fillBand": {
           "lo": 0.15,

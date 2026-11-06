@@ -130,6 +130,9 @@ type VariantState struct {
 	// DecodeTTFT is what the variant's rows say of a TTFT's decode side; the
 	// zero value on a variant that is not decode (state_ttft.go).
 	DecodeTTFT DecodeTTFTState
+	// LineRows is the variant's rows of its latest cycles that have one, off
+	// a ramp and on one, for the line check (state_line.go).
+	LineRows []whatif.LineRow
 }
 
 // MeasuredShape is the shape a variant served over the cycles it had
@@ -186,6 +189,7 @@ func StateAt(ctx context.Context, recording []byte, opts Options, q StateQuery) 
 		windows  []whatif.TPOTWindow
 		shapes   = map[string][]shapeSample{}
 		ttft     = newTTFTSamples()
+		lines    = newLineSamples()
 		cycleAt  = map[time.Time]int{}
 	)
 	opts.stop = func(r *replayer, ev learnrec.RawEvent) bool {
@@ -215,6 +219,7 @@ func StateAt(ctx context.Context, recording []byte, opts Options, q StateQuery) 
 		}
 		noteShapes(shapes, in.ReplicaMetrics, n)
 		ttft.note(in, n, ev.Now)
+		lines.note(in, n, ev.Now)
 		ttft.noteTerm(in, ev.Now, func(variant string) string {
 			if rec := r.store.Get(in.Namespace, in.ModelID, variant); rec != nil {
 				return rec.EngineParams.ArgsTag()
@@ -240,6 +245,7 @@ func StateAt(ctx context.Context, recording []byte, opts Options, q StateQuery) 
 	st.FirstAt, st.TPOTWindows, st.Cycles = firstAt, windows, total
 	for i := range st.Variants {
 		st.Variants[i].ReadingsFrom, st.Variants[i].ReadingsTo = cyclesSpanned(st.Variants[i].LineReadings, cycleAt)
+		st.Variants[i].LineRows = lines.rows(st.Variants[i].Variant)
 	}
 	return st, nil
 }

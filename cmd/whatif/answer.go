@@ -310,6 +310,9 @@ type pricedVariant struct {
 	cycle   int
 	decode  whatif.Decode
 	shape   shape.Shape
+	// check is the line against the recording's rows, the zero value with no
+	// line.
+	check whatif.LineCheck
 	// assumedIL and assumedOL say which lengths the flags assumed.
 	assumedIL, assumedOL bool
 	flags                []whatif.Flag
@@ -364,6 +367,12 @@ func (f *answerFlags) decodeVariants(st *learnreplay.State) ([]pricedVariant, er
 			pv.flags = append(pv.flags, whatif.BorrowedLine)
 		case whatif.TierHeld:
 			pv.flags = append(pv.flags, whatif.HeldLine)
+		}
+		if !vs.Line.IsZero() {
+			pv.check = whatif.CheckLine(pv.decode, vs.LineRows)
+			if pv.check.Mismatch() {
+				pv.flags = append(pv.flags, lineMismatch)
+			}
 		}
 		if vs.Refitted {
 			pv.lines = whatif.BootstrapLines(vs.Readings, whatif.Refit{Tier: vs.Tier, Line: vs.Line,

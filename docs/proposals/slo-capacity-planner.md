@@ -371,7 +371,8 @@ change tier. `V_P` from a peak and `f` are extreme statistics, so they get a
 ±15% sensitivity sweep instead. **Extrapolation**: a fill or prompt length
 outside the window's range is flagged with the distance; outside the band the
 tool clamps, as `whatif.PricingK` and `whatif.PriceTPOT` do. **The line check** runs on every
-answer and a mismatch above 15% away from a ramp is printed.
+answer and a mismatch above 15% away from a ramp is printed
+([as built](#the-line-check-as-built)).
 
 ## Where decode is most wrong
 
@@ -654,7 +655,8 @@ Every answer is an `Answer{Value, Band, Basis, Flags}` or an
 **Flags**, never refusals: extrapolation (with its distance), a borrowed, held
 or snapshot line, a lower-bound or assumed `V_P`, no readiness, an unstable
 tier, an assumed `R_q`, a pooled `R_q` on a bucket, a coarse TPOT bucket, the
-engine TPOT histogram used in place of the router's, a rate held down by decode
+engine TPOT histogram used in place of the router's, a line the recording's rows
+do not support (`LineMismatch`), a rate held down by decode
 admission, flow control inferred off, above a
 flow-control onset, several priority bands, and UNVALIDATED on TTFT. The decode
 library's flags today: `AssumedTPOTRatio`, `CoarseTPOTBucket`,
@@ -915,6 +917,38 @@ variant's `DecodeTTFT` (`state_ttft.go`). They are read from the cycles' rows an
 the saturation analyzer's stash, and nothing is fed back: no switch, no golden
 moves.
 
+### The line check, as built
+
+Every answer on a line prints a `line check` row, and the JSON gives
+`inputs.line.check`. It is the analyzers' GPS check over a window: the token rate
+the line predicts against the `generation_tokens` rate each decode row reported,
+at the row's own fill and shape, not the shape asked (`whatif.CheckLine`). A
+median error above 15% prints `MISMATCH`, says which way the line reads, and
+flags every answer on that line `LineMismatch`. The answer still stands: it is a
+flag, not a refusal.
+
+| What | Rule |
+| --- | --- |
+| The rows | The variant's serving rows, on the replay up to the cycle asked, at fill 0.30 (`itl.DefaultGPSMinKForVerification`) to the band's top, with a token rate. Above the band no answer reads the line |
+| Off a ramp | The pod read for the steady gate's time (2 minutes), its fill within the gate's drift (0.10) and the KV a request holds within 20% (`shape.DefaultChangeTolerance`) over it. The last 20 cycles with such a row are compared, so a recording that ends on a ramp is checked where it last held still. Rows on a ramp are counted and left out |
+| The figure | The median of the rows' errors, so one noisy minute decides nothing; the worst and the count past 15% print beside it |
+| The price | Sequences capped at the batch cap, as every price is. `itl.GPSErrorPct` does not cap, and a replica at its cap would read as a mismatch |
+| Nothing compared | `not run`, with how many rows were on a ramp. It is not a pass, and raises no flag |
+
+**Measured on the goldens, at the last cycle.** Of the 23 lines the goldens price,
+`ols-sweep` (2.9%), `ols-sweep-slo` (8.3%), `ols-sweep-slo-restart` (0.9%),
+`throughput-sweep` (14.3%), `throughput-sweep-restart` (10.8%),
+`ttft-staircase-b-on` (8.0%) and `ttft-three-pods` (2.0%) pass. Ten are `not run`
+on `e1`, `e1-tuned`, or the `start-*` runs read only on a ramp or above the band.
+Six mismatch: the four lines of `mu-paths`, a synthetic run, up to 974%, and
+`ttft-staircase-b-off` and `ttft-staircase-c-on`, 49.8% and 61.7% low. Those two
+are pinned-B lines on the default intercept, which the planner refuses
+(`PinnedDefaultB`), so no answer rests on them and the row prints beside the
+refusal. `TestLineCheck_OnTheGoldens` freezes four of these. A row whose lengths lag a change
+of shape reads as a false mismatch: before the KV rule, `ols-sweep` read 138% high
+on rows that priced 2.4 times the sequences that ran. The check says the line and the
+shape disagree with the tokens read. It cannot say which is wrong.
+
 ### JSON output
 
 `-o json` (or `--output json`) writes one object. Abridged from the worked
@@ -1029,7 +1063,7 @@ four results only `meanTPOT` is kept here):
 | `source` | The recording, the model, `firstCycle` (1), `lastCycle` (the cycle answered at) and `totalCycles` (the recording's), with their clocks. With `--prometheus`, `recording` is empty and `window` names the window: `prometheus` (the URL's scheme and host alone), `from`, `to`, `stepSeconds`, and `roles` (`kube-state-metrics` or `role-of`); absent in recording mode. Absent on an error object. |
 | `bands` | How the bands were drawn: block bootstrap, `blockCycles`, `resamples`, `seed`, the percentiles. Absent on an error object. |
 | `roles[]` | One per decode variant priced: `inputs` (what it was priced from) and `results`. |
-| `inputs.line` | The ITL line (`a` in seconds per unit of fill, `b` in seconds), its `tier`, the `readings` it was fitted from, their `observedFill` range and `fromCycle`-`toCycle`, and of the bootstrap's `resamples` how many (`tierChanges`) landed at another tier. |
+| `inputs.line` | The ITL line (`a` in seconds per unit of fill, `b` in seconds), its `tier`, the `readings` it was fitted from, their `observedFill` range and `fromCycle`-`toCycle`, of the bootstrap's `resamples` how many (`tierChanges`) landed at another tier, and the [line `check`](#the-line-check-as-built): `status` `ok`, `mismatch` or `not-run`, the rows `compared`, `onRamp` and `past` 15%, and the median, worst and signed errors in percent. |
 | `inputs.shape` | Lengths in tokens, each with its source, `measured` (over `fromCycle`-`toCycle`) or `assumed`. |
 | `results` | `knee`, `operatingRate`, `meanTPOT`, `percentileTPOT` for question 2; `rate` for question 1. A question not asked has no key. |
 | a result | Exactly one of `answer` and `refused`. |
@@ -1077,6 +1111,16 @@ roles[].inputs.line object
 roles[].inputs.line.a number
 roles[].inputs.line.b number
 roles[].inputs.line.borrowedFrom string
+roles[].inputs.line.check object
+roles[].inputs.line.check.compared number
+roles[].inputs.line.check.fromCycle number
+roles[].inputs.line.check.medianErrorPct number
+roles[].inputs.line.check.onRamp number
+roles[].inputs.line.check.past number
+roles[].inputs.line.check.signedErrorPct number
+roles[].inputs.line.check.status string
+roles[].inputs.line.check.toCycle number
+roles[].inputs.line.check.worstErrorPct number
 roles[].inputs.line.fromCycle number
 roles[].inputs.line.observedFill object
 roles[].inputs.line.observedFill.hi number
