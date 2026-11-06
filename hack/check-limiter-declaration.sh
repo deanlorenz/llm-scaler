@@ -1291,6 +1291,7 @@ lim_stub() {
             jq -n --arg d "$LIM_DEFAULT" '{data:{default:$d}}' ;;
         "get configmap wva-scaling-policy-config -n "*" -o jsonpath="*)
             printf '%s' "$LIM_DEFAULT" ;;
+        "get configmap wva-"*) echo 'Error from server (NotFound): configmaps "x" not found' >&2; return 1 ;; # rename:keep
         "patch configmap wva-scaling-policy-config "*)
             local a next=0
             for a in "$@"; do

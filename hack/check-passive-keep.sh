@@ -85,6 +85,7 @@ kubectl() {
                 *) printf '%s' "$LIVE_DEFAULT" ;;
             esac ;;
         "get configmap wva-controller-status"*) printf '%s' "$LIVE_STATUS_PASSIVE" ;;
+        "get configmap wva-"*) echo 'Error from server (NotFound): configmaps "x" not found' >&2; return 1 ;; # rename:keep
         "kustomize "*) printf '%s\n' "$RENDERED_POLICY" ;;
         "rollout restart"*) RESTARTED=$((RESTARTED + 1)) ;;
         *) echo "unexpected kubectl $*" >&2; return 1 ;;
