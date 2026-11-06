@@ -479,7 +479,7 @@ func TestTTFT_ASpreadAboveThePeakIsFlagged(t *testing.T) {
 }
 
 // The table is the gamma's: the prompt's own quantile, as the model prices it
-// at no load, peaks where promptCVPeak says at each percentile.
+// at no load, peaks where whatif.PromptCVPeak says at each percentile.
 func TestTTFT_PromptCVPeakIsTheGammas(t *testing.T) {
 	floor := func(cv, q float64) float64 {
 		in := ttftInputsAt(1, 0)
@@ -498,11 +498,11 @@ func TestTTFT_PromptCVPeakIsTheGammas(t *testing.T) {
 				best, at = f, cv
 			}
 		}
-		assert.InDelta(t, at, promptCVPeak(percent), 0.03, "p%d", percent)
+		assert.InDelta(t, at, whatif.PromptCVPeak(float64(percent)/100), 0.03, "p%d", percent)
 	}
-	assert.Equal(t, 2.22, promptCVPeak(90))
-	assert.Equal(t, whatif.PromptCVStop, promptCVPeak(94))
-	assert.Equal(t, 0.0, promptCVPeak(40))
+	assert.Equal(t, 2.22, whatif.PromptCVPeak(0.90))
+	assert.Equal(t, whatif.PromptCVStop, whatif.PromptCVPeak(0.94))
+	assert.Equal(t, 0.0, whatif.PromptCVPeak(0.40))
 }
 
 // Test 8: the prompt V_P was read at and the curve reach the model through
@@ -658,7 +658,7 @@ func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
 		require.True(t, ok)
 		rate := knee.Value * (0.05 + 0.9*r.Float64())
 		var cvs []float64
-		for cv := 0.3; cv <= promptCVPeak(percent)+1e-9; cv += 0.1 {
+		for cv := 0.3; cv <= whatif.PromptCVPeak(float64(percent)/100)+1e-9; cv += 0.1 {
 			cvs = append(cvs, cv)
 		}
 		var floor float64
@@ -737,7 +737,7 @@ func TestTTFT_TheCVClaimsThatDoNotHold(t *testing.T) {
 	// by multiples between the peak and the stop.
 	for _, percent := range []int{90, 92, 93} {
 		q := float64(percent) / 100
-		peak := promptCVPeak(percent)
+		peak := whatif.PromptCVPeak(float64(percent) / 100)
 		in := ttftInputsAt(1, 0)
 		rateAt := func(cv float64, target whatif.TTFTTarget) float64 {
 			in.spread.cv = cv

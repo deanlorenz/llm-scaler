@@ -25,30 +25,6 @@ import (
 // Every assumed input is named twice: in the flags, and in the words of the
 // fleet's assumed list, which the text prints and the JSON carries.
 
-// promptCVPeaks is S1's table, from p50 to p93: the cv at which a mean-one
-// gamma's quantile peaks on [0, 3], to 0.01. From p94 it is still rising at
-// 3. Below p50 the figure is a median, under the mean at any cv.
-var promptCVPeaks = [...]float64{
-	0, 0.04, 0.08, 0.11, 0.15, 0.19, 0.23, 0.26, 0.30, 0.34,
-	0.38, 0.42, 0.46, 0.50, 0.54, 0.58, 0.62, 0.66, 0.70, 0.74,
-	0.79, 0.83, 0.87, 0.92, 0.97, 1.02, 1.07, 1.12, 1.18, 1.24,
-	1.30, 1.36, 1.43, 1.50, 1.58, 1.66, 1.75, 1.85, 1.96, 2.08,
-	2.22, 2.38, 2.56, 2.78,
-}
-
-// promptCVPeak is the cv that prices the longest prompt at percentile q, read
-// at the whole percent below it, the lower peak, which flags sooner.
-func promptCVPeak(q float64) float64 {
-	i := int(math.Floor(100*q+1e-9)) - 50
-	switch {
-	case i < 0:
-		return 0
-	case i >= len(promptCVPeaks):
-		return whatif.PromptCVStop
-	}
-	return promptCVPeaks[i]
-}
-
 // The words the JSON and the text name a source or a role by.
 const (
 	sourceLearned    = "learned"
@@ -60,7 +36,7 @@ const (
 const (
 	// assumedPoisson is Poisson arrivals: P3 has no flag for them.
 	assumedPoisson whatif.Flag = "AssumedPoissonArrivals"
-	// promptSpreadAbovePeak is a cv above promptCVPeak for the percentile: the
+	// promptSpreadAbovePeak is a cv above whatif.PromptCVPeak for the percentile: the
 	// prompt's own tail shrinks as cv rises from there, so a larger cv can
 	// price a shorter floor and a higher rate.
 	promptSpreadAbovePeak whatif.Flag = "PromptSpreadAbovePeak"
@@ -344,7 +320,7 @@ func (f *answerFlags) fleetFor(st *learnreplay.State, ps *learnreplay.PrefillSta
 // flags read f at the recorded count, where the window was read.
 func (pf *pricedFleet) raiseFlags(ps *learnreplay.PrefillState) {
 	p := pf.fleet.Prefill
-	if pf.q > 0 && p.PromptCV > promptCVPeak(pf.q) {
+	if pf.q > 0 && p.PromptCV > whatif.PromptCVPeak(pf.q) {
 		pf.flags = append(pf.flags, promptSpreadAbovePeak)
 	}
 	if p.Replicas != ps.Pods {

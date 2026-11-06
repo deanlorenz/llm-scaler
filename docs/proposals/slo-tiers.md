@@ -1402,7 +1402,7 @@ on this path: S1 always passes `f`, and `RateForTTFT` stays below both limits.
 
 **Decision 3's monotonicity is narrower than stated.** The prompt's quantile
 peaks below `cv` 3 up to p93: 0.79 at p70, 1.30 at p80, 1.66 at p85, 2.22 at
-p90, 2.78 at p93 (`promptCVPeak`, `TestTTFT_PromptCVPeakIsTheGammas`). At p90
+p90, 2.78 at p93 (`whatif.PromptCVPeak`, `TestTTFT_PromptCVPeakIsTheGammas`). At p90
 it is 8% lower at `cv` 3 than at the peak. What holds, on seeded fleets at p90
 to p93, p95 and p99 (`TestProperty_TTFTIsMonotoneInCV`), is that from `cv` 0.3
 up to the peak a larger `cv` prices no shorter TTFT from 0.05 of the knee and no

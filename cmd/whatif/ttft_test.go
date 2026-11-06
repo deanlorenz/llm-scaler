@@ -627,7 +627,7 @@ func TestTTFT_PromptSpreadAbovePeak(t *testing.T) {
 		q    float64
 		peak float64
 	}{{0.70, 0.79}, {0.80, 1.30}, {0.85, 1.66}, {0.88, 1.96}, {0.90, 2.22}, {0.92, 2.56}, {0.93, 2.78}, {0.94, 3}, {0.999, 3}, {0.4, 0}} {
-		assert.Equal(t, c.peak, promptCVPeak(c.q), "q %g", c.q)
+		assert.Equal(t, c.peak, whatif.PromptCVPeak(c.q), "q %g", c.q)
 	}
 	flagged := func(q float64) bool {
 		f := answerFlags{set: map[string]bool{}}

@@ -33,7 +33,7 @@ const (
 	// FlowControlMismatch is a declared slo.flowControl the router's series
 	// contradict: priced as declared.
 	FlowControlMismatch whatif.Flag = "FlowControlMismatch"
-	// PromptSpreadAbovePeak is a cv, assumed or measured, above promptCVPeak
+	// PromptSpreadAbovePeak is a cv, assumed or measured, above whatif.PromptCVPeak
 	// for the objective's percentile: the prompt's own tail shrinks as cv
 	// rises from there, so a larger cv prices a shorter floor and can price a
 	// higher rate. On S2's no-act list.
@@ -44,30 +44,6 @@ const (
 	// routing-bound.
 	ImbalanceNotSustained whatif.Flag = "ImbalanceNotSustained"
 )
-
-// promptCVPeaks is, from p50 to p93, the cv at which a mean-one gamma's quantile
-// peaks on [0, 3], to 0.01. From p94 it is still rising at 3. Below 0.5 the
-// figure is a median, under the mean at any cv, so its peak is cv 0.
-var promptCVPeaks = [...]float64{
-	0, 0.04, 0.08, 0.11, 0.15, 0.19, 0.23, 0.26, 0.30, 0.34,
-	0.38, 0.42, 0.46, 0.50, 0.54, 0.58, 0.62, 0.66, 0.70, 0.74,
-	0.79, 0.83, 0.87, 0.92, 0.97, 1.02, 1.07, 1.12, 1.18, 1.24,
-	1.30, 1.36, 1.43, 1.50, 1.58, 1.66, 1.75, 1.85, 1.96, 2.08,
-	2.22, 2.38, 2.56, 2.78,
-}
-
-// promptCVPeak is the cv that prices the longest prompt at the percentile, at
-// no load (TestTTFT_PromptCVPeakIsTheGammas).
-func promptCVPeak(percent int) float64 {
-	i := percent - 50
-	switch {
-	case i < 0:
-		return 0
-	case i >= len(promptCVPeaks):
-		return whatif.PromptCVStop
-	}
-	return promptCVPeaks[i]
-}
 
 // Where f came from, on the log line.
 const (
@@ -188,7 +164,7 @@ func ttftFleet(in ttftInputs, pods int) (whatif.TTFTFleet, []whatif.Flag) {
 	if in.mismatch {
 		flags = append(flags, FlowControlMismatch)
 	}
-	if in.spread.cv > promptCVPeak(in.percent) {
+	if in.spread.cv > whatif.PromptCVPeak(float64(in.percent)/100) {
 		flags = append(flags, PromptSpreadAbovePeak)
 	}
 	if _, transient := in.routing(); transient && pods == in.pods {
