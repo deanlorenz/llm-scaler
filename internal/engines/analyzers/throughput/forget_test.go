@@ -434,7 +434,7 @@ func TestForget_LogsEachForgottenKeyOnTheCallersLogger(t *testing.T) {
 // names each): one added later fails here until someone decides.
 func TestForget_EveryFieldIsClassified(t *testing.T) {
 	forgotten := []string{"lines", "itlLogged", "variantStates"}
-	kept := []string{"ownSettle", "ownSettled", "paths"}
+	kept := []string{"ownSettle", "ownSettled", "paths", "learnerReports", "forgottenReports"}
 	plumbing := []string{"mu", "clock", "rec", "settle", "store"}
 	plain := func(k reflect.Kind) bool {
 		switch k {

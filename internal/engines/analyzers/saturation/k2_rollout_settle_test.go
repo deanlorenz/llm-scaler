@@ -68,6 +68,22 @@ func TestK2Rollout_TheMemoDoesNotWait(t *testing.T) {
 	}
 }
 
+// A wait begun later than the rollout stands: the rollout does not move it
+// back. Past the rollout's window, a row that was not Ready starts a wait of
+// its own.
+func TestK2Rollout_ALaterWaitIsNotMovedBack(t *testing.T) {
+	r := newRestartRig(t, restartT0)
+	ready := restartT0.Add(-time.Hour)
+	settled(t, r, func() []domain.ReplicaMetrics { return revisedFull(ready, "rev-1") }, decodeVariants("v"))
+	for range waitWindow + 2 {
+		r.cycle(revisedFull(ready, "rev-2"), decodeVariants("v"))
+	}
+	notReady := revisedFull(ready, "rev-2")
+	notReady[0].Ready = false
+	r.cycle(notReady, decodeVariants("v"))
+	assert.Equal(t, []string{k2ReasonObsUnsettled}, r.cycle(revisedFull(ready, "rev-2"), decodeVariants("v")))
+}
+
 // A new Ready time waits whichever way the switch is: only the revision that
 // arrives with the Ready time unchanged depends on it, so the switch adds a
 // wait and shortens none.

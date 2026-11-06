@@ -192,6 +192,31 @@ func TestRollout_UnknownArgumentsForgetNothing(t *testing.T) {
 	require.Equal(t, before+6, r.a.lines.WindowLen(variantKey("ns", "m", "v1")))
 }
 
+// Arguments first read on a line already fitting are no change: there is
+// nothing to say the window was another engine's.
+func TestRollout_FirstKnownArgumentsForgetNothing(t *testing.T) {
+	store := capacity.NewStore()
+	r := newLineRun(t, NewThroughputAnalyzer().WithCapacityStore(store))
+	before := warm(t, r, 2, spreadFleet("rev-1"))
+	require.Positive(t, before, "premise: the window holds readings")
+	fileRecord(store, rollParams(64), false)
+	r.step(spreadFleet("rev-1"))
+	require.Equal(t, before+3, r.a.lines.WindowLen(variantKey("ns", "m", "v1")))
+}
+
+// After a forget the arguments read next are the first again, as for a new
+// line: nothing is left to forget.
+func TestRollout_AForgetTakesTheArguments(t *testing.T) {
+	store := capacity.NewStore()
+	fileRecord(store, rollParams(64), false)
+	r := newLineRun(t, NewThroughputAnalyzer().WithCapacityStore(store))
+	warm(t, r, 2, spreadFleet("rev-1"))
+	r.a.mu.Lock()
+	r.a.forgetLineLocked("ns", "m", "v1")
+	require.Empty(t, r.a.variantStates[variantKey("ns", "m", "v1")].lineArgs)
+	r.a.mu.Unlock()
+}
+
 // The forget keeps the replicas' traces, as the annotation's does: a step of
 // load across it is still read as a step
 // (TestForget_TheSteadyGateSeesTheFirstCycleAfter).

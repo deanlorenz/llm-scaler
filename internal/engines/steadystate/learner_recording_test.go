@@ -853,7 +853,6 @@ func TestLearnerRecording_TheSaturationCapabilitiesHoldWithRecordingOn(t *testin
 		"variantForgetter": caps.forgetter, "staleHistoryEvictor": caps.evictor,
 		"learnedStater": caps.learned, "acceleratorStabiliser": caps.stabiliser,
 		"presenceNoter": caps.noter, "saturationRecorded": caps.recorded,
-		"learnerReporter": caps.reporter,
 	} {
 		assert.Same(t, sat, c, name)
 	}

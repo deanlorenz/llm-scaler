@@ -17,6 +17,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/fleet"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
@@ -69,6 +70,13 @@ type ThroughputAnalyzer struct {
 	// itlAdmitsAtCap is the replay switch of learner PR 4b-3 (admission.go):
 	// SwitchITLAdmitsAtSequenceCap. On by the constructor.
 	itlAdmitsAtCap bool
+	// itlFilesReports is SwitchITLFilesReports (learner_reports.go). On by
+	// the constructor. learnerReports is each model's reports of its last
+	// cycle, by namespace|model, and forgottenReports what was forgotten
+	// since the engine last took them.
+	itlFilesReports  bool
+	learnerReports   map[string][]learn.Report
+	forgottenReports []learn.Report
 	// itlRolloutGuard is SwitchITLRolloutGuard and itlForgetsOnNewArgs
 	// SwitchITLForgetsOnNewArguments (itl_line.go). On by the constructor.
 	itlRolloutGuard     bool
@@ -178,6 +186,8 @@ func NewThroughputAnalyzer() *ThroughputAnalyzer {
 		itlIdleOnEvidence:     true,
 		itlFiniteOnly:         true,
 		itlRolloutGuard:       true,
+		itlFilesReports:       true,
+		learnerReports:        make(map[string][]learn.Report),
 		itlForgetsOnNewArgs:   true,
 		itlAdmitsAtCap:        true,
 		itlForgetReachesLine:  true,
@@ -353,6 +363,7 @@ func (a *ThroughputAnalyzer) observe(
 		if now.Sub(state.lastObservedAt) > 2*itl.DefaultObservationMaxAge {
 			delete(a.variantStates, key)
 			delete(a.itlLogged, key)
+			a.noteEvictedLocked(key)
 		}
 	}
 	a.evictOwnSettleLocked(now)
@@ -425,6 +436,7 @@ func (a *ThroughputAnalyzer) analyze(
 	// may observe partial state across the lock gaps below.
 	// Update variant roles so state.role is current when observe runs.
 	a.mu.Lock()
+	delete(a.learnerReports, reportModel(input.Namespace, input.ModelID))
 	for _, vs := range input.VariantStates {
 		key := variantKey(input.Namespace, input.ModelID, vs.VariantName)
 		state := a.getOrCreateVariantState(key)

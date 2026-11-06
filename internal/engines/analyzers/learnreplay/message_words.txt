@@ -1367,6 +1367,7 @@ k2-obs-admitted
 k2-reads-the-settle-tracker
 k2-unsettled-joined
 k2-unsettled-window
+k2-waits-after-a-rollout
 k2-waits-after-controller-restart
 k2Borrows
 k2ComputeBound
@@ -2435,6 +2436,7 @@ slo
 slo-
 slo-batch-cap-admission
 slo-batch-cap-per-rank
+slo-itl-files-learner-reports
 slo-itl-forget-reaches-the-line
 slo-itl-idle-needs-evidence
 slo-itl-keeps-the-settle-through-a-missing-row
@@ -2444,6 +2446,7 @@ slo-itl-pinned
 slo-itl-reads-the-finite-pod-mean
 slo-itl-reads-the-settle-tracker
 slo-itl-restart-under-its-name-settles
+slo-itl-rollout-guard
 slo-itl-waits-after-controller-restart
 slo-model
 slo-transient
@@ -2627,7 +2630,9 @@ throughput-demand-floor-total
 throughput-itl-above-band
 throughput-itl-admits-at-sequence-cap
 throughput-itl-at-cap
+throughput-itl-files-learner-reports
 throughput-itl-forget-reaches-the-line
+throughput-itl-forgets-on-new-arguments
 throughput-itl-held
 throughput-itl-idle-needs-evidence
 throughput-itl-keeps-the-settle-through-a-missing-row
@@ -2637,6 +2642,7 @@ throughput-itl-pinned
 throughput-itl-reads-the-finite-pod-mean
 throughput-itl-reads-the-settle-tracker
 throughput-itl-restart-under-its-name-settles
+throughput-itl-rollout-guard
 throughput-itl-settling
 throughput-itl-steady-gate
 throughput-itl-waits-after-controller-restart

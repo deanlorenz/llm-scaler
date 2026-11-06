@@ -149,6 +149,13 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	throughput.SwitchITLForgetsOnNewArguments: nil,
 	slo.SwitchITLRolloutGuard:                 nil,
 
+	// #495: the slo and throughput lines file reports, and the slo line logs
+	// learner-write. They move no golden: nothing the analyzers price reads a
+	// report, and no output reads the line. Their unit tests hold them
+	// (heldBy).
+	slo.SwitchITLFilesReports:        nil,
+	throughput.SwitchITLFilesReports: nil,
+
 	// #495: k2 waits after a rollout under a key already seen
 	// (saturation.SwitchK2WaitsAfterRollout). It moves no golden: no recording
 	// changes a replica's revision under its name. Its unit test holds it
@@ -688,6 +695,15 @@ var heldBy = map[string][]heldTest{
 		{"../slo", "TestTTFT_TheDecodeTermWindow"},
 		{"../slo", "TestTTFT_TheDecodeTermSwitchOnALine"},
 		{"../slo", "TestTTFT_TheRouterMeanReachesTheWindow"},
+	},
+	// #495: each runs with the switch on, and the last with it off.
+	slo.SwitchITLFilesReports: {
+		{"../slo", "TestLearner_ALineFilesItsReport"},
+		{"../slo", "TestLearner_TheSwitchOffFilesNothing"},
+	},
+	throughput.SwitchITLFilesReports: {
+		{"../throughput", "TestLearnerReports_ALineFilesItsReport"},
+		{"../throughput", "TestLearnerReports_TheSwitchOffFilesNothing"},
 	},
 	// #495: it runs the switch on and off and asserts both (a window of
 	// refusals on, read at once off).

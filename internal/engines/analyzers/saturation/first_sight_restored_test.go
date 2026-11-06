@@ -308,6 +308,21 @@ func TestFirstSight_SettleUntilCoversAWaitInProgress(t *testing.T) {
 	assert.Equal(t, restartT0.Add(JoinedReplicaWindow).UTC().Format(time.RFC3339), m["settleUntil"])
 }
 
+// learner-start counts the ITL lines a snapshot brought back, by model.
+func TestFirstSight_TheLineCountsRestoredITLKeys(t *testing.T) {
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	now := restartT0
+	a.now = func() time.Time { return now }
+	a.itlTracker.RestoreBaseline("test-ns|test-model|v|H200|1", 0.01)
+	a.itlTracker.RestoreBaseline("test-ns|other|v|H200|1", 0.01)
+	ctx, logs := observedCtx(t)
+	_, err := a.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{fullRow("d0", "v", now.Add(-time.Hour))}, decodeVariants("v")))
+	require.NoError(t, err)
+	e := logs.FilterMessage("learner-start").All()
+	require.Len(t, e, 1)
+	assert.Equal(t, map[string]int{learn.K2: 0, learn.Mu: 0, learn.ITL: 1}, e[0].ContextMap()["restoredKeys"])
+}
+
 // learner-start counts the start keys a snapshot brought back, by model.
 func TestFirstSight_TheLineCountsStartKeys(t *testing.T) {
 	a := NewSaturationAnalyzer(capacity.NewStore())

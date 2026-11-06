@@ -39,6 +39,29 @@ func TestRecordLearnerReportsPublishesOneSeriesPerVariantAndLearner(t *testing.T
 	}
 }
 
+// The slo and throughput lines have series of their own beside the saturation
+// line's, and a forget of one leaves the others.
+func TestRecordLearnerReportsKeepsTheThreeLinesApart(t *testing.T) {
+	emitter, registry := engineConfigEmitter(t)
+	at := time.Unix(1_700_000_000, 0)
+	emitter.RecordLearnerReports([]learn.Report{
+		report(learn.ITL, "decode", "sat-key", at),
+		report(learn.SLO, "decode", "slo-key", at.Add(time.Minute)),
+		report(learn.Throughput, "decode", "thr-key", at.Add(2*time.Minute)),
+	}, nil)
+	if got := countSeries(t, registry, lastAdmittedSeries); got != 3 {
+		t.Fatalf("series = %d, want 3", got)
+	}
+	gone := report(learn.SLO, "decode", "", time.Time{}, "slo-key")
+	emitter.RecordLearnerReports([]learn.Report{gone}, nil)
+	if got := countSeries(t, registry, lastAdmittedSeries); got != 2 {
+		t.Fatalf("after the forget: series = %d, want 2", got)
+	}
+	if _, ok := seriesValue(t, registry, lastAdmittedSeries, map[string]string{constants.LabelLearner: learn.SLO}); ok {
+		t.Fatal("the forgotten line's series stands")
+	}
+}
+
 // A figure with no stamp is as old as can be, not the year 1.
 func TestRecordLearnerReportsPublishesZeroForNoStamp(t *testing.T) {
 	emitter, registry := engineConfigEmitter(t)

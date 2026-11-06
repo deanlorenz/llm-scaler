@@ -60,6 +60,39 @@ func spyReports(model, variant string) map[string][]learn.Report {
 		Variant: variant, Role: domain.RoleDecode, PricingKey: "key", LastAdmitted: time.Unix(1_700_000_000, 0)}}}
 }
 
+// Every built-in analyzer that reports is taken from, and one that does not
+// is passed over: the slo and throughput lines are not the saturation
+// analyzer's.
+func TestLearnerReportsAreTakenFromEveryBuiltin(t *testing.T) {
+	e, registry := analyzerSeriesEngine(t)
+	sat := &reportSpy{reports: spyReports("m", "v")}
+	line := &reportSpy{reports: map[string][]learn.Report{"ns|m": {{Learner: learn.SLO, Namespace: "ns", ModelID: "m",
+		Variant: "v", Role: domain.RoleDecode, PricingKey: "slo-key", LastAdmitted: time.Unix(1_700_000_000, 0)}}}}
+	e.analyzers = testAnalyzers(sat, analyzerEntry{name: domain.SLOAnalyzerName, analyzer: line},
+		analyzerEntry{name: "silent", analyzer: silentAnalyzer{}})
+	e.publishLearnerReports()
+	assert.Equal(t, 1, sat.takes)
+	assert.Equal(t, 1, line.takes)
+	got := 0
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	for _, f := range families {
+		if f.GetName() == lastAdmittedSeries {
+			got = len(f.GetMetric())
+		}
+	}
+	assert.Equal(t, 2, got, "one series of each learner")
+}
+
+// silentAnalyzer is a built-in that files no reports.
+type silentAnalyzer struct{}
+
+func (silentAnalyzer) Name() string { return "silent" }
+
+func (silentAnalyzer) Analyze(context.Context, domain.AnalyzerInput) (*domain.AnalyzerResult, error) {
+	return nil, nil
+}
+
 // EvictStaleHistory files the spy's reports: the sweep runs inside the cycle,
 // after the prune, as the Analyze calls that file real ones do.
 func (s *reportSpy) EvictStaleHistory() saturation.Evicted {

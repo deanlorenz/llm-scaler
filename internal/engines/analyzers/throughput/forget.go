@@ -37,7 +37,8 @@ import (
 // inside it: with the engine's view, on the analyzer's own tracker, and on
 // the key's own trace; with no trace, only the engine's view with its wait
 // would keep it (TestForget_AReplicaSettlingAtAForgetStillSettlesOnEveryPath).
-// Also kept: ownSettle and ownSettled, when each replica was last seen, which
+// Also kept: learnerReports and forgottenReports, which go to the engine and
+// name the forget themselves; ownSettle and ownSettled, when each replica was last seen, which
 // the engine's tracker keeps alike; the shape, the traffic now, which no line
 // is learned from; the role, whether the variant is rolling out, and the log
 // lines' memories of what they last said; paths, the replay's counters over every fit. The rest is
@@ -78,6 +79,7 @@ func (a *ThroughputAnalyzer) forgetVariant(namespace, modelID, variant string) (
 		n += dropped
 		forgotten = append(forgotten, keys...)
 	}
+	a.noteForgottenLocked(namespace, modelID, variant, forgotten)
 	return n, forgotten
 }
 

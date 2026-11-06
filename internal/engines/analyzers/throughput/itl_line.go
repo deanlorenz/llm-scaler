@@ -3,7 +3,6 @@ package throughput
 import (
 	"context"
 	"maps"
-	"math"
 	"slices"
 	"time"
 
@@ -109,6 +108,7 @@ func (a *ThroughputAnalyzer) switchFields() map[string]*bool {
 		SwitchITLIdleOnEvidence:               &a.itlIdleOnEvidence,
 		SwitchITLReadsFinitePodMean:           &a.itlFiniteOnly,
 		SwitchITLRolloutGuard:                 &a.itlRolloutGuard,
+		SwitchITLFilesReports:                 &a.itlFilesReports,
 		SwitchITLForgetsOnNewArguments:        &a.itlForgetsOnNewArgs,
 		SwitchITLAdmitsAtSequenceCap:          &a.itlAdmitsAtCap,
 		SwitchITLForgetReachesTheLine:         &a.itlForgetReachesLine,
@@ -188,6 +188,7 @@ func (a *ThroughputAnalyzer) lineModel(ctx context.Context, key string, state *v
 	r := state.reading
 	reason := lineReason(r)
 	a.noteLearnerWrite(ctx, key, r, reason, namespace, modelID, variant, now)
+	a.noteLineReport(key, state, r, reason, namespace, modelID, variant)
 	noteLineSilence(ctx, state, r, reason, namespace, modelID, variant)
 	if r.Tier == "" {
 		return itl.Model{}, reason, false
@@ -310,14 +311,8 @@ func (a *ThroughputAnalyzer) noteLearnerWrite(ctx context.Context, key string, r
 	if reason == itlReasonT2Failed && (!logged || last.reason == itlReasonT2Failed) {
 		return
 	}
-	moved := func(now, was float64) bool {
-		if math.IsNaN(now) || math.IsNaN(was) {
-			return math.IsNaN(now) != math.IsNaN(was)
-		}
-		return math.Abs(now-was) > ITLWriteBand*math.Abs(was)
-	}
-	if logged && last.reason == reason && !moved(r.Model.A, last.a) && !moved(r.Model.B, last.b) &&
-		now.Sub(last.at) < LearnerHeartbeat {
+	if logged && last.reason == reason && !itl.Moved(r.Model.A, last.a, ITLWriteBand) &&
+		!itl.Moved(r.Model.B, last.b, ITLWriteBand) && now.Sub(last.at) < LearnerHeartbeat {
 		return
 	}
 	a.itlLogged[key] = itlLogged{a: r.Model.A, b: r.Model.B, reason: reason, at: now}

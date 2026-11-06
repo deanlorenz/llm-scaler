@@ -30,6 +30,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
@@ -132,6 +133,15 @@ type Analyzer struct {
 	// judges an absence by (settle.Tolerance), as the saturation analyzer's.
 	settleInterval time.Duration
 
+	// itlFilesReports is SwitchITLFilesReports (learner.go): on from the
+	// constructor; a replay turns it off (SetSwitchesForReplay). lineLogged is
+	// what learner-write last logged per key, learnerReports each model's
+	// reports of its last cycle, by namespace|model, and forgottenReports what
+	// was forgotten since the engine last took them. Under mu.
+	itlFilesReports  bool
+	lineLogged       map[string]lineLogged
+	learnerReports   map[string][]learn.Report
+	forgottenReports []learn.Report
 	// itlRolloutGuard is SwitchITLRolloutGuard (rollout.go): on from the
 	// constructor; a replay turns it off (SetSwitchesForReplay).
 	itlRolloutGuard bool
@@ -212,6 +222,9 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		itlKeepsSettle:       true,
 		itlFiniteOnly:        true,
 		itlRolloutGuard:      true,
+		itlFilesReports:      true,
+		lineLogged:           make(map[string]lineLogged),
+		learnerReports:       make(map[string][]learn.Report),
 		itlRestartUnderName:  true,
 		itlIdleOnEvidence:    true,
 		itlForgetReachesLine: true,
@@ -287,6 +300,9 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 		AnalyzedAt:   now,
 	}
 	snap := metrics.SLOModelSnapshot{Namespace: input.Namespace, ModelName: input.ModelID}
+	a.mu.Lock()
+	delete(a.learnerReports, reportModel(input.Namespace, input.ModelID))
+	a.mu.Unlock()
 	// Without the engine's settle tracker, the analyzer observes its own
 	// first, as the engine does before any analyzer runs (settle.go).
 	a.observeOwnSettle(input, now)
@@ -315,6 +331,7 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 	for _, vs := range fleet.variants {
 		key := a.variantKey(input.Namespace, input.ModelID, vs)
 		vc, reading, d := a.priceVariant(input, vs, key, fleet, tpotTarget, scaleUp, now)
+		a.noteLineLearner(logger, input.Namespace, input.ModelID, vs, key, d, now)
 		if domain.CanonicalRole(vs.Role) == domain.RoleDecode {
 			decodeLines = append(decodeLines, ttftDecodeLine{state: vs, detail: d})
 		}
@@ -763,7 +780,9 @@ func (a *Analyzer) evictStale(now time.Time) Evicted {
 		return !ok || now.Sub(at) > a.stateTimeout
 	}
 	var ev Evicted
-	ev.Lines, ev.Baselines = a.lines.Sweep(now, stale)
+	var evicted []learn.Forgotten
+	ev.Lines, ev.Baselines, evicted = a.lines.ForgetKeys(now, learn.ByEvicted, stale)
+	a.noteEvictedLocked(evicted)
 	for key := range a.seen {
 		if stale(key) {
 			delete(a.seen, key)
