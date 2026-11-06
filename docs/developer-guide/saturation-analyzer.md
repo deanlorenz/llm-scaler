@@ -783,8 +783,10 @@ Add a row when you add such a threshold.
 target the fill is the line's own, lowered by the batch cap, and it often clamps
 to the band's top for both lines: the ITL there is what tells them apart.
 
-**Resting.** Between the clear and set values the full fit prices the line and
-teaches nothing: it writes neither `B` nor the held slope. It stays only while
+**Resting.** Between the clear and set values the full fit prices its own key's
+line and teaches nothing: it writes neither `B` nor the held slope, and it is not
+published, so the prior on `B`, a sibling's borrow, the shape points and the
+snapshot all stay on the last fit at the set values. It stays only while
 the pinned fit, through a `B` learned at the set values, does not price 3 % more.
 So a resting line prices at most 3 % under the pinned fit.
 
@@ -809,7 +811,8 @@ saturation line, `slo-variant` (at `-v=3`) on the slo line, and the
 when the line goes silent or comes back. Leaving the full fit holds the key's last
 slope (`slopeHeld`), and entering it stays on the pinned fit; the what-if planner
 reads both as `held` and flags `HeldLine`. A key's first full fit does not wait:
-with no `B` learned, only it can replace the default. Once the dwell ends a new
+until then, only it can replace the default `B`. A key that has had one waits even
+if its `B` came out at or under zero and was not kept. Once the dwell ends a new
 line may price less than the one it replaces by more than 3 %, as it could before.
 
 `SwitchITLTierHysteresis`, one per analyzer, turns the latch off for a replay.

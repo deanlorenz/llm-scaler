@@ -165,6 +165,11 @@ type Reading struct {
 	SteadySpread float64
 }
 
+// Resting reports a full fit taken between the clear and set values
+// (Admission.TierHysteresis): it prices its own key's line, and teaches nothing.
+// Only a latched key's full fit is short of Ready.
+func (r Reading) Resting() bool { return r.Tier == TierOLS && !r.Ready }
+
 // SlopeAge is how long ago the held A was fitted, zero when none is held:
 // what tells a held line from a fit made this cycle in a log.
 func (r Reading) SlopeAge(now time.Time) time.Duration {

@@ -417,3 +417,28 @@ func TestDwellTier_RestingLeavesForAHigherPinnedFit(t *testing.T) {
 		t.Errorf("a resting fit moved the held slope: %v, was %v", got, a)
 	}
 }
+
+// A key that had a full fit with B at or under zero remembers no B, and still
+// waits out the dwell: it is past its first full fit.
+func TestDwellTier_AFullFitWithNoPositiveBStillDwells(t *testing.T) {
+	ks := make([]float64, 12)
+	for i := range ks {
+		ks[i] = 0.49 + 0.028*float64(i)
+	}
+	l := newLatchRig()
+	l.a, l.b = 0.06, -0.008
+	if r := l.see(0, ks); r.Tier != TierOLS {
+		t.Fatalf("the first cycle fitted %q", r.Tier)
+	}
+	if _, ok := l.tr.Baseline(latchKey); ok {
+		t.Fatal("a B under zero was remembered")
+	}
+	l.tr.mu.Lock()
+	got := l.tr.latches[latchKey]
+	got.tier = TierPinnedB
+	l.tr.latches[latchKey] = got
+	l.tr.mu.Unlock()
+	if r := l.after(15*time.Second, ks, 1); r.Tier != TierPinnedB || !r.TierHeld {
+		t.Fatalf("tier %q held %v, want the full fit refused", r.Tier, r.TierHeld)
+	}
+}

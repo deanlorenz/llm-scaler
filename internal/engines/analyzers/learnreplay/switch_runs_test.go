@@ -243,7 +243,7 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	//     most 3.0 %, DefaultTierSafeMargin. Decode demand moves x0.933 to
 	//     x1.120; in whole replicas of supply the decode requirement is higher
 	//     on one cycle and lower on none. lines.csv loses the publishes of the
-	//     fits a dwell held.
+	//     fits a dwell held and of the resting fits.
 	//   - The slo line, 4 outputs: slo-published.csv, on the fills priced, and
 	//     the slo rows of variant-capacities.csv.
 	//   - The throughput line, 6 outputs of throughput-sweep, whose line a

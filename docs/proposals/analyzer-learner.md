@@ -1186,14 +1186,19 @@ lines, one named change with one `SwitchITLTierHysteresis` per analyzer.
   the tier moves only for a line that prices 3 % more, so a held line prices at
   most 3 % under the line it refused (`tier-safe-margin`,
   `TestDwellTier_AClampedFillStillComparesTheRate`).
-- **Resting:** between the clear and set values the full fit teaches no `B` and no
-  held slope, and leaves at once for a pinned fit that prices 3 % more.
+- **Resting:** between the clear and set values the full fit prices its own key,
+  and teaches nothing: no `B`, no held slope, and no publish, so the prior on `B`,
+  a borrow, the shape points and the snapshot do not read it
+  (`TestITLResting_TheFitPricesItsKeyAndPublishesNothing`). It leaves at once for a
+  pinned fit that prices 3 % more.
 - **Evidence:** an emptied steady window, a gap past the steady carry and every
   forget put the key back at the pinned tier.
 - **Restart:** the latch is not persisted. A key with a restored slope stands at
   the pinned fit, the rule's safe choice (`TestDwellTier_ARestoredKeyStartsOnTheSafeSide`).
 - **Not held:** a key's first full fit, since no `B` is learned without it, and a
   tier change once the dwell has run out, which may still price less in one cycle.
+  A key with a full fit behind it dwells even if that fit's `B` was at or under
+  zero and so was not kept.
 
 Measured before the change, main at f7130a9cb, every golden replayed, the
 staircase recordings of #492 included: 78 analyzer-key series, 7758 cycles.

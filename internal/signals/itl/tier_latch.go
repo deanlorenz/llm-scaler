@@ -38,6 +38,9 @@ type tierLatch struct {
 	tier  string
 	since time.Time
 	seen  time.Time
+	// fitted is set once the key has stood at the full fit, which a B at or
+	// under zero leaves no other mark of (Observe remembers none).
+	fitted bool
 }
 
 // clearReady reports whether the steady readings keep a key at the full fit.
@@ -76,7 +79,7 @@ func (t *Tracker) fullFitReady(key string, set bool, steady []Observation, adm A
 // last changed. Called with t.mu held.
 func (t *Tracker) unlatch(key string) {
 	if l, ok := t.latches[key]; ok {
-		l.tier = TierPinnedB
+		l.tier, l.fitted = TierPinnedB, false
 		t.latches[key] = l
 	}
 }
@@ -109,7 +112,7 @@ type tierInputs struct {
 // Otherwise a line leaving the full fit holds the key's last slope, and a line
 // entering it stays on the pinned fit. With no slope to hold, or no pinned fit
 // to stay on, there is nothing to prefer, and the change goes through. So too
-// for a key's first full fit, which no dwell delays: until B is learned the
+// for a key's first full fit, which no dwell delays: until a full fit is had the
 // pinned fit rests on a constant for another card, and only the full fit can
 // replace it (Liveness, analyzer-learner.md 2.6).
 //
@@ -129,7 +132,7 @@ func (t *Tracker) dwellTier(key string, c fitChoice, in tierInputs, adm Admissio
 	held, have := t.slopes[key]
 	l, ok := t.latches[key]
 	if !ok {
-		l = tierLatch{tier: c.tier, since: now, seen: now}
+		l = tierLatch{tier: c.tier, since: now, seen: now, fitted: c.tier == TierOLS}
 		if have {
 			l.tier = TierPinnedB
 		}
@@ -152,7 +155,7 @@ func (t *Tracker) dwellTier(key string, c fitChoice, in tierInputs, adm Admissio
 			if have && adm.mayHold(held, now) && !adm.pricesMoreBy(pricedLine(c, in, adm), line, DefaultTierSafeMargin) {
 				return fitChoice{hold: true}, true
 			}
-		} else if in.learned {
+		} else if in.learned || l.fitted {
 			p := chooseFit(in.obs, in.steady, false, in.baseline, in.minSettled)
 			if p.tier == TierPinnedB && !adm.pricesMoreBy(c.model, pricedLine(p, in, adm), DefaultTierSafeMargin) {
 				return p, true
@@ -167,7 +170,7 @@ func (t *Tracker) dwellTier(key string, c fitChoice, in tierInputs, adm Admissio
 func (t *Tracker) latch(key, tier string, now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.latches[key] = tierLatch{tier: tier, since: now, seen: now}
+	t.latches[key] = tierLatch{tier: tier, since: now, seen: now, fitted: t.latches[key].fitted || tier == TierOLS}
 }
 
 // pricedLine is the line Observe would take from a pinned choice, one-sided
