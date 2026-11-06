@@ -372,7 +372,7 @@ func (a *Analyzer) promptSpread(key string, rows []domain.ReplicaMetrics, now ti
 		a.prompts[key] = w
 	}
 	w.seen = now
-	w.window.Note(rows, int(a.cycle))
+	w.window.Note(rows, int(a.cycle), now)
 	if !a.ttftMeasuredSpread {
 		return whatif.ReadPromptSpread(nil, 0)
 	}

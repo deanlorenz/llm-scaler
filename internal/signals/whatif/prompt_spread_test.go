@@ -4,8 +4,10 @@ import (
 	"math"
 	"math/rand/v2"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
@@ -129,7 +131,9 @@ func TestReadPromptSpread_TheFloorPastTheCheck(t *testing.T) {
 // rate: 98% of prompts at 1800 tokens, 2% at 20000, 40 requests a minute, true
 // cv 1.2. One cycle's histogram misses the long prompts in 45% of minutes and
 // reads 0.48 with no flag. The window misses them about 1% of the time at 15 s
-// a cycle, when it spans under 6 minutes, and at 60 s a cycle not at all.
+// a cycle, when it spans under 6 minutes, and at 60 s a cycle not at all. A
+// restart has no such span: at the minimum the window has counted 200 requests,
+// and the long prompts are in them all but about 1.8% of the time.
 func TestPromptWindow_ARareLongPrompt(t *testing.T) {
 	const slices15s, perSlice = 4000, 10
 	r := rand.New(rand.NewPCG(7, 11))
@@ -142,6 +146,7 @@ func TestPromptWindow_ARareLongPrompt(t *testing.T) {
 		}
 	}
 	// row is the one-minute rates at slice i.
+	at := func(i int) time.Time { return time.Unix(int64(15*i), 0) }
 	row := func(i int) []domain.ReplicaMetrics {
 		n, l := 0.0, 0.0
 		for j := i - 3; j <= i; j++ {
@@ -171,14 +176,13 @@ func TestPromptWindow_ARareLongPrompt(t *testing.T) {
 			oneMissed, windowMissed, windowLow, cycles := 0, 0, 0, 0
 			for i, n := 3, 0; i < slices15s; i, n = i+tc.stride, n+1 {
 				rows := row(i)
-				window.Note(rows, i)
+				window.Note(rows, i, at(i))
 				if n < PromptWindowCycles {
 					continue
 				}
-				var one PromptWindow
-				one.Note(rows, i)
+				mean := rows[0].PrefillComputedTokenRate / rows[0].RequestRate
 				cycles++
-				if one.Spread().CV < missed {
+				if ReadPromptSpread(PoolComputedBuckets(nil, rows), mean).CV < missed {
 					oneMissed++
 				}
 				cv := window.Spread().CV
@@ -197,6 +201,75 @@ func TestPromptWindow_ARareLongPrompt(t *testing.T) {
 				cycles, of(oneMissed), of(windowMissed), low, of(windowLow))
 		})
 	}
+
+	// A restart at every 15 s slice: the first reading a fresh window gives.
+	for _, tc := range []struct {
+		name       string
+		stride     int
+		firstCycle int
+	}{
+		{"restart, 15 s cycle", 1, 17},
+		{"restart, 60 s cycle", 4, 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			starts, firstMissed := 0, 0
+			for start := 3; start+tc.stride*PromptWindowCycles < slices15s; start++ {
+				var w PromptWindow
+				for n := 1; ; n++ {
+					i := start + (n-1)*tc.stride
+					w.Note(row(i), i, at(i))
+					if n < tc.firstCycle {
+						require.True(t, w.Spread().Assumed, "cycle %d of a restart at %d", n, start)
+						continue
+					}
+					s := w.Spread()
+					require.False(t, s.Assumed, "cycle %d", n)
+					if s.CV < missed {
+						firstMissed++
+					}
+					break
+				}
+				starts++
+			}
+			got := float64(firstMissed) / float64(starts)
+			assert.Less(t, got, 0.04)
+			t.Logf("%d restarts, first read at cycle %d: misses the long prompts %.4f", starts, tc.firstCycle, got)
+		})
+	}
+}
+
+// Each minimum holds alone: traffic past the count over too few cycles, and
+// cycles past the count of too few requests. The count takes the time since
+// the last cycle, not the rate's whole minute, so overlapping samples count
+// once, and a gap past a minute counts a minute: the rate says nothing of the
+// rest.
+func TestPromptWindow_TheMinimums(t *testing.T) {
+	inf := math.Inf(1)
+	row := func(rate float64) []domain.ReplicaMetrics {
+		return []domain.ReplicaMetrics{{Ready: true, PrefillComputedTokenRate: rate * 1000, PrefillComputedTokenRateKnown: true,
+			RequestRate: rate, RequestRateKnown: true,
+			ComputedTokensBuckets: []domain.LengthBucket{bucket(2000, rate), bucket(inf, rate)}}}
+	}
+	at := func(s int) time.Time { return time.Unix(int64(s), 0) }
+	reads := func(rate float64, cycles, gap int) bool {
+		var w PromptWindow
+		for i := range cycles {
+			w.Note(row(rate), i, at(i*gap))
+		}
+		return !w.Spread().Assumed
+	}
+	assert.False(t, reads(1000, PromptWindowMinCycles-1, 60), "the count passed, too few cycles")
+	assert.True(t, reads(1000, PromptWindowMinCycles, 60))
+	// 1 a second: 60 from the first cycle and 15 from each after it is 195 at
+	// cycle 10, under, and 210 at cycle 11. A count of each whole minute, the
+	// overlap counted again, would read at cycle 4.
+	assert.False(t, reads(1, 10, 15), "195 requests")
+	assert.True(t, reads(1, 11, 15), "210 requests")
+	// 42 a minute at a cycle an hour apart: 42 a cycle, not 2520.
+	assert.False(t, reads(0.7, 4, 3600), "168 requests")
+	assert.True(t, reads(0.7, 5, 3600), "210 requests")
+	// A clock that steps back adds nothing, and takes nothing away.
+	assert.True(t, reads(5, PromptWindowMinCycles, -15), "300 requests from the first cycle")
 }
 
 // The window keeps the latest cycles with traffic and no others, reads a nil
@@ -212,34 +285,38 @@ func TestPromptWindow(t *testing.T) {
 	assert.True(t, none.Spread().Assumed)
 	assert.Nil(t, none.Clone())
 
+	at := func(i int) time.Time { return time.Unix(int64(60*i), 0) }
 	var w PromptWindow
-	w.Note([]domain.ReplicaMetrics{row(0, 0)}, 1)
+	w.Note([]domain.ReplicaMetrics{row(0, 0)}, 1, at(1))
 	_, _, _, n := w.Prompt()
 	assert.Zero(t, n, "no traffic is no cycle")
 
 	for i := range PromptWindowCycles + 3 {
-		w.Note([]domain.ReplicaMetrics{row(100, 1)}, i+2)
+		w.Note([]domain.ReplicaMetrics{row(100, 1)}, i+2, at(i+2))
 	}
 	tokens, from, to, n := w.Prompt()
 	assert.Equal(t, []int{5, 24, PromptWindowCycles}, []int{from, to, n})
 	assert.InDelta(t, 100, tokens, 1e-9)
 
-	// Twenty cycles at 100 tokens and no histogram, then one at 900 with one:
-	// the spread reads at 900, where the window's mean would be under it.
-	w.Note([]domain.ReplicaMetrics{row(900, 1, bucket(1000, 1), bucket(inf, 1))}, 30)
+	// Cycles at 100 tokens with no histogram, then cycles at 900 with one: the
+	// spread reads at 900, where the window's mean would be under it, and the
+	// cycles with no histogram count toward no minimum.
+	for i := range PromptWindowMinCycles {
+		w.Note([]domain.ReplicaMetrics{row(900, 1, bucket(1000, 1), bucket(inf, 1))}, 30+i, at(30+i))
+	}
 	assert.InDelta(t, math.Sqrt(1e6/(900.0*900)-1), w.Spread().CV, 1e-9)
 
 	copied := w.Clone()
-	w.Note([]domain.ReplicaMetrics{row(9000, 1)}, 31)
+	w.Note([]domain.ReplicaMetrics{row(9000, 1)}, 40, at(40))
 	_, _, last, _ := copied.Prompt()
-	assert.Equal(t, 30, last, "a clone is not reached by a later Note")
+	assert.Equal(t, 34, last, "a clone is not reached by a later Note")
 
 	// A row not serving, or with one rate unread, does not count, nor does its
 	// histogram: the mean and the pool hold the same rows.
 	skipped := row(100000, 1, bucket(1000, 5), bucket(inf, 5))
 	skipped.RequestRateKnown = false
 	var mixed PromptWindow
-	mixed.Note([]domain.ReplicaMetrics{row(500, 1, bucket(1000, 1), bucket(inf, 1)), skipped}, 1)
+	mixed.Note([]domain.ReplicaMetrics{row(500, 1, bucket(1000, 1), bucket(inf, 1)), skipped}, 1, at(1))
 	assert.Equal(t, map[float64]float64{1000: 1, inf: 1}, mixed.samples[0].buckets)
 }
 

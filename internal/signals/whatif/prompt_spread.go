@@ -3,6 +3,7 @@ package whatif
 import (
 	"math"
 	"slices"
+	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/prefill"
@@ -13,6 +14,27 @@ import (
 // cycle. One cycle's one-minute histogram is too few requests: at 40 requests
 // a minute, one prompt in 50 being long is missed by 45% of minutes.
 const PromptWindowCycles = 20
+
+// The evidence a window must hold before its spread is read: until then it is
+// Assumed, as a window with no histogram is, so a restart cannot read low with
+// no flag. Both count only the cycles that carried a histogram.
+const (
+	// PromptWindowMinRequests is the requests the histogram must have counted.
+	// A spread is set by its tail, and a tail of share p is missed by n requests
+	// with chance (1-p)^n: at 200, a 2% tail is missed 1.8% of the time, and a
+	// 5% one 0.004%. The window's 20 cycles span 345 s at the default 15 s
+	// cycle, so a variant under 35 requests a minute never reaches it there
+	// and stays Assumed; at a 60 s cycle that floor is 10.
+	PromptWindowMinRequests = 200
+	// PromptWindowMinCycles is the cycles it must have counted them over. It is
+	// for fast traffic, where one minute passes the count: one minute is one
+	// burst, not the traffic. Five is whatif.TTFTWindowCycles, two minutes at
+	// the default 15 s cycle. At slower traffic the count binds first.
+	PromptWindowMinCycles = 5
+	// promptHistogramWindow is the window of the histogram's rate
+	// (registration.TTFTInputWindow), what a cycle's rate is a count over.
+	promptHistogramWindow = time.Minute
+)
 
 // PromptSpread is the coefficient of variation of the effective prompt, and
 // how it was had: what the slo analyzer and the what-if CLI pass as
@@ -49,6 +71,7 @@ func PoolComputedBuckets(pooled map[float64]float64, rows []domain.ReplicaMetric
 // a second, and its pooled computed-token histogram, nil with none.
 type promptSample struct {
 	cycle             int
+	at                time.Time
 	computed, request float64
 	buckets           map[float64]float64
 }
@@ -61,12 +84,12 @@ type PromptWindow struct {
 	samples []promptSample
 }
 
-// Note folds one cycle's rows into the window. A cycle with no traffic leaves
-// it as it is, so an idle tail is read at the traffic it last served. Only the
+// Note folds one cycle's rows, read at at, into the window. A cycle with no
+// traffic leaves it as it is, so an idle tail is read at the traffic it last served. Only the
 // serving rows that read both rates count, and the histogram is pooled over
 // those same rows.
-func (w *PromptWindow) Note(rows []domain.ReplicaMetrics, cycle int) {
-	s := promptSample{cycle: cycle}
+func (w *PromptWindow) Note(rows []domain.ReplicaMetrics, cycle int, at time.Time) {
+	s := promptSample{cycle: cycle, at: at}
 	counted := make([]domain.ReplicaMetrics, 0, len(rows))
 	for _, rm := range rows {
 		if !prefill.Serving(rm) || !rm.PrefillComputedTokenRateKnown || !rm.RequestRateKnown {
@@ -114,15 +137,28 @@ func (w *PromptWindow) Prompt() (tokens float64, from, to, cycles int) {
 
 // Spread is the prompt spread over the window: the histograms summed, as the
 // rates are, and read at the mean of the cycles that carried one, so a window
-// reaching back before the histogram does not mix two sets of requests.
+// reaching back before the histogram does not mix two sets of requests. Below
+// PromptWindowMinCycles or PromptWindowMinRequests it is Assumed, whatever the
+// histogram says.
 func (w *PromptWindow) Spread() PromptSpread {
 	pooled := map[float64]float64{}
 	var computed, requests float64
+	cycles, counted := 0, 0.0
+	var last time.Time
 	if w != nil {
 		for _, s := range w.samples {
 			if s.buckets == nil {
 				continue
 			}
+			// Each rate is over the last minute, so at a short cycle the
+			// samples overlap: only the time since the last one is new.
+			covered := promptHistogramWindow
+			if cycles > 0 {
+				covered = min(max(s.at.Sub(last), 0), promptHistogramWindow)
+			}
+			counted += s.request * covered.Seconds()
+			last = s.at
+			cycles++
 			computed += s.computed
 			requests += s.request
 			for bound, rate := range s.buckets {
@@ -130,7 +166,7 @@ func (w *PromptWindow) Spread() PromptSpread {
 			}
 		}
 	}
-	if !(requests > 0) {
+	if cycles < PromptWindowMinCycles || counted < PromptWindowMinRequests {
 		return ReadPromptSpread(nil, 0)
 	}
 	return ReadPromptSpread(pooled, computed/requests)

@@ -1509,9 +1509,29 @@ time and reads 0.48 with no flag. `TestPromptWindow_ARareLongPrompt` replays it:
 | Window, 15 s cycle | 1.2% | 11.1% |
 | Window, 60 s cycle | 0 | 1.1% |
 
-A window is short after a restart: until it fills it reads as few requests as it
-holds, unflagged. At 15 s a cycle the 20 samples overlap, so they span under 6
-minutes of requests, not 20.
+At 15 s a cycle the 20 samples overlap, so they span under 6 minutes of requests,
+not 20.
+
+**A window must hold evidence before it reads.** Until a window holds 5 cycles and
+200 requests with a histogram, `cv` is assumed and `AssumedPromptSpread` stands, so
+a restart cannot read low with no flag. Above both it reads as above.
+
+- **200 requests** comes from the case above. A spread is set by its tail, and n
+  requests miss a tail of share p with chance `(1-p)^n`: at 200, a 2% tail is
+  missed 1.8% of the time. Restarted at every point of the case, the first reading
+  misses it 1.71% of the time at a 15 s cycle and 1.74% at 60 s
+  (`TestPromptWindow_ARareLongPrompt`). That reading comes at cycle 17 and cycle 5.
+- **Requests are counted without the overlap.** A rate covers the last minute, so
+  each cycle adds its rate times the time since the last cycle, up to a minute,
+  and the first adds a full minute.
+- **5 cycles** does not come from the case, where the count binds first. It is for
+  fast traffic, where one minute passes the count: one minute is one burst, not the
+  traffic. It is the 5 of the other TTFT windows.
+
+**What it costs.** The window spans 345 s of requests at a 15 s cycle, so a variant
+under 35 requests a minute never reaches 200 and stays at `cv` 2, flagged. At a 60 s
+cycle that floor is 10 requests a minute. That reads high, the side that costs
+replicas, and S2's gate on `AssumedPromptSpread` stops it acting there.
 
 **A mean the buckets cannot hold.** The mean and the histogram can describe
 different requests: a pod in a rollout may carry no histogram, and the requests
@@ -1536,21 +1556,25 @@ in for it, in a throwaway replay of S1 at the stitched estimate of
 prefix hits are low, and the prompt histogram is over `[5m]`, not `[1m]`. The
 prediction, as a ratio to `cv` 2:
 
-| Recording | Cycles with a prediction | Least | Median | Most | Clamped cycles | Refused cycles |
+| Recording | Cycles with a prediction | Least | Median | Most | Clamped cycles | Assumed cycles |
 | --- | --- | --- | --- | --- | --- | --- |
-| `ttft-open-loop-short` | 99 | 0.544 | 0.781 | 1.000 | 0 of 105 | 18 |
-| `ttft-open-loop-long` | 86 | 0.600 | 1.094 | 1.320 | 58 of 93 | 0 |
-| `ttft-saturated` | 16 | 0.351 | 1.977 | 2.000 | 167 of 193 | 0 |
+| `ttft-open-loop-short` | 99 | 0.544 | 0.781 | 1.000 | 0 of 105 | 22 |
+| `ttft-open-loop-long` | 86 | 0.600 | 1.000 | 1.320 | 19 of 93 | 47 |
+| `ttft-saturated` | 16 | 1.000 | 1.977 | 2.000 | 167 of 193 | 4 |
 
 On the short run the figure closes on the router's p90: 1.82x to 1.44x at 2k
 tokens, 1.74x to 1.04x at 4k. At 1k it goes from 1.10x over to 0.95x under. The
-16k level's last cycle is refused and stays at 1.62x: the stand-in's `[5m]`
-histogram lags the mean after a step up. A refused cycle reads `cv` 2, flagged.
-On the long run's 8k level it goes from 3.23x to 1.94x.
+16k level's last cycle reads assumed and stays at 1.62x. An assumed cycle reads
+`cv` 2, flagged, either because the window is short of evidence or because the
+mean check refused it, which the stand-in's `[5m]` histogram against the `[1m]`
+mean probably causes after a step up. On the long run's 8k level it goes from 3.23x
+to 1.94x. Its 30k and 37k levels stay at 1.50x and 1.56x: at that rate the window
+holds too few requests, so they read `cv` 2, not the clamped 3.
 
 **The histogram stops at 20000 tokens on these runs.** Past that bound a prompt
 lands in `+Inf`, so `cv` is held at 3 and flagged `PromptSpreadClamped`, whatever
-the true spread. The 30k and 37k prompts sent at `cv` 0.06 read that way. So on
+the true spread. The 30k prompts sent at `cv` 0.06 read that way on the saturated
+run. So on
 prompts longer than the top bound Q1 raises the figure instead of correcting it,
 and S2's gate on `PromptSpreadClamped` stops it acting there.
 

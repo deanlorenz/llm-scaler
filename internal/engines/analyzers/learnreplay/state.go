@@ -214,7 +214,7 @@ func StateAt(ctx context.Context, recording []byte, opts Options, q StateQuery) 
 			windows = append(windows, w)
 		}
 		noteShapes(shapes, in.ReplicaMetrics, n)
-		ttft.note(in, n)
+		ttft.note(in, n, ev.Now)
 		if n == cycle {
 			st = r.stateOf(in, n, ev.Now, shapes)
 			r.fillTTFT(st, in, ttft)

@@ -142,8 +142,10 @@ func TestTTFT_TheSpreadOrder(t *testing.T) {
 	withBuckets := func(b []domain.LengthBucket) *learnreplay.State {
 		st := learnedState()
 		w := &whatif.PromptWindow{}
-		w.Note([]domain.ReplicaMetrics{{Ready: true, PrefillComputedTokenRate: 2000, PrefillComputedTokenRateKnown: true,
-			RequestRate: 1, RequestRateKnown: true, ComputedTokensBuckets: b}}, 1)
+		for i := range whatif.PromptWindowMinCycles {
+			w.Note([]domain.ReplicaMetrics{{Ready: true, PrefillComputedTokenRate: 2000, PrefillComputedTokenRateKnown: true,
+				RequestRate: 1, RequestRateKnown: true, ComputedTokensBuckets: b}}, i, time.Unix(int64(60*i), 0))
+		}
 		st.Prefill[0].PromptWindow = w
 		return st
 	}
@@ -170,7 +172,13 @@ func TestTTFT_TheSpreadOrder(t *testing.T) {
 	assert.Equal(t, shapeClamped, pf.in.PromptCVSource)
 	assert.Contains(t, strings.Join(pf.in.Assumed, " "), "prompt cv 3 (the histogram")
 
-	for name, st := range map[string]*learnreplay.State{"nil": learnedState(), "empty": withBuckets(nil)} {
+	// A window with one cycle of a histogram has too little to read yet.
+	fresh := learnedState()
+	fresh.Prefill[0].PromptWindow = &whatif.PromptWindow{}
+	fresh.Prefill[0].PromptWindow.Note([]domain.ReplicaMetrics{{Ready: true, PrefillComputedTokenRate: 2000,
+		PrefillComputedTokenRateKnown: true, RequestRate: 1000, RequestRateKnown: true, ComputedTokensBuckets: measured}}, 1, time.Unix(0, 0))
+
+	for name, st := range map[string]*learnreplay.State{"nil": learnedState(), "empty": withBuckets(nil), "fresh": fresh} {
 		pf = fleetOf(t, st, answerFlags{})
 		assert.Equal(t, whatif.AssumedPromptCV, pf.fleet.Prefill.PromptCV, name)
 		assert.True(t, pf.fleet.Prefill.PromptCVAssumed, name)

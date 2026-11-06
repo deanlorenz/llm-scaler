@@ -546,12 +546,38 @@ func TestTTFT_TheAssumedSpread(t *testing.T) {
 	assert.Contains(t, got.Flags, string(whatif.AssumedPromptSpread))
 }
 
+// warmPromptWindow runs the cycles a prompt window needs before it reads, one
+// short of the minimum, a minute apart, so the next cycle is the first to read.
+func (r *ttftRig) warmPromptWindow(t *testing.T) {
+	t.Helper()
+	for range whatif.PromptWindowMinCycles - 1 {
+		r.one(t)
+		r.now = r.now.Add(time.Minute)
+	}
+}
+
+// A fresh window reads Assumed and raises the flag, however much traffic its
+// one cycle holds: a restart cannot read low with no flag. It reads from the
+// minimum on.
+func TestTTFT_AFreshWindowReadsAssumed(t *testing.T) {
+	rows := prefillRows("pre", 4000000)
+	rows[0].ComputedTokensBuckets = []domain.LengthBucket{bucket(5000, 2), bucket(math.Inf(1), 2)}
+	r := newTTFTRig(ttftEstimate(), rows)
+	for i := range whatif.PromptWindowMinCycles - 1 {
+		assert.Contains(t, r.one(t).Flags, string(whatif.AssumedPromptSpread), "cycle %d", i)
+		r.now = r.now.Add(time.Minute)
+	}
+	assert.NotContains(t, r.one(t).Flags, string(whatif.AssumedPromptSpread), "at the minimum")
+}
+
 // Test 9 through Analyze: a clamped spread is flagged, and a measured one
 // lifts the assumed flag.
 func TestTTFT_AMeasuredSpreadThroughAnalyze(t *testing.T) {
 	rows := prefillRows("pre", 4000)
 	rows[0].ComputedTokensBuckets = []domain.LengthBucket{bucket(1000, 1), bucket(math.Inf(1), 2)}
-	got := newTTFTRig(ttftEstimate(), rows).one(t)
+	r := newTTFTRig(ttftEstimate(), rows)
+	r.warmPromptWindow(t)
+	got := r.one(t)
 	assert.Contains(t, got.Flags, string(PromptSpreadClamped))
 	assert.NotContains(t, got.Flags, string(whatif.AssumedPromptSpread))
 }
@@ -564,6 +590,7 @@ func TestTTFT_TheMeasuredSpreadSwitch(t *testing.T) {
 		rows[0].ComputedTokensBuckets = []domain.LengthBucket{bucket(5000, 2), bucket(math.Inf(1), 2)}
 		r := newTTFTRig(ttftEstimate(), rows)
 		require.NoError(t, r.a.SetSwitchesForReplay(map[string]bool{SwitchTTFTMeasuredSpread: on}))
+		r.warmPromptWindow(t)
 		return r
 	}
 	on := rig(true).one(t)
@@ -574,7 +601,7 @@ func TestTTFT_TheMeasuredSpreadSwitch(t *testing.T) {
 
 	spread := func(on bool) whatif.PromptSpread {
 		r := rig(on)
-		return r.a.promptSpread("k", r.in.ReplicaMetrics, r.now)
+		return r.a.promptSpread("ns|m|pre", r.in.ReplicaMetrics, r.now)
 	}
 	assert.False(t, spread(true).Assumed)
 	assert.Equal(t, whatif.PromptSpread{CV: whatif.AssumedPromptCV, Assumed: true}, spread(false))
@@ -595,14 +622,16 @@ func TestTTFT_TheSpreadIsTheWindowsNotTheCycles(t *testing.T) {
 	}
 	r := newTTFTRig(ttftEstimate(), nil)
 	var cli whatif.PromptWindow
-	for i, rows := range [][]domain.ReplicaMetrics{minute(4), minute(0)} {
-		cli.Note(rows, i)
-		got := r.a.promptSpread("k", rows, r.now)
+	cycles := [][]domain.ReplicaMetrics{minute(4), minute(0), minute(0), minute(0), minute(0), minute(0)}
+	for i, rows := range cycles {
+		at := r.now.Add(time.Duration(i) * time.Minute)
+		cli.Note(rows, i, at)
+		got := r.a.promptSpread("k", rows, at)
 		assert.Equal(t, cli.Spread(), got, "S1 and the CLI, cycle %d", i)
 	}
-	var alone whatif.PromptWindow
-	alone.Note(minute(0), 0)
-	assert.InDelta(t, 0.484, alone.Spread().CV, 0.001, "this minute alone")
+	alone := whatif.ReadPromptSpread(whatif.PoolComputedBuckets(nil, minute(0)), 1800)
+	assert.InDelta(t, 0.484, alone.CV, 0.001, "this minute alone")
+	assert.False(t, cli.Spread().Assumed)
 	assert.Greater(t, cli.Spread().CV, 1.0, "the window holds the long prompts")
 }
 

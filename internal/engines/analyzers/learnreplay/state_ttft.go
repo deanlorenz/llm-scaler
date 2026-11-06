@@ -146,8 +146,8 @@ type prefillRows struct {
 // a latency, and pulls a mean low.
 func positive(x float64) bool { return whatif.Finite(x) && x > 0 }
 
-// note takes one cycle's rows.
-func (t *ttftSamples) note(in domain.AnalyzerInput, cycle int) {
+// note takes one cycle's rows, read at at.
+func (t *ttftSamples) note(in domain.AnalyzerInput, cycle int, at time.Time) {
 	roles := rolesOf(in)
 	pre := map[string]*prefillRows{}
 	decode := map[string]*decodeRows{}
@@ -210,7 +210,7 @@ func (t *ttftSamples) note(in domain.AnalyzerInput, cycle int) {
 		if t.prompts[v] == nil {
 			t.prompts[v] = &whatif.PromptWindow{}
 		}
-		t.prompts[v].Note(rowsOfVariant(in.ReplicaMetrics, v), cycle)
+		t.prompts[v].Note(rowsOfVariant(in.ReplicaMetrics, v), cycle, at)
 	}
 	for v, d := range decode {
 		if d.transferRows > 0 {
