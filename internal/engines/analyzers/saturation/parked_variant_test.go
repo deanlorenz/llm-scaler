@@ -101,11 +101,12 @@ var _ = Describe("a variant that still exists keeps what it learned", func() {
 	})
 
 	It("keeps the variant's accelerator memo alive, so its key does not move on wake", func() {
-		// The memo ages on the wall clock, so it is checked on the wall
-		// clock: backdated past its horizon, then stamped.
+		// Backdated past its horizon on the analyzer's clock, then stamped.
+		// On the wall clock this case held only while the wall stayed within
+		// 23 days of the rig's fixed date.
 		a.mu.Lock()
-		a.lastAccelerator[ns+"/v"] = acceleratorMemo{name: accel, lastUsed: time.Now().Add(-30 * 24 * time.Hour)}
-		a.lastAccelerator[ns+"/gone"] = acceleratorMemo{name: accel, lastUsed: time.Now().Add(-30 * 24 * time.Hour)}
+		a.lastAccelerator[ns+"/v"] = acceleratorMemo{name: accel, lastUsed: now.Add(-30 * 24 * time.Hour)}
+		a.lastAccelerator[ns+"/gone"] = acceleratorMemo{name: accel, lastUsed: now.Add(-30 * 24 * time.Hour)}
 		a.mu.Unlock()
 
 		a.NoteVariantsPresent(ns, model, []string{"v"})
