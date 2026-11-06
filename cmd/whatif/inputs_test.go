@@ -19,8 +19,8 @@ import (
 // spread of output lengths the shape reads.
 
 // ttftAt prices the worked example's fleet, its decode line included, under
-// flags, at p90 at rate.
-func ttftAt(t *testing.T, f answerFlags, rate float64, set ...string) (*pricedFleet, whatif.TTFT) {
+// flags, at p90 at 8 r/s.
+func ttftAt(t *testing.T, f answerFlags, set ...string) (*pricedFleet, whatif.TTFT) {
 	t.Helper()
 	st := workedState(t)
 	f.assumeVP, f.prefill, f.decode, f.inputTokens, f.outputTokens = 30000, 1, 1, 1000, 1000
@@ -33,7 +33,7 @@ func ttftAt(t *testing.T, f answerFlags, rate float64, set ...string) (*pricedFl
 	fleets, err := f.ttftFleets(st, ttftQuestion{q: 0.9}, variants)
 	require.NoError(t, err)
 	require.Nil(t, fleets[0].refused)
-	got := fleets[0].priced(func(fl whatif.TTFTFleet) whatif.Result { return whatif.TTFTAt(fl, rate, 0.9) })
+	got := fleets[0].priced(func(fl whatif.TTFTFleet) whatif.Result { return whatif.TTFTAt(fl, 8, 0.9) })
 	require.IsType(t, whatif.TTFT{}, got)
 	return fleets[0], got.(whatif.TTFT)
 }
@@ -42,14 +42,14 @@ func ttftAt(t *testing.T, f answerFlags, rate float64, set ...string) (*pricedFl
 // Poisson to the last bit, the flag's stated figure included. It is flagged
 // and named, never silently a Poisson answer.
 func TestArrivalCV2_ReachesThePrefillQueue(t *testing.T) {
-	_, poisson := ttftAt(t, answerFlags{}, 8)
-	_, one := ttftAt(t, answerFlags{arrivalCV2: 1}, 8, "arrival-cv2")
+	_, poisson := ttftAt(t, answerFlags{})
+	_, one := ttftAt(t, answerFlags{arrivalCV2: 1}, "arrival-cv2")
 	assert.Equal(t, poisson.Seconds, one.Seconds, "Ca^2 1 is Poisson")
 	assert.Contains(t, one.Flags, assumedArrivalCV2)
 	assert.NotContains(t, poisson.Flags, assumedArrivalCV2)
 
-	pf, bursty := ttftAt(t, answerFlags{arrivalCV2: 8}, 8, "arrival-cv2")
-	_, smooth := ttftAt(t, answerFlags{arrivalCV2: 0.25}, 8, "arrival-cv2")
+	pf, bursty := ttftAt(t, answerFlags{arrivalCV2: 8}, "arrival-cv2")
+	_, smooth := ttftAt(t, answerFlags{arrivalCV2: 0.25}, "arrival-cv2")
 	assert.Greater(t, bursty.Seconds, poisson.Seconds)
 	assert.Less(t, smooth.Seconds, bursty.Seconds)
 	assert.Equal(t, 8.0, pf.in.ArrivalCV2)
@@ -62,7 +62,7 @@ func TestArrivalCV2_ReachesThePrefillQueue(t *testing.T) {
 // Poisson stands there, flagged and named, whatever the flag says. With no
 // line priced nothing rests on Poisson any more, and the flag goes.
 func TestArrivalCV2_DecodeAdmissionStaysPoisson(t *testing.T) {
-	pf, got := ttftAt(t, answerFlags{arrivalCV2: 4}, 8, "arrival-cv2")
+	pf, got := ttftAt(t, answerFlags{arrivalCV2: 4}, "arrival-cv2")
 	require.NotNil(t, pf.fleet.Decode)
 	assert.Contains(t, got.Flags, assumedPoisson)
 	assert.Contains(t, got.Flags, assumedArrivalCV2)
@@ -109,17 +109,17 @@ func TestPromptCV_TheFlagOverrides(t *testing.T) {
 		assert.True(t, pf.fleet.Prefill.PromptCVAssumed)
 	})
 	t.Run("the price moves, and 2 is the default", func(t *testing.T) {
-		_, def := ttftAt(t, answerFlags{}, 8)
-		pf, two := ttftAt(t, answerFlags{assumePromptCV: 2}, 8, "assume-prompt-cv")
+		_, def := ttftAt(t, answerFlags{})
+		pf, two := ttftAt(t, answerFlags{assumePromptCV: 2}, "assume-prompt-cv")
 		assert.Equal(t, def.Seconds, two.Seconds)
 		assert.Contains(t, two.Flags, whatif.AssumedPromptSpread)
 		assert.Contains(t, pf.in.Assumed, "prompt cv 2 (--assume-prompt-cv)")
-		_, one := ttftAt(t, answerFlags{assumePromptCV: 1}, 8, "assume-prompt-cv")
+		_, one := ttftAt(t, answerFlags{assumePromptCV: 1}, "assume-prompt-cv")
 		assert.Less(t, one.Seconds, def.Seconds)
 		assert.Contains(t, one.Flags, whatif.AssumedPromptSpread)
 	})
 	t.Run("a cv above the peak is flagged", func(t *testing.T) {
-		_, wide := ttftAt(t, answerFlags{assumePromptCV: 6}, 8, "assume-prompt-cv")
+		_, wide := ttftAt(t, answerFlags{assumePromptCV: 6}, "assume-prompt-cv")
 		assert.Contains(t, wide.Flags, promptSpreadAbovePeak)
 	})
 }
