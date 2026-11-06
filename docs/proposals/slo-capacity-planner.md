@@ -822,6 +822,7 @@ TTFT: the decode answers are as they were.
 | `cv` | No recording has one: it needs Q1's histogram | 2, flagged `AssumedPromptSpread` (S1) |
 | Arrivals | None | Poisson, flagged `AssumedPoissonArrivals`, the S1 flag, kept in `cmd/whatif` because P3 has none |
 | `T_xfer` | Decode rows' `AvgKVTransferTime` over the measured prompt | Left out, flagged `TransferOmitted` |
+| Decode term | With a decode line: `D` and `R` as the recording's cycles teach them ([the decode term](slo-capacity-planner-ttft.md#as-built-the-decode-term)), in place of `T_xfer` and `ITL` | `D`: the measured figure held at slope 10, flagged `DecodeStepSlopeAssumed`, or the old sum, flagged `DecodeTermOmitted`. `R`: 20 ms, flagged `RouterHopAssumed`. Each is named on the `assumed` row |
 | Decode side | The decode variant's line, if `whatif.KneeRate` prices it | The decode engine's `AvgTTFT`, readings above 0 only: the largest of the last 5 cycles, with that cycle's prompt, flagged `DecodeEngineMeasured`. A cycle with no reading holds an empty slot, so the figure ages out of an idle tail. Else left out, flagged `DecodeSideOmitted` and `DecodeTTFTUnmeasured` |
 | Flow control | On when the scheduler queue exists at the cycle, S1's rule (`domain.AnalyzerInput.FlowControlSeries`). A pool or a wait histogram does not count: both are filled only while recording, and wait buckets read at rate 0 within a run's first 3 to 4 minutes on runs `goldens.yaml` describes as off, cause not known (74 cycles across five committed recordings) | Off, flagged `FlowControlInferredOff`. On takes the upstream thresholds 5 and 0.8, and is named as assumed. On with no decode line is answered, flagged `DecodeOnsetUnchecked`; S1 refuses that case, a planner reads the flag. `--flow-control` is not built |
 
@@ -1237,6 +1238,7 @@ roles[].results.ttft.answer.parts.ownPrefill number
 roles[].results.ttft.answer.parts.pooled number
 roles[].results.ttft.answer.parts.prefillKnee number
 roles[].results.ttft.answer.parts.prefillUtilization number
+roles[].results.ttft.answer.parts.routerHop number
 roles[].results.ttft.answer.parts.vpMarginApplied number
 roles[].results.ttft.answer.parts.waitOffset number
 roles[].results.ttft.answer.parts.waitScale number
@@ -1250,9 +1252,11 @@ roles[].ttft object
 roles[].ttft.arrivalsSource string
 roles[].ttft.assumed array
 roles[].ttft.assumed[] string
+roles[].ttft.decodePerStep number
 roles[].ttft.decodeSide string
 roles[].ttft.decodeTTFTPromptTokens number
 roles[].ttft.decodeTTFTSeconds number
+roles[].ttft.decodeTermSource string
 roles[].ttft.decodeVariant string
 roles[].ttft.fixedLatencySeconds number
 roles[].ttft.fixedLatencySource string
@@ -1270,6 +1274,7 @@ roles[].ttft.rate number
 roles[].ttft.rateSource string
 roles[].ttft.replicas number
 roles[].ttft.replicasFrom string
+roles[].ttft.routerHopSource string
 roles[].ttft.targetSeconds number
 roles[].ttft.transferSecondsPerToken number
 roles[].ttft.transferSource string

@@ -132,6 +132,12 @@ import (
 // state an output reads there; S1b's TTFT pricing reads the estimate it
 // stashes. Its unit tests hold it (heldBy).
 var replaySwitches = map[string][]string{
+	// The decode term of a TTFT on a decode line. It moves no golden: S1
+	// prices a line only on a fleet with a TTFT target, and no recording with
+	// slo.Analyze has one that reaches a decode line. Its unit tests hold it
+	// (heldBy); the CLI, which has no switch, moves its own goldens.
+	slo.SwitchTTFTDecodeTerm: nil,
+
 	saturation.SwitchPrefillCapacityObserve: nil,
 	throughput.SwitchITLAdmitsAtSequenceCap: {
 		"throughput-sweep-restart/composite-holds.csv",
@@ -628,6 +634,16 @@ func withSeams(more, rows map[string][]string) map[string][]string {
 // test that holds the same on either side is a control, not a hold, and is
 // not listed here.
 var heldBy = map[string][]heldTest{
+	// The decode term: the first prices one fleet on and off and asserts both
+	// (the term and its flags on, the old sum unflagged off); the second runs
+	// the switch through Analyze (a window kept on, none off). The third has
+	// no window to read with the switch off.
+	slo.SwitchTTFTDecodeTerm: {
+		{"../slo", "TestTTFT_TheDecodeTermSwitch"},
+		{"../slo", "TestTTFT_TheDecodeTermWindow"},
+		{"../slo", "TestTTFT_TheDecodeTermSwitchOnALine"},
+		{"../slo", "TestTTFT_TheRouterMeanReachesTheWindow"},
+	},
 	// P1's prefill observation: it runs the switch on and off through
 	// Analyze and asserts both (a line per cycle on, none off).
 	saturation.SwitchPrefillCapacityObserve: {

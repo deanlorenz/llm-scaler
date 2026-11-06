@@ -141,6 +141,8 @@ func (a *Analyzer) switchFields() map[string]*bool {
 		// S1: each prefill variant priced against the TTFT target, in shadow
 		// (ttft.go).
 		SwitchTTFTPrice: &a.ttftPrice,
+		// The decode term of a TTFT on a decode line (ttft.go).
+		SwitchTTFTDecodeTerm: &a.ttftDecodeTerm,
 	}
 }
 

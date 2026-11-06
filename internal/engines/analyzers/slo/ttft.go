@@ -41,6 +41,12 @@ import (
 // and the snapshot's TTFT stays nil.
 const SwitchTTFTPrice = "slo-ttft-price"
 
+// SwitchTTFTDecodeTerm is the replay switch for the decode term: on, decode's
+// part of a TTFT on a decode line is whatif.DecodeTerm, D(I, ITL(k)) + R learned
+// per variant and flagged when assumed; off, as before, the sum T_xfer + ITL(k)
+// with ITL clamped to the band.
+const SwitchTTFTDecodeTerm = "slo-ttft-decode-term"
+
 const (
 	// decodeBoundRatio is how far the prefill side's own rate must exceed
 	// the full rate for decode to count as setting it: any decode wait lowers
@@ -250,7 +256,7 @@ func rowsOf(rows []domain.ReplicaMetrics, variants []string) []domain.ReplicaMet
 // The estimate is read before any lock of this analyzer is taken, and the
 // windows lock a.mu for themselves (prefill_estimates.go, the lock order).
 func (a *Analyzer) priceTTFTVariants(logger logr.Logger, input domain.AnalyzerInput, cfg *config.ScalingPolicy,
-	fleet fleetReading, lines []ttftDecodeLine, now time.Time) []metrics.SLOTTFTReading {
+	fleet fleetReading, lines []ttftDecodeLine, router *domain.RouterLatency, now time.Time) []metrics.SLOTTFTReading {
 	if !a.ttftPrice || cfg.SLO == nil || cfg.SLO.TTFT == nil {
 		return nil
 	}
@@ -291,9 +297,18 @@ func (a *Analyzer) priceTTFTVariants(logger logr.Logger, input domain.AnalyzerIn
 	if len(decodes) == 1 {
 		var cycle whatif.DecodeTTFT
 		if s, ok := decodeEngineTTFT(decodeRows); ok && modelPrompt > 0 {
-			cycle = whatif.DecodeTTFT{Seconds: s, PromptTokens: modelPrompt}
+			cycle = whatif.DecodeTTFT{Seconds: s, PromptTokens: modelPrompt, ITLSeconds: prefill.MeanStep(decodeRows)}
 		}
 		measured = a.noteDecodeTTFT(ttftWindowKey(input.Namespace, input.ModelID, decodes[0]), cycle, now)
+	}
+	var term *whatif.DecodeTerm
+	if len(decodes) == 1 && a.ttftDecodeTerm {
+		est := a.noteDecodeTerm(ttftWindowKey(input.Namespace, input.ModelID, decodes[0]), prefill.DecodeTermCycle{
+			Now: now, Prefill: prefillRows, Decode: decodeRows, PromptTokens: modelPrompt, Router: router,
+			Settled: &prefill.Settle{View: a.settleView(), Model: utils.GetNamespacedKey(input.Namespace, input.ModelID)},
+		})
+		t := whatif.TermFromEstimate(est, measured)
+		term = &t
 	}
 	arrival := input.ArrivalRate
 	if !(arrival > 0) || !whatif.Finite(arrival) {
@@ -317,7 +332,7 @@ func (a *Analyzer) priceTTFTVariants(logger logr.Logger, input domain.AnalyzerIn
 			prompt: prompt, spread: readPromptSpread(rows, prompt),
 			shares:   a.noteShare(ttftWindowKey(input.Namespace, input.ModelID, v), pods, share, shareOK, now),
 			transfer: transferPerToken(decodeRows, prompt), decode: decode, decodeVariant: decodeVariant,
-			decodeTTFT: measured, flow: flow, mismatch: mismatch,
+			decodeTTFT: measured, term: term, legacyDecodeSum: !a.ttftDecodeTerm, flow: flow, mismatch: mismatch,
 		}
 		p := gateOrPrice(&in, fresh, arrival, target)
 		out = append(out, metrics.SLOTTFTReading{

@@ -189,6 +189,7 @@ roles[].results.ttft.answer.parts.ownPrefill number
 roles[].results.ttft.answer.parts.pooled number
 roles[].results.ttft.answer.parts.prefillKnee number
 roles[].results.ttft.answer.parts.prefillUtilization number
+roles[].results.ttft.answer.parts.routerHop number
 roles[].results.ttft.answer.parts.vpMarginApplied number
 roles[].results.ttft.answer.parts.waitOffset number
 roles[].results.ttft.answer.parts.waitScale number
@@ -202,9 +203,11 @@ roles[].ttft object
 roles[].ttft.arrivalsSource string
 roles[].ttft.assumed array
 roles[].ttft.assumed[] string
+roles[].ttft.decodePerStep number
 roles[].ttft.decodeSide string
 roles[].ttft.decodeTTFTPromptTokens number
 roles[].ttft.decodeTTFTSeconds number
+roles[].ttft.decodeTermSource string
 roles[].ttft.decodeVariant string
 roles[].ttft.fixedLatencySeconds number
 roles[].ttft.fixedLatencySource string
@@ -222,6 +225,7 @@ roles[].ttft.rate number
 roles[].ttft.rateSource string
 roles[].ttft.replicas number
 roles[].ttft.replicasFrom string
+roles[].ttft.routerHopSource string
 roles[].ttft.targetSeconds number
 roles[].ttft.transferSecondsPerToken number
 roles[].ttft.transferSource string

@@ -122,7 +122,9 @@ Datastore
 DecodeEngineMeasured
 DecodeOnsetUnchecked
 DecodeSideOmitted
+DecodeStepSlopeAssumed
 DecodeTTFTUnmeasured
+DecodeTermOmitted
 Deleted
 Deployment
 Discarding
@@ -219,6 +221,7 @@ N_dec
 NaN
 Name
 NarrowPromptClusters
+NegativePromptSlope
 NegativeSlopeFit
 NewEngine
 NewTypeInventoryWithUsage
@@ -235,10 +238,14 @@ NoPrefillReplicas
 NoPromptSpread
 NoPromptVariance
 NoShortPrompts
+NoStepSpread
 NoTPOTHistogram
 NoTraffic
+NonPositiveDecodeBase
+NonPositiveHop
 NonPositiveIntercept
 NonPositiveSlope
+NonPositiveStepSlope
 NotTriggerScaleUp
 Nothing
 OLS
@@ -317,6 +324,7 @@ Restored
 Retention
 Retrying
 RollingOut
+RouterHopAssumed
 Running
 S
 SATURATION_CONFIG_MAP_NAME
@@ -364,6 +372,8 @@ The
 This
 TierUnstable
 TokenGapPercentile
+TooFewDecodeMinutes
+TooFewHopWindows
 TooFewImbalanceMinutes
 TooFewLowLoadMinutes
 TooFewPromptClusters
@@ -2415,6 +2425,7 @@ slo-itl-restart-under-its-name-settles
 slo-itl-waits-after-controller-restart
 slo-model
 slo-transient
+slo-ttft-decode-term
 slo-ttft-price
 slo-ttft-variant
 slo-variant
@@ -2564,6 +2575,7 @@ tell
 template
 tenants
 tensor_parallel_size
+term
 terminating
 termination
 tesla

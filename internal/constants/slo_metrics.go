@@ -233,7 +233,8 @@ const SLOTTFTPredictionCaveat = "Not a bound, and which way it errs depends on t
 var SLOTTFTFlags = []string{
 	"UnvalidatedTTFT", "AssumedVP", "VPLowerBound", "VPAboveSlopeBound", "AssumedImbalance",
 	"AssumedPromptSpread", "TransferOmitted", "DecodeSideOmitted", "DecodeTTFTUnmeasured",
-	"DecodeEngineMeasured", "VPScaledToPrompt", "VPShapeMoved", "FlowControlInferredOff",
+	"DecodeEngineMeasured", "DecodeTermOmitted", "DecodeStepSlopeAssumed", "RouterHopAssumed",
+	"VPScaledToPrompt", "VPShapeMoved", "FlowControlInferredOff",
 	"AboveFlowControlOnset", "HeldByDecodeAdmission", "DecodeOnsetUnchecked",
 	"BelowFittedBand", "KVBoundSlots",
 	"AssumedPoissonArrivals", "PromptSpreadClamped", "FlowControlMismatch",

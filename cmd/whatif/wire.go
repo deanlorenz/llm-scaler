@@ -130,11 +130,17 @@ type wireTTFT struct {
 	TransferSource          string  `json:"transferSource,omitempty"`
 	// DecodeSide is how decode's part was priced: line, "decode engine" or
 	// omitted; the two figures are the decode engine's measured pair.
-	DecodeSide             string   `json:"decodeSide,omitempty"`
-	DecodeTTFTSeconds      float64  `json:"decodeTTFTSeconds,omitempty"`
-	DecodeTTFTPromptTokens float64  `json:"decodeTTFTPromptTokens,omitempty"`
-	FlowControl            string   `json:"flowControl,omitempty"`
-	Assumed                []string `json:"assumed"`
+	DecodeSide             string  `json:"decodeSide,omitempty"`
+	DecodeTTFTSeconds      float64 `json:"decodeTTFTSeconds,omitempty"`
+	DecodeTTFTPromptTokens float64 `json:"decodeTTFTPromptTokens,omitempty"`
+	// DecodeTermSource and RouterHopSource say where the line's decode term
+	// and hop came from (measured, assumed; the term may be omitted), and
+	// DecodePerStep is the TTFT seconds per second of ITL priced.
+	DecodeTermSource string   `json:"decodeTermSource,omitempty"`
+	RouterHopSource  string   `json:"routerHopSource,omitempty"`
+	DecodePerStep    float64  `json:"decodePerStep,omitempty"`
+	FlowControl      string   `json:"flowControl,omitempty"`
+	Assumed          []string `json:"assumed"`
 }
 
 // wireInputs is what a variant was priced from.
@@ -258,6 +264,7 @@ type wireTTFTParts struct {
 	DecodeWait            float64 `json:"decodeWait"`
 	FirstStep             float64 `json:"firstStep"`
 	DecodeEngine          float64 `json:"decodeEngine"`
+	RouterHop             float64 `json:"routerHop"`
 	PrefillUtilization    float64 `json:"prefillUtilization"`
 	VPMarginApplied       float64 `json:"vpMarginApplied"`
 	WaitScale             float64 `json:"waitScale"`
@@ -342,7 +349,7 @@ func toWireTTFT(r whatif.Result) *wireTTFTResult {
 		}, Parts: wireTTFTParts{
 			Independent: v.Independent, Pooled: v.Pooled, DecodeShare: v.DecodeShare,
 			EngineWait: v.Parts.EngineWait, OwnPrefill: v.Parts.OwnPrefill, DecodeWait: v.Parts.DecodeWait,
-			FirstStep: v.Parts.FirstStep, DecodeEngine: v.Parts.DecodeEngine,
+			FirstStep: v.Parts.FirstStep, DecodeEngine: v.Parts.DecodeEngine, RouterHop: v.Parts.RouterHop,
 			PrefillUtilization: v.PrefillUtilization, VPMarginApplied: v.VPMarginApplied,
 			WaitScale: v.WaitScale, WaitOffset: v.WaitOffset, DecodeWaitProbability: v.DecodeWaitProbability,
 			PrefillKnee: v.PrefillKnee, DecodeKnee: v.DecodeKnee,

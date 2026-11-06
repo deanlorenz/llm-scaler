@@ -10,9 +10,10 @@ import (
 // docs/proposals/slo-capacity-planner.md; the model is
 // docs/proposals/slo-capacity-planner-ttft.md):
 //
-//	TTFT = W_router + W_engine + own_prefill + T_xfer + W_decode + ITL(k_d)
+//	TTFT = W_router + W_engine + own_prefill + W_decode + D(I, ITL(k_d)) + R
 //
-// on a P/D fleet. Aggregated TTFT is not built (M1).
+// on a P/D fleet, D the decode engine's TTFT and R the hop between the router
+// and the engines, both learned (DecodeTerm). Aggregated TTFT is not built (M1).
 //
 // UNVALIDATED: the only caller in the controller is the SLO analyzer's shadow
 // pricing, which sizes nothing (slo.SwitchTTFTPrice). The plan
@@ -172,6 +173,13 @@ type TTFTFleet struct {
 	// shadow pricing of a prefill variant (S1) with flow control off is that
 	// case.
 	Decode *Decode
+	// DecodeTerm is decode's part with a decode line, D(I, ITL(k_d)) + R, in
+	// place of T_xfer + ITL(k_d). Nil is no term: the old sum, flagged
+	// DecodeTermOmitted. Read only with Decode set.
+	DecodeTerm *DecodeTerm
+	// LegacyDecodeSum prices T_xfer + ITL(k_d), with no flag, as the model did
+	// before the term: slo.SwitchTTFTDecodeTerm off, for a replay.
+	LegacyDecodeSum bool
 	// DecodeTTFT is the decode engine's measured TTFT, read only when Decode
 	// is nil. On P/D the router's TTFT is the prefill engine's and then the
 	// decode engine's (the KV pull and decode's first step): P2 found the
@@ -203,6 +211,10 @@ type DecodeTTFT struct {
 	// prompt, prefix hits included: with prefix hits the ratio I/PromptTokens
 	// tracks the pull only as far as the hit rate holds.
 	PromptTokens float64
+	// ITLSeconds is the decode rows' mean ITL of the same cycle: where
+	// TermFromEstimate starts an assumed slope from. 0 is unread, which adds
+	// the whole step time to a TTFT that already holds it: high.
+	ITLSeconds float64
 }
 
 // MinDecodeTTFTPrompt is the least prompt, in tokens, a measured decode-engine
@@ -484,9 +496,12 @@ type ttftPlan struct {
 	// decodeTTFT is the decode engine's measured TTFT, set only with no
 	// decode line.
 	decodeTTFT DecodeTTFT
-	fc         FlowControl
-	onsets     Onsets
-	flags      []Flag
+	// term is decode's part with a decode line; nil with none, or with
+	// LegacyDecodeSum.
+	term   *termPlan
+	fc     FlowControl
+	onsets Onsets
+	flags  []Flag
 }
 
 // plan checks a fleet and places its flow-control onsets.
@@ -501,6 +516,16 @@ func (fl TTFTFleet) plan() (ttftPlan, *Unanswerable) {
 		}
 	}
 	pl := ttftPlan{pf: pf, d: fl.Decode, fc: fl.FlowControl}
+	if fl.Decode != nil && !fl.LegacyDecodeSum {
+		t := DecodeTerm{EngineOmitted: true}
+		if fl.DecodeTerm != nil {
+			t = *fl.DecodeTerm
+		}
+		if u := t.check(); u != nil {
+			return ttftPlan{}, u
+		}
+		pl.term = termOn(t, &pf)
+	}
 	if fl.Decode == nil {
 		dt := fl.DecodeTTFT
 		switch {
@@ -719,11 +744,28 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 			u := refuse(Saturated, fmt.Sprintf("no decode fill carries %g r/s", rate))
 			return priced{u: &u}
 		}
+		fill := k
 		if k < d.Band.Lo {
 			k = d.Band.Lo
 			out.Flags = addFlags(out.Flags, BelowFittedBand)
 		}
 		first, floorStep = d.Line.ITLAt(k), d.Line.ITLAt(d.Band.Lo)
+		if t := pl.term; t != nil {
+			// The term reads the line at the actual fill: D is several steps,
+			// so the clamp's reading, harmless on one step, would be the
+			// figure's largest error at light load. No rate has a fill under
+			// 0, which is the floor's.
+			engine, hop := t.at(d.Line.ITLAt(fill), first)
+			out.Parts.RouterHop = hop
+			if t.omitted {
+				out.Parts.FirstStep = engine
+			} else {
+				out.Parts.DecodeEngine = engine
+			}
+			first = engine + hop
+			engine, hop = t.at(d.Line.ITLAt(0), floorStep)
+			floorStep = engine + hop
+		}
 		out.Flags = addFlags(out.Flags, adm.Flags...)
 		out.DecodeWaitProbability = adm.WaitProbability
 		if withDecodeWait {
@@ -746,7 +788,7 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 		out.Parts.DecodeEngine = first
 	}
 
-	if pl.d != nil {
+	if pl.d != nil && pl.term == nil {
 		out.Parts.FirstStep = first
 	}
 

@@ -114,11 +114,15 @@
         "arrivalsSource": "assumed",
         "transferSource": "omitted",
         "decodeSide": "line",
+        "decodeTermSource": "omitted",
+        "routerHopSource": "assumed",
         "flowControl": "off, inferred",
         "assumed": [
           "V_P 30000 tok/s (--assume-vp)",
           "prompt 1000 tokens (--assume-input-tokens)",
           "prompt cv 2 (no computed-prompt histogram)",
+          "decode term omitted (no fit and no decode engine TTFT): T_xfer + ITL stands for it",
+          "router hop 20 ms (no router TTFT mean in the recording)",
           "flow control off (no queue series)",
           "Poisson arrivals"
         ]
@@ -126,24 +130,26 @@
       "results": {
         "rate": {
           "answer": {
-            "value": 1.1873353849712105,
+            "value": 0.25063609988609226,
             "unit": "r/s",
             "basis": {
-              "fill": 0.022512357250687086,
+              "fill": 0.004523186773091,
               "kneeRate": 13.313632625239457,
-              "floor": 0.17460685106698073,
+              "floor": 0.19460685106698072,
               "uncapped": 0,
               "boundBy": [
                 "TTFT"
               ],
               "tier": "ols",
-              "prefillOnlyRate": 1.1873353849712105
+              "prefillOnlyRate": 0.25063609988609226
             },
             "flags": [
               "UnvalidatedTTFT",
               "AssumedVP",
               "AssumedPromptSpread",
               "TransferOmitted",
+              "DecodeTermOmitted",
+              "RouterHopAssumed",
               "FlowControlInferredOff",
               "BelowFittedBand",
               "AssumedShape",
@@ -159,7 +165,7 @@
       "results": {
         "rate": {
           "answer": {
-            "value": 1.1873353849712105,
+            "value": 0.25063609988609226,
             "unit": "r/s",
             "basis": {
               "fill": 0,
@@ -176,6 +182,8 @@
               "AssumedVP",
               "AssumedPromptSpread",
               "TransferOmitted",
+              "DecodeTermOmitted",
+              "RouterHopAssumed",
               "FlowControlInferredOff",
               "BelowFittedBand",
               "AssumedShape",

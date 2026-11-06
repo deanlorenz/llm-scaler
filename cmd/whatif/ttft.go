@@ -471,6 +471,7 @@ func (pf *pricedFleet) decodeSide() {
 			d := pf.pv.decode
 			pf.fleet.Decode = &d
 			pf.in.DecodeSide = "line"
+			pf.decodeTerm()
 			return
 		}
 		pf.fleet.DecodeTTFT = pf.pv.state.DecodeTTFT.EngineTTFT
@@ -483,6 +484,30 @@ func (pf *pricedFleet) decodeSide() {
 		return
 	}
 	pf.in.DecodeSide = "omitted"
+}
+
+// decodeTerm is the term on the decode line: what the recording's cycles
+// taught the variant, each input with no fit named as assumed.
+func (pf *pricedFleet) decodeTerm() {
+	t := pf.pv.state.DecodeTTFT.Term
+	pf.fleet.DecodeTerm = &t
+	pf.in.DecodeTermSource = shapeMeasured
+	switch {
+	case t.EngineOmitted:
+		pf.in.DecodeTermSource = "omitted"
+		pf.assume("decode term omitted (no fit and no decode engine TTFT): T_xfer + ITL stands for it")
+	case t.StepAssumed:
+		pf.in.DecodeTermSource = shapeAssumed
+		pf.assume("decode TTFT slope %s on ITL (too little load movement to fit one)", num(t.PerStep))
+	default:
+		pf.in.TransferSource = "held by the decode term, not priced"
+	}
+	pf.in.DecodePerStep = t.PerStep
+	pf.in.RouterHopSource = shapeMeasured
+	if t.HopAssumed {
+		pf.in.RouterHopSource = shapeAssumed
+		pf.assume("router hop %.0f ms (no router TTFT mean in the recording)", 1000*t.Hop.Base)
+	}
 }
 
 // flowControl is flow control inferred from its series: S1's rule with
@@ -526,7 +551,7 @@ func (pf *pricedFleet) describe() {
 	b.WriteString(")")
 	switch pf.in.DecodeSide {
 	case "line":
-		b.WriteString("; decode by its line")
+		fmt.Fprintf(&b, "; decode by its line, term %s, hop %s", pf.in.DecodeTermSource, pf.in.RouterHopSource)
 	case sideDecodeEngine:
 		fmt.Fprintf(&b, "; decode engine TTFT %.1f ms at %s tokens, measured", 1000*pf.fleet.DecodeTTFT.Seconds, num(round(pf.fleet.DecodeTTFT.PromptTokens)))
 	default:

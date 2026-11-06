@@ -1,0 +1,460 @@
+package prefill
+
+import (
+	"maps"
+	"math"
+	"slices"
+	"time"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+)
+
+// The decode side of a TTFT on a P/D fleet
+// (docs/proposals/slo-capacity-planner-ttft.md, "As built: the decode term"):
+//
+//	router TTFT = prefill engine's + D + R
+//	D(I, ITL)   = base + perToken*I + perStep*ITL
+//
+// D is the decode engine's mean TTFT: the KV pull and its first steps. It
+// grows with the prompt, and with the step time, because a request that
+// arrives on a decode pod waits on the steps that pod is running. R is the hop
+// between the router and the engines, the router's mean less the two engines'.
+//
+// Neither is a constant of the model. Both are learned here per variant from
+// what the collector reads, by the learner rules of this package: readings are
+// admitted by state, and a figure the readings cannot support is refused with a
+// reason, for the caller to flag (whatif.TermFromEstimate).
+//
+// D reads a row's AvgTTFT, AvgITL, input tokens, request rate and capacity
+// queue, all on the scaling queries of every cycle. R reads the router's TTFT
+// _sum and _count, over the router's window. The router's histogram cannot
+// stand in for them: its buckets are 25 to 100 ms wide around a figure of 5 to
+// 15 ms, and on the warm-up of the staircase run a residual read from them fell
+// with the prompt where the true one rises.
+
+const (
+	// MinDecodeRequestRate is the least request rate, per second, a decode row
+	// must carry to be admitted: below it a one-minute mean holds a few
+	// requests.
+	MinDecodeRequestRate = 0.05
+	// MaxDecodePromptDrift is how far, relatively, a row's one-minute prompt
+	// may be from its longer-window prompt: further, the mean TTFT of the
+	// minute was not read at the prompt the row states.
+	MaxDecodePromptDrift = 0.15
+	// MaxDecodeQueue is the most requests a decode row may hold waiting. A few
+	// is the KV pull in transit, which D is. Past that the pod is behind on
+	// pulls, and its TTFT is a queue no step time explains: on the staircase
+	// run's 3,300 rows, 3% of those at 6 to 9 waiting read over 30 ms above
+	// the fit, against 44% at 10 to 14 and 81% at 15 to 24. Stated from
+	// that one model, not a property of the engine.
+	MaxDecodeQueue = 9
+	// MinDecodeMinutes is the fewest admitted pod-minutes D is fitted from.
+	MinDecodeMinutes = 10
+	// MinStepSpread is the least ratio of the longest to the shortest step
+	// time the admitted minutes must span for perStep to be read, between the
+	// second shortest and the second longest so that each end holds two
+	// minutes. At 1.4 the staircase's warm-up read a slope of -1.0; at 3.9
+	// its 6.8 was the final figure's.
+	MinStepSpread = 1.5
+	// MinHopWindows is the fewest admitted router windows R is read from.
+	MinHopWindows = 5
+	// MinHopCycles is the fewest cycles a router window must hold for its
+	// engines' means to be read over it.
+	MinHopCycles = 4
+	// MinHopRequestRate is the least request rate, per second over the
+	// model, of a cycle in a router window: below it the means are a few
+	// requests.
+	MinHopRequestRate = 0.1
+	// MaxHopRateRatio is the most the request rate may move across a router
+	// window, largest over least. The router's mean is weighted by the
+	// window's requests and the engines' by their cycles' rates; a ramp
+	// inside the window parts the two.
+	MaxHopRateRatio = 1.3
+	// minHopWindowShare is how much of the router's window the cycles must
+	// span.
+	minHopWindowShare = 0.8
+	// maxDecodeSamples bounds a window's pod-minutes, and maxHopSamples its
+	// router windows, whatever the cycle interval: six hours of a dozen pods.
+	maxDecodeSamples = 12 * maxSamples
+	maxHopSamples    = maxSamples
+)
+
+// Why a term of D or R was not learned.
+const (
+	// TooFewDecodeMinutes is D with fewer than MinDecodeMinutes admitted
+	// pod-minutes.
+	TooFewDecodeMinutes Refusal = "TooFewDecodeMinutes"
+	// NoStepSpread is D whose minutes do not span MinStepSpread in step time:
+	// load has not moved enough to tell perStep from base. A flat fleet lands
+	// here for as long as it stays flat.
+	NoStepSpread Refusal = "NoStepSpread"
+	// NonPositiveStepSlope is a fitted perStep not above zero.
+	NonPositiveStepSlope Refusal = "NonPositiveStepSlope"
+	// NegativePromptSlope is a fitted perToken below zero.
+	NegativePromptSlope Refusal = "NegativePromptSlope"
+	// NonPositiveDecodeBase is D fitted at one prompt with a base not above
+	// zero: the base stands for the whole prompt's part there.
+	NonPositiveDecodeBase Refusal = "NonPositiveDecodeBase"
+	// TooFewHopWindows is R with fewer than MinHopWindows admitted windows.
+	TooFewHopWindows Refusal = "TooFewHopWindows"
+	// NonPositiveHop is an R not above zero: the engines' means already
+	// hold the router's.
+	NonPositiveHop Refusal = "NonPositiveHop"
+)
+
+// DecodeFit is D as learned: base + perToken*I + perStep*ITL, seconds.
+type DecodeFit struct {
+	// Base is the intercept, seconds. With HeldPromptTokens it is the prompt's
+	// part too.
+	Base float64
+	// PerToken is seconds per prompt token; 0 with HeldPromptTokens.
+	PerToken float64
+	// PerStep is TTFT seconds per second of ITL.
+	PerStep float64
+	// HeldPromptTokens is the shortest prompt the minutes read, set when they
+	// did not span MinPromptSpread: no perToken can be told from Base, and the
+	// caller scales Base by the prompt from there (whatif.PromptLine). 0 with
+	// a PerToken fitted.
+	HeldPromptTokens float64
+	// Minutes is the admitted pod-minutes.
+	Minutes int
+	// Refused says why no fit stands; "" with one.
+	Refused Refusal
+}
+
+// HopFit is R as learned: Base + PerToken*I, seconds.
+type HopFit struct {
+	// Base is the intercept, seconds, and with HeldPromptTokens the median R.
+	Base float64
+	// PerToken is seconds per prompt token; 0 with HeldPromptTokens.
+	PerToken float64
+	// HeldPromptTokens is the shortest prompt read, set with too few prompt
+	// lengths for a line. 0 with PerToken fitted.
+	HeldPromptTokens float64
+	// Windows is the admitted router windows.
+	Windows int
+	// Refused says why no R stands; "" with one.
+	Refused Refusal
+}
+
+// DecodeTermEstimate is what a decode variant's window has learned.
+type DecodeTermEstimate struct {
+	Decode DecodeFit
+	Hop    HopFit
+}
+
+// DecodeTermCycle is what one cycle gives a window.
+type DecodeTermCycle struct {
+	Now time.Time
+	// Prefill and Decode are the rows of the model's prefill variants and of
+	// the one decode variant.
+	Prefill, Decode []domain.ReplicaMetrics
+	// PromptTokens is the model's E[I_eff] of the cycle, the prompt of the
+	// router's window; D reads each row's own prompt of the minute. 0 admits
+	// nothing.
+	PromptTokens float64
+	// Router is the router's latency of the cycle; nil with none read.
+	Router *domain.RouterLatency
+	// Settled is nil, or the settle tracker's reading of a row: a replica
+	// still warming up is not admitted.
+	Settled *Settle
+}
+
+// decodeSample is one pod-minute of a decode row.
+type decodeSample struct {
+	at                time.Time
+	ttft, itl, prompt float64
+}
+
+// engineCycle is one cycle's engine means, for the router's window.
+type engineCycle struct {
+	at                    time.Time
+	prefill, decode, rate float64
+	prompt                float64
+}
+
+// hopSample is one router window's R.
+type hopSample struct {
+	at        time.Time
+	r, prompt float64
+}
+
+// DecodeTermWindow is one decode variant's readings of D and R. It holds no
+// persisted state, as the rest of the package does not, and takes its lock from
+// its owner.
+type DecodeTermWindow struct {
+	lastAt  map[string]time.Time
+	decode  []decodeSample
+	engines []engineCycle
+	hops    []hopSample
+	lastHop time.Time
+}
+
+// NewDecodeTermWindow returns an empty window.
+func NewDecodeTermWindow() *DecodeTermWindow {
+	return &DecodeTermWindow{lastAt: map[string]time.Time{}}
+}
+
+// Observe takes one cycle.
+func (w *DecodeTermWindow) Observe(c DecodeTermCycle) {
+	w.prune(c.Now)
+	if !finitePositive(c.PromptTokens) {
+		return
+	}
+	for _, rm := range c.Decode {
+		itl, ttft, prompt, ok := admittedDecodeRow(rm)
+		if !ok || !c.Settled.Settled(rm, c.Now) {
+			continue
+		}
+		if at, seen := w.lastAt[rm.PodName]; seen && c.Now.Sub(at) < SampleSpacing {
+			continue
+		}
+		w.lastAt[rm.PodName] = c.Now
+		w.decode = append(w.decode, decodeSample{at: c.Now, ttft: ttft, itl: itl, prompt: prompt})
+	}
+	if len(w.decode) > maxDecodeSamples {
+		w.decode = slices.Clone(w.decode[len(w.decode)-maxDecodeSamples:])
+	}
+	w.observeRouter(c)
+}
+
+// admittedDecodeRow is a row's step time and TTFT, in seconds, and its prompt of
+// the same minute, when the row is admitted: serving, both means known, carrying requests at the prompt it
+// states, with nobody waiting for a slot (that wait is W_decode, priced apart)
+// and no more than MaxDecodeQueue waiting at all, and with no speculation, where
+// AvgITL is a step and the line a token.
+func admittedDecodeRow(rm domain.ReplicaMetrics) (itl, ttft, prompt float64, ok bool) {
+	switch {
+	case !Serving(rm), !rm.AvgTTFTKnown, !finitePositive(rm.AvgTTFT),
+		rm.ITLState() != domain.ITLFinite, !finitePositive(rm.AvgITL),
+		rm.SpecAcceptedPerStep > 0, rm.CapacityQueueLength > 0, rm.QueueLength > MaxDecodeQueue:
+		return 0, 0, 0, false
+	}
+	rate, known := requestRate(rm)
+	if !known || !(rate >= MinDecodeRequestRate) {
+		return 0, 0, 0, false
+	}
+	recent, long := rm.AvgInputTokensRecent, rm.AvgInputTokens
+	if !finitePositive(recent) || !finitePositive(long) || !(math.Abs(recent/long-1) <= MaxDecodePromptDrift) {
+		return 0, 0, 0, false
+	}
+	return rm.AvgITL, rm.AvgTTFT, recent, true
+}
+
+// observeRouter folds the cycle's engines into the router's window and, with
+// the router's mean to set them against, takes R once per SampleSpacing.
+func (w *DecodeTermWindow) observeRouter(c DecodeTermCycle) {
+	p, pRate, pOK := engineMean(c.Prefill)
+	d, _, dOK := engineMean(c.Decode)
+	if pOK && dOK {
+		w.engines = append(w.engines, engineCycle{at: c.Now, prefill: p, decode: d, rate: pRate, prompt: c.PromptTokens})
+	}
+	r := c.Router
+	if r == nil || !(r.WindowSeconds > 0) || !finitePositive(r.TTFTSumRate) || !finitePositive(r.TTFTCountRate) {
+		return
+	}
+	span := time.Duration(r.WindowSeconds * float64(time.Second))
+	cut := slices.IndexFunc(w.engines, func(e engineCycle) bool { return c.Now.Sub(e.at) < span })
+	if cut < 0 {
+		w.engines = nil
+		return
+	}
+	w.engines = slices.Clone(w.engines[cut:])
+	if !w.lastHop.IsZero() && c.Now.Sub(w.lastHop) < SampleSpacing {
+		return
+	}
+	hop, prompt, ok := hopOver(w.engines, r.TTFTSumRate/r.TTFTCountRate, span)
+	if !ok {
+		return
+	}
+	w.lastHop = c.Now
+	w.hops = append(w.hops, hopSample{at: c.Now, r: hop, prompt: prompt})
+	if len(w.hops) > maxHopSamples {
+		w.hops = slices.Clone(w.hops[len(w.hops)-maxHopSamples:])
+	}
+}
+
+// hopOver is R over one router window: the router's mean less the engines'
+// means over its cycles, each weighted by its cycle's rate. False unless the
+// window is steady: cycles enough, spanning it, the prompt held to
+// MaxPromptDrift and the rate to MaxHopRateRatio.
+func hopOver(cycles []engineCycle, router float64, span time.Duration) (hop, prompt float64, ok bool) {
+	if len(cycles) < MinHopCycles {
+		return 0, 0, false
+	}
+	first, last := cycles[0], cycles[len(cycles)-1]
+	if float64(last.at.Sub(first.at)) < minHopWindowShare*float64(span) {
+		return 0, 0, false
+	}
+	loRate, hiRate, loPrompt, hiPrompt := first.rate, first.rate, first.prompt, first.prompt
+	var p, d, weight, tokens float64
+	for _, e := range cycles {
+		loRate, hiRate = min(loRate, e.rate), max(hiRate, e.rate)
+		loPrompt, hiPrompt = min(loPrompt, e.prompt), max(hiPrompt, e.prompt)
+		p += e.prefill * e.rate
+		d += e.decode * e.rate
+		tokens += e.prompt * e.rate
+		weight += e.rate
+	}
+	if !(loRate >= MinHopRequestRate) || !(hiRate <= MaxHopRateRatio*loRate) || !(hiPrompt <= (1+MaxPromptDrift)*loPrompt) {
+		return 0, 0, false
+	}
+	hop = router - p/weight - d/weight
+	return hop, tokens / weight, isFinite(hop)
+}
+
+// engineMean is the serving rows' mean AvgTTFT, weighted by request rate, and
+// that rate's sum. False with no such row.
+func engineMean(rows []domain.ReplicaMetrics) (mean, rate float64, ok bool) {
+	var weighted float64
+	for _, rm := range rows {
+		rr, known := requestRate(rm)
+		if !Serving(rm) || !rm.AvgTTFTKnown || !finitePositive(rm.AvgTTFT) || !known || !finitePositive(rr) {
+			continue
+		}
+		weighted += rr * rm.AvgTTFT
+		rate += rr
+	}
+	if !(rate > 0) {
+		return 0, 0, false
+	}
+	return weighted / rate, rate, true
+}
+
+// prune drops what is older than Retention.
+func (w *DecodeTermWindow) prune(now time.Time) {
+	w.decode = slices.DeleteFunc(w.decode, func(s decodeSample) bool { return now.Sub(s.at) > Retention })
+	w.hops = slices.DeleteFunc(w.hops, func(s hopSample) bool { return now.Sub(s.at) > Retention })
+	maps.DeleteFunc(w.lastAt, func(_ string, at time.Time) bool { return now.Sub(at) > Retention })
+}
+
+// Estimate is what the window supports now.
+func (w *DecodeTermWindow) Estimate() DecodeTermEstimate {
+	return DecodeTermEstimate{Decode: fitDecode(w.decode), Hop: fitHop(w.hops)}
+}
+
+// fitDecode fits D over the admitted minutes, untrimmed. With the prompts
+// spanning MinPromptSpread it is the three-term least squares; otherwise TTFT
+// against ITL alone, whose intercept is then the prompt's part as well, held at
+// the shortest prompt read, so that the caller's scaling reads high.
+func fitDecode(samples []decodeSample) DecodeFit {
+	out := DecodeFit{Minutes: len(samples)}
+	if len(samples) < MinDecodeMinutes {
+		out.Refused = TooFewDecodeMinutes
+		return out
+	}
+	itl := make([]float64, len(samples))
+	prompt := make([]float64, len(samples))
+	ttft := make([]float64, len(samples))
+	for i, s := range samples {
+		itl[i], prompt[i], ttft[i] = s.itl, s.prompt, s.ttft
+	}
+	if spreadOf(itl) < MinStepSpread {
+		out.Refused = NoStepSpread
+		return out
+	}
+	if spreadOf(prompt) < MinPromptSpread {
+		base, slope := ols(itl, ttft)
+		switch {
+		case !(slope > 0) || !isFinite(slope):
+			out.Refused = NonPositiveStepSlope
+		case !(base > 0) || !isFinite(base):
+			out.Refused = NonPositiveDecodeBase
+		default:
+			out.Base, out.PerStep, out.HeldPromptTokens = base, slope, slices.Min(prompt)
+		}
+		return out
+	}
+	base, perToken, perStep, ok := olsTwo(prompt, itl, ttft)
+	switch {
+	case !ok || !(perStep > 0):
+		out.Refused = NonPositiveStepSlope
+	case !(perToken >= 0):
+		out.Refused = NegativePromptSlope
+	default:
+		out.Base, out.PerToken, out.PerStep = base, perToken, perStep
+	}
+	return out
+}
+
+// spreadOf is the second largest of xs over the second smallest: each end holds
+// two minutes. 0 with fewer than two.
+func spreadOf(xs []float64) float64 {
+	if len(xs) < 2 {
+		return 0
+	}
+	s := slices.Sorted(slices.Values(xs))
+	return s[len(s)-2] / s[1]
+}
+
+// olsTwo is the least-squares plane y = a + b*u + c*v. ok is false when the
+// solve is singular: u and v move together, or one of them not at all.
+func olsTwo(us, vs, ys []float64) (a, b, c float64, ok bool) {
+	n := float64(len(us))
+	var mu, mv, my float64
+	for i := range us {
+		mu += us[i]
+		mv += vs[i]
+		my += ys[i]
+	}
+	mu, mv, my = mu/n, mv/n, my/n
+	var suu, svv, suv, suy, svy float64
+	for i := range us {
+		du, dv, dy := us[i]-mu, vs[i]-mv, ys[i]-my
+		suu += du * du
+		svv += dv * dv
+		suv += du * dv
+		suy += du * dy
+		svy += dv * dy
+	}
+	det := suu*svv - suv*suv
+	if !(det > minSolveDet*suu*svv) {
+		return 0, 0, 0, false
+	}
+	b = (suy*svv - svy*suv) / det
+	c = (svy*suu - suy*suv) / det
+	a = my - b*mu - c*mv
+	return a, b, c, isFinite(a) && isFinite(b) && isFinite(c)
+}
+
+// fitHop reads R from the admitted windows. A window that held a queue or a ramp
+// its gates missed reads far off (one phase of the staircase run read a spread of
+// 28 ms around a median of 12.5 ms), so each prompt length gives its median, as
+// a's clusters do: two lengths or more, spanning
+// MinPromptSpread, give a line through the medians; otherwise R is the median
+// of all, held at the shortest prompt. A slope below zero is held too, at the
+// largest median, the side that asks for more.
+func fitHop(samples []hopSample) HopFit {
+	out := HopFit{Windows: len(samples)}
+	if len(samples) < MinHopWindows {
+		out.Refused = TooFewHopWindows
+		return out
+	}
+	prompt := make([]float64, len(samples))
+	r := make([]float64, len(samples))
+	for i, s := range samples {
+		prompt[i], r[i] = s.prompt, s.r
+	}
+	var xs, ys []float64
+	for _, c := range promptClusters(prompt, r) {
+		if c.n >= MinQuadraticClusterMinutes {
+			xs, ys = append(xs, c.x), append(ys, c.y)
+		}
+	}
+	held := median(slices.Clone(r))
+	shortest := slices.Min(prompt)
+	if len(xs) >= 2 && xs[len(xs)-1] >= MinPromptSpread*xs[0] {
+		base, slope := ols(xs, ys)
+		if slope >= 0 && isFinite(base) {
+			out.Base, out.PerToken = base, slope
+			return out
+		}
+		held = slices.Max(ys)
+	}
+	if !(held > 0) {
+		out.Refused = NonPositiveHop
+		return out
+	}
+	out.Base, out.HeldPromptTokens = held, shortest
+	return out
+}

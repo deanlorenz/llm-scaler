@@ -1392,6 +1392,9 @@ model reads all of them `0`, including the two marked "on every answer":
 | `VPScaledToPrompt` | `V_P` was rescaled to a longer prompt. It read 1.5% high on the one measured point. |
 | `TransferOmitted` | No KV transfer time measured: left out, so TTFT reads low. |
 | `DecodeEngineMeasured` | No decode line: decode's part is the decode engine's measured mean TTFT, held at the rate it was measured at. |
+| `DecodeTermOmitted` | A decode line, but no fit of the decode engine's TTFT and no reading of it: the older, lower sum stands, so TTFT reads low. |
+| `DecodeStepSlopeAssumed` | A decode line and no fit: load has not moved enough to learn how decode's TTFT follows step time. The measured figure is held, and rises at an assumed slope of 10. |
+| `RouterHopAssumed` | No fit of the hop between the router and the engines: it is priced at an assumed 20 ms. The fit needs the router's TTFT `_sum` and `_count` and steady 5-minute windows. |
 | `DecodeSideOmitted`, `DecodeTTFTUnmeasured` | No decode line and no measured TTFT: decode's part is left out, so TTFT reads low. They always come together. |
 | `FlowControlInferredOff` | `slo.flowControl` is unset and the flow-control queue series does not exist. A scrape gap looks the same: declare it. |
 | `FlowControlMismatch` | The declared `slo.flowControl` contradicts the series. Priced as declared; the log says so. |

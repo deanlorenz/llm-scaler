@@ -819,6 +819,7 @@ P3's on the answer.
 | `ArrivalCV2` | 0, Poisson (P3's open question 5), flagged `AssumedPoissonArrivals`: an S1 flag, since P3 has none for it. Poisson over-promises on bursty traffic. Lifted by the staircase's bursty bucket ([which bucket lifts which flag](slo-capacity-planner-ttft.md#ground-truth-and-the-staircase)) |
 | `TransferSecondsPerToken` | Measured: the mean of the R1 field `AvgKVTransferTime` over Ready decode rows with `AvgKVTransferTimeKnown`, divided by `E[I_eff]`. Run 2 recorded it on 374 of 386 decode rows. `TransferOmitted` (0 passed) only where no decode row carries it, which in production is until Q1 issues the query. With no decode line and `DecodeTTFT` measured, P3 does not price it (the decode engine's TTFT holds the pull) |
 | `DecodeTTFT` | With no decode line only: the decode variant's measured `AvgTTFT` and the prompt it was read at ([below](#3-what-s1-passes-to-ttftat-and-rateforttft)); 0 when no row carries it (`DecodeTTFTUnmeasured`) |
+| `DecodeTerm` | With a decode line: `D` and `R` as the variant's window has learned them, flagged when assumed ([the decode term](slo-capacity-planner-ttft.md#as-built-the-decode-term)). Switch `slo-ttft-decode-term`; off, the old sum |
 | `Decode` | The model's decode variant, from the inputs S1 already prices TPOT with: its line, band, capacity tokens, `KVreq`, `O`, batch cap times ranks, and Ready replicas `N_d`. Only when the model has exactly one decode variant and its line prices (`own` or `pinned`; not `pinned-default`, `no-line` or `declined`) |
 | `FlowControl` | The tier's `slo.flowControl` when it is set ([below](#the-flow-control-state)): `enabled` passes `FlowControlOn`, `disabled` passes `FlowControlOff`. Unset, it is inferred from the series: on when the router's flow-control queue series exists for the model, `FlowControlNoSeries` (flagged `FlowControlInferredOff`) otherwise. On always carries the upstream detector thresholds 5 and 0.8, which this repository's install leaves unchanged, so P3's `FlowControlUnknown` cannot arise |
 | The rate | The model's arrival rate times the variant's share of the Ready prefill replicas |
@@ -1039,7 +1040,7 @@ by name.
 The flag series zero-fills a fixed list, `constants.SLOTTFTFlags`, in this
 order: P3's TTFT flags (`UnvalidatedTTFT`, `AssumedVP`, `VPLowerBound`,
 `VPAboveSlopeBound`, `AssumedImbalance`, `AssumedPromptSpread`,
-`TransferOmitted`, `DecodeSideOmitted`, `DecodeTTFTUnmeasured`, `DecodeEngineMeasured`, `VPScaledToPrompt`, `VPShapeMoved`, `FlowControlInferredOff`,
+`TransferOmitted`, `DecodeSideOmitted`, `DecodeTTFTUnmeasured`, `DecodeEngineMeasured`, `DecodeTermOmitted`, `DecodeStepSlopeAssumed`, `RouterHopAssumed`, `VPScaledToPrompt`, `VPShapeMoved`, `FlowControlInferredOff`,
 `AboveFlowControlOnset`, `HeldByDecodeAdmission`, `DecodeOnsetUnchecked`),
 the decode flags a TTFT answer can carry (`BelowFittedBand`,
 `KVBoundSlots`), and S1's (`AssumedPoissonArrivals`,
@@ -1152,6 +1153,9 @@ asserted.
     read 1.5% above the served `V_P` on run 2 at 37k; lifted when a second
     measured point confirms it);
   - `TransferOmitted`, raised only when no transfer time was measured;
+  - `DecodeTermOmitted`, where the old, lower sum stands.
+    `DecodeStepSlopeAssumed` and `RouterHopAssumed` are not on the list: each
+    takes the value that asks for more;
   - `AssumedPoissonArrivals`, until the staircase's bursty bucket passes;
   - `AboveFlowControlOnset` on the rate answer, where the per-pod model is
     not proven conservative;

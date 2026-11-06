@@ -158,11 +158,15 @@
         "arrivalsSource": "assumed",
         "transferSource": "omitted",
         "decodeSide": "line",
+        "decodeTermSource": "omitted",
+        "routerHopSource": "assumed",
         "flowControl": "off, inferred",
         "assumed": [
           "V_P 30000 tok/s (--assume-vp)",
           "prompt 1000 tokens (--assume-input-tokens)",
           "prompt cv 2 (no computed-prompt histogram)",
+          "decode term omitted (no fit and no decode engine TTFT): T_xfer + ITL stands for it",
+          "router hop 20 ms (no router TTFT mean in the recording)",
           "flow control off (no queue series)",
           "Poisson arrivals"
         ]
@@ -192,12 +196,12 @@
         },
         "ttft": {
           "answer": {
-            "value": 0.35340232418569223,
+            "value": 0.37340232418569225,
             "unit": "s",
             "basis": {
               "fill": 0,
               "kneeRate": 30,
-              "floor": 0.11331041570592462,
+              "floor": 0.1333104157059246,
               "uncapped": 0,
               "boundBy": [],
               "tier": "ols"
@@ -207,19 +211,22 @@
               "AssumedVP",
               "AssumedPromptSpread",
               "TransferOmitted",
+              "DecodeTermOmitted",
+              "RouterHopAssumed",
               "FlowControlInferredOff",
               "AssumedPoissonArrivals",
               "AssumedShape"
             ],
             "parts": {
-              "independent": 0.3234393200155779,
-              "pooled": 0.31143853287278644,
+              "independent": 0.3434393200155779,
+              "pooled": 0.33143853287278646,
               "decodeShare": 0.031774930977097736,
               "engineWait": 0.05047520035773935,
               "ownPrefill": 0.044368837498301734,
               "decodeWait": 0.01591097479879894,
               "firstStep": 0.0036607509947803553,
               "decodeEngine": 0,
+              "routerHop": 0.02,
               "prefillUtilization": 0.37721959104845126,
               "vpMarginApplied": 0,
               "waitScale": 0.1615335863923104,

@@ -150,6 +150,12 @@ func TestTTFT_TheWorkedExampleFromTheRecording(t *testing.T) {
 	near(t, "a", fl.Prefill.FixedLatency, 0.01104, 0.0001)
 	assert.False(t, fl.Prefill.VPMargin != 0, "an assumed V_P carries no margin")
 	fl.Prefill.PromptCV = 1
+	// The page's sum: the old one. This recording reads no decode TTFT, so the
+	// term is omitted and only the assumed hop would stand on top of it.
+	require.NotNil(t, fl.DecodeTerm)
+	assert.True(t, fl.DecodeTerm.EngineOmitted)
+	assert.True(t, fl.DecodeTerm.HopAssumed)
+	fl.DecodeTerm, fl.LegacyDecodeSum = nil, true
 
 	got, ok := whatif.TTFTAt(fl, 11.32, 0.9).(whatif.TTFT)
 	require.True(t, ok)
@@ -954,8 +960,8 @@ func TestPrometheus_TheTTFTAnswerIsTheFilesAnswer(t *testing.T) {
 		{"replicas-to-slo", []string{"replicas-to-slo", "--assume-vp", "100000"}, 0},
 		{"replicas-to-slo at a rate", []string{"replicas-to-slo", "--assume-vp", "100000", "--rate", "2", "--ttft-percentile", "95"}, 0},
 		{"replicas-to-slo, more pods", []string{"replicas-to-slo", "--assume-vp", "100000", "--prefill", "3"}, 0},
-		{"slo-to-rate", []string{"slo-to-rate", "--assume-vp", "100000", "--tpot", "15ms", "--ttft", "2s@p90"}, 0},
-		{"slo-to-rate, TTFT alone", []string{"slo-to-rate", "--assume-vp", "100000", "--ttft", "2s"}, 0},
+		{"slo-to-rate", []string{"slo-to-rate", "--assume-vp", "100000", "--tpot", "15ms", "--ttft", "5s@p90"}, 0},
+		{"slo-to-rate, TTFT alone", []string{"slo-to-rate", "--assume-vp", "100000", "--ttft", "5s"}, 0},
 		{"refused: no V_P", []string{"replicas-to-slo", "--ttft-percentile", "90"}, 3},
 		{"refused: saturated", []string{"replicas-to-slo", "--assume-vp", "100000", "--rate", "5000"}, 3},
 	} {
@@ -978,7 +984,7 @@ func TestPrometheus_TheTTFTAnswerIsTheFilesAnswer(t *testing.T) {
 	}
 
 	// The window answers TTFT, from a learned a.
-	out, code := runCmd(t, slices.Concat([]string{"slo-to-rate"}, window, []string{"--assume-vp", "100000", "--ttft", "2s@p90", "-o", "json"})...)
+	out, code := runCmd(t, slices.Concat([]string{"slo-to-rate"}, window, []string{"--assume-vp", "100000", "--ttft", "5s@p90", "-o", "json"})...)
 	require.Equal(t, 0, code, out)
 	w := decodeOutput(t, out)
 	i := slices.IndexFunc(w.Roles, func(r wireRole) bool { return r.Role == rolePrefill })
@@ -1002,7 +1008,7 @@ func TestPrometheus_TheTTFTInputsCrossTheCapture(t *testing.T) {
 	window := pdWindow(srv.URL)
 	asks := [][]string{
 		{"replicas-to-slo", "--assume-vp", "100000"},
-		{"slo-to-rate", "--assume-vp", "100000", "--tpot", "15ms", "--ttft", "2s@p90"},
+		{"slo-to-rate", "--assume-vp", "100000", "--tpot", "15ms", "--ttft", "5s@p90"},
 	}
 	for _, q := range asks {
 		for _, output := range []string{outputJSON, outputText} {
@@ -1031,7 +1037,9 @@ func TestPrometheus_TheTTFTInputsCrossTheCapture(t *testing.T) {
 	assert.Equal(t, "on", in.FlowControl)
 	assert.Contains(t, in.Assumed, "flow-control thresholds 5 and 0.8 (upstream defaults)")
 	assert.Equal(t, "line", in.DecodeSide)
-	assert.Equal(t, "measured", in.TransferSource)
+	assert.Equal(t, "held by the decode term, not priced", in.TransferSource)
+	assert.Equal(t, "measured", in.DecodeTermSource)
+	assert.Equal(t, "assumed", in.RouterHopSource, "the fake publishes no router mean")
 	near(t, "transfer", in.TransferSecondsPerToken*in.PromptTokens, pdTransfer, 1e-9)
 	require.NotNil(t, w.Roles[i].Results.TTFT.Answer, out)
 	assert.NotNil(t, w.Roles[i].Results.TTFT.Answer.Parts.Onsets, "the gate on places onsets")
@@ -1042,7 +1050,7 @@ func TestPrometheus_TheTTFTInputsCrossTheCapture(t *testing.T) {
 	require.Equal(t, 0, code, other)
 	j := slices.IndexFunc(decodeOutput(t, other).Roles, func(r wireRole) bool { return r.Role == rolePrefill })
 	require.GreaterOrEqual(t, j, 0)
-	assert.NotEqual(t, in.TransferSource, decodeOutput(t, other).Roles[j].TTFT.TransferSource)
+	assert.NotEqual(t, in.TransferSecondsPerToken, decodeOutput(t, other).Roles[j].TTFT.TransferSecondsPerToken)
 	assert.NotEqual(t, in.FlowControl, decodeOutput(t, other).Roles[j].TTFT.FlowControl)
 }
 

@@ -93,6 +93,42 @@ func pdInput(rows ...domain.ReplicaMetrics) domain.AnalyzerInput {
 		{VariantName: "pre", Role: domain.RolePrefill}, {VariantName: "dec", Role: domain.RoleDecode}}}
 }
 
+// The state's term is what the cycles teach: with no reading it is omitted,
+// with a reading and no fit held and assumed, and a sweep of step times is the
+// fit.
+func TestTTFTSamples_TheTerm(t *testing.T) {
+	term := func(s *ttftSamples) whatif.DecodeTerm {
+		return whatif.TermFromEstimate(s.terms["dec"].Estimate(), largestTTFT(s.engineTTFT["dec"]))
+	}
+	row := func(step float64) domain.ReplicaMetrics {
+		r := decodeRow("d0", 0.03+5*step, 10)
+		r.AvgITL, r.AvgITLKnown, r.AvgInputTokens, r.AvgInputTokensRecent = step, true, 1000, 1000
+		return r
+	}
+	s := newTTFTSamples()
+	in := pdInput(prefillRow("p0", 1000, 1))
+	s.note(in, 1)
+	s.noteTerm(in, time.Unix(0, 0))
+	assert.True(t, term(s).EngineOmitted)
+
+	in = pdInput(prefillRow("p0", 1000, 1), row(0.003))
+	s.note(in, 2)
+	s.noteTerm(in, time.Unix(60, 0))
+	held := term(s)
+	assert.True(t, held.StepAssumed)
+	assert.InDelta(t, 0.003, held.FromITL, 1e-12)
+
+	for i := range 30 {
+		in = pdInput(prefillRow("p0", 1000, 1), row(0.002+float64(i%6)*0.002))
+		s.note(in, 3+i)
+		s.noteTerm(in, time.Unix(int64(120+60*i), 0))
+	}
+	fit := term(s)
+	assert.False(t, fit.StepAssumed)
+	assert.InDelta(t, 5, fit.PerStep, 1e-6)
+	assert.True(t, fit.HopAssumed, "this recording holds no router mean")
+}
+
 // The prompt is computed tokens over requests across the cycles, and a cycle
 // with no traffic does not read as a prompt of nothing.
 func TestTTFTSamples_Prompt(t *testing.T) {

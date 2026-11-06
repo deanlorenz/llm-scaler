@@ -166,6 +166,7 @@
               "decodeWait": 0,
               "firstStep": 0,
               "decodeEngine": 0.07385067939758301,
+              "routerHop": 0,
               "prefillUtilization": 0.85,
               "vpMarginApplied": 0,
               "waitScale": 2.1156705925274877,

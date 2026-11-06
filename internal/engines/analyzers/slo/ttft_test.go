@@ -1196,7 +1196,8 @@ func slicesOfMap(m map[string]bool) []string {
 func TestTTFT_TheFlagListIsTheModels(t *testing.T) {
 	flags := []whatif.Flag{whatif.UnvalidatedTTFT, whatif.AssumedVP, whatif.VPLowerBound, whatif.VPAboveSlopeBound,
 		whatif.AssumedImbalance, whatif.AssumedPromptSpread, whatif.TransferOmitted, whatif.DecodeSideOmitted,
-		whatif.DecodeTTFTUnmeasured, whatif.DecodeEngineMeasured, whatif.VPScaledToPrompt, whatif.VPShapeMoved,
+		whatif.DecodeTTFTUnmeasured, whatif.DecodeEngineMeasured, whatif.DecodeTermOmitted,
+		whatif.DecodeStepSlopeAssumed, whatif.RouterHopAssumed, whatif.VPScaledToPrompt, whatif.VPShapeMoved,
 		whatif.FlowControlInferredOff, whatif.AboveFlowControlOnset, whatif.HeldByDecodeAdmission,
 		whatif.DecodeOnsetUnchecked, whatif.BelowFittedBand, whatif.KVBoundSlots,
 		AssumedPoissonArrivals, PromptSpreadClamped, FlowControlMismatch, PromptSpreadAbovePeak, ImbalanceNotSustained}
@@ -1276,6 +1277,134 @@ func TestTTFT_TheSwitch(t *testing.T) {
 	rec := learnrec.New(&buf, 0)
 	rec.Record("x", ttftNow, snap)
 	assert.NotContains(t, buf.String(), "TTFT")
+}
+
+// termRows are prefill and decode rows with the decode engine's TTFT read.
+func termRows() []domain.ReplicaMetrics {
+	rows := append(prefillRows("pre", 4000), decodeRows("dec", 2)...)
+	for i := range rows {
+		if rows[i].VariantName == "dec" {
+			rows[i].AvgTTFT, rows[i].AvgTTFTKnown = 0.2, true
+			rows[i].AvgITL, rows[i].AvgITLKnown = 0.004, true
+		}
+	}
+	return rows
+}
+
+// The decode term's switch, on the fleet ttftFleet builds: on, the term is what
+// the window supports, flagged; off, the old sum, unflagged.
+func TestTTFT_TheDecodeTermSwitch(t *testing.T) {
+	in := ttftInputsAt(1, 0)
+	in.decode = testDecode()
+	in.decode.Replicas = 1
+	term := whatif.TermFromEstimate(prefill.DecodeTermEstimate{}, whatif.DecodeTTFT{Seconds: 0.2, PromptTokens: 2000, ITLSeconds: 0.004})
+	in.term = &term
+	on := priceTTFT(in, 0.1, ttftTarget)
+	require.NotNil(t, on.at)
+	assert.Contains(t, on.flags, whatif.DecodeStepSlopeAssumed, "no fit yet: the measured D, held")
+	assert.Contains(t, on.flags, whatif.RouterHopAssumed)
+
+	in.term, in.legacyDecodeSum = nil, true
+	off := priceTTFT(in, 0.1, ttftTarget)
+	require.NotNil(t, off.at)
+	assert.NotContains(t, off.flags, whatif.DecodeStepSlopeAssumed)
+	assert.NotContains(t, off.flags, whatif.RouterHopAssumed)
+	assert.NotContains(t, off.flags, whatif.DecodeTermOmitted, "the old sum as it was")
+	assert.Greater(t, on.predicted, off.predicted+0.1, "the measured 200 ms stands for what the old sum left out")
+
+	in.legacyDecodeSum = false
+	assert.Contains(t, priceTTFT(in, 0.1, ttftTarget).flags, whatif.DecodeTermOmitted, "no term is never silent")
+}
+
+// The switch through Analyze: on, the window fills; off, none is kept. The
+// published flags follow only with a line to price, which TheDecodeTermSwitch
+// holds.
+func TestTTFT_TheDecodeTermWindow(t *testing.T) {
+	r := newTTFTRig(ttftEstimate(), termRows())
+	r.in.VariantStates = append(r.in.VariantStates, decState)
+	r.analyze(t)
+	assert.Len(t, r.a.decodeTerms, 1)
+
+	r = newTTFTRig(ttftEstimate(), termRows())
+	r.in.VariantStates = append(r.in.VariantStates, decState)
+	require.NoError(t, r.a.SetSwitchesForReplay(map[string]bool{SwitchTTFTDecodeTerm: false}))
+	r.analyze(t)
+	assert.Empty(t, r.a.decodeTerms)
+}
+
+// The switch through Analyze on a decode line that prices: on, the hop is on the
+// answer and flagged; off, the old sum, unflagged, not the flagged fall-back.
+func TestTTFT_TheDecodeTermSwitchOnALine(t *testing.T) {
+	read := func(on bool) metrics.SLOTTFTReading {
+		rows := func(i int) []domain.ReplicaMetrics {
+			return append(prefillRows("pre", 4000), cycleRows("dec", i)...)
+		}
+		r := newTTFTRig(ttftEstimate(), rows(0))
+		r.a.store = capacity.NewStore()
+		r.a.store.Update("ns", "m", "dec", capacity.Record{EngineParams: &capacity.EngineParams{MaxNumSeqs: 64}}, ttftNow)
+		r.in.VariantStates = append(r.in.VariantStates, decState)
+		require.NoError(t, r.a.SetSwitchesForReplay(map[string]bool{SwitchTTFTDecodeTerm: on}))
+		var got metrics.SLOTTFTReading
+		for i := range 13 {
+			r.now = r.now.Add(time.Minute)
+			r.in.ReplicaMetrics = rows(i)
+			got = r.one(t)
+		}
+		require.False(t, math.IsNaN(got.Predicted), got.Reason)
+		return got
+	}
+	on, off := read(true), read(false)
+	assert.Contains(t, on.Flags, string(whatif.RouterHopAssumed))
+	assert.NotContains(t, off.Flags, string(whatif.RouterHopAssumed))
+	assert.NotContains(t, off.Flags, string(whatif.DecodeTermOmitted), "the old sum as it was")
+	assert.Greater(t, on.Predicted, off.Predicted)
+}
+
+// The judge runs first, so the router's mean of the cycle reaches the window
+// the cycle's pricing reads.
+func TestTTFT_TheRouterMeanReachesTheWindow(t *testing.T) {
+	r := newTTFTRig(ttftEstimate(), nil)
+	r.a.router = fakeRouter{latency: &domain.RouterLatency{WindowSeconds: 300, TTFTSumRate: 2.2, TTFTCountRate: 10,
+		TTFTBuckets: []domain.LatencyBucket{{UpperBound: 1, Rate: 10}, {UpperBound: math.Inf(1), Rate: 10}}}}
+	r.in.VariantStates = append(r.in.VariantStates, decState)
+	rows := func() []domain.ReplicaMetrics {
+		out := prefillRows("pre", 4000)
+		out[0].AvgTTFT, out[0].AvgTTFTKnown = 0.05, true
+		out[0].RequestRate = 10
+		return append(out, domain.ReplicaMetrics{PodName: "d", VariantName: "dec", Ready: true, AvgTTFT: 0.1, AvgTTFTKnown: true,
+			RequestRate: 10, RequestRateKnown: true})
+	}
+	r.in.ReplicaMetrics = rows()
+	for range 60 {
+		r.analyze(t)
+		r.now = r.now.Add(15 * time.Second)
+	}
+	est := r.a.decodeTerms[ttftWindowKey("ns", "m", "dec")].readings.Estimate()
+	require.Empty(t, est.Hop.Refused)
+	assert.InDelta(t, 0.07, est.Hop.Base, 1e-9, "220 ms less 50 and 100")
+}
+
+// The term a window learns reaches TermFromEstimate as a fit: D from the rows,
+// R from the router's mean less the engines'.
+func TestTTFT_TheWindowLearnsTheTerm(t *testing.T) {
+	a := New(nil, nil)
+	key := ttftWindowKey("ns", "m", "dec")
+	router := &domain.RouterLatency{WindowSeconds: 300, TTFTSumRate: 2.2, TTFTCountRate: 10}
+	var est prefill.DecodeTermEstimate
+	for i := range 80 {
+		now := ttftNow.Add(time.Duration(i) * 15 * time.Second)
+		itl := 0.002 + float64(i%8)*0.002
+		rows := []domain.ReplicaMetrics{{PodName: "d", Ready: true, AvgTTFT: 0.1 + 5*itl, AvgTTFTKnown: true, AvgITL: itl, AvgITLKnown: true,
+			RequestRate: 10, RequestRateKnown: true, AvgInputTokens: 1000, AvgInputTokensRecent: 1000}}
+		pre := []domain.ReplicaMetrics{{PodName: "p", Ready: true, AvgTTFT: 0.05, AvgTTFTKnown: true, RequestRate: 10, RequestRateKnown: true}}
+		est = a.noteDecodeTerm(key, prefill.DecodeTermCycle{Now: now, Prefill: pre, Decode: rows, PromptTokens: 1000, Router: router})
+	}
+	require.Empty(t, est.Decode.Refused)
+	assert.InDelta(t, 5, est.Decode.PerStep, 1e-6)
+	require.Empty(t, est.Hop.Refused)
+	term := whatif.TermFromEstimate(est, whatif.DecodeTTFT{})
+	assert.False(t, term.StepAssumed)
+	assert.False(t, term.HopAssumed)
 }
 
 // The result is what it was: a prefill variant stays no-data and the role
@@ -1384,6 +1513,7 @@ func TestTTFT_TheWindowsAreForgottenAndEvicted(t *testing.T) {
 		r.analyze(t)
 		require.Len(t, r.a.imbalance, 1)
 		require.Len(t, r.a.decodeTTFT, 1)
+		require.Len(t, r.a.decodeTerms, 1)
 		return r
 	}
 	r := rig()
@@ -1391,16 +1521,19 @@ func TestTTFT_TheWindowsAreForgottenAndEvicted(t *testing.T) {
 	assert.Positive(t, n)
 	assert.Empty(t, r.a.imbalance)
 	assert.Len(t, r.a.decodeTTFT, 1, "another variant's stays")
+	assert.Len(t, r.a.decodeTerms, 1, "another variant's stays")
 	r.a.forgetVariant("ns", "m", "dec")
 	assert.Empty(t, r.a.decodeTTFT)
+	assert.Empty(t, r.a.decodeTerms)
 
 	r = rig()
 	r.now = r.now.Add(r.a.stateTimeout + time.Minute)
 	ev := r.a.evictStale(r.now)
-	assert.Equal(t, 2, ev.TTFTWindows)
+	assert.Equal(t, 3, ev.TTFTWindows)
 	assert.True(t, ev.Any())
 	assert.Empty(t, r.a.imbalance)
 	assert.Empty(t, r.a.decodeTTFT)
+	assert.Empty(t, r.a.decodeTerms)
 
 	r = rig()
 	r.now = r.now.Add(r.a.stateTimeout - time.Minute)
