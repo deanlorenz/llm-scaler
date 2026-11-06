@@ -185,6 +185,19 @@ when the router histogram is empty or its resolution is flagged. The SLO
 analyzer's percentile ([SLO tiers](slo-tiers.md#later-a-tpot-percentile)) uses
 the same rule and the same library.
 
+As built in the CLI, with two choices the page left open. The engine's replaces a
+coarse router only when it is not coarse itself: swapping one grid for another
+buys nothing, and the router's is what the client sees. A router histogram that is
+malformed, or whose quantile is unbounded, stands as its refusal: that is a reading,
+not an absence. The collector reads the engine's buckets and not its `_sum`, so the
+window's mean is each row's `AvgITL`, weighted by its requests, the assumption the
+mean TPOT target already makes. It answers `throughput-sweep-restart`, which has no
+router latency, and which refused `NoTPOTHistogram` before: mean TPOT 3.21 ms, p90
+21.79 ms. That `R_q` of 6.78 is the engine's grid and not the traffic, and is flagged
+`CoarseTPOTBucket` too: vLLM's edges are 10, then 25 ms, around a 3 ms mean. The flag
+is `EngineTPOTHistogram`, the row says `R_q 6.78 from 314 engine TPOT windows, not the
+router's`, and `inputs.tpot.ratioSource` is `engine histogram`.
+
 **Without a histogram**, a percentile TPOT is refused (`NoTPOTHistogram`).
 `--assume-tpot-ratio R` gives a flagged answer instead. Recommendation: refuse
 by default, because no default ratio has been measured; a stated default would
@@ -703,7 +716,7 @@ Every answer is an `Answer{Value, Band, Basis, Flags}` or an
 | `NoImbalance` | More than one prefill pod and no `f`, learned or assumed (`f` = 1 is never assumed silently: it over-promises) |
 | `NoPrefillReplicas` | A TTFT question with no prefill pod to price |
 | `TokenGapPercentile` | A percentile over token gaps (ITL); per-request TPOT percentiles are supported |
-| `NoTPOTHistogram` | A per-request TPOT percentile with no router or engine TPOT histogram (the router's needs `usage` on responses) and no `--assume-tpot-ratio` |
+| `NoTPOTHistogram` | A per-request TPOT percentile with no router or engine TPOT histogram holding an observation (the router's needs `usage` on responses) and no `--assume-tpot-ratio` |
 | `TPOTQuantileUnbounded` | The TPOT `q` quantile falls in the histogram's `+Inf` bucket |
 | `TargetBelowFloor` | The target is below what any number of replicas reaches |
 | `FlowControlUnknown` | Flow control on and the detector's thresholds unknown |

@@ -128,7 +128,7 @@ func sloToRate(ctx context.Context, args []string, out, warn io.Writer) error {
 			h := query.Headroom
 			in.Headroom = &h
 			if asksTPOT {
-				in.TPOT = tpotInputs(st, target.Seconds, target.Percentile, target.Ratio)
+				in.TPOT = f.tpotInputs(st, target.Seconds, target.Percentile, target.Ratio)
 				w.Roles = append(w.Roles, wireRole{Role: "decode", Variant: a.pv.state.Variant, Inputs: in,
 					Results: wireResults{Rate: toWire(a.result, unitRate)}})
 			}

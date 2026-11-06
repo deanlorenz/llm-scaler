@@ -178,7 +178,7 @@ func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) erro
 				in.Rate, in.RateSource = &a.ttft.rate, sourcePrefillKnee
 			}
 			if query.PercentileTarget != nil {
-				in.TPOT = tpotInputs(st, 0, q, a.ratio)
+				in.TPOT = f.tpotInputs(st, 0, q, a.ratio)
 			}
 			w.Roles = append(w.Roles, wireRole{Role: "decode", Variant: a.pv.state.Variant, Inputs: in, Results: wireResults{
 				Knee: toWire(a.slo.KneeRate, unitRate), OperatingRate: toWire(a.slo.Rate, unitRate),
@@ -219,12 +219,14 @@ func noDecode(st *learnreplay.State, variants []pricedVariant) *whatif.Unanswera
 }
 
 // tpotInputs is the wire's account of the TPOT question.
-func tpotInputs(st *learnreplay.State, target, q float64, r whatif.TPOTRatio) *wireTPOT {
-	t := &wireTPOT{TargetSeconds: target, Percentile: q, Ratio: r.Value, Windows: len(st.TPOTWindows)}
+func (f *answerFlags) tpotInputs(st *learnreplay.State, target, q float64, r whatif.TPOTRatio) *wireTPOT {
+	t := &wireTPOT{TargetSeconds: target, Percentile: q, Ratio: r.Value, Windows: f.tpotWindowCount(st)}
 	switch {
 	case r.Value == 0:
 	case r.Assumed:
 		t.RatioSource = "assumed"
+	case f.engineTPOT:
+		t.RatioSource = "engine histogram"
 	default:
 		t.RatioSource = sourceLearned
 	}

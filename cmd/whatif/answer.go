@@ -56,6 +56,9 @@ type answerFlags struct {
 	set                                               map[string]bool
 	// assumeA is --assume-a, a TTFT flag (ttft.go).
 	assumeA time.Duration
+	// engineTPOT says R_q was read from the engine's TPOT histogram
+	// (tpotRatioFor).
+	engineTPOT bool
 	// window is the --prometheus mode's flags, capture's own, and its
 	// namespace the --namespace both modes take; captured is the window
 	// read, once it is. question names the command, and warn is where a
@@ -464,18 +467,43 @@ func (f *answerFlags) headroomFor(p *config.ScalingPolicy) float64 {
 	return config.DefaultScaleUpThreshold
 }
 
+// engineTPOTHistogram is an R_q read from the engine's TPOT histogram in place
+// of the router's. The CLI alone raises it.
+const engineTPOTHistogram whatif.Flag = "EngineTPOTHistogram"
+
 // tpotRatioFor resolves R_q for a percentile q: --assume-tpot-ratio, else
-// learned from the recording's TPOT windows. A refusal comes back as the
-// Result the percentile answers with.
+// learned from the router's TPOT windows, which are what the client sees; else,
+// flagged, from the engine's, where the router's hold no observation or read
+// coarse and the engine's do not. Any other refusal of the router's stands: it
+// says that data is wrong. A refusal comes back as the Result the percentile
+// answers with.
 func (f *answerFlags) tpotRatioFor(st *learnreplay.State, q float64) (whatif.TPOTRatio, []whatif.Flag, *whatif.Unanswerable) {
 	if f.set["assume-tpot-ratio"] {
 		return whatif.TPOTRatio{Value: f.tpotRatio, Assumed: true}, nil, nil
 	}
-	if len(st.TPOTWindows) == 0 {
-		return whatif.TPOTRatio{}, nil, &whatif.Unanswerable{Reason: whatif.NoTPOTHistogram,
-			Detail: "the recording carries no TPOT histogram; pass --assume-tpot-ratio for a flagged answer"}
+	r, flags, refused := whatif.TPOTRatio{}, []whatif.Flag(nil), &whatif.Unanswerable{Reason: whatif.NoTPOTHistogram,
+		Detail: "the recording carries no TPOT histogram; pass --assume-tpot-ratio for a flagged answer"}
+	if len(st.TPOTWindows) > 0 {
+		r, flags, refused = whatif.TPOTRatioFromWindows(st.TPOTWindows, q)
 	}
-	return whatif.TPOTRatioFromWindows(st.TPOTWindows, q)
+	coarse := refused == nil && slices.Contains(flags, whatif.CoarseTPOTBucket)
+	if !coarse && (refused == nil || refused.Reason != whatif.NoTPOTHistogram) || len(st.EngineTPOTWindows) == 0 {
+		return r, flags, refused
+	}
+	er, eflags, erefused := whatif.TPOTRatioFromWindows(st.EngineTPOTWindows, q)
+	if erefused != nil || coarse && slices.Contains(eflags, whatif.CoarseTPOTBucket) {
+		return r, flags, refused
+	}
+	f.engineTPOT = true
+	return er, append(eflags, engineTPOTHistogram), nil
+}
+
+// tpotWindowCount is how many windows R_q was read from.
+func (f *answerFlags) tpotWindowCount(st *learnreplay.State) int {
+	if f.engineTPOT {
+		return len(st.EngineTPOTWindows)
+	}
+	return len(st.TPOTWindows)
 }
 
 // placeholderRatio prices a percentile whose R_q was refused, so that the
@@ -498,6 +526,8 @@ func withRatioRefusal(r whatif.Result, refused *whatif.Unanswerable) whatif.Resu
 // ratioNote says where R_q came from, for the human output.
 func (f *answerFlags) ratioNote(st *learnreplay.State, r whatif.TPOTRatio) string {
 	switch {
+	case f.engineTPOT:
+		return fmt.Sprintf("R_q %s from %d engine TPOT windows, not the router's", num(r.Value), f.tpotWindowCount(st))
 	case r.Assumed && len(st.TPOTWindows) == 0:
 		return fmt.Sprintf("R_q %s ASSUMED (no TPOT histogram)", num(r.Value))
 	case r.Assumed:
