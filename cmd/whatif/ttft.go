@@ -50,10 +50,6 @@ const (
 	imbalanceNotSustained whatif.Flag = "ImbalanceNotSustained"
 )
 
-// assumedA is a --assume-a supplied: P3 has no flag for it, as S1 has no
-// assumption for a.
-const assumedA whatif.Flag = "AssumedA"
-
 // The closing note's measured halves. The figures are the frozen P2 table's
 // (TestTTFTFrozen_TheNotesFigures, learnreplay).
 const (
@@ -61,6 +57,10 @@ const (
 	ttftNoteAssumed  = "at the assumed prompt cv %s it read 1.1x to 4.1x the router's percentile on the P2 recordings; at the sent spread (cv 0.06) up to 34%% under it."
 	ttftNoteMeasured = "at the sent spread (cv 0.06) it read up to 34% under the router's percentile on the P2 recordings."
 )
+
+// assumedA is a --assume-a supplied: P3 has no flag for it, as S1 has no
+// assumption for a.
+const assumedA whatif.Flag = "AssumedA"
 
 // ttftQuestion is the TTFT a command was asked for.
 type ttftQuestion struct {
@@ -206,12 +206,13 @@ type pricedFleet struct {
 	q       float64
 	// assumedHop is the hop --assume-router-hop supplied, nil with none.
 	assumedHop *time.Duration
+	// assumedA is an a --assume-a supplied.
+	assumedA bool
 	// promptAssumed is a prompt --assume-input-tokens supplied: no reading of
 	// the decode rows' prompt says what its prefix hits are.
 	promptAssumed bool
-	// assumedVP is a V_P --assume-vp supplied, and assumedA an a --assume-a
-	// supplied.
-	assumedVP, assumedA bool
+	// assumedVP is a V_P --assume-vp supplied.
+	assumedVP bool
 	// flags are the fleet's own, beside P3's.
 	flags []whatif.Flag
 	// inputsText is where the fleet's inputs came from, for the human

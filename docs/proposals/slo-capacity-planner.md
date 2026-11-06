@@ -887,10 +887,10 @@ TTFT: the decode answers are as they were.
 | `--ttft 200ms@p95` | `slo-to-rate`: the end-to-end target, a mean (`200ms`) or a percentile. Without `--tpot`, only TTFT is asked |
 | `--ttft-percentile 90` | `replicas-to-slo`: the percentile. Default: the policy's `slo.ttft`, else 90. On `slo-to-rate`, beside a plain `--ttft` |
 | `--assume-vp 30000` | `V_P`, prompt tokens per second, in place of the learned one, as every `--assume-*` flag overrides the recording. Neither rescaled nor margined |
-| `--assume-a 11ms` | `a`, the fixed latency one request pays on a prefill pod, in place of the learned one, flagged `AssumedA` and printed `a ASSUMED`, with any learned figure beside it (`a 8.00 ms ASSUMED, learned 11.04 ms`, and `fixedLatencyLearned` in the JSON). For a fleet of one prompt length, which gives P1 no fit |
 | `--assume-router-hop 8ms` | The hop between the router and the engines, in place of the learned or default one, flagged `RouterHopAssumed` |
 | `--prefill N` | Prefill pods to price; 0 takes the serving pods at the cycle |
 | `--prefill-variant V` | The prefill variant to price, when the model has several: the CLI prices one fleet, and a usage error says so otherwise. It gets the whole rate, named as assumed |
+| `--assume-a 11ms` | `a`, the fixed latency one request pays on a prefill pod, in place of the learned one, flagged `AssumedA` and printed `a ASSUMED`, with any learned figure beside it (`a 8.00 ms ASSUMED, learned 11.04 ms`, and `fixedLatencyLearned` in the JSON). For a fleet of one prompt length, which gives P1 no fit |
 
 **Where each input comes from.**
 
@@ -1166,7 +1166,8 @@ four results only `meanTPOT` is kept here):
 | `source` | The recording, the model, `firstCycle` (1), `lastCycle` (the cycle answered at) and `totalCycles` (the recording's), with their clocks. With `--prometheus`, `recording` is empty and `window` names the window: `prometheus` (the URL's scheme and host alone), `from`, `to`, `stepSeconds`, and `roles` (`kube-state-metrics` or `role-of`); absent in recording mode. Absent on an error object. |
 | `bands` | How the bands were drawn: block bootstrap, `blockCycles`, `resamples`, `seed`, the percentiles. Absent on an error object. |
 | `roles[]` | One per decode variant priced: `inputs` (what it was priced from) and `results`. |
-| `inputs.line` | The ITL line (`a` in seconds per unit of fill, `b` in seconds), its `tier`, the `readings` it was fitted from, their `observedFill` range and `fromCycle`-`toCycle`, of the bootstrap's `resamples` how many (`tierChanges`) landed at another tier, and the [line `check`](#the-line-check-as-built): `status` `ok`, `mismatch` or `not-run`, the rows `compared`, `onRamp` and `past` 15%, and the median, worst and signed errors in percent. |
+| `inputs.line.check` | The [line check](#the-line-check-as-built): `status` `ok`, `mismatch` or `not-run`, the rows `compared`, `onRamp` and `past` 15%, and the median, worst and signed errors in percent. |
+| `inputs.line` | The ITL line (`a` in seconds per unit of fill, `b` in seconds), its `tier`, the `readings` it was fitted from, their `observedFill` range and `fromCycle`-`toCycle`, and of the bootstrap's `resamples` how many (`tierChanges`) landed at another tier. |
 | `inputs.shape` | Lengths in tokens, each with its source, `measured` (over `fromCycle`-`toCycle`) or `assumed`. |
 | `results` | `knee`, `operatingRate`, `meanTPOT`, `percentileTPOT` for question 2; `rate` for question 1. A question not asked has no key. |
 | a result | Exactly one of `answer` and `refused`. |
