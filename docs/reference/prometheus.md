@@ -1153,6 +1153,12 @@ max by (exported_namespace, variant_name) (wva_desired_replicas)
 
 ### Ceilings, wakes, start times and warm pool metrics
 
+Set `LEGACY_METRIC_NAMES=false` on the controller to stop publishing the old
+metric names. During the release that follows a metric rename, every metric is
+published under its old name as well, marked deprecated in its help text, so
+ScaledObjects, alerts and dashboards keep working. Turning this off halves the
+number of series the controller publishes.
+
 Every series below also carries `controller_instance` when `CONTROLLER_INSTANCE`
 is set, and is scraped with the workload's namespace as `exported_namespace`.
 

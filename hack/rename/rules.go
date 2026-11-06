@@ -1,16 +1,17 @@
 package main
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
 
 // Targets are the switches of a run.
 type Targets struct {
-	// Module is the Go module path. This one value is the module switch: it is
-	// the only place the target is written, and the old paths are matched
-	// whatever it says, so the tool can move main from the first path to this
-	// one, or a later main from any earlier target to a new one.
+	// Module is the Go module path, and the only place the target is written.
+	// The two paths in oldModules are matched whatever it says, so a tree on
+	// either moves to this value. A tree already on some other path is not
+	// matched: add that path to oldModules to move it.
 	Module string
 	// CodeMoved turns the held rows on. See HoldUntilMoved.
 	CodeMoved bool
@@ -20,6 +21,34 @@ type Targets struct {
 var DefaultTargets = Targets{
 	Module:    "github.com/llm-d-incubation/llm-d-scaling-manager",
 	CodeMoved: false,
+}
+
+// oldModules are the module paths the module rows replace.
+var oldModules = []string{"github.com/llm-d/llm-d-workload-variant-autoscaler", "github.com/ev-shindin/llm-scaling-manager"}
+
+// The three shapes an old variable name takes. The env rows of the table and the
+// install guard are both built from these, so the guard refuses exactly what the
+// rename moves.
+const (
+	envOldPrefix = "WVA_"
+	envOldInner  = "_WVA_"
+	envOldSuffix = "_WVA"
+	envNewInner  = "_LLMSM_"
+	envNewSuffix = "_SCALING_MANAGER"
+)
+
+// EnvGuardLines are the generated lines of the install guard: the case arms of
+// legacy_env_refuse in deploy/lib/common.sh and the legacy_env_set line of the
+// Makefile. TestEnvGuardIsCurrent holds both equal to this.
+func EnvGuardLines() (shell []string, makefile string) {
+	shell = []string{
+		fmt.Sprintf("%s*) new=%s${name#%s} ;; # rename:keep", envOldPrefix, envPre, envOldPrefix),
+		fmt.Sprintf("*%s*) new=${name/%s/%s} ;; # rename:keep", envOldInner, envOldInner, envNewInner),
+		fmt.Sprintf("*%s) new=${name%%%s}%s ;; # rename:keep", envOldSuffix, envOldSuffix, envNewSuffix),
+	}
+	makefile = fmt.Sprintf("legacy_env_set := $(filter %s%% %%%s,$(.VARIABLES)) $(foreach v,$(.VARIABLES),$(if $(findstring %s,$(v)),$(v))) # rename:keep",
+		envOldPrefix, envOldSuffix, envOldInner)
+	return shell, makefile
 }
 
 const (
@@ -119,9 +148,12 @@ var keepWholeFiles = []string{
 	"pr-body-rname.md",
 }
 
-// standalone matches a name standing alone: not part of a longer kebab-case name.
+// standalone matches a name standing alone: not part of a longer kebab-case
+// name. A hyphen before it usually means a longer name, with these exceptions:
+// the shell's default-value forms ${X:-name} and ${X-name}, and s0-name, the
+// index KEDA prefixes to an external metric in an HPA.
 func standalone(name string) string {
-	return `(?:^|[^A-Za-z0-9_-])(?P<m>` + regexp.QuoteMeta(name) + `)(?:$|[^A-Za-z0-9_-])`
+	return `(?:^|[^A-Za-z0-9_-]|:-|\$\{[A-Za-z_][A-Za-z0-9_]*-|\bs[0-9]+-)(?P<m>` + regexp.QuoteMeta(name) + `)(?:$|[^A-Za-z0-9_-])`
 }
 
 // RulesFor builds the table. Order is meaning: a row claims its text before
@@ -202,9 +234,9 @@ func RulesFor(t Targets, metrics []string) []Rule {
 
 		// The upstream guide talks about two installs at once: upstream's names
 		// on upstream's objects stay, and this project's names move.
-		{Name: "keep-guide-upstream-line", Class: "external", Pattern: `(?m)^.*<upstream-namespace>.*$`, Action: Keep,
+		{Name: "keep-guide-upstream-line", Class: "external", Pattern: `(?m)^.*\b(?:kubectl|helm) [^\n]*(?:<upstream-namespace>|workload-variant-autoscaler).*$`, Action: Keep,
 			Paths: upstreamGuide, Why: "a command against the upstream install"},
-		{Name: "keep-guide-upstream-names", Class: "external", Pattern: `workload-variant-autoscaler|wva-(?:manager|metrics|epp-metrics)[a-z-]*|\bWVA\b|\bwva_`, Action: Keep,
+		{Name: "keep-guide-upstream-names", Class: "external", Pattern: `a workload-variant-autoscaler chart|test\("\^wva-"\)|wva-(?:manager|metrics|epp-metrics)-[a-z-]*(?:role|reader|binding)\b|wva-metrics-reader\b|wva-manager-config|\bWVA\b|\bwva_`, Action: Keep,
 			Paths: upstreamGuide, Why: "names of the upstream install, or the other product"},
 		{Name: "keep-owners", Class: "person", Pattern: `ev-shindin`, Action: Keep, Paths: []string{"OWNERS"}, Why: "a GitHub login"},
 
@@ -231,6 +263,8 @@ func RulesFor(t Targets, metrics []string) []Rule {
 			"llm-d-benchmark's scenario schema"),
 		{Name: "keep-harness-scenario-key", Class: "external", Pattern: `(?:^|[\s\x60])(?P<m>wva):`, Action: Keep,
 			Paths: []string{"hack/benchmark/scenarios/**"}, Why: "the wva block of llm-d-benchmark's scenario schema"},
+		{Name: "keep-harness-attribute", Class: "external", Pattern: `\bwva_namespace\b`, Action: Keep,
+			Paths: []string{"hack/benchmark/patch_harness.sh", "hack/check-harness-teardown.sh"}, Why: "context.wva_namespace is an attribute of llm-d-benchmark's context"},
 		{Name: "keep-harness-anchor", Class: "external", Pattern: `WVA teardown skipped|WVA was never installed`, Action: Keep,
 			Paths: []string{"hack/benchmark/patch_harness.sh", "hack/check-harness-teardown.sh"}, Why: "text in llm-d-benchmark's source that the patcher anchors on"},
 
@@ -241,8 +275,8 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		kept("keep-learned-state", "persisted", standalone("wva-learned-state"), "holds learned state: a new name starts the fleet from nothing"),
 		kept("keep-share-history", "persisted", standalone("wva-utilization-share-history"), "holds the utilization-share ledger history"),
 		kept("keep-legacy-policy-cm", "persisted", standalone("wva-saturation-scaling-config"), "already a legacy name, read as a fall-back"),
-		kept("keep-applied-by", "persisted", `wva-epp-metrics-auth|applied-by[=:] ?(?:\\?")?wva-setup-prereqs|(?:^|[^A-Za-z0-9_-])wva-setup-prereqs(?:$|[^A-Za-z0-9_-])`,
-			"a mark on applied objects that undeploy selects on; the EPP role and its per-namespace bindings carry the same word and are matched by name"),
+		kept("keep-applied-by", "persisted", standalone("wva-setup-prereqs"), "a mark on applied objects that undeploy selects on"),
+		kept("keep-epp-auth", "persisted", `wva-epp-metrics-auth`, "the same kind of mark; the EPP role and its per-namespace bindings carry the word and are matched by name"),
 		kept("keep-metric-wire-name", "persisted", standalone("wva-desired-replicas"), "the external metric name in every KEDA-built HPA"),
 		kept("keep-node-dir", "persisted", `/mnt/local/wva`, "a directory on GPU nodes that holds downloaded weights"),
 		kept("keep-field-manager", "persisted", `--field-manager=llm-scaling-manager`, "server-side-apply owner of existing fields"),
@@ -268,10 +302,10 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		{Name: "camel-embedded", Class: "word", Pattern: `([a-z])WVA([A-Z]\w*|\b)`, Replace: "${1}ScalingManager$2"},
 
 		// Environment variables.
-		{Name: "env-prefix", Class: "env", Pattern: `\bWVA_`, Replace: envPre},
-		{Name: "env-after-escape", Class: "env", Pattern: `\\[a-z"](?P<m>WVA_)`, Replace: envPre},
-		{Name: "env-inner", Class: "env", Pattern: `_WVA_`, Replace: "_LLMSM_"},
-		{Name: "env-suffix", Class: "env", Pattern: `_WVA\b`, Replace: "_SCALING_MANAGER"},
+		{Name: "env-prefix", Class: "env", Pattern: `\b` + envOldPrefix, Replace: envPre},
+		{Name: "env-after-escape", Class: "env", Pattern: `\\[a-z"](?P<m>` + envOldPrefix + `)`, Replace: envPre},
+		{Name: "env-inner", Class: "env", Pattern: envOldInner, Replace: envNewInner},
+		{Name: "env-suffix", Class: "env", Pattern: envOldSuffix + `\b`, Replace: envNewSuffix},
 
 		// The project's names.
 		{Name: "project-name-title", Class: "project", Pattern: `Workload[- ]Variant[- ]Autoscaler(?: \(WVA\))?`, Replace: newName},
@@ -347,7 +381,7 @@ func renameFileWord(claimed, _ string) string {
 // moduleSwap keeps what follows the module path and swaps the path itself.
 func moduleSwap(target string) func(string, string) string {
 	return func(claimed, _ string) string {
-		for _, old := range []string{"github.com/llm-d/llm-d-workload-variant-autoscaler", "github.com/ev-shindin/llm-scaling-manager"} {
+		for _, old := range oldModules {
 			if rest, ok := strings.CutPrefix(claimed, old); ok {
 				return target + rest
 			}

@@ -63,10 +63,14 @@ expressions over Go test fixtures cost this repository a reverted refactor.
 - Edits are spliced into the original bytes, and gofmt then realigns the columns
   and re-sorts the imports.
 - A positional check then holds the Nth token of the result against the Nth
-  token of the input. A token may only differ the way the table says, so a value
-  in a fixture cannot drift and an expression cannot become a literal. It
-  compares in document order on purpose: fixtures reuse names, and a check keyed
-  by name would hide that.
+  token of the input, in document order, because fixtures reuse names and a check
+  keyed by name would hide a drift. It proves the edit did what the table says and
+  nothing else: no token appeared, vanished or moved, and a non-string token is
+  unchanged. It does not prove the table is right, because it recomputes each
+  string with the same table. Comments are outside it, and imports are compared
+  as a set because gofmt sorts them. Whether a renamed string is still correct is
+  for the tests to say: they found two fixtures whose expected order
+  changed with the name.
 
 Strings in test fixtures take the same rules as production strings. Most of them
 are expected values, so they have to move with the code they check. What must
@@ -77,9 +81,22 @@ row.
 
 | Name | What happens | Remove |
 |---|---|---|
-| Metrics | `internal/metrics/legacy_names.go` publishes every `llmsm_` metric as `wva_` too, from the same scrape. `LEGACY_METRIC_NAMES=false` turns it off. | Next release: delete the file and its call in `InitMetrics`. |
-| Controller settings | `internal/config/legacy_env.go` reads `WVA_*` as `LLMSM_*`, from the environment and the config file, and logs each one. The new name wins. | Next release: delete the file, the call in `main` and the two helpers' call sites. |
-| Install variables | `make` and `deploy/lib/common.sh` stop on a `WVA_*` variable and name the new one. Read by nothing, it would install into the default namespace. | Next release: the `legacy_env_refuse` function, its call and the Makefile block. |
+| Metrics | `internal/metrics/legacy_names.go` publishes every `llmsm_` metric as `wva_` too, from the same scrape. `LEGACY_METRIC_NAMES=false` turns it off. | See below. |
+| Controller settings | `internal/config/legacy_env.go` reads `WVA_*` as `LLMSM_*`, from the environment and the config file, and logs each one. The new name wins, and the old name it discarded is logged without its value. | See below. |
+| Install variables | `make` and `deploy/lib/common.sh` stop on an old variable name (`WVA_NS`, `DEPLOY_WVA`, `BENCHMARK_WVA_TAG`) and on `INSTALL_PHASE=wva`, naming the new one. Read by nothing, it would install into the default namespace, or install a controller. The patterns are generated: `go run ./hack/rename --print-env-guard`. | See below. |
+| Scaling-policy ConfigMap | The controller reads `wva-scaling-policy-config` when the new name is absent, in its own, the policy and a tenant's namespace, and logs the object it read. The multi-namespace cache selects the old label too. | See below. |
+| Live reads on re-deploy | `legacy_cm_capture` falls back to the old ConfigMap name on NotFound, so a passive controller stays passive and kept policy entries, limiters and the live Prometheus settings carry over. | See below. |
+
+### Removing them
+
+One release after the rename, delete:
+
+- `internal/metrics/legacy_names.go`, `legacy_names_test.go`, `legacy_names_wired_test.go`, and the `withLegacyNames` call in `InitMetrics`.
+- `internal/config/legacy_env.go`, `legacy_env_test.go`, the `ApplyLegacyEnv` call and its two loops in `main`, the `applyLegacyConfigKeys` block in the loader, and `lookupWithLegacy` in `ManagerConfigPassive`.
+- `internal/controller/configmap_old_name_test.go`, `RenamedScalingPolicyConfigMapName` in `ScalingPolicyConfigMapNames`, and `ConfigMapCacheSelector` in `main`.
+- `hack/check-legacy-env.sh` and its two lines in `lint-deploy-scripts`.
+- `legacy_env_refuse`, `legacy_cm_old_name`, `legacy_cm_capture`, `legacy_cm_refuse_write` and their callers in `deploy/lib`, the `.WVA_PASSIVE` read in `wva_live_passive`, and the guard block at the top of the Makefile.
+- The matching rows in `keepWholeFiles`.
 
 All three do nothing before the rename, because they key on the current prefix
 differing from the old one, or on a metric having the new prefix.
@@ -105,11 +122,14 @@ from the renamed tree. None of this has been run on a cluster.
 | `namePrefix: wva-`, so every prefixed object | Deployment, ServiceAccount, RBAC, Services, ConfigMaps | New objects next to the old: uninstall the old one first | `scaling-manager-` |
 | `workload-variant-autoscaler-system`, `wva-system` | default namespaces | A default re-deploy lands in a new namespace with no learned state, beside the running controller | `scaling-manager-system` |
 | `wva-external-scaler` | Service every ScaledObject addresses, its NetworkPolicy, TLS names | Existing ScaledObjects address a Service that no longer exists: KEDA calls fail and scaling stops until they are re-pointed | `scaling-manager-external-scaler` |
-| `wva-scaling-policy-config` | the ConfigMap admins edit | The install writes a fresh one; tuned policy is not read | `scaling-manager-scaling-policy-config`; copy it across before deploying |
+| `wva-scaling-policy-config` | the ConfigMap admins edit | The old name is read as a fall-back for one release, with a warning. An install writes the new one in its own namespace, with the old entries carried over. In the policy namespace and a tenant's, nothing writes it | `scaling-manager-scaling-policy-config`. To move off the fall-back, copy it to the new name, confirm it loaded, delete the old one |
 | `wva-manager-config` | rendered by the install | Re-rendered | `scaling-manager-manager-config` |
 | `wva-controller-status` | rewritten at every start | Old one stays as an orphan | `scaling-manager-controller-status` |
 | `app.kubernetes.io/name: workload-variant-autoscaler` | selector labels | Immutable on a Deployment, so it needs the new Deployment above | `scaling-manager` |
 | Grafana dashboard ids, alert names | operators' routes | Routes on `WVA*` alerts stop matching | `LLMSM*` |
+| `workload-variant-autoscaler-monitoring` | the default monitoring namespace | A default re-deploy installs a second Prometheus stack there, and the Prometheus URL default moves with it. Pass `MONITORING_NAMESPACE=<old>` and the old `PROMETHEUS_URL` on upgrade | `scaling-manager-monitoring` |
+| `wva-policy-reader-<suffix>` | the RoleBinding that lets a controller read the policy namespace | It binds the old ServiceAccount, so the new one reads Forbidden and, by design, refuses to start. Order: re-grant first (`make setup-prereqs`), then deploy; remove the old binding after | `scaling-manager-policy-reader-<suffix>` |
+| `LLMSM_WATCH_NS=auto` | discovery of namespaces to manage | `wva_managed_by_others` selects on the new label and reads the new variable, so it does not see a controller still running under the old names, and `auto` claims the namespaces that controller manages. During a rolling upgrade name the namespaces explicitly, or remove the old controller first | Name them |
 
 There are no finalizers and no webhooks with an old name.
 

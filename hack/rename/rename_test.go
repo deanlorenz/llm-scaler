@@ -69,6 +69,14 @@ func TestRewriteText(t *testing.T) {
 		{"the harness text stays", "hack/benchmark/patch_harness.sh", `if "WVA was never installed" not in second:`, `if "WVA was never installed" not in second:`},
 		{"a dotted name is not the harness schema", "hack/x.sh", "scaler.wva-ctl.svc", "scaler.scaling-manager-ctl.svc"},
 		{"a namespace called wva is not the harness schema", "hack/x.sh", "wva-external-scaler.wva.svc", "scaling-manager-external-scaler.scaling-manager.svc"},
+		{"a shell default keeps the policy namespace", "deploy/x.sh", "${POLICY_NS:-wva-policy}", "${POLICY_NS:-wva-policy}"},
+		{"so does the unset-only form", "deploy/x.sh", "${POLICY_NS-wva-policy}", "${POLICY_NS-wva-policy}"},
+		{"the assign form", "deploy/x.sh", "${POLICY_NS:=wva-policy}", "${POLICY_NS:=wva-policy}"},
+		{"an HPA metric index keeps the wire name", "hack/x.sh", "s0-wva-desired-replicas", "s0-wva-desired-replicas"},
+		{"a longer index too", "hack/x.sh", "s12-wva-desired-replicas", "s12-wva-desired-replicas"},
+		{"a word before a hyphen still means a longer name", "deploy/x.sh", "tenant-wva-policy", "tenant-scaling-manager-policy"},
+		{"as does a word ending in an s and a digit", "deploy/x.sh", "class0-wva-policy", "class0-scaling-manager-policy"},
+		{"the harness attribute stays", "hack/benchmark/patch_harness.sh", `"wva_namespace"`, `"wva_namespace"`},
 		{"a marked line stays", "Makefile", "A := WVA_ # rename:keep", "A := WVA_ # rename:keep"},
 		{"a hyphen-free word stays out of residual", docsDir + "a.md", "newValue windowVariants", "newValue windowVariants"},
 	}
@@ -416,5 +424,62 @@ func TestMixedLineEndingsInGoAreRefused(t *testing.T) {
 	_, err := e.rewriteFile("a.go", ClassGo, []byte("package a\r\n\n// WVA\n"))
 	if err == nil {
 		t.Fatal("a Go file with mixed endings went through gofmt")
+	}
+}
+
+// TestEnvGuardIsCurrent holds the install guard to the rules: what it refuses is
+// what the env rows rename.
+func TestEnvGuardIsCurrent(t *testing.T) {
+	shell, makefile := EnvGuardLines()
+	common, err := os.ReadFile("../../deploy/lib/common.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk, err := os.ReadFile("../../Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mkText := strings.ReplaceAll(string(mk), "\r\n", "\n")
+	commonText := strings.ReplaceAll(string(common), "\r\n", "\n")
+	for _, line := range shell {
+		if !strings.Contains(commonText, "            "+line+"\n") {
+			t.Errorf("deploy/lib/common.sh is missing the generated line %q", line)
+		}
+	}
+	if !strings.Contains(mkText, makefile+"\n") {
+		t.Errorf("the Makefile is missing the generated line %q", makefile)
+	}
+}
+
+// TestEnvGuardRefusesWhatTheRowsRename checks the three shapes through the rows.
+func TestEnvGuardRefusesWhatTheRowsRename(t *testing.T) {
+	cases := map[string]string{
+		"WVA_NS":            "LLMSM_NS",
+		"DEPLOY_WVA":        "DEPLOY_SCALING_MANAGER",
+		"BENCHMARK_WVA_TAG": "BENCHMARK_LLMSM_TAG",
+		"SFZ_WVA_NAMESPACE": "SFZ_LLMSM_NAMESPACE",
+	}
+	for old, want := range cases {
+		e := newEngine(t)
+		if got := string(e.RewriteText("deploy/x.sh", ClassShell, CtxText, []byte(old), 0)); got != want {
+			t.Errorf("%s became %s, want %s", old, got, want)
+		}
+	}
+}
+
+// TestKeptNamesSurviveEveryBoundary puts each name a keep row protects in every
+// context it was seen in, and fails if any comes out changed.
+func TestKeptNamesSurviveEveryBoundary(t *testing.T) {
+	names := []string{"wva-policy", "wva-learned-state", "wva-utilization-share-history",
+		"wva-saturation-scaling-config", "wva-desired-replicas", "wva-setup-prereqs"}
+	wrappers := []string{"%s", " %s ", "\"%s\"", "'%s'", "`%s`", "=%s", "/%s", "${X:-%s}", "${X-%s}", "${X:=%s}", "${X:+%s}", "{%s}", "(%s)", "%s:", "%s,"}
+	for _, name := range names {
+		for _, w := range wrappers {
+			in := strings.ReplaceAll(w, "%s", name)
+			e := newEngine(t)
+			if got := string(e.RewriteText("deploy/x.sh", ClassShell, CtxText, []byte(in), 0)); got != in {
+				t.Errorf("%q became %q", in, got)
+			}
+		}
 	}
 }

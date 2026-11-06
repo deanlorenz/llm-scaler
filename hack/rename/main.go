@@ -36,6 +36,7 @@ type Options struct {
 	Apply             bool
 	AllowUnclassified bool
 	ExpectNoop        bool
+	PrintEnvGuard     bool
 	Targets           Targets
 }
 
@@ -51,6 +52,7 @@ func parseOptions(args []string) (Options, error) {
 	fs.BoolVar(&opts.Targets.CodeMoved, "code-moved", DefaultTargets.CodeMoved,
 		"the code, issues and images now live in the new repository: rename the held names too")
 	fs.StringVar(&opts.Targets.Module, "module", DefaultTargets.Module, "target Go module path")
+	fs.BoolVar(&opts.PrintEnvGuard, "print-env-guard", false, "print the generated lines of the install guard and exit")
 	if err := fs.Parse(args); err != nil {
 		return opts, err
 	}
@@ -67,6 +69,12 @@ func run(args []string, stdout io.Writer) error {
 	opts, err := parseOptions(args)
 	if err != nil {
 		return err
+	}
+	if opts.PrintEnvGuard {
+		shell, makefile := EnvGuardLines()
+		fmt.Fprintln(stdout, strings.Join(shell, "\n"))
+		fmt.Fprintln(stdout, makefile)
+		return nil
 	}
 	metrics, err := metricNames(opts.Root)
 	if err != nil {
