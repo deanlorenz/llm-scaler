@@ -768,7 +768,7 @@ func TestFleetRate(t *testing.T) {
 			got, ok := fleetRate(q, 0.85, c.decode, c.ttft).(whatif.Answer)
 			require.True(t, ok)
 			assert.Equal(t, c.want, got.Value)
-			var by []string
+			by := make([]string, 0, len(got.Basis.BoundBy))
 			for _, b := range got.Basis.BoundBy {
 				by = append(by, string(b))
 			}

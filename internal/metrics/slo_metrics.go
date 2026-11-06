@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"math"
+	"slices"
 	"sync"
 	"time"
 
@@ -20,6 +21,14 @@ var (
 	sloSource       *prometheus.GaugeVec
 	sloRequests     *prometheus.GaugeVec
 	sloExcluded     *prometheus.GaugeVec
+
+	sloPredictedTTFT   *prometheus.GaugeVec
+	sloTTFTUnmet       *prometheus.GaugeVec
+	sloTTFTReplicaRate *prometheus.GaugeVec
+	sloTTFTVPSource    *prometheus.GaugeVec
+	sloTTFTReason      *prometheus.GaugeVec
+	sloTTFTRefused     *prometheus.GaugeVec
+	sloTTFTFlag        *prometheus.GaugeVec
 )
 
 // registerSLOMetrics creates and registers the SLO analyzer's gauges. Called
@@ -76,8 +85,40 @@ func registerSLOMetrics(registry prometheus.Registerer) error {
 		"SLO analyzer: per objective, 1 for the reason its router window is not judged this cycle (a wake "+
 			"from zero, a replica starting), 0 for the others; all 0 while it is judged.",
 		withInstance(constants.LabelNamespace, constants.LabelModelName, constants.LabelObjective, constants.LabelReason))
+	ttftLabels := func(more ...string) []string {
+		return withInstance(append([]string{constants.LabelNamespace, constants.LabelModelName,
+			constants.LabelVariantName, constants.LabelStatistic}, more...)...)
+	}
+	sloPredictedTTFT = gauge(constants.WVASLOPredictedTTFTSeconds,
+		"SLO analyzer, shadow only: the TTFT predicted for a prefill variant at its current rate, in "+
+			"seconds, at the objective's percentile. "+constants.SLOTTFTPredictionCaveat+" Absent when the "+
+			"model refuses the rate or wva_slo_ttft_reason is a refusal.",
+		ttftLabels())
+	sloTTFTUnmet = gauge(constants.WVASLOTTFTUnmet,
+		"SLO analyzer, shadow only: 1 when a prefill variant's current rate misses the TTFT target, "+
+			"including a rate at or over the prefill knee or the decode onset, and a target below the floor, "+
+			"0 when met. Absent when not priced.",
+		ttftLabels())
+	sloTTFTReplicaRate = gauge(constants.WVASLOTTFTReplicaRequestsPerSecond,
+		"SLO analyzer, shadow only: the requests per second per prefill replica at which the bounded "+
+			"TTFT meets the target, at the current replica count. Absent unless wva_slo_ttft_reason is priced.",
+		ttftLabels())
+	sloTTFTVPSource = gauge(constants.WVASLOTTFTVPSource,
+		"SLO analyzer: 1 for where a prefill variant's capacity V_P came from, 0 for the others.",
+		ttftLabels(constants.LabelVPSource))
+	sloTTFTReason = gauge(constants.WVASLOTTFTReason,
+		"SLO analyzer: 1 for the reason of a prefill variant's TTFT pricing, 0 for the others.",
+		ttftLabels(constants.LabelReason))
+	sloTTFTRefused = gauge(constants.WVASLOTTFTRefused,
+		"SLO analyzer: 1 for why the model refused a prefill variant's current rate as past what the fleet "+
+			"serves, 0 for the other. The reason series stays the answer at the target.",
+		ttftLabels(constants.LabelReason))
+	sloTTFTFlag = gauge(constants.WVASLOTTFTFlag,
+		"SLO analyzer: 1 for each flag on a prefill variant's TTFT answer, 0 for the others.",
+		ttftLabels(constants.LabelFlag))
 	for _, g := range []*prometheus.GaugeVec{sloTarget, sloObserved, sloAttainment, sloObjective, sloFill,
-		sloPredictedITL, sloSource, sloRequests, sloExcluded} {
+		sloPredictedITL, sloSource, sloRequests, sloExcluded, sloPredictedTTFT, sloTTFTUnmet, sloTTFTReplicaRate,
+		sloTTFTVPSource, sloTTFTReason, sloTTFTRefused, sloTTFTFlag} {
 		if err := registry.Register(g); err != nil {
 			return err
 		}
@@ -119,6 +160,26 @@ type SLOVariantReading struct {
 	PredictedITL float64
 }
 
+// SLOTTFTReading is one prefill variant's TTFT pricing, as PublishSLO takes it.
+// A shadow figure: nothing reads it to size a fleet. A NaN Predicted or
+// PerReplica is not published. wva_slo_ttft_unmet reads 1 with Unmet, 0 with
+// Predicted present and Unmet false, and is absent otherwise: no prediction and
+// no miss is not priced. Unmet with no prediction is a rate the model refused
+// (Refused), or a target below the floor (Reason).
+type SLOTTFTReading struct {
+	Variant, Statistic    string
+	Predicted, PerReplica float64
+	Unmet                 bool
+	VPSource, Reason      string
+	// Refused is why the model refused the current rate as past what the
+	// fleet serves, one of constants.SLOTTFTRefusedReasons, or "". Reason is the
+	// answer at the target, so this is what says why a prediction is absent
+	// while Unmet is set.
+	Refused string `learnrec:"omitzero"`
+	// Flags is the flags on the answer, in constants.SLOTTFTFlags order.
+	Flags []string
+}
+
 // SLOModelSnapshot is everything the SLO analyzer publishes for one model in
 // one cycle.
 type SLOModelSnapshot struct {
@@ -126,6 +187,9 @@ type SLOModelSnapshot struct {
 	ModelName  string
 	Objectives []SLOObjectiveReading
 	Variants   []SLOVariantReading
+	// TTFT is each prefill variant's TTFT pricing; nil with no TTFT target,
+	// no prefill variant, or the slo-ttft-price replay switch off.
+	TTFT []SLOTTFTReading `learnrec:"omitzero"`
 }
 
 // sloStaleAfter is how long a model's SLO series outlive the last cycle that
@@ -210,6 +274,33 @@ func PublishSLO(snap SLOModelSnapshot, now time.Time) {
 			}
 			set(sloSource, labels(constants.LabelVariantName, v.Variant, constants.LabelSource, s), on)
 		}
+	}
+
+	for _, t := range snap.TTFT {
+		tl := func(pairs ...string) prometheus.Labels {
+			return labels(append([]string{constants.LabelVariantName, t.Variant, constants.LabelStatistic, t.Statistic}, pairs...)...)
+		}
+		set(sloPredictedTTFT, tl(), t.Predicted)
+		set(sloTTFTReplicaRate, tl(), t.PerReplica)
+		switch {
+		case t.Unmet:
+			set(sloTTFTUnmet, tl(), 1)
+		case !math.IsNaN(t.Predicted):
+			set(sloTTFTUnmet, tl(), 0)
+		}
+		oneHot := func(g *prometheus.GaugeVec, label string, values []string, on func(string) bool) {
+			for _, v := range values {
+				x := 0.0
+				if on(v) {
+					x = 1
+				}
+				set(g, tl(label, v), x)
+			}
+		}
+		oneHot(sloTTFTVPSource, constants.LabelVPSource, constants.SLOTTFTVPSources, func(v string) bool { return v == t.VPSource })
+		oneHot(sloTTFTReason, constants.LabelReason, constants.SLOTTFTReasons, func(v string) bool { return v == t.Reason })
+		oneHot(sloTTFTRefused, constants.LabelReason, constants.SLOTTFTRefusedReasons, func(v string) bool { return v == t.Refused })
+		oneHot(sloTTFTFlag, constants.LabelFlag, constants.SLOTTFTFlags, func(v string) bool { return slices.Contains(t.Flags, v) })
 	}
 
 	key := snap.Namespace + "/" + snap.ModelName

@@ -27,6 +27,9 @@ included); router judgement with the transient exclusion; the `wva_slo_*`
 metrics; alerts `WVAModelSLOAttainmentLow` (TTFT, request-weighted),
 `WVAModelSLOMissed` (TPOT) and `WVAModelSLOUnjudged`.
 
+**Built** (S1): each prefill variant of a P/D model priced for TTFT in shadow,
+no replica count moved ([as built](#as-built-s1)).
+
 **Not built**: step 2a. It was built and removed, because its output could not
 answer [open question 5](#open-questions); it is re-specified as "observe what
 open question 5 asks for". Until then, read the raw per-pod vLLM series.
@@ -1143,6 +1146,8 @@ asserted.
     measured decode-engine TTFT). `DecodeEngineMeasured` is not on the list;
     a measured term is gated by `UnvalidatedTTFT` and the gate items;
   - `AssumedPromptSpread` or `PromptSpreadClamped`, so Q1 is a hard gate;
+  - `PromptSpreadAbovePeak`, a `cv` above the peak for the percentile, where a
+    larger `cv` prices a higher rate ([as built](#as-built-s1));
   - `VPShapeMoved`, `VPAboveSlopeBound` or `VPScaledToPrompt` (the rescale
     read 1.5% above the served `V_P` on run 2 at 37k; lifted when a second
     measured point confirms it);
@@ -1304,6 +1309,136 @@ exists) and passes on the PR; each switch is also held by the golden runs.
    per chunk, the measured mean under-reads.
 9. **Scale-in: closed.** S2 searches from 1 ([decision 5](#5-s2-as-a-sketch)),
    at most `N_p + cap` `RateForTTFT` calls per variant per cycle.
+
+##### As built (S1)
+
+Built in `internal/engines/analyzers/slo/ttft.go` and `ttft_fleet.go`, behind
+`slo.SwitchTTFTPrice`, as the decisions above say. The analyzer's result is
+what it was (`TestTTFT_TheResultDoesNotMove`), and `steadystate/runAnalyzers`
+is unchanged. The prediction **is not a bound**, and which way it errs depends
+on the prompt spread, on the 14 light-load points of [P3 after
+P2](slo-capacity-planner-ttft.md#as-built-p3-after-p2), 7 each at p90 and p95:
+
+| Spread | Result | Worst |
+| --- | --- | --- |
+| Assumed `cv` 2, all S1 has today | Reads **high**: over the mark at 13 of 14 (6 of 7 at p90, 7 of 7 at p95) | 3.15x at p90, 4.13x at p95 |
+| The spread sent, `cv` 0.058 | Reads **low**: under the mark at 9 of 14 (5 of 7 at p90, 4 of 7 at p95) | 34% under, at p90 |
+
+`constants.SLOTTFTPredictionCaveat` carries this into the metric's help, and
+`TestS1_TheCaveatIsTheFrozenTable` holds its figures to the frozen table.
+
+**What is measured:**
+
+- `slo-published.csv` moves in `ols-sweep-slo` and `ols-sweep-slo-restart` only:
+  83 and 143 readings, all `no-prefill-capacity` and `vp_source="none"`, as
+  decision 4 predicted. With `prefill-capacity-observe` off they read
+  `no-estimate`, held as the pairwise run
+  (`TestGoldens_TTFTPriceReadsTheObservation`).
+- The prefill-stress goldens have **no `slo.Analyze` events**: the analyzer was
+  not listed when they were recorded, so their `slo-published.csv` stays empty
+  whatever S1 does. `TestS1_OnThePrefillStressGoldensAsP1LearnsThem` runs the
+  analyzer over their rows instead. No run alone prices: run 2 reads
+  `no-fixed-latency` with `busy-minutes`, run 1 `no-fixed-latency` with
+  `peak-under-queue`, runs 3 and 4 `no-prefill-capacity`.
+- `TestS1_PricedOnRecordedRows` stitches `V_P` from run 2 and `a` from run 4,
+  as P2's table does, and prices run 4's rows through `Analyze`. The published
+  p90 reads 0.052, 0.087, 0.160 and 0.512 s against the router's 0.047, 0.048,
+  0.092 and 0.316 s, 1.10 to 1.82 times over. That is P3's frozen `cv` 2 column
+  (0.052, 0.088, 0.160, 0.523), to within 2%: the widest gap is 16k's 0.512
+  against 0.523, one cycle's inputs against the level's means. So until Q1 the
+  published figure usually reads **high**, which is a wrong spread hiding a
+  missing term, not a margin. Items 1 to 6 are not scored by this PR.
+- Stitched the same way, run 2 has 171 of 193 cycles past what the fleet
+  serves: `reason="priced"` and `wva_slo_ttft_refused{reason="saturated"}` 1.
+
+**What differs from the text above:**
+
+1. **Each prefill variant is priced at the model's whole rate**, not its share,
+   because the decode role takes the whole rate. Its share is expressed as the
+   replicas that rate spreads over: `Prefill.Replicas` is every Ready prefill
+   replica of the model, at this variant's `V_P` and `f`, which loads each of
+   its pods as its share would. The per-replica rate is the whole rate over
+   those replicas. `whatif` is unchanged. With one prefill variant nothing moves.
+   Before this, two equal variants behind one decode replica read 0.065 s where
+   the whole rate reads 0.90 s, and read a rate above the decode onset as met
+   (`TestTTFT_TheDecodeSideTakesTheWholeRate`,
+   `TestTTFT_TheRateIsTheModelsWithADecodeSide`).
+2. **`routing-bound` must be sustained.** The raw share is a largest of 5
+   cycles and chance alone can put it past 0.8, and withdrawing the rate errs
+   toward fewer replicas. So a raw share past 0.8 is priced at that high `f`,
+   flagged `ImbalanceNotSustained`, and is `routing-bound` only with every one
+   of a full window past 0.8 (a learned `f` has already held). On run 1, 3 pods
+   throughout, `routing-bound` read on 1 of 203 cycles before this and on 0
+   after; the flag reads on that 1. That cycle does not contradict P2's "at most
+   1.33", which is over loaded cycles: it carried 0.06 r/s, and all of it landed
+   on one pod. On one pod `f ÷ N_p` is 1 by construction, so the rule needs two.
+3. **A decode knee counts as `decode-bound`.** With the prefill side alone
+   stopped at a decode knee below the prefill knee, `PrefillOnlyRate` cannot
+   read 10% above the rate, though decode sets it.
+4. **`wva_slo_ttft_refused{reason}`** is new: `saturated` and
+   `above-decode-onset`, the current rate past what the fleet serves. The reason
+   stays `RateForTTFT`'s, as test 16 says, so this is what names that state.
+5. **The unmet contract.** `wva_slo_ttft_unmet` reads 1 for a refused rate and
+   for `target-below-floor` at any rate, each with no prediction; 0 only with
+   a prediction; absent otherwise. Every refusal reason blanks the prediction.
+6. **Flow control is inferred from `SchedulerQueue` alone**, collected every
+   cycle. `FlowControlPools` is filled only while a learner recording is on, so
+   reading it would have made a replay differ from production
+   (`TestTTFT_TheFlowControlStateDoesNotDependOnARecording`). `AvgKVTransferTime`
+   still differs that way: it is recorded and not collected, so `TransferOmitted`
+   stands in production until Q1.
+7. **Flags.** `PromptSpreadAbovePeak` and `ImbalanceNotSustained` join the list.
+   With the rate refused the flags are `TTFTAt`'s where it answered, and none
+   where neither call did, so `UnvalidatedTTFT` and `AssumedPoissonArrivals`
+   read 0 on those cycles.
+8. **`ComputedTokensBuckets`** is a new row field S1 reads for the measured
+   `cv`. No collector fills it: that is Q1.
+9. **`prefill.Bound.PromptTokens` is not added.** A back-pressure bound has no
+   `VPPromptTokens`, so it reads `VPShapeMoved`, the safe side.
+
+`no-imbalance`, and `saturated` and `above-decode-onset` as reasons, cannot fire
+on this path: S1 always passes `f`, and `RateForTTFT` stays below both limits.
+
+**Decision 3's monotonicity is narrower than stated.** The prompt's quantile
+peaks below `cv` 3 up to p93: 0.79 at p70, 1.30 at p80, 1.66 at p85, 2.22 at
+p90, 2.78 at p93 (`promptCVPeak`, `TestTTFT_PromptCVPeakIsTheGammas`). At p90
+it is 8% lower at `cv` 3 than at the peak. What holds, on seeded fleets at p90
+to p93, p95 and p99 (`TestProperty_TTFTIsMonotoneInCV`), is that from `cv` 0.3
+up to the peak a larger `cv` prices no shorter TTFT from 0.05 of the knee and no
+higher rate at the target. Outside that (`TestTTFT_TheCVClaimsThatDoNotHold`):
+
+- At the bottom of the range: `cv` 0.15 reads 5.2% under `cv` 0 at p90 and 0.11
+  of the knee, on that test's fleet.
+- Past the peak: just over the floor, at 1.001 times it, the rate at `cv` 3 is
+  42.6, 16.2 and 5.2 times the rate at the peak at p90, p92 and p93 on the same
+  fleet. A rate that high is a target at the floor, so the multiple depends on
+  the fleet; it is not a typical error. On a low-rate fleet 1.1 times the floor
+  and up, the rise was 5%.
+
+`PromptSpreadAbovePeak` flags any `cv`, assumed or measured, above the peak for
+the percentile. So at p85 and below the assumed 2 is flagged. The stop at 3
+stays: it is where a measured `cv` is held, not the value that prices the most.
+
+**Not checked:** an EPP with the gate on and no traffic, so "declared `enabled`
+with no series" stays the unverified reading decision 3 calls it. The
+flow-control paths ran on synthetic fleets only. The `f` floor 1.5, the 0.8, the
+10% and `cv` 2 remain stated, not measured.
+
+**What this leaves for S2's gate:**
+
+- **Priced coverage.** No committed recording prices end to end, so S2 needs one
+  run with `V_P`, `a` and `slo` listed, and a decode line that prices.
+- **The union bound is untested on a recording.** On runs 1 and 2 every answered
+  cycle carries `DecodeEngineMeasured`, so item 2's "the prefill side binds" is
+  vacuous there: no decode line priced. Run 2's decode rows never reached the
+  band (0 of 386, KV at most 0.064). Run 1's did (393 of 609), but the line stayed
+  `pinned-default` on all 145 cycles a TPOT target logged, which S1 refuses.
+- **The cost.** One priced variant took 32 ms a cycle here with a decode line
+  (64 slots, 4 replicas), and under 1 ms without one. The review measured 107 ms,
+  on a fleet not reproduced here, so budget from the larger. It is paid once
+  per variant per cycle today; S2's search multiplies it by `N_p + cap`.
+- **The no-act list** gains `PromptSpreadAbovePeak`
+  ([decision 5](#5-s2-as-a-sketch)).
 
 ### Phase 3: the attainment trim
 

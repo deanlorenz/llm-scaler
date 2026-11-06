@@ -132,8 +132,9 @@ func TestExport_EveryRecordedStringIsClassified(t *testing.T) {
 	// Pinned, so a new field is a reviewed change.
 	t.Logf("%d string value sites, %d string-keyed maps", len(values), len(keys))
 	// 137 since learner PR 5d: settle.RestoreEvent's namespace and model, and
-	// each sighting's Pod and variant.
-	assert.Len(t, values, 137, "string value sites")
+	// each sighting's Pod and variant. 144 with S1: SLOTTFTReading's six, and
+	// SLOPolicy.FlowControl.
+	assert.Len(t, values, 144, "string value sites")
 	// 51 since learner PR 5c: LearnedState.StartSamples and StartAdmittedAt,
 	// keyed like StartSeconds, and AnalyzerResult.RoleStartSeeded, by role.
 	// 52 since 5d: LearnedState.StartCounted.

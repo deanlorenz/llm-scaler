@@ -32,7 +32,22 @@ const DefaultTTFTPercentile = 90
 type SLOPolicy struct {
 	TPOT *SLOObjective `yaml:"tpot,omitempty"`
 	TTFT *SLOObjective `yaml:"ttft,omitempty"`
+	// FlowControl declares whether the EPP's flowControl feature gate is on,
+	// as deployed. Empty is unset: the state is inferred from the router's
+	// flow-control series, and an inferred off is flagged, because a scrape
+	// gap looks the same.
+	FlowControl SLOFlowControl `yaml:"flowControl,omitempty" learnrec:"omitzero"`
 }
+
+// SLOFlowControl is the EPP's flowControl feature gate as a tier declares it.
+type SLOFlowControl string
+
+const (
+	// SLOFlowControlEnabled declares the gate on.
+	SLOFlowControlEnabled SLOFlowControl = "enabled"
+	// SLOFlowControlDisabled declares the gate off.
+	SLOFlowControlDisabled SLOFlowControl = "disabled"
+)
 
 // SLOObjective is one latency target.
 type SLOObjective struct {
@@ -117,6 +132,11 @@ func (s *SLOPolicy) Validate() error {
 		if p := s.TTFT.Percentile; p != 0 && (p < 50 || p > 99) {
 			return fmt.Errorf("ttft.percentile must be between 50 and 99, got %d", p)
 		}
+	}
+	switch s.FlowControl {
+	case "", SLOFlowControlEnabled, SLOFlowControlDisabled:
+	default:
+		return fmt.Errorf("flowControl must be %q or %q, got %q", SLOFlowControlEnabled, SLOFlowControlDisabled, s.FlowControl)
 	}
 	return nil
 }

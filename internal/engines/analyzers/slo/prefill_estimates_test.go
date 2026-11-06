@@ -120,7 +120,7 @@ func TestPrefillEstimates_NoHandleReadsNothing(t *testing.T) {
 }
 
 // The read takes no lock of the slo analyzer's: a caller already holding
-// a.mu, as an Analyze path in S1b may, reads without deadlocking itself
+// a.mu reads without deadlocking itself
 // (sync.Mutex is not reentrant).
 func TestPrefillEstimates_TheReadTakesNoSLOLock(t *testing.T) {
 	p := newStashPair()

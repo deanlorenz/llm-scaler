@@ -14,7 +14,8 @@ import (
 //
 // on a P/D fleet. Aggregated TTFT is not built (M1).
 //
-// UNVALIDATED, and on no switch: nothing in the controller calls it. The plan
+// UNVALIDATED: the only caller in the controller is the SLO analyzer's shadow
+// pricing, which sizes nothing (slo.SwitchTTFTPrice). The plan
 // has P3 depend on P2, the prefill-stress GPU recording kept as a golden; that
 // recording is blocked on cluster access, so P3 is built against closed-form
 // queueing values and synthetic fleets instead, and every figure carries

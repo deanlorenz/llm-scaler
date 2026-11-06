@@ -1225,6 +1225,13 @@ reads higher than what clients saw over a whole run.
 | `wva_slo_fill` | gauge | `namespace`, `model_name`, `variant_name`, `objective` | The KV fill, as a fraction of physical KV, the variant's SLO capacity is priced at, before any scale-up headroom: where its mean inter-token latency meets the TPOT target, clamped to the ITL band (`analyzerTuning.itlBand.minObservableK`, `analyzerTuning.itlBand.maxObservableK`; [0.15, 0.80] by default), and lowered to the fill the engine can reach when `max_num_seqs` (or `--max-num-active-seqs`, when lower or when `max_num_seqs` is not stated) binds. Clamped or capped, the line's ITL there is below the target. Absent when the variant could not be priced: see `wva_slo_source`. | Compare with `kvCacheThreshold` (0.80 by default), the fill saturation prices a replica at before headroom. Lower: the target needs more replicas than the tier gives; [scaling-policy](scaling-policy.md#slo-observe-only) has the query for how many. At 0.80, the top of the clamp, the target does not bind; with a `kvCacheThreshold` above 0.80 it cannot show slack. |
 | `wva_slo_predicted_itl_seconds` | gauge | `namespace`, `model_name`, `variant_name` | The mean inter-token latency the variant's fitted line predicts at the fill it would actually run at, once `scaleUpThreshold` headroom is applied, never below the bottom of the fitted range. | It is the latency margin an SLO tier would really have. It differs per accelerator for the same `scaleUpThreshold`. |
 | `wva_slo_source` | gauge | `namespace`, `model_name`, `variant_name`, `source` | `1` for where the variant's SLO pricing came from, `0` for the others. See the source values below. Absent for a variant not priced for TPOT (a prefill variant). | See the source values below. |
+| `wva_slo_predicted_ttft_seconds` | gauge | `namespace`, `model_name`, `variant_name`, `statistic` | Shadow, prefill variants of a P/D model only. The TTFT predicted at the variant's current rate, at the objective's percentile. **It is an estimate, not a bound:** at the assumed prompt spread it reads high, and at the spread actually sent it reads low. Absent when the model refuses the rate, or when `wva_slo_ttft_reason` is a refusal. | Against `wva_slo_observed_seconds{objective="ttft"}`, with the query below. Nothing sizes from it. See [reading the TTFT prediction](#reading-the-ttft-prediction). |
+| `wva_slo_ttft_unmet` | gauge | `namespace`, `model_name`, `variant_name`, `statistic` | `1` when the current rate misses the target: the prediction is above it, or the rate is at or over the prefill knee or the decode flow-control onset, or above the prefill flow-control onset, or `wva_slo_ttft_reason` is `target-below-floor`, which is `1` at any rate. `0` only with a prediction, when it meets the target. Absent otherwise. | `1` with no prediction: read `wva_slo_ttft_refused`, or the reason for `target-below-floor`. |
+| `wva_slo_ttft_replica_requests_per_second` | gauge | `namespace`, `model_name`, `variant_name`, `statistic` | The requests per second per prefill replica at which the TTFT meets the target, at the current replica count and imbalance. Absent unless the reason is `priced`. Carries the prediction's error: see below. | Below `rate(vllm:request_success_total[1m])` on the variant's prefill pods, per pod: the model says the target needs more prefill replicas. With several prefill variants the rate is the model's whole rate over all their replicas. |
+| `wva_slo_ttft_vp_source` | gauge | `namespace`, `model_name`, `variant_name`, `statistic`, `vp_source` | `1` for where the variant's prefill capacity `V_P` came from, `0` for the others: `busy-minutes`, `peak-under-queue`, `back-pressure-bound`, `none`. | `peak-under-queue` and `back-pressure-bound` are lower bounds: the rate reads low, the safe side. |
+| `wva_slo_ttft_reason` | gauge | `namespace`, `model_name`, `variant_name`, `statistic`, `reason` | `1` for the reason of the pricing, `0` for the others. See the reasons below. A refusal is a reason here, never a number. | Anything but `priced` means no per-replica rate this cycle. |
+| `wva_slo_ttft_refused` | gauge | `namespace`, `model_name`, `variant_name`, `statistic`, `reason` | `1` for why the model refused the current rate as past what the fleet serves, `0` for the other: `saturated` (at or over the prefill knee), `above-decode-onset` (at or over the decode flow-control onset). `wva_slo_ttft_reason` stays the answer at the target, usually `priced`, beside it. | Any `1`: the fleet is past what it serves at any TTFT. Expect no prediction, and `wva_slo_ttft_unmet` `1`. |
+| `wva_slo_ttft_flag` | gauge | `namespace`, `model_name`, `variant_name`, `statistic`, `flag` | `1` for each flag on the answer, `0` for the others. See the flags below. All `0` when neither call answered. | What the figures rest on. |
 
 The `wva_slo_excluded` reasons and rules:
 
@@ -1302,6 +1309,98 @@ comments say why each is there:
   Prometheus 3 ranges are left-open, so 60 fails on any gap in the series,
   such as a restart's;
 - for "unjudged", a cause to act on, so a quiet model does not fire.
+
+### Reading the TTFT prediction
+
+The `wva_slo_ttft_*` series and `wva_slo_predicted_ttft_seconds` are **shadow
+figures**: no replica count reads them, and the analyzer's own result for a
+prefill variant stays no-data. They appear for each prefill variant of a P/D
+model whose policy lists the `slo` analyzer and sets `slo.ttft`. An aggregated
+variant publishes none.
+
+The `slo-ttft-variant` log line has every input behind a figure, but it is at
+verbosity 3 and the default is 2, so it is not in a default log. The series here
+carry what you act on.
+
+**The prediction is not a bound.** It was checked against the router on 14
+light-load points of one small model, on one prefill pod with no queue, 7 at
+p90 and 7 at p95. Which way it errs depends on the prompt spread:
+
+- **With no prompt histogram, which is what you get today,** it assumes a spread
+  of 2 and reads **high**: over the router at 6 of 7 points at p90, worst 3.15x,
+  and at 7 of 7 at p95, worst 4.13x. That is a wrong spread hiding a missing
+  term, not a margin.
+- **With the spread the load generator actually sent,** it reads **low**: under
+  at 5 of 7 points at p90 and 4 of 7 at p95, worst 34% under. Two terms are
+  missing: decode's spread, and the prefill engine's overhead on long prompts.
+- **At saturation** the model refuses the rate: no prediction,
+  `wva_slo_ttft_refused` `1`, and `wva_slo_ttft_unmet` `1`.
+- Bursty arrivals, several prefill pods and flow control have not been scored.
+
+To compare it with the router, with one prefill variant per model:
+
+```promql
+max by (exported_namespace, model_name, statistic) (wva_slo_predicted_ttft_seconds)
+  / on (exported_namespace, model_name, statistic)
+max by (exported_namespace, model_name, statistic) (wva_slo_observed_seconds{objective="ttft"})
+```
+
+With several prefill variants, `max` takes the worst variant against the
+model's mixed figure.
+
+The `wva_slo_ttft_reason` values:
+
+- **`priced`:** the per-replica rate is published.
+- **`no-estimate`:** no capacity estimate from this cycle.
+- **`no-decode-side`:** flow control is on and no decode line prices, so the
+  point where the decode gate closes cannot be placed. Nothing is priced.
+- **`decode-bound`:** decode sets the rate, so more prefill replicas cannot
+  raise it. The prediction stays; the per-replica rate does not.
+- **`routing-bound`:** on two or more pods, one pod has taken at least 80% of
+  the work, learned over minutes or on every one of the last 5 cycles. The fix
+  is the router's scoring, not replicas. The prediction stays; the per-replica
+  rate does not.
+- **`no-prefill-capacity`:** no `V_P`. A pod has to queue for it to be learned,
+  and it is lost at a controller restart. SGLang always reads this.
+- **`no-fixed-latency`:** no fixed latency `a`: it needs low-load minutes with
+  varied prompts.
+- **`no-traffic`:** no prompt length to price, or no output length with a
+  decode line.
+- **`target-below-floor`:** no fleet meets the target: the TTFT at no load is
+  at or above it. `wva_slo_ttft_unmet` reads `1` at any rate, with no prediction.
+- **`no-prefill-replicas`**, **`no-decode-replicas`**, **`no-capacity`**,
+  **`no-batch-cap`**, **`too-many-slots`**, **`input-invalid`:** a reading the
+  model needs is missing or unusable. At verbosity 3, the `slo-ttft-variant`
+  log line says which (`rateRefused`).
+- **`no-imbalance`**, **`saturated`**, **`above-decode-onset`:** kept for the
+  set; the rate at the target stays below both limits, so a current rate past
+  them reads `wva_slo_ttft_refused`, not one of these.
+
+The `wva_slo_ttft_flag` values. A cycle with a refusal and no answer from the
+model reads all of them `0`, including the two marked "on every answer":
+
+| flag | meaning |
+| --- | --- |
+| `UnvalidatedTTFT` | On every answer: the model has not passed its validation. |
+| `AssumedPromptSpread` | No prompt histogram: a spread of 2 is assumed. |
+| `AssumedPoissonArrivals` | On every answer: Poisson arrivals are assumed, which over-promises on bursty traffic. |
+| `AssumedImbalance` | The imbalance `f` was not learned at this pod count: assumed, at least 1.5. |
+| `ImbalanceNotSustained` | One pod read 80% of the work or more, but not over the whole window: priced at that high `f`, not `routing-bound`. |
+| `VPLowerBound` | `V_P` is a lower bound. |
+| `VPAboveSlopeBound` | `V_P` is above what the low-load fit allows: one of the two is wrong. |
+| `VPShapeMoved` | The mean prompt is more than 1.2 times away from the one `V_P` was learned at, with no curve to rescale by. |
+| `VPScaledToPrompt` | `V_P` was rescaled to a longer prompt. It read 1.5% high on the one measured point. |
+| `TransferOmitted` | No KV transfer time measured: left out, so TTFT reads low. |
+| `DecodeEngineMeasured` | No decode line: decode's part is the decode engine's measured mean TTFT, held at the rate it was measured at. |
+| `DecodeSideOmitted`, `DecodeTTFTUnmeasured` | No decode line and no measured TTFT: decode's part is left out, so TTFT reads low. They always come together. |
+| `FlowControlInferredOff` | `slo.flowControl` is unset and no flow-control series exist. A scrape gap looks the same: declare it. |
+| `FlowControlMismatch` | The declared `slo.flowControl` contradicts the series. Priced as declared; the log says so. |
+| `AboveFlowControlOnset` | At the rate answered, the prefill gate is closing: the model is not proven conservative there. |
+| `HeldByDecodeAdmission` | The decode wait lowers the rate a little. Informational below `decode-bound`. |
+| `PromptSpreadClamped` | The measured spread was above 3 or ran past the histogram: priced at 3. |
+| `PromptSpreadAbovePeak` | The spread, assumed or measured, is above the one that prices the longest prompt at this percentile (2.22 at p90, 1.66 at p85), so a wider spread reads a shorter floor. At p85 and below the assumed 2 sets it. |
+| `BelowFittedBand`, `KVBoundSlots` | Decode ran below its fitted band, or KV set its slots rather than the batch cap. |
+| `AssumedVP`, `DecodeOnsetUnchecked` | Always 0 here. Listed so the series set does not change. |
 
 ### Utilization-share optimizer metrics
 

@@ -80,6 +80,7 @@ Applied
 Applying
 ArgsFingerprint
 AssumedImbalance
+AssumedPoissonArrivals
 AssumedPromptSpread
 AssumedShape
 AssumedTPOTRatio
@@ -138,6 +139,7 @@ FMA
 Failed
 Fix
 FlowControlInferredOff
+FlowControlMismatch
 FlowControlUnknown
 Found
 GLOBAL_OPT_INTERVAL
@@ -165,6 +167,7 @@ ITL
 If
 Ignoring
 ImagePullBackOff
+ImbalanceNotSustained
 Inf
 InferencePool
 Inferencepool
@@ -291,6 +294,8 @@ Preserving
 PriorityClass
 Processing
 Prometheus
+PromptSpreadAbovePeak
+PromptSpreadClamped
 Published
 REST_CLIENT_TIMEOUT
 ROLE
@@ -593,6 +598,7 @@ below-band
 belowBand
 beside
 best-effort
+beta
 better
 between
 biased
@@ -767,6 +773,7 @@ contamination-heterogeneity
 context_length
 continues
 contradicted
+contradicts
 contributors
 control
 controller
@@ -795,6 +802,7 @@ currentNeedGPUs
 currentReplicas
 curve
 cv
+cvSource
 cycle
 cycles
 cyclesSinceAnalyzed
@@ -820,6 +828,9 @@ decode-queue-unknown
 decode-style
 decodeSaturatedAt
 decodeSaturation
+decodeTTFT
+decodeTTFTPrompt
+decodeVariant
 deduced
 deeper
 default
@@ -968,6 +979,7 @@ errPct
 error
 errors
 estimate
+estimateAt
 estimateSeconds
 estimatedTokens
 evaluate
@@ -1001,9 +1013,13 @@ externalNamespaceQuotas
 f
 fAtPods
 fPods
+fRaw
+fRawLeast
+fRawWindowFull
 fRefused
 fSamples
 fSamplesAtPods
+fSource
 factor
 factory
 failed
@@ -1047,6 +1063,7 @@ fleet
 fleet-shape-change
 fleet-shape-hold
 fleetOutputTokens
+fleetRate
 fleetShape
 fleetShapes
 flight
@@ -1061,6 +1078,7 @@ flooredTo
 floors
 flow
 flow-control
+flowControl
 folded
 for
 forbidden
@@ -1210,6 +1228,7 @@ inactive
 included
 incomplete
 inconsistency
+independent
 index
 inf
 inference
@@ -1701,6 +1720,7 @@ no-prefill-reading
 no-rate
 no-reading
 no-seqs
+no-series
 no-shape
 no-waiting
 noDemandFor
@@ -1773,9 +1793,12 @@ on
 once
 one
 one-minute
+one-pod
 ones
 only
 onset
+onsetDecode
+onsetPrefill
 onto
 open
 operating
@@ -1793,6 +1816,7 @@ orderedBehindQueue
 oscillate
 other
 other-role-cannot-grow
+otherPrefillPods
 others
 otherwise
 out
@@ -1868,6 +1892,7 @@ per-request
 per-role
 perModel
 perReplicaCapacity
+perReplicaRate
 perReplicaTokensPerSec
 percent
 percentile
@@ -1914,6 +1939,7 @@ policy
 polling
 pool
 poolCarve
+pooled
 pools
 positive
 pp_size
@@ -1943,6 +1969,7 @@ prefillDemandBefore
 prefillEstimates
 prefillKnown
 prefillObservations
+prefillOnlyRate
 prefillRefused
 prefillStepsPerToken
 prefix
@@ -2028,6 +2055,7 @@ ran
 range
 rank
 rate
+rateRefused
 rather
 ratio
 raw
@@ -2184,6 +2212,7 @@ reversal-hold
 reversed
 revision
 revisions
+rho
 rises
 role
 role-of
@@ -2298,6 +2327,7 @@ seqs
 sequence
 sequences
 series
+seriesPresent
 serve
 served
 served-siblings
@@ -2385,12 +2415,15 @@ slo-itl-restart-under-its-name-settles
 slo-itl-waits-after-controller-restart
 slo-model
 slo-transient
+slo-ttft-price
+slo-ttft-variant
 slo-variant
 slo.Analyze
 slo.BeginCycle
 slo.EvictStale
 slo.ForgetVariant
 slo.NoteVariantsPresent
+slo.flowControl
 sloEntries
 slope
 slopeAge
@@ -2545,6 +2578,7 @@ them
 then
 there
 these
+theta
 they
 this
 thisControllerGPUs
@@ -2629,6 +2663,7 @@ tpot.target
 tpotExcluded
 traffic
 transfer
+transferPerToken
 transfers
 transient
 transient-admitted
@@ -2646,6 +2681,7 @@ ttft
 ttft.percentile
 ttft.target
 ttftExcluded
+ttftRefused
 turn
 twice
 two
@@ -2672,6 +2708,7 @@ unknownPeaks
 unlikely
 unlimited
 unmark
+unmet
 unparseable
 unread
 unreadable

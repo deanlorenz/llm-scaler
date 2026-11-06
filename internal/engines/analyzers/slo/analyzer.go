@@ -135,6 +135,15 @@ type Analyzer struct {
 	// prefillEstimates is where P1's prefill estimates are read
 	// (WithPrefillEstimates, prefill_estimates.go); nil when none was given.
 	prefillEstimates PrefillEstimates
+
+	// ttftPrice is SwitchTTFTPrice (ttft.go): on from the constructor; a
+	// replay turns it off (SetSwitchesForReplay).
+	ttftPrice bool
+	// imbalance is each prefill variant's raw shares and decodeTTFT each
+	// decode variant's measured TTFT, keyed namespace|model|variant, for the
+	// TTFT pricing (ttft_fleet.go). Under mu.
+	imbalance  map[string]*imbalanceWindow
+	decodeTTFT map[string]*decodeTTFTWindow
 }
 
 // The batch cap's readers in this analyzer (issue #420). Each took the cap
@@ -190,6 +199,10 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		itlIdleOnEvidence:    true,
 		itlForgetReachesLine: true,
 		itlOneSidedAtCap:     true,
+
+		ttftPrice:  true,
+		imbalance:  make(map[string]*imbalanceWindow),
+		decodeTTFT: make(map[string]*decodeTTFTWindow),
 	}
 }
 
@@ -275,9 +288,13 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 	// The threshold the engine publishes this analyzer's target with: the slo
 	// entry's own when it sets one, the tier's otherwise.
 	scaleUp, _ := cfg.AnalyzerThresholds(domain.SLOAnalyzerName)
+	var decodeLines []ttftDecodeLine
 	for _, vs := range fleet.variants {
 		key := a.variantKey(input.Namespace, input.ModelID, vs)
 		vc, reading, d := a.priceVariant(input, vs, key, fleet, tpotTarget, scaleUp, now)
+		if domain.CanonicalRole(vs.Role) == domain.RoleDecode {
+			decodeLines = append(decodeLines, ttftDecodeLine{state: vs, detail: d})
+		}
 		if !shapeKnown && reading != nil {
 			vc.PerReplicaCapacity, vc.Reason = 0, domain.ReasonNoData
 			reading.Source = constants.SLOSourceNoOutputLength
@@ -331,6 +348,10 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 		}
 	}
 
+	// After the loop, whatever order the variants sort in: a prefill variant
+	// reads its decode variant's line.
+	snap.TTFT = a.priceTTFTVariants(logger, input, cfg, fleet, decodeLines, now)
+
 	var j judged
 	snap.Objectives, j.Latency, j.RouterCalled = a.judge(ctx, input, cfg.SLO)
 	// A window that covered a wake or a starting replica is not judged: the
@@ -374,7 +395,12 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 
 // pricingDetail is what a variant was priced from, for its log line.
 type pricingDetail struct {
-	line       itl.Reading
+	line itl.Reading
+	// source is where the line came from (fitLine), and band the fill range
+	// it is fitted over; the TTFT pricing reads both, with or without a TPOT
+	// target.
+	source     string
+	band       whatif.FillBand
 	targetFill float64
 	capTokens  float64
 	// maxSeqs is max_num_seqs times ranks, and activeSeqs is
@@ -430,9 +456,10 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 		ObservedReplicas: fleet.ready[vs.VariantName],
 		Reason:           domain.ReasonNoData,
 	}
-	// Prefill is not modelled in phase 0: its TPOT is meaningless (the P/D
-	// sidecar asks it for one token), and TTFT is not priced yet. Left as
-	// no-data, so a combiner treats it as undefined rather than as zero.
+	// Prefill has no TPOT (the P/D sidecar asks it for one token), and its
+	// TTFT is priced in shadow only (ttft.go), so the result carries nothing
+	// of it. Left as no-data, so a combiner treats it as undefined rather
+	// than as zero.
 	if !isGenerating(vs.Role) {
 		return vc, nil, d
 	}
@@ -458,7 +485,7 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	// The fill is clamped to the band the line is fitted over.
 	band := whatif.FillBand{Lo: adm.MinK, Hi: adm.MaxK}
 	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, adm, now)
-	d.line = r
+	d.line, d.source, d.band = r, source, band
 	if !(tpotTarget > 0) {
 		return vc, nil, d
 	}
@@ -488,15 +515,7 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 		d.maxSeqs = params.MaxNumSeqs * d.ranks
 		d.activeSeqs = params.MaxNumActiveSeqs * d.ranks
 	}
-	d.batchCap, d.batchCapSource = params.BatchCap(), batchCapDefault
-	if params.ExplicitMaxNumSeqs() > 0 {
-		d.batchCapSource = batchCapFlags
-	} else if stated := params.StatedBatchCap(); a.batchCapPerRank && stated > 0 {
-		d.batchCap, d.batchCapSource = stated, batchCapDeclared
-	}
-	if d.batchCap <= 0 {
-		d.batchCapSource = batchCapNone
-	}
+	d.batchCap, d.batchCapSource = a.pricedBatchCap(params)
 	maxSeqs := d.batchCap * d.ranks
 	capTokens := fleet.capacityTokens(vs.VariantName, params)
 	d.capTokens = capTokens
@@ -514,6 +533,21 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 		reading.PredictedITL = line.ITLAt(k)
 	}
 	return vc, reading, d
+}
+
+// pricedBatchCap is the cap per rank a replica is priced at, and where it came
+// from: the flags, the annotation, the parser's default, or none.
+func (a *Analyzer) pricedBatchCap(params *capacity.EngineParams) (int64, string) {
+	batchCap, source := params.BatchCap(), batchCapDefault
+	if params.ExplicitMaxNumSeqs() > 0 {
+		source = batchCapFlags
+	} else if stated := params.StatedBatchCap(); a.batchCapPerRank && stated > 0 {
+		batchCap, source = stated, batchCapDeclared
+	}
+	if batchCap <= 0 {
+		source = batchCapNone
+	}
+	return batchCap, source
 }
 
 // admission is which rows teach the variant's line: the policy's ITL band, and
@@ -727,6 +761,18 @@ func (a *Analyzer) evictStale(now time.Time) Evicted {
 			ev.Accelerators++
 		}
 	}
+	for key, w := range a.imbalance {
+		if now.Sub(w.seen) > a.stateTimeout {
+			delete(a.imbalance, key)
+			ev.TTFTWindows++
+		}
+	}
+	for key, w := range a.decodeTTFT {
+		if now.Sub(w.seen) > a.stateTimeout {
+			delete(a.decodeTTFT, key)
+			ev.TTFTWindows++
+		}
+	}
 	a.evictOwnSettleLocked(now)
 	return ev
 }
@@ -734,11 +780,13 @@ func (a *Analyzer) evictStale(now time.Time) Evicted {
 // Evicted counts what one EvictStale forgot, per map.
 type Evicted struct {
 	Lines, Baselines, Transients, Accelerators int
+	// TTFTWindows counts the imbalance and decode-TTFT windows.
+	TTFTWindows int `learnrec:"omitzero"`
 }
 
 // Any reports whether anything was evicted.
 func (e Evicted) Any() bool {
-	return e.Lines+e.Baselines+e.Transients+e.Accelerators > 0
+	return e.Lines+e.Baselines+e.Transients+e.Accelerators+e.TTFTWindows > 0
 }
 
 // beginCycle marks the start of an engine cycle. The engine calls it once per
@@ -771,6 +819,12 @@ func (a *Analyzer) noteVariantsPresent(namespace, modelID string, variantNames [
 			if strings.HasPrefix(key, prefix) {
 				a.seen[key] = now
 			}
+		}
+		if w := a.imbalance[ttftWindowKey(namespace, modelID, name)]; w != nil {
+			w.seen = now
+		}
+		if w := a.decodeTTFT[ttftWindowKey(namespace, modelID, name)]; w != nil {
+			w.seen = now
 		}
 	}
 	if m, ok := a.transients[namespace+"/"+modelID]; ok {

@@ -41,6 +41,22 @@ var _ = Describe("SLOPolicy", func() {
 		Entry("a quoted number", `"95"`),
 	)
 
+	It("round-trips slo.flowControl through YAML, and leaves it out unset", func() {
+		p, err := parse("slo:\n  ttft: {target: 3s}\n  flowControl: disabled\n")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(p.SLO.FlowControl).To(Equal(SLOFlowControlDisabled))
+		b, err := yaml.Marshal(SLOPolicy{FlowControl: p.SLO.FlowControl})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(b)).To(ContainSubstring("flowControl: disabled"))
+		var back SLOPolicy
+		Expect(yaml.Unmarshal(b, &back)).To(Succeed())
+		Expect(back.FlowControl).To(Equal(SLOFlowControlDisabled))
+
+		b, err = yaml.Marshal(SLOPolicy{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(b)).NotTo(ContainSubstring("flowControl"))
+	})
+
 	It("defaults the TTFT percentile to 90", func() {
 		p, err := parse("slo:\n  ttft: {target: 3s}\n")
 		Expect(err).NotTo(HaveOccurred())
@@ -57,6 +73,14 @@ var _ = Describe("SLOPolicy", func() {
 			Expect(err).To(MatchError(ContainSubstring(wantErr)))
 		},
 		Entry("a mean TPOT", SLOPolicy{TPOT: &SLOObjective{Target: SLODuration{100 * time.Millisecond}}}, ""),
+		Entry("flow control declared on", SLOPolicy{FlowControl: SLOFlowControlEnabled}, ""),
+		Entry("flow control declared off", SLOPolicy{FlowControl: SLOFlowControlDisabled}, ""),
+		Entry("a third flow-control value", SLOPolicy{FlowControl: "on"},
+			`flowControl must be "enabled" or "disabled", got "on"`),
+		Entry("flow control in another case", SLOPolicy{FlowControl: "Enabled"},
+			`flowControl must be "enabled" or "disabled", got "Enabled"`),
+		Entry("flow control with whitespace", SLOPolicy{FlowControl: " enabled"},
+			`flowControl must be "enabled" or "disabled", got " enabled"`),
 		Entry("a TPOT percentile: TPOT is a mean",
 			SLOPolicy{TPOT: &SLOObjective{Target: SLODuration{100 * time.Millisecond}, Percentile: 90}},
 			"tpot is a mean"),

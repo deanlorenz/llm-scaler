@@ -3,10 +3,12 @@ package learnreplay
 import (
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
@@ -189,6 +191,8 @@ var valueRules = map[string]rule{
 	"Role": {class: classVocab}, "Reason": {class: classVocab}, "K2Source": {class: classVocab},
 	"RateSource": {class: classVocab}, "Source": {class: classVocab}, "Excluded": {class: classVocab},
 	"Objective": {class: classVocab}, "Statistic": {class: classVocab}, "LearnedFrom": {class: classVocab},
+	"VPSource": {class: classVocab}, "Refused": {class: classVocab}, "Flags": {class: classVocab},
+	"FlowControl":     {class: classVocab},
 	"FreshnessStatus": {class: classVocab}, "Quantity": {class: classVocab}, "Engine": {class: classVocab},
 	"Scope": {class: classVocab}, "Type": {class: classVocab}, "AnalyzerName": {class: classAnalyzer},
 	"Analyzers.Name": {class: classAnalyzer}, "Analyzers.Type": {class: classAnalyzer},
@@ -267,7 +271,7 @@ var keyRules = map[string]rule{
 // may hold. A value not here stops the export, naming the field: add the
 // word here when it is the code's own, or classify the field as a rename
 // when it is a name someone chose.
-var vocabulary = withWords(enginerec.Words(), setOf(
+var vocabulary = withWords(ttftWords(), withWords(enginerec.Words(), setOf(
 	// Roles and analyzers.
 	"both", "decode", "prefill", "saturation", "slo", "throughput", "saturation-token-based",
 	"queueing-model", "default",
@@ -291,9 +295,11 @@ var vocabulary = withWords(enginerec.Words(), setOf(
 	"fp8_e5m2", "int8", "awq", "gptq", "marlin", "awq_marlin", "gptq_marlin", "compressed-tensors",
 	"modelopt", "bitsandbytes", "NixlConnector", "LMCacheConnectorV1", "OffloadingConnector",
 	"MultiConnector", "P2pNcclConnector", "native", "lmcache", "cpu",
+	// The tier's slo.flowControl.
+	string(config.SLOFlowControlEnabled), string(config.SLOFlowControlDisabled),
 	// The redaction marker.
 	"redacted",
-))
+)))
 
 // withWords adds words to a set and returns it: the composite's own words
 // (enginerec.Words), read from the code that writes them.
@@ -302,6 +308,11 @@ func withWords(words []string, set map[string]bool) map[string]bool {
 		set[w] = true
 	}
 	return set
+}
+
+// ttftWords is what the slo analyzer's TTFT readings hold.
+func ttftWords() []string {
+	return slices.Concat(constants.SLOTTFTReasons, constants.SLOTTFTVPSources, constants.SLOTTFTFlags)
 }
 
 func setOf(names ...string) map[string]bool {
