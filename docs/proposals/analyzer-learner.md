@@ -2762,7 +2762,8 @@ not taken as the new engine's. The throughput line never had that guard,
 before 4b or since; with the cap read from the store, a rollout that
 changes `--max-num-seqs` can briefly judge old pods against the new cap.
 A small PR of its own. (The forget for this line has landed:
-[as built](#the-throughput-lines-forget-as-built). The rollout guard has not.)
+[as built](#the-throughput-lines-forget-as-built), and so has the guard:
+[as built](#rollouts-k2s-wait-and-the-lines-reports-as-built-481-495).)
 
 #### 4b-3 round-2 review
 
@@ -3102,7 +3103,8 @@ and 2 added:
 **Not in this PR: the throughput line's rollout guard.** Still true after
 4b-3: the saturation line empties a variant's rows while its scale target
 rolls out (`rec.InRollout()`, `D/analyze.go`), and the throughput line has
-no such guard. Left for an issue of its own, as the round-1 review planned.
+no such guard. Left for an issue of its own, as the round-1 review planned
+(#481, since [built](#rollouts-k2s-wait-and-the-lines-reports-as-built-481-495)).
 
 #### 5b as built
 
@@ -3516,8 +3518,8 @@ and the `restored` field have none, because no replay output reads either.
   6.2 plus `learner`, at most 4 per variant (k2, mu, itl, start), against the
   budget of about 60 per model. The `learner` label is bounded by
   `learn.Learners`, and a test holds a variant to one series through 1000 key
-  changes. Only the saturation analyzer files reports, so the throughput and slo
-  ITL lines publish nothing here.
+  changes. Only the saturation analyzer filed reports when this was built; the
+  slo and throughput lines [do now](#rollouts-k2s-wait-and-the-lines-reports-as-built-481-495).
 
   | overlapping series | kept or replaced |
   | --- | --- |
@@ -3560,9 +3562,64 @@ and the `restored` field have none, because no replay output reads either.
   `forgetMuLocked` clears it, and counts the entries the variant's forget counted
   before. The prefill bound shares mu's maps: its keys still go with the variant,
   and are not reported. Eviction reports too, as k2's does.
-- **Open.** `learner-write` and `learn.Report` for `slo` (6.1), left for after
-  #493 and #494. B's own last-admitted stamp (Deferred). `restoredKeys` for ITL on
-  `learner-start`. Not measured on a cluster: no run has read this series.
+- **Open.** B's own last-admitted stamp (Deferred). Not measured on a cluster: no
+  run has read this series.
+
+#### Rollouts, k2's wait and the lines' reports, as built (#481, #495)
+
+Six replay switches, on from the constructors. None moves a golden: no recording
+holds a rollout, a change of arguments or a new revision under a name, and
+nothing priced reads a report. Their unit tests hold them. Nothing here has run
+on a cluster.
+
+| switch | what it changes |
+| --- | --- |
+| `throughput-itl-rollout-guard`, `slo-itl-rollout-guard` | the line is offered no rows while `Record.InRollout`, or while the variant's rows report two revisions (`domain.RevisionsMixed`, moved from the saturation analyzer so all three read one rule) |
+| `throughput-itl-forgets-on-new-arguments` | the throughput line forgets on a change of `ArgsTag`, keeping the traces |
+| `k2-waits-after-a-rollout` | `settle.RolledOut` starts k2's joined wait |
+| `slo-itl-files-learner-reports` | the slo line's `learn.Report` and `learner-write` |
+| `throughput-itl-files-learner-reports` | the throughput line's `learn.Report`; its `learner-write` stands as 4b-1 built it |
+
+- **The guard.** As the saturation line's: the line fits from what it holds, so an
+  image-only rollout goes on being priced. With the guard off, a test holds the
+  defect #481 names: an old pod above the band counted as at the new cap
+  (`TestRollout_AnOldPodIsNotJudgedAgainstTheNewCap`). The slo line had the
+  arguments rule already (`linesUnderArgs`).
+- **"Forget the line".** #481 lists it without saying when. Read here as the
+  arguments rule the saturation and slo lines have, and the table in
+  [PR 4b](#pr-4b-the-throughput-analyzers-itl-line) records this line lacking
+  ("no args rule; no rollout rule"). Without it the guard is half a fix: the old
+  engine's window comes back into the fit when the rollout ends. Not a forget on
+  every rollout: that would silence an image-only rollout, which the saturation
+  line does not do. The cost: a rollout that changes arguments leaves the line
+  silent (`cause` `rollout`) until it ends and 10 new readings arrive, and a
+  policy listing `throughput` alone holds its role meanwhile. There is no B stash:
+  a rollback relearns, as on the slo line.
+- **k2's wait.** Only a new revision that arrives with the Ready time unchanged
+  or unread: a new Ready time waited already, and a new Pod is a join. Only
+  `r.Reason == settle.RolledOut` is read, not `Since` for every reason, so
+  `Rejoined` and load returning after idle keep what k2 does with them today.
+  Mu's write sits behind the same joined test. A sighting in the snapshot carries
+  no reason, so a controller restart that restores it ends the wait, and one with
+  no snapshot starts every replica's wait anyway.
+- **The series.** The label is the report's `learner`, so the three lines need
+  three names: `learn.SLO` (`slo`) and `learn.Throughput` (`throughput`), bounded
+  by `learn.Reporters`. Neither is on `learn.Learners`: the annotation forgets both
+  under `itl`. That takes the series to at most 6 per variant. `learner-write`
+  keeps `learner` `itl` on all three lines, as the throughput line already
+  logged it, and `analyzer` says which. The engine takes reports from every
+  built-in analyzer with `TakeLearnerReports`, not the saturation analyzer alone.
+- **Forgotten and evicted keys** go out as reports of their own ahead of the
+  cycle's, so a key refilled on the same cycle stays published. They are held
+  until the engine takes them, not until the model next reports, since a swept
+  model reports again never. The slo line evicts through `ForgetKeys` to learn
+  which keys went; the counts are `Sweep`'s.
+- **A line above the band** has an empty main window. `Tracker.Report` stamps it
+  with the newest reading there, or the throughput line's series would read 0.
+- **`restoredKeys`** on `learner-start` gains `itl`: lines whose intercept or held
+  slope came from the snapshot and have kept no reading (`Tracker.RestoredKeys`).
+  One field on one log line, which no output reads, so it has no switch, as
+  `restored` has none.
 
 ## 8. Risks and limits
 
