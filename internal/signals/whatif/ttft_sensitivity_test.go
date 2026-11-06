@@ -5,6 +5,16 @@ import (
 	. "github.com/onsi/gomega"
 )
 
+// pricedCorners is price at each corner of fl's sweep.
+func pricedCorners(fl TTFTFleet, price func(TTFTFleet) Result) []Result {
+	fleets := SensitivityFleets(fl)
+	out := make([]Result, len(fleets))
+	for i, c := range fleets {
+		out[i] = price(c)
+	}
+	return out
+}
+
 var _ = Describe("the V_P and f sweep", func() {
 	fleet := func(pods int, f float64) TTFTFleet {
 		return TTFTFleet{Prefill: Prefill{VP: 100000, FixedLatency: 0.01, Replicas: pods, Imbalance: f, PromptTokens: 2000, PromptCV: 1},
@@ -22,9 +32,9 @@ var _ = Describe("the V_P and f sweep", func() {
 	It("sweeps both at more than one pod, f held to its bounds", func() {
 		corners := SensitivityFleets(fleet(2, 1.9))
 		Expect(corners).To(HaveLen(4))
-		fs := []float64{}
-		for _, c := range corners {
-			fs = append(fs, c.Prefill.Imbalance)
+		fs := make([]float64, len(corners))
+		for i, c := range corners {
+			fs[i] = c.Prefill.Imbalance
 		}
 		Expect(fs).To(HaveEach(BeNumerically(">=", 1)))
 		Expect(fs).To(HaveEach(BeNumerically("<=", 2)), "no more than the pods")
@@ -44,10 +54,7 @@ var _ = Describe("the V_P and f sweep", func() {
 
 	It("reads the knee's span from the closed form", func() {
 		fl := fleet(2, 1.5)
-		var corners []Result
-		for _, c := range SensitivityFleets(fl) {
-			corners = append(corners, PrefillKnee(c.Prefill))
-		}
+		corners := pricedCorners(fl, func(c TTFTFleet) Result { return PrefillKnee(c.Prefill) })
 		knee := PrefillKnee(fl.Prefill).(Answer).Value
 		s := SensitivitySpan(knee, corners)
 		// (1 - margin) x N_p x V_P / (f x I): down by 0.85/1.15, up by 1.15/0.85.
@@ -59,10 +66,7 @@ var _ = Describe("the V_P and f sweep", func() {
 	It("spans the figure, and a TTFT rises as V_P falls", func() {
 		fl := fleet(1, 0)
 		v := TTFTAt(fl, 10, 0.9).(TTFT)
-		var corners []Result
-		for _, c := range SensitivityFleets(fl) {
-			corners = append(corners, TTFTAt(c, 10, 0.9))
-		}
+		corners := pricedCorners(fl, func(c TTFTFleet) Result { return TTFTAt(c, 10, 0.9) })
 		s := SensitivitySpan(v.Seconds, corners)
 		Expect(s.Lo).To(BeNumerically("<", v.Seconds))
 		Expect(s.Hi).To(BeNumerically(">", v.Seconds))
@@ -74,10 +78,7 @@ var _ = Describe("the V_P and f sweep", func() {
 		// At 90% of the knee, V_P 15% down is past it.
 		rate := 0.9 * PrefillKnee(fl.Prefill).(Answer).Value
 		v := TTFTAt(fl, rate, 0.9).(TTFT)
-		var corners []Result
-		for _, c := range SensitivityFleets(fl) {
-			corners = append(corners, TTFTAt(c, rate, 0.9))
-		}
+		corners := pricedCorners(fl, func(c TTFTFleet) Result { return TTFTAt(c, rate, 0.9) })
 		s := SensitivitySpan(v.Seconds, corners)
 		Expect(s.Refused).To(Equal(Saturated))
 		Expect(s.Hi).To(Equal(v.Seconds), "the worse side has no figure")

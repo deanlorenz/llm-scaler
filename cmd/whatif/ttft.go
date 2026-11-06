@@ -89,7 +89,7 @@ func (f *answerFlags) checkTTFT() error {
 		return usagef("--assume-vp %g, want a finite throughput above 0, in prompt tokens per second", f.assumeVP)
 	case f.set["assume-router-hop"] && f.assumeRouterHop < 0:
 		return usagef("--assume-router-hop %s, want a duration of 0 or more", f.assumeRouterHop)
-	case f.set["assume-a"] && !(f.assumeA > 0):
+	case f.set["assume-a"] && f.assumeA <= 0:
 		return usagef("--assume-a %s, want a duration above 0", f.assumeA)
 	case f.set["assume-a"] && f.question == rateQuestion && f.ttft == "":
 		return usagef("--assume-a needs a --ttft target on slo-to-rate")

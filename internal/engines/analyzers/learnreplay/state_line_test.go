@@ -130,7 +130,7 @@ func TestKeepCycles(t *testing.T) {
 func TestStateAt_CarriesTheLineRows(t *testing.T) {
 	st, err := StateAt(context.Background(), olsSweepRecording(t), Options{}, StateQuery{})
 	require.NoError(t, err)
-	var rows []whatif.LineRow
+	rows := make([]whatif.LineRow, 0, shapeCycles)
 	for _, v := range st.Variants {
 		rows = append(rows, v.LineRows...)
 	}

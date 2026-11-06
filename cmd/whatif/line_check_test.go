@@ -16,10 +16,11 @@ import (
 // of the one the rows were made from.
 func checkedState(factor float64) *learnreplay.State {
 	line := itl.Model{A: 0.01, B: 0.005}
-	var rows []whatif.LineRow
-	for c, k := range []float64{0.4, 0.5, 0.6} {
-		rows = append(rows, whatif.LineRow{Cycle: c + 1, K: k, KVPerRequest: 1500,
-			TokenRate: whatif.ReplicaTokenRate(line, k, 100000, 1500, 1000)})
+	fills := []float64{0.4, 0.5, 0.6}
+	rows := make([]whatif.LineRow, len(fills))
+	for c, k := range fills {
+		rows[c] = whatif.LineRow{Cycle: c + 1, K: k, KVPerRequest: 1500,
+			TokenRate: whatif.ReplicaTokenRate(line, k, 100000, 1500, 1000)}
 	}
 	return &learnreplay.State{Cycle: 3, Variants: []learnreplay.VariantState{{
 		Variant: "d", Role: "decode", Replicas: 1, Ranks: 1, BatchCap: 1000, CapacityTokens: 100000, Tier: whatif.TierOLS,

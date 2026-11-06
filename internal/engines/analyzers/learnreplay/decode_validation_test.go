@@ -269,7 +269,7 @@ func validateGolden(ctx context.Context, t *testing.T, name string, raw []byte) 
 			lines = append(lines, fmt.Sprintf("%s %s prefill; %s", id, ps.Variant, prefillOwnCheck(ps, rows)))
 		}
 		if len(st.Variants) == 0 && len(st.Prefill) == 0 {
-			lines = append(lines, fmt.Sprintf("%s; SKIPPED no variant priced at the freeze", id))
+			lines = append(lines, id+"; SKIPPED no variant priced at the freeze")
 		}
 	}
 	slices.Sort(lines)
@@ -289,7 +289,7 @@ func TestDecodeValidation_OnTheGoldens(t *testing.T) {
 	dir := filepath.Join("testdata", "goldens")
 	m, err := ReadManifest(dir)
 	require.NoError(t, err)
-	var got []string
+	got := make([]string, 0, len(m.Goldens))
 	seen := map[string]bool{}
 	for _, g := range m.Goldens {
 		gz, err := os.ReadFile(filepath.Join(dir, g.Recording))
