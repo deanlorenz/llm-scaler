@@ -334,7 +334,6 @@ RollingOut
 RouterHopAssumed
 Running
 S
-SATURATION_CONFIG_MAP_NAME
 SCALE_FROM_ZERO_ENGINE_MAX_CONCURRENCY
 SCALING
 SCALING_POLICY_CONFIG_MAP_NAME
@@ -2913,7 +2912,6 @@ wrong-side
 wva-learned-state
 wva-manager-config
 wva-policy
-wva-saturation-scaling-config
 wva-scaling-policy-config
 wva-utilization-share-history
 wva_unattributed_gpus
