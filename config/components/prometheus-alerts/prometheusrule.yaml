@@ -31,9 +31,10 @@ spec:
         description: "wva_models_processed has been 0 (or absent) over a 10-minute window, sustained for 15+ minutes. This is EXPECTED when no variants are being managed (an idle controller). If you do have managed workloads, it can indicate the optimization loop is stalled/crashed or metric collection is failing — check controller pod status and logs, and Prometheus connectivity."
 
     - alert: WVAMetricsCollectionFailing
-      # learner_recording queries feed only a learner recording, never a
-      # scaling decision: their failures stay on the counter and do not alert.
-      expr: sum by (query_type, reason) (rate(wva_metrics_collection_errors_total{query_type!="learner_recording"}[5m])) > 0.0833
+      # learner_recording queries feed only a learner recording, and ttft_inputs
+      # queries only the shadow TTFT pricing, never a scaling decision: their
+      # failures stay on the counter and do not alert.
+      expr: sum by (query_type, reason) (rate(wva_metrics_collection_errors_total{query_type!~"learner_recording|ttft_inputs"}[5m])) > 0.0833
       for: 5m
       labels:
         severity: warning

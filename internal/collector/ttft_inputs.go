@@ -18,6 +18,7 @@ var ttftInputHistograms = []struct {
 	field func(*podMetricData) *map[float64]float64
 }{
 	{registration.QueryPromptTokensBuckets, func(d *podMetricData) *map[float64]float64 { return &d.promptTokensBuckets }},
+	{registration.QueryComputedTokensBuckets, func(d *podMetricData) *map[float64]float64 { return &d.computedTokensBuckets }},
 	{registration.QueryTTFTBuckets, func(d *podMetricData) *map[float64]float64 { return &d.ttftBuckets }},
 	{registration.QueryQueueTimeBuckets, func(d *podMetricData) *map[float64]float64 { return &d.queueTimeBuckets }},
 	{registration.QueryTPOTBuckets, func(d *podMetricData) *map[float64]float64 { return &d.tpotBuckets }},
@@ -43,8 +44,8 @@ var ttftInputFigures = []struct {
 // (registration/ttft_inputs.go) into the instances the model-scoped queries
 // already found. They are supplementary like the output-length histogram:
 // they attach to an instance and never define one, and a failed query leaves
-// each one absent. Recorded; of them only the queue minimum is read, by the
-// saturation analyzer's prefill observation (its busy minutes).
+// each one absent, an unknown and never a zero. A query the cycle did not
+// issue (replicaQueryLists) has no result and reads the same way.
 func (c *ReplicaMetricsCollector) extractTTFTInputs(ctx context.Context, modelID, namespace string,
 	results map[string]*source.MetricResult, podData map[string]*podMetricData) {
 	for _, h := range ttftInputHistograms {
