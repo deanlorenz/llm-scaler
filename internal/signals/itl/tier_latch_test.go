@@ -40,8 +40,8 @@ func (l *latchRig) rows(ks []float64, scale float64) []domain.ReplicaMetrics {
 }
 
 // see offers one cycle at ks.
-func (l *latchRig) see(at time.Duration, ks []float64, scale float64) Reading {
-	return l.tr.Observe(latchKey, "v", l.rows(ks, scale), l.adm, latchStart.Add(at))
+func (l *latchRig) see(at time.Duration, ks []float64) Reading {
+	return l.tr.Observe(latchKey, "v", l.rows(ks, 1), l.adm, latchStart.Add(at))
 }
 
 // latchPods is the pods of every test with a k in [lo, hi]: 24 of them, from
@@ -65,14 +65,13 @@ func narrow() []float64 { return latchPods(0.55, 0.685) }
 func atOLS(t *testing.T) *latchRig {
 	t.Helper()
 	l := newLatchRig()
-	if r := l.see(0, latchFleet(), 1); r.Tier != TierOLS {
+	if r := l.see(0, latchFleet()); r.Tier != TierOLS {
 		t.Fatalf("the fleet's first cycle fitted %q, want the full fit", r.Tier)
 	}
 	return l
 }
 
-// after is one cycle at at whose windows hold exactly ks, read a cycle
-// earlier: the window a key at the full fit has aged to, with the evidence it
+// after is one cycle whose windows hold exactly ks, read a cycle earlier: the window a key at the full fit has aged to, with the evidence it
 // stands on. ClearWindow would be a forget, which unlatches.
 func (l *latchRig) after(at time.Duration, ks []float64, scale float64) Reading {
 	l.tr.mu.Lock()
@@ -83,7 +82,7 @@ func (l *latchRig) after(at time.Duration, ks []float64, scale float64) Reading 
 		}
 	}
 	l.tr.mu.Unlock()
-	return l.see(at, nil, 1)
+	return l.see(at, nil)
 }
 
 // Inside the clear values a key at the full fit stays on it, where the set
@@ -179,21 +178,21 @@ func TestDwellTier_AFullFitThatPricesLessWaits(t *testing.T) {
 	wide := latchPods(0, 1)
 	// A pinned B under the true one: the pinned fit is steeper past the pods.
 	l := setup(0.02, 0.012, 0.002, wide)
-	r := l.see(15*time.Second, wide, 1)
+	r := l.see(15*time.Second, wide)
 	if r.Tier != TierPinnedB || !r.TierHeld || !r.Ready {
 		t.Fatalf("a full fit pricing less: tier %q held %v Ready %v", r.Tier, r.TierHeld, r.Ready)
 	}
 	if b, _ := l.tr.Baseline(latchKey); b != 0.002 {
 		t.Fatalf("a refused full fit wrote its intercept: %v", b)
 	}
-	r = l.see(DefaultTierDwell, wide, 1)
+	r = l.see(DefaultTierDwell, wide)
 	if r.Tier != TierOLS || r.TierHeld {
 		t.Fatalf("at the dwell: tier %q held %v, want the full fit", r.Tier, r.TierHeld)
 	}
 
 	// A pinned B over the true one: the pinned fit prices less.
 	l = setup(0.03, 0.0025, 0.012, wide)
-	r = l.see(15*time.Second, wide, 1)
+	r = l.see(15*time.Second, wide)
 	if r.Tier != TierOLS || r.TierHeld {
 		t.Fatalf("a full fit pricing more: tier %q held %v, want it at once", r.Tier, r.TierHeld)
 	}
@@ -209,7 +208,7 @@ func TestDwellTier_TheFirstFullFitDoesNotWait(t *testing.T) {
 	l.tr.mu.Lock()
 	l.tr.latches[latchKey] = tierLatch{tier: TierPinnedB, since: latchStart}
 	l.tr.mu.Unlock()
-	if r := l.see(15*time.Second, wide, 1); r.Tier != TierOLS || r.TierHeld {
+	if r := l.see(15*time.Second, wide); r.Tier != TierOLS || r.TierHeld {
 		t.Fatalf("the first full fit: tier %q held %v", r.Tier, r.TierHeld)
 	}
 }
@@ -221,7 +220,7 @@ func TestDwellTier_ARestoredKeyStartsOnTheSafeSide(t *testing.T) {
 	l := newLatchRig()
 	l.tr.RestoreBaseline(latchKey, latchB)
 	l.tr.RestoreSlope(latchKey, Slope{A: latchA * 1.5, FittedAt: latchStart})
-	r := l.see(0, latchFleet(), 1)
+	r := l.see(0, latchFleet())
 	if r.Tier != TierPinnedB || !r.TierHeld {
 		t.Fatalf("a restored key's first cycle: tier %q held %v, want the pinned fit", r.Tier, r.TierHeld)
 	}
@@ -230,7 +229,7 @@ func TestDwellTier_ARestoredKeyStartsOnTheSafeSide(t *testing.T) {
 	}
 	// With nothing restored there is no side to err to: a cold key takes the
 	// full fit on its first cycle.
-	if r := newLatchRig().see(0, latchFleet(), 1); r.Tier != TierOLS {
+	if r := newLatchRig().see(0, latchFleet()); r.Tier != TierOLS {
 		t.Fatalf("a cold key's first cycle: %q", r.Tier)
 	}
 }
@@ -296,7 +295,7 @@ func TestDwellTier_APinnedLineIsPricedOneSided(t *testing.T) {
 	for i := range ks {
 		ks[i] = 0.86 + 0.002*float64(i)
 	}
-	r := l.see(15*time.Second, ks, 1)
+	r := l.see(15*time.Second, ks)
 	if r.TierHeld || !r.PinnedAtLeastITL {
 		t.Fatalf("held %v, one-sided %v, line %+v: want the one-sided line through the dwell", r.TierHeld, r.PinnedAtLeastITL, r.Model)
 	}
@@ -346,7 +345,7 @@ func TestDwellTier_TheLatchGoesWithItsEvidence(t *testing.T) {
 		many = append(many, 0.40+0.007*float64(i))
 	}
 	for i := 1; i <= 3; i++ {
-		wide.see(time.Duration(i)*15*time.Second, many, 1)
+		wide.see(time.Duration(i)*15*time.Second, many)
 	}
 	if got := wide.tr.latches[latchKey].tier; got != TierOLS {
 		t.Errorf("48 rows a cycle: the latch stands at %q", got)
@@ -372,7 +371,7 @@ func TestDwellTier_TheLatchGoesWithItsEvidence(t *testing.T) {
 	l.tr.windows[latchKey].Clear()
 	l.tr.steady[latchKey].Clear()
 	l.tr.mu.Unlock()
-	if r := l.see(2*time.Hour, inside, 1); r.Tier == TierOLS {
+	if r := l.see(2*time.Hour, inside); r.Tier == TierOLS {
 		t.Error("a window that aged out kept the full fit on the clear values")
 	}
 	if got := l.tr.latches[latchKey].tier; got != TierPinnedB {
@@ -384,7 +383,7 @@ func TestDwellTier_TheLatchGoesWithItsEvidence(t *testing.T) {
 	l.tr.windows[latchKey].Clear()
 	l.tr.steady[latchKey].Clear()
 	l.tr.mu.Unlock()
-	l.see(15*time.Second, nil, 1)
+	l.see(15*time.Second, nil)
 	if got := l.tr.latches[latchKey].tier; got != TierPinnedB {
 		t.Errorf("emptied: the latch stands at %q", got)
 	}
