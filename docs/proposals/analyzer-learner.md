@@ -726,20 +726,18 @@ correcting the `goldens:` section re-runs it. Goldens are written only by the
 
 As built (#495), the check is `.github/workflows/ci-goldens-gate.yaml`, which runs
 `deploy/ci-pr-checks/goldens-section.sh`. `hack/check-goldens-section.sh` tests it
-on fixture PRs from `make lint-deploy-scripts`. The format is in
-[testing](../developer-guide/testing.md#the-goldens-section). It takes the forms
-earlier PRs used most: a heading, or a line that starts `goldens:`. It watches
+on fixture PRs from `make lint-deploy-scripts`. The section is a strict line
+format, set out in [testing](../developer-guide/testing.md#the-goldens-section),
+not Markdown: two reviews found paths through a Markdown parser written in bash,
+and the check is for honest mistakes, since a PR runs its own copy of it. So the
+pasted summary goes under the next heading, not in the section. The check watches
 more than this rule's replay outputs: also the `cmd/whatif` goldens and schema,
 `goldens.yaml`, and each `recording.jsonl.gz`, so a retaken recording or a new
-fixture is named too. The check compares file names only. The direction and the
-pasted summary stay with the reviewer, and nothing machine-checks them. Run on
-the 77 PRs merged since #388,
-with their real bodies and changed paths, the 46 that moved no golden pass. Of
-the 31 that moved one, 8 pass and 23 would have failed: 12 have no section it
-reads (several wrote a list item, `- **Goldens:**`), 7 named everything but
-`goldens.yaml`, 3 named only part of what moved (#426, #445, #488), and one
-(#406) named its golden on a line indented four spaces, which the check will not
-read as a name because that can render as a code block.
+fixture is named too. It compares file names only. The direction and the pasted
+summary stay with the reviewer, and nothing machine-checks them. Run on the 77
+PRs merged since #388, with their real bodies and changed paths, the 46 that moved
+no golden pass. The 31 that moved one fail, because their bodies predate the
+format, so that count says nothing about the format.
 
 **Per-path counters must be above zero.** P1-obs admitted, mu samples written,
 mu yields (served, sibling, stale), OLS cycles, pinned cycles, instant-KV

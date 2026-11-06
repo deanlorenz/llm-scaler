@@ -15,24 +15,36 @@ Fixes #
 -
 -
 
-## goldens:
-
 <!--
-Keep this heading. Fill it in only when the PR moves a golden: a file under
+The section below is checked by CI, line by line. Keep its heading exactly.
+If no golden moves, leave it at none.
+
+If the PR moves a golden, replace none with one line per golden: a file under
 internal/engines/analyzers/learnreplay/testdata/goldens/, a
 cmd/whatif/testdata/*.golden, cmd/whatif/testdata/schema-v*.txt, or
-internal/engines/steadystate/testdata/engine-run-event-counts.txt.
+internal/engines/steadystate/testdata/engine-run-event-counts.txt. A line is a
+dash, a space, one name in backticks, and optionally a space, a dash, a space and
+what moved and which way:
 
-Name each one in backticks and say which way it moves. For a learner golden,
-paste the per-output summary from `make learner-goldens-check`, never the CSV.
-That target replays learner goldens only: for any other golden, say what moved.
+- `acceptance/results.csv` - decode demand up on 12 cycles, by at most 0.5 %
+- `pd-restart/*.csv` - new fixture
+- `pd-restart/recording.jsonl.gz` - new fixture
+- `goldens.yaml` - lists it
 
-- `acceptance/results.csv`: decode demand up on 12 cycles, by at most 0.5 %
-- `pd-restart/*`: new fixture
-- `goldens.yaml`: lists it
-
-CI fails when a moved golden is not named. Editing this section re-runs it.
+Nothing else may sit in the section. Put prose and the replay summary under the
+next heading. Editing the section re-runs the check.
 The format: docs/developer-guide/testing.md, "The goldens: section".
+-->
+## goldens:
+
+none
+
+### Replay summary
+
+<!--
+For a learner golden, paste the per-output summary from make learner-goldens-check,
+never the CSV. That target replays learner goldens only: for any other golden, say
+what moved. Delete this heading if no golden moves.
 -->
 
 ### Pre-review Checklist

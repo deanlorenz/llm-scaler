@@ -1418,15 +1418,18 @@ the test and say why in the PR.
 #### The `goldens:` section
 
 A PR that moves a golden names it in its body. CI fails the PR when it does
-not. Write the section like this:
+not. The format is strict, line by line:
 
 ```markdown
 ## goldens:
 
-- `acceptance/results.csv`: decode demand up on 12 cycles, by at most 0.5 %
-- `throughput-sweep/*`: new fixture
-- `goldens.yaml`: lists it
-- `engine-run-event-counts.txt`: one `settle.Observe` line per cycle
+- `acceptance/results.csv` - decode demand up on 12 cycles, by at most 0.5 %
+- `throughput-sweep/*.csv` - new fixture
+- `throughput-sweep/recording.jsonl.gz` - new fixture
+- `goldens.yaml` - lists it
+- `engine-run-event-counts.txt` - one `settle.Observe` line per cycle
+
+### Replay summary
 
 (for the learner goldens, the per-output summary from `make learner-goldens-check`)
 ```
@@ -1437,41 +1440,41 @@ recordings and `goldens.yaml`), `cmd/whatif/testdata/*.golden`,
 `cmd/whatif/testdata/schema-v*.txt`, and
 `internal/engines/steadystate/testdata/engine-run-event-counts.txt`.
 
-**Where the section is.** It opens at a heading that says only `goldens`
-(`## goldens:`, `### Goldens`), or at a line that starts `goldens:` or
-`**goldens:**`. It ends at the next heading, or the next line that starts in
-bold. A list item does not open it. A PR that moves no golden needs no section.
+**The section.** It starts at one line that is exactly `## goldens:`, at column
+0. A body with two such lines fails. It ends at the next line that starts with
+`#`, or at the end of the body. A PR that moves no golden needs no section, and
+the check does not read one.
 
-The check reads the body as GitHub renders it: a fence closes only on its own
-character at its own length or longer, a comment that opens a line runs to the
-end of the line holding `-->`, and a `<!--` inside a code span is text.
+**Its lines.** A blank line is allowed. Every other line must be one of:
 
-**How to name a file.** Only text in backticks counts, and not inside a fenced
-block or an HTML comment, so the template's comment names nothing.
+- `none`, which fails if a golden moved.
+- A dash, a space, one name in backticks, and optionally ` - ` and free text.
+
+Anything else fails, and the check gives the line's number in the body. That
+covers prose, tables, fences, comments and indented lines, whatever they would
+render as, so prose and pasted output go under the next heading.
+
+**Names.**
 
 | name | names |
 | --- | --- |
 | `acceptance/results.csv` | that output |
-| `acceptance/*`, `acceptance/`, `acceptance` | every file of that fixture |
-| `ttft-staircase-*/` | every file of each fixture that matches |
+| `acceptance/*.csv` | the outputs of that fixture. Name its `recording.jsonl.gz` as well if it moved |
+| `ttft-staircase-*/*.csv` | those outputs of each fixture that matches |
 | `*/results.csv` | that output in every fixture |
 | `goldens.yaml` | the manifest. A new fixture changes it, so name it |
 | `engine-run-event-counts.txt`, `ttft-*.golden` | a golden outside the learnreplay directory, by file name or by its full path |
 
-A full repository path also works. `*` stops at a slash. A name must carry a
-literal fixture or output part: one part below the golden's directory spelled
-out, or opening with at least three literal characters. So `*.csv`, `*/*.csv`,
-`*e*`, `*/*` and `cmd/whatif/testdata/*` name nothing.
+A full repository path also works. A name that has a wildcard must have at least
+3 literal characters in its file part, and must not be the whole of a golden
+directory, so `acceptance/*`, `*/*.csv` and `*.golden` are refused. No wildcard
+may stand above the fixture, so `internal/*/results.csv` is refused too. `*`
+stops at a slash.
 
-**When GitHub might render it otherwise.** The check fails, and says why, rather
-than guess. That is a comment that opens inside a line and does not end on it, a
-backtick in the section with no partner on its line, a fence in the section
-inside a list, a quote or an indent, and a name indented four spaces or more.
-Move the names to plain lines or top-level list items.
-
-**What the check does not do.** It compares file names with the section. It
-does not run a replay, read a CSV, or check the direction or the summary: those
-are for the reviewer. Naming a file that did not move is not an error.
+**What the check does not do.** It catches honest mistakes, not an adversary: a
+PR runs its own copy of it. It compares file names with the section. It does not
+run a replay, read a CSV, or check the direction or the summary: those are for
+the reviewer. Naming a file that did not move is not an error.
 
 **How it runs.** `.github/workflows/ci-goldens-gate.yaml` runs on `opened`,
 `edited`, `reopened` and `synchronize`, so editing the body re-runs it without a

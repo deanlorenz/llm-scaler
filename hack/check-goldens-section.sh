@@ -77,154 +77,172 @@ expect() {
     fi
 }
 
+# section LINE...: a body with the section holding those lines.
+section() {
+    printf '## goldens:\n\n'
+    printf '%s\n' "$@"
+}
+
+R='- `acceptance/results.csv`'
+L='- `acceptance/lines.csv`'
+
 # The four cases the gate exists for.
 pr_with "$A_RESULTS"
 expect "a moved golden and no section fails" 1 "no goldens: section" "$(printf 'Fixes #1\n\n## Proposed Changes\n\n- a change\n')"
 expect "the failure names the file" 1 "not named: acceptance/results.csv" "no section here"
-expect "a section naming it passes" 0 "the section names each" "$(printf '## goldens:\n\n- `acceptance/results.csv`: decode demand up on 12 cycles\n')"
+expect "a section naming it passes" 0 "the section names each" "$(section "$R")"
 pr_with "$A_RESULTS" "$A_LINES"
-expect "a partial section fails" 1 "does not name 1" "$(printf '## goldens:\n\n- `acceptance/results.csv`: up\n')"
-expect "a partial section names what is missing" 1 "not named: acceptance/lines.csv" "$(printf '## goldens:\n\n- `acceptance/results.csv`: up\n')"
+expect "a partial section fails" 1 "does not hold up" "$(section "$R")"
+expect "a partial section names what is missing" 1 "not named: acceptance/lines.csv" "$(section "$R")"
 pr_with "$DOC"
 expect "docs only, no section, passes" 0 "none of them a golden" "just docs"
 expect "docs only, empty body, passes" 0 "none of them a golden" ""
+expect "docs only, section none, passes" 0 "none of them a golden" "$(section none)"
+expect "docs only reads no section" 0 "none of them a golden" "$(section 'an old body in prose')"
 pr_with cmd/main.go "$DOC"
-expect "code with no golden passes" 0 "none of them a golden" "no section"
+expect "code with no golden passes" 0 "2 files changed" "no section"
+pr_with "$DOC"
+expect "the file count is singular" 0 "1 file changed" "no section"
 
-# What counts as a golden.
+# What counts as a golden, and how each is named.
 pr_with "$G/acceptance/recording.jsonl.gz"
 expect "a recording is a golden" 1 "not named: acceptance/recording.jsonl.gz" "no section"
-expect "and is named like one" 0 "names each" 'goldens: `acceptance/recording.jsonl.gz` taken again'
+expect "and is named like one" 0 "names each" "$(section '- `acceptance/recording.jsonl.gz` - taken again')"
 pr_with "$COUNTS"
 expect "the engine event counts are a golden" 1 "not named: $COUNTS" "no section"
-expect "the event counts by file name" 0 "names each" "$(printf 'goldens:\n\n- `engine-run-event-counts.txt`: one line\n')"
+expect "the event counts by file name" 0 "names each" "$(section '- `engine-run-event-counts.txt`')"
+expect "the event counts by full path" 0 "names each" "$(section "- \`$COUNTS\`")"
 pr_with "$WHATIF"
 expect "a whatif golden is a golden" 1 "not named: $WHATIF" "no section"
-expect "a whatif golden by glob" 0 "names each" 'goldens: `cmd/whatif/testdata/ttft-*.golden` move by one line'
-expect "a whatif golden by its file-name glob" 0 "names each" 'goldens: `ttft-*.golden`'
-expect "the whatif directory is not a name" 1 "does not name 1" 'goldens: `cmd/whatif/testdata/*`'
-expect "nor is every golden" 1 "does not name 1" 'goldens: `*.golden`'
+expect "a whatif golden by glob" 0 "names each" "$(section '- `cmd/whatif/testdata/ttft-*.golden` - one line each')"
+expect "a whatif golden by its file-name glob" 0 "names each" "$(section '- `ttft-*.golden`')"
 pr_with "$SCHEMA"
 expect "the whatif schema is a golden" 1 "not named: $SCHEMA" "no section"
+expect "the whatif schema by path" 0 "names each" "$(section "- \`$SCHEMA\`")"
 pr_with "$G/goldens.yaml"
 expect "the manifest is a golden" 1 "not named: goldens.yaml" "no section"
-expect "the manifest by name" 0 "names each" 'goldens: `goldens.yaml` gains a fixture'
-
-# Every way an earlier PR opened the section.
+expect "the manifest by name" 0 "names each" "$(section '- `goldens.yaml`')"
 pr_with "$A_RESULTS"
-BODY='`acceptance/results.csv` up'
-expect "form: ## goldens:" 0 "names each" "$(printf '## goldens:\n\n%s\n' "$BODY")"
-expect "form: ### goldens" 0 "names each" "$(printf '### goldens\n\n%s\n' "$BODY")"
-expect "form: ### Goldens" 0 "names each" "$(printf '### Goldens\n\n%s\n' "$BODY")"
-expect "form: plain goldens: then a list" 0 "names each" "$(printf 'goldens:\n\n- %s\n' "$BODY")"
-expect "form: goldens: on one line" 0 "names each" "goldens: $BODY"
-expect "form: **goldens:**" 0 "names each" "**goldens:** $BODY"
-expect "form: **Goldens:**" 0 "names each" "**Goldens:** $BODY"
-expect "form: **Goldens**:" 0 "names each" "**Goldens**: $BODY"
-expect "form: a table" 0 "names each" "$(printf 'goldens:\n\n| Output | Rows |\n| --- | --- |\n| `acceptance/results.csv` | 83 |\n')"
-expect "form: a full path" 0 "names each" "goldens: \`$A_RESULTS\`"
-expect "form: CRLF, as the web editor sends it" 0 "names each" "$(printf '## goldens:\r\n\r\n- %s\r\n\r\n## Other\r\n' "$BODY")"
+expect "a learner golden by full path" 0 "names each" "$(section "- \`$A_RESULTS\`")"
 
-# Globs, and what they may not do.
+# The format, where it holds.
+expect "free text after a dash" 0 "names each" "$(section '- `acceptance/results.csv` - decode up on 12 cycles, by `0.5 %`')"
+expect "text before the heading is ignored" 0 "names each" "$(printf 'Fixes #1\n\n`x` goldens: here\n\n'; section "$R")"
+expect "a line starting # ends the section" 0 "names each" "$(section "$R"; printf '\n### Replay summary\n\nany text `at all`\n```\n')"
+expect "CRLF, as the web editor sends it" 0 "names each" "$(printf '## goldens:\r\n\r\n- `acceptance/results.csv`\r\n\r\n## Other\r\ntext\r\n')"
+expect "blank lines are allowed" 0 "names each" "$(section '' "$R" '   ' '')"
+expect "the section may end the body" 0 "names each" "$(printf '## goldens:\n- `acceptance/results.csv`')"
 pr_with "$A_RESULTS" "$A_LINES"
-expect "a fixture's files by glob" 0 "names each" 'goldens: `acceptance/*`'
-expect "a fixture by directory" 0 "names each" 'goldens: `acceptance/`'
-expect "a fixture by its name" 0 "names each" 'goldens: new fixture `acceptance`'
-pr_with "$G/e1/lines.csv"
-expect "a short fixture name is literal" 0 "names each" 'goldens: `e1/*`'
-pr_with "$A_RESULTS" "$A_LINES"
-pr_with "$OLS_RESULTS"
-expect "a fixture name is not a prefix of another" 1 "not named: ols-sweep/results.csv" 'goldens: `ols-sweep-slo/results.csv`'
-pr_with "$OLS_SLO"
-expect "one fixture's glob stops at its own name" 1 "not named: ols-sweep-slo/results.csv" 'goldens: `ols-sweep/*`'
-expect "one fixture's name stops at its own name" 1 "not named: ols-sweep-slo/results.csv" 'goldens: `ols-sweep`'
+expect "two lines name two" 0 "names each" "$(section "$R" "$L")"
+expect "a fixture's outputs by glob" 0 "names each" "$(section '- `acceptance/*.csv`')"
 pr_with "$TTFT_A" "$TTFT_B"
-expect "a family by glob" 0 "names each" 'goldens: `ttft-staircase-*/`'
-expect "a family with a literal output" 0 "names each" 'goldens: `ttft-*/lines.csv`'
+expect "a family by glob" 0 "names each" "$(section '- `ttft-staircase-*/lines.csv`')"
+expect "a family's outputs by glob" 0 "names each" "$(section '- `ttft-*/*.csv`')"
 pr_with "$A_RESULTS" "$OLS_RESULTS"
-expect "one output across fixtures" 0 "names each" 'goldens: `*/results.csv`'
-expect "a bare star names nothing" 1 "does not name 2" 'goldens: `*`'
-expect "stars and slashes name nothing" 1 "does not name 2" 'goldens: `*/*` and `**` and `?/*`'
-expect "an extension alone names nothing" 1 "does not name 2" 'goldens: `*/*.csv`'
-expect "a letter between stars names nothing" 1 "does not name 2" 'goldens: `*e*` and `*e*/*` and `*/*e*`'
-expect "under three leading characters is not literal" 1 "does not name 2" 'goldens: `ac*/*` and `*/re*`'
-expect "a full path does not lend its directories" 1 "does not name 2" "goldens: \`$G/*/*\`"
-expect "a question mark is not literal" 1 "does not name 2" 'goldens: `???/*.csv`'
-expect "a star does not cross a slash" 1 "does not name 2" 'goldens: `*.csv` and `acc*.csv`'
-expect "a bare file name is not a learner golden" 1 "does not name 2" 'goldens: `results.csv`'
-pr_with "$G/goldens.yaml"
-expect "a fixture name is not the manifest" 1 "not named: goldens.yaml" 'goldens: `acceptance`'
+expect "one output across fixtures" 0 "names each" "$(section '- `*/results.csv`')"
+expect "a star does not cross a slash" 1 "does not hold up" "$(section '- `acc*.csv`' '- `ols*.csv`')"
+pr_with "$G/e1/lines.csv"
+expect "a short fixture name is literal" 0 "names each" "$(section '- `e1/*.csv`')"
+pr_with "$OLS_RESULTS"
+expect "a fixture name is not a prefix of another" 1 "not named: ols-sweep/results.csv" "$(section '- `ols-sweep-slo/results.csv`')"
+pr_with "$OLS_SLO"
+expect "one fixture's glob stops at its own name" 1 "not named: ols-sweep-slo/results.csv" "$(section '- `ols-sweep/*.csv`')"
 
-# Names that do not count.
+# none.
 pr_with "$A_RESULTS"
-expect "prose is not a name" 1 "does not name 1" 'goldens: acceptance/results.csv moves'
-expect "a name outside the section does not count" 1 "no goldens: section" 'Moved `acceptance/results.csv`.'
-expect "a name after the section does not count" 1 "does not name 1" "$(printf '## goldens:\n\nnone\n\n## Notes\n\n`acceptance/results.csv`\n')"
-expect "a bold paragraph ends the section" 1 "does not name 1" "$(printf 'goldens: none\n\n**Verified.** `acceptance/results.csv`\n')"
-expect "the template's comment names nothing" 1 "does not name 1" "$(printf '## goldens:\n\n<!-- for example `acceptance/results.csv`: up -->\n')"
-expect "a comment over several lines names nothing" 1 "does not name 1" "$(printf '## goldens:\n\n<!--\n`acceptance/results.csv`\n-->\n')"
-expect "the line a block comment ends on is raw, as GitHub renders it" 1 "does not name 1" "$(printf '## goldens:\n\n<!--\nhow to\n--> `acceptance/results.csv`\n')"
-expect "so is a one-line block comment" 1 "does not name 1" "$(printf '## goldens:\n\n<!-- how to --> `acceptance/results.csv`\n')"
-expect "a name on the line after a comment counts" 0 "names each" "$(printf '## goldens:\n\n<!-- how to -->\n`acceptance/results.csv`\n')"
-expect "a name after a comment over several lines counts" 0 "names each" "$(printf '## goldens:\n\n<!--\nhow to\n-->\n`acceptance/results.csv`\n')"
-expect "a comment does not open a section" 1 "no goldens: section" "$(printf '<!--\ngoldens: `acceptance/results.csv`\n-->\n')"
-expect "a fence does not open a section" 1 "no goldens: section" "$(printf '```\ngoldens: `acceptance/results.csv`\n```\n')"
-expect "a fence names nothing" 1 "does not name 1" "$(printf '## goldens:\n\n```\n`acceptance/results.csv`\n```\n')"
-expect "a heading in a fence does not end the section" 0 "names each" "$(printf '## goldens:\n\n```\n# output\n```\n\n`acceptance/results.csv`\n')"
-expect "the word in a sentence opens nothing" 1 "no goldens: section" 'The goldens: `acceptance/results.csv` moved.'
-expect "a heading about goldens opens nothing" 1 "no goldens: section" "$(printf '## How goldens work\n\n`acceptance/results.csv`\n')"
-expect "an empty section fails" 1 "does not name 1" "$(printf '## goldens:\n\n## Other\n')"
+expect "none fails when a golden moved" 1 "none, and a golden moved" "$(section none)"
+expect "none beside the name still fails" 1 "none, and a golden moved" "$(section none "$R")"
+
+# One section, opened by that one line.
+expect "two sections fail" 1 "2 goldens: sections" "$(section "$R"; printf '\n'; section "$R")"
+expect "two sections fail, the second empty" 1 "2 goldens: sections" "$(section "$R"; printf '\n## goldens:\n')"
+for line in '### goldens:' '## goldens' '## Goldens:' ' ## goldens:' '## goldens: ' '##  goldens:' \
+    'goldens:' '**goldens:**' '**Goldens**:' '- **Goldens:**' 'goldens: `acceptance/results.csv`'; do
+    expect "not the heading: $line" 1 "no goldens: section" "$(printf '%s\n\n%s\n' "$line" "$R")"
+done
+expect "an empty section fails" 1 "not named: acceptance/results.csv" "$(printf '## goldens:\n\n## Other\n')"
 expect "an empty body fails" 1 "no goldens: section" ""
+expect "a name past the section does not count" 1 "not named: acceptance/results.csv" "$(printf '## goldens:\n\n# Notes\n\n%s\n' "$R")"
+expect "an indented heading does not end the section" 1 "not of the required form" "$(section "$R" '  ## Notes')"
 
-# Fences, as GitHub closes them. A wrong close here is the fail-open case: the
-# pasted text reads as the section.
-LEDE='## goldens:\n\n'
-NAME='`acceptance/results.csv`'
-expect "a four-backtick fence stays one block over a three-backtick line" 1 "does not name 1" "$(printf "$LEDE"'````\n```\n%s\n```\n%s\n````\n' "$NAME" "$NAME")"
-expect "a name after a four-backtick fence counts" 0 "names each" "$(printf "$LEDE"'````\n```\n````\n\n%s\n' "$NAME")"
-expect "tildes do not close a backtick fence" 1 "does not name 1" "$(printf "$LEDE"'```\n~~~\n%s\n```\n' "$NAME")"
-expect "backticks do not close a tilde fence" 1 "does not name 1" "$(printf "$LEDE"'~~~\n```\n%s\n~~~\n' "$NAME")"
-expect "a shorter run does not close a tilde fence" 1 "does not name 1" "$(printf "$LEDE"'~~~~\n~~~\n%s\n~~~~\n' "$NAME")"
-expect "a closer takes no text after it" 1 "does not name 1" "$(printf "$LEDE"'```\n``` x\n%s\n```\n' "$NAME")"
-expect "a longer run closes a fence" 0 "names each" "$(printf "$LEDE"'```\n`````\n%s\n' "$NAME")"
-expect "an unclosed fence runs to the end" 1 "does not name 1" "$(printf "$LEDE"'```\n%s\n' "$NAME")"
-expect "a one-line triple-backtick span is not a fence" 0 "names each" "$(printf "$LEDE"'``` x ```\n\n%s\n' "$NAME")"
-expect "an opener with a backtick in its info is not a fence" 1 "may not render" "$(printf "$LEDE"'``` a`b
-%s
-' "$NAME")"
-expect "a tilde fence may hold a backtick in its info" 1 "does not name 1" "$(printf "$LEDE"'~~~ a`b\n%s\n~~~\n' "$NAME")"
-expect "a fence in a list item is a doubt" 1 "may not render" "$(printf "$LEDE"'%s\n\n- ```\n  x\n  ```\n' "$NAME")"
-expect "a fence in a quote is a doubt" 1 "may not render" "$(printf "$LEDE"'%s\n\n> ```\n> x\n> ```\n' "$NAME")"
-expect "an indented fence is a doubt" 1 "may not render" "$(printf "$LEDE"'%s\n\n    ```\n' "$NAME")"
-expect "and says what it doubts" 1 "sits in a list, a quote or an indent" "$(printf "$LEDE"'%s\n\n- ```\n  x\n  ```\n' "$NAME")"
+# Everything else in the section fails, beside a good name, so the line is the
+# only reason. Each of these got through a Markdown parser written here once, or
+# would have: fences of each kind and an indented closer, a span across lines, a
+# setext heading, indented code, raw HTML, comments, and the forms earlier PRs
+# used. `form` takes the section's lines, and wants the bad line's number.
+form() {
+    local name="$1"
+    shift
+    expect "not the form: $name" 1 "line 4 of the body: not of the required form" "$(section "$R" "$@")"
+}
+form "a fence" '```' "$R" '```'
+form "a four-backtick fence" '````' '```' '````'
+form "a tilde fence" '~~~' '~~~'
+form "an indented closer" '  ```'
+form "a one-line triple-backtick span" '``` x ```'
+form "a fence in a list item" '- ```'
+form "a fence in a quote" '> ```'
+form "a span across lines" 'a `b' 'c` d'
+form "a setext heading" 'Title' '---'
+form "a thematic break" '---'
+form "an equals underline" '==='
+form "a dash, then indented code" '-     `acceptance/lines.csv`'
+form "two spaces after the dash" '-  `acceptance/lines.csv`'
+form "an indented list item" '  - `acceptance/lines.csv`'
+form "a star bullet" '* `acceptance/lines.csv`'
+form "a plus bullet" '+ `acceptance/lines.csv`'
+form "a numbered item" '1. `acceptance/lines.csv`'
+form "a quoted item" '> - `acceptance/lines.csv`'
+form "a bare span" '`acceptance/lines.csv`'
+form "a span in a sentence" 'moved `acceptance/lines.csv` up'
+form "prose" 'acceptance/lines.csv moves'
+form "a colon after the name" '- `acceptance/lines.csv`: up'
+form "text with no dash" '- `acceptance/lines.csv` up'
+form "a dash with no text" '- `acceptance/lines.csv` -'
+form "two names on a line" '- `acceptance/lines.csv` `goldens.yaml`'
+form "a double-backtick span" '- ``acceptance/lines.csv``'
+form "escaped backticks" '- \`acceptance/lines.csv\`'
+form "an unclosed span" '- `acceptance/lines.csv'
+form "an empty span" '- ``'
+form "a one-line comment" '<!-- `acceptance/lines.csv` -->'
+form "a comment over lines" '<!--' 'how to' '-->'
+form "raw HTML, a pre" '<pre>' "$R" '</pre>'
+form "raw HTML, details" '<details>' '</details>'
+form "raw HTML, an inline tag" '<b>acceptance/lines.csv</b>'
+form "a table" '| Output | Rows |' '| --- | --- |'
+form "none in a sentence" 'none move'
+form "None" 'None'
+form "none with a dash" '- none'
+form "a tab before the dash" "$(printf '\t- `acceptance/lines.csv`')"
+form "a trailing space" '- `acceptance/lines.csv` '
+expect "the template's old comment fails" 1 "not of the required form" "$(section '<!-- for example `acceptance/results.csv`: up -->')"
+expect "a section in a comment fails" 1 "not of the required form" "$(printf '<!--\n## goldens:\n- `acceptance/results.csv`\n-->\n')"
+expect "a section in a fence fails" 1 "not of the required form" "$(printf '```\n## goldens:\n- `acceptance/results.csv`\n```\n')"
 
-# Spans and comments, read left to right: whichever opens first hides the other.
-expect "a comment opener in a span opens nothing" 0 "names each" "$(printf "$LEDE"'- `<!--` opens a comment\n- %s\n' "$NAME")"
-expect "a comment opener in a long span opens nothing" 0 "names each" "$(printf "$LEDE"'- ``<!--`` opens a comment\n- %s\n' "$NAME")"
-expect "a span in an inline comment names nothing" 1 "does not name 1" "$(printf 'goldens: none <!-- %s --> here\n' "$NAME")"
-expect "a name after an inline comment counts" 0 "names each" "$(printf 'goldens: <!-- x --> %s\n' "$NAME")"
-expect "an inline comment with no end on its line is a doubt" 1 "may not render" "$(printf 'goldens: %s <!-- x\n\ny -->\n' "$NAME")"
-expect "a less-than sign is text" 0 "names each" "$(printf 'goldens: 1 < 2 %s\n' "$NAME")"
-expect "an escaped backtick opens no span" 1 "does not name 1" 'goldens: \`acceptance/results.csv\`'
-expect "an escaped backtick pairs with nothing" 0 "names each" 'goldens: \` then `acceptance/results.csv`'
-expect "a double-backtick span names" 0 "names each" 'goldens: ``acceptance/results.csv``'
-expect "a span's padding is not the name" 0 "names each" 'goldens: `` acceptance/results.csv ``'
-expect "a span of another length does not close one" 1 "cannot tell how GitHub renders" 'goldens: ``acceptance/results.csv`'
-expect "a stray backtick is a doubt" 1 "may not render" "$(printf 'goldens: %s and one ` more\n' "$NAME")"
-expect "and says what it doubts" 1 "has no partner on its line" "$(printf 'goldens: %s and one ` more\n' "$NAME")"
-expect "a span across lines is a doubt" 1 "may not render" "$(printf "$LEDE"'%s `a\nb`\n' "$NAME")"
-expect "a stray backtick just above the section is a doubt" 1 "may not render" "$(printf 'one ` here\ngoldens: %s\n' "$NAME")"
-expect "a stray backtick elsewhere is no doubt" 0 "names each" "$(printf 'one ` here\n\ngoldens: %s\n\n## Other\n\none ` there\n' "$NAME")"
-expect "an indented name is a doubt" 1 "may not render" "$(printf "$LEDE"'    %s\n' "$NAME")"
-expect "a tab-indented name is a doubt" 1 "may not render" "$(printf "$LEDE"'\t%s\n' "$NAME")"
-expect "a nested list item is not indented enough to doubt" 0 "names each" "$(printf "$LEDE"'- moved:\n  - %s\n' "$NAME")"
-expect "a heading indented up to three ends the section" 1 "does not name 1" "$(printf 'goldens: none\n\n  ## Notes\n\n%s\n' "$NAME")"
+# Names, beside a good one, so the rule is the only reason.
+name() {
+    expect "not a name: $1" 1 "line 4 of the body: the name is not allowed" "$(section "$R" "- \`$1\`")"
+}
+for bad in '*' '**' '*/*' '?/*' '*.csv' '*/*.csv' '*.gz' '*e*' '*e*/*' '*/*e*' '*/re*.csv' 'ac*/*.csv' '???/*.csv' \
+    'acceptance/*' 'acceptance/???' '*/*/results.csv' \
+    '*.golden' '*.txt' '*.yaml' 'cmd/whatif/testdata/*' 'cmd/whatif/testdata/*.golden' 'cmd/whatif/testdata/*/x.golden' \
+    'cmd/*/testdata/ttft-open-loop-short.golden' 'internal/engines/steadystate/testdata/*.txt' \
+    "$G/*" "$G/*/*" "$G/*/*.csv" "$G/*/*/lines.csv" \
+    'internal/*/*/*/*/*/*/*' 'internal/*/*/*/*/*/*/*/results.csv' 'internal/engines/*/results.csv' \
+    'internal/engines/analyzers/learnreplay/testdata/*/acceptance/results.csv' \
+    '<!--' '@(acceptance)/results.csv' '[a-z]*/results.csv' 'a b.csv' '$(id)' '../acceptance/results.csv/x'; do
+    name "$bad"
+done
+pr_with "$A_RESULTS" "$A_LINES"
+expect "a literal directory lends a glob nothing" 1 "not allowed" "$(section '- `internal/*/*/*/*/*/*/*`')"
+expect "a refused name names nothing" 1 "not named: acceptance/lines.csv" "$(section "$R" '- `*/*.csv`')"
+expect "a name that is no file is not a pass" 1 "not named: acceptance/results.csv" "$(section '- `acceptance`' '- `acceptance/`')"
 
 # Paths git would C-quote. Unquoted, each is a golden like any other.
 for odd in 'a"b.csv' "$(printf 'a\tb.csv')" 'a\b.csv' "$(printf 'a\nb.csv')"; do
     pr_with "$G/acceptance/$odd"
     expect "a path git quotes is a golden: $(printf '%q' "$odd")" 1 "this PR moves 1 golden and" "no section"
-    expect "and a glob names it: $(printf '%q' "$odd")" 0 "names each" 'goldens: `acceptance/*`'
+    expect "and a glob names it: $(printf '%q' "$odd")" 0 "names each" "$(section '- `acceptance/*.csv`')"
 done
 pr_with "$G/acceptance/$(printf 'x\n::error::injected.csv')"
 CASES=$((CASES + 1))
@@ -234,18 +252,14 @@ if printf '%s\n' "$OUT" | grep -q '^::'; then
 else
     PASS=$((PASS + 1)); echo "ok   a path with a newline prints no workflow command"
 fi
-pr_with cmd/main.go "$DOC"
-expect "the file count is plural" 0 "2 files changed" "no section"
-pr_with "$DOC"
-expect "the file count is singular" 0 "1 file changed" "no section"
 
 # Renames and deletions: both ends of a rename move.
 pr_with "$A_RESULTS"
 git -C "$BASE" reset -q --hard "$BASE_SHA"
 git -C "$BASE" mv "$A_RESULTS" "$G/acceptance/renamed.csv"
 git -C "$BASE" commit -q -m rename
-expect "a rename moves both ends" 1 "does not name 1" 'goldens: `acceptance/renamed.csv`'
-expect "a rename named at both ends passes" 0 "names each" 'goldens: `acceptance/renamed.csv` and `acceptance/results.csv`'
+expect "a rename moves both ends" 1 "not named: acceptance/results.csv" "$(section '- `acceptance/renamed.csv`')"
+expect "a rename named at both ends passes" 0 "names each" "$(section '- `acceptance/renamed.csv`' "$R")"
 git -C "$BASE" reset -q --hard "$BASE_SHA"
 git -C "$BASE" rm -q "$A_LINES"
 git -C "$BASE" commit -q -m delete
@@ -255,19 +269,17 @@ expect "a deleted golden moved" 1 "not named: acceptance/lines.csv" "no section"
 pr_with "$A_RESULTS"
 PWN="$WORK/pwned"
 for hostile in "\$(touch $PWN)" "\`touch $PWN\`" "; touch $PWN" "\${IFS}touch $PWN"; do
-    expect "a hostile body is not run: $hostile" 1 "FAIL: goldens" "$(printf 'goldens:\n\n%s\n`%s`\n' "$hostile" "$hostile")"
+    expect "a hostile line is not run: $hostile" 1 "FAIL: goldens" "$(section "$hostile" "- \`$hostile\`")"
 done
-expect "a hostile span beside a real name is not run" 0 "names each" "$(printf 'goldens: `acceptance/results.csv` `$(touch %s)`\n' "$PWN")"
+expect "a hostile free text is not run" 0 "names each" "$(section "$R - \$(touch $PWN) \`touch $PWN\`")"
 CASES=$((CASES + 1))
 if [ -e "$PWN" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL a hostile body ran: $PWN exists"
 else
     PASS=$((PASS + 1)); echo "ok   no hostile body ran"
 fi
-expect "an extended glob is not a pattern" 1 "does not name 1" 'goldens: `@(acceptance)/results.csv`'
-expect "a bracket is not a pattern" 1 "does not name 1" 'goldens: `[a-z]*/results.csv`'
 CASES=$((CASES + 1))
-OUT="$(cd "$BASE" && PR_BODY="$(printf 'goldens:\n::error::injected\n`::warning::injected`\n')" bash "$GATE" "$BASE_SHA" HEAD 2>&1)"
+OUT="$(cd "$BASE" && PR_BODY="$(section '::error::injected' '- `::warning::injected`' '- `*/*.csv` - ::notice::injected')" bash "$GATE" "$BASE_SHA" HEAD 2>&1)"
 if [ "${OUT#*injected}" != "$OUT" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL the body reached the job's output: $OUT"
 else
