@@ -1428,7 +1428,7 @@ not. Write the section like this:
 - `goldens.yaml`: lists it
 - `engine-run-event-counts.txt`: one `settle.Observe` line per cycle
 
-(the per-output summary from `make learner-goldens-check`)
+(for the learner goldens, the per-output summary from `make learner-goldens-check`)
 ```
 
 **What counts as a golden:** every file under
@@ -1442,6 +1442,10 @@ recordings and `goldens.yaml`), `cmd/whatif/testdata/*.golden`,
 `**goldens:**`. It ends at the next heading, or the next line that starts in
 bold. A list item does not open it. A PR that moves no golden needs no section.
 
+The check reads the body as GitHub renders it: a fence closes only on its own
+character at its own length or longer, a comment that opens a line runs to the
+end of the line holding `-->`, and a `<!--` inside a code span is text.
+
 **How to name a file.** Only text in backticks counts, and not inside a fenced
 block or an HTML comment, so the template's comment names nothing.
 
@@ -1454,8 +1458,16 @@ block or an HTML comment, so the template's comment names nothing.
 | `goldens.yaml` | the manifest. A new fixture changes it, so name it |
 | `engine-run-event-counts.txt`, `ttft-*.golden` | a golden outside the learnreplay directory, by file name or by its full path |
 
-A full repository path also works. `*` stops at a slash, so `*.csv` names
-nothing, and a name of wildcards alone (`*`, `*/*`) names nothing.
+A full repository path also works. `*` stops at a slash. A name must carry a
+literal fixture or output part: one part below the golden's directory spelled
+out, or opening with at least three literal characters. So `*.csv`, `*/*.csv`,
+`*e*`, `*/*` and `cmd/whatif/testdata/*` name nothing.
+
+**When GitHub might render it otherwise.** The check fails, and says why, rather
+than guess. That is a comment that opens inside a line and does not end on it, a
+backtick in the section with no partner on its line, a fence in the section
+inside a list, a quote or an indent, and a name indented four spaces or more.
+Move the names to plain lines or top-level list items.
 
 **What the check does not do.** It compares file names with the section. It
 does not run a replay, read a CSV, or check the direction or the summary: those
@@ -1574,7 +1586,7 @@ one is a row in `known-failures.yaml` with these fields:
 | `expect` | the violation kind the case fails with |
 | `finding` | the defect |
 | `measured` | how often it failed, and the first failure, when the row was written |
-| `owner` | what clears it: an issue (`#391`), or `open`. `CheckLedger` refuses anything else |
+| `owner` | what clears it: an issue (`#394`), or `open`. `CheckLedger` checks that form and reads no tracker, so a closed issue passes |
 
 The test is strict both ways:
 

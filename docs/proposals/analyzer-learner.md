@@ -728,13 +728,18 @@ As built (#495), the check is `.github/workflows/ci-goldens-gate.yaml`, which ru
 `deploy/ci-pr-checks/goldens-section.sh`. `hack/check-goldens-section.sh` tests it
 on fixture PRs from `make lint-deploy-scripts`. The format is in
 [testing](../developer-guide/testing.md#the-goldens-section). It takes the forms
-earlier PRs used most: a heading, or a line that starts `goldens:`. The check
-compares file names only. The direction and the pasted summary stay with the
-reviewer, and nothing machine-checks them. Run on the 77 PRs merged since #388,
+earlier PRs used most: a heading, or a line that starts `goldens:`. It watches
+more than this rule's replay outputs: also the `cmd/whatif` goldens and schema,
+`goldens.yaml`, and each `recording.jsonl.gz`, so a retaken recording or a new
+fixture is named too. The check compares file names only. The direction and the
+pasted summary stay with the reviewer, and nothing machine-checks them. Run on
+the 77 PRs merged since #388,
 with their real bodies and changed paths, the 46 that moved no golden pass. Of
-the 31 that moved one, 9 pass and 22 would have failed: 12 have no section it
+the 31 that moved one, 8 pass and 23 would have failed: 12 have no section it
 reads (several wrote a list item, `- **Goldens:**`), 7 named everything but
-`goldens.yaml`, and 3 named only part of what moved (#426, #445, #488).
+`goldens.yaml`, 3 named only part of what moved (#426, #445, #488), and one
+(#406) named its golden on a line indented four spaces, which the check will not
+read as a name because that can render as a code block.
 
 **Per-path counters must be above zero.** P1-obs admitted, mu samples written,
 mu yields (served, sibling, stale), OLS cycles, pinned cycles, instant-KV
@@ -788,10 +793,12 @@ class below runs on it as well as on direct inputs.
 
 **Known-failures ledger.** Some classes fail on today's code by design. Those
 listed when 0b landed that have since been cleared are known truth on the
-time-base family (A5, #393), first sample on k2 (#392) and edges on the k2 key
-boundary (#396). 0b commits a ledger of (class, learner, finding,
-measured result, the issue that clears it or "open"), and `CheckLedger` refuses
-any other owner. A listed case runs and must
+time-base family (A5, #393), first sample on k2 (#392), first sample on start
+time (`first-sample/start-time/between-sample-and-default`, 86f9cb5f0) and edges
+on the k2 key boundary (#396). 0b commits a ledger of (class, learner, finding,
+measured result, the issue that clears it or "open"), and `CheckLedger` holds
+the owner to that form. It reads no tracker, so a closed issue passes. A listed
+case runs and must
 still fail; a listed case that starts passing fails the build until its row is
 removed. A PR that fixes one removes its row. Nothing is skipped and no
 tolerance is widened to pass a defect.
@@ -851,9 +858,9 @@ not cover a key.
 `D/property_mutants_test.go`, and a test holds it to the mutants. Each
 finding above is in exactly one state:
 
-- **Caught:** 35 findings. For each, a mutant puts the defect back, and its
+- **Caught:** 34 findings. For each, a mutant puts the defect back, and its
   class fails on that mutant. For 26 a mutant runs the production learner
-  (a policy key, rows, or a stub); 9 are caught only by a toy, and the code
+  (a policy key, rows, or a stub); 8 are caught only by a toy, and the code
   table marks them "caught (toy)". "Restart fix stubbed" is caught: its
   mutant stubs the Ready time through the analyzer's `readySince` seam, the
   restart case fails on it, and the per-path counter "joined refusals with a
