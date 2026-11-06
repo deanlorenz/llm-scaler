@@ -1519,6 +1519,14 @@ the true spread. The 30k and 37k prompts sent at `cv` 0.06 read that way. So on
 prompts longer than the top bound Q1 raises the figure instead of correcting it,
 and S2's gate on `PromptSpreadClamped` stops it acting there.
 
+**"Reads high, never low" needs one window.** The upper-bound second moment
+cannot read below the true `cv` only when the mean and the histogram count the
+same requests. The stand-in broke that (`[5m]` against `[1m]`), and `cv` read 0
+on at least one cycle of the short run, with the mean above what the buckets
+allow. Q1 puts both on `[1m]`, but the mean's denominator is the request rate,
+not the histogram's own count, so a load change inside the minute can still
+read low. This is not measured: it needs a recording with the histogram.
+
 **The transfer term did not move a figure.** Off against on, the prediction read
 the same on all three recordings (ratio 1.0000), and no cycle gained
 `TransferOmitted`: each is `DecodeEngineMeasured`, where the decode engine's TTFT
