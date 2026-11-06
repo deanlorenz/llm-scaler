@@ -35,7 +35,12 @@ const (
 
 	// residualPattern is every spelling of an old name. Whatever it finds
 	// outside a rule's claim is unclassified, and --apply refuses it.
-	residualPattern = `wva|Wva|WVA|(?i:workload[-_ ]?variant)|llm-scaling-manager|ev-shindin|llm-d/llm-d-workload`
+	residualPattern = `wva|Wva|WVA|(?i:workload[-_ ]?variant|variant-autoscaler|variantautoscaler)|llm-scaling-manager|ev-shindin|llm-d/llm-d-workload`
+
+	// sweepPattern is what the final sweep looks for, in any case. Unlike the
+	// residual pattern it also finds a capital inside a word, so nothing is
+	// left out before a person has seen why.
+	sweepPattern = `(?i)wva|workload-variant-autoscaler|workload_variant|variant-autoscaler|variantautoscaler`
 )
 
 // Path classes for the report.
@@ -69,7 +74,7 @@ func classify(p string) string {
 		return ClassGoE2E
 	case strings.HasSuffix(p, ".go"):
 		return ClassGo
-	case matchAny(historyPaths, p):
+	case strings.HasPrefix(p, "docs/plans/"), strings.HasPrefix(p, "docs/proposals/"), strings.HasPrefix(p, "comparison/"):
 		return ClassHistory
 	case strings.HasSuffix(p, ".md"):
 		return ClassDocs
@@ -93,14 +98,6 @@ func classify(p string) string {
 var binaryExtensions = []string{
 	".gz", ".tgz", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf",
 	".docx", ".pptx", ".xlsx", ".so", ".a", ".bin", ".zst", ".xz",
-}
-
-// historyPaths are records of what was decided and when. They keep the names of
-// their time; only a link to a file the tool moved is updated.
-var historyPaths = []string{
-	"docs/plans/**",
-	"docs/proposals/**",
-	"comparison/**",
 }
 
 // scalerTLS mints the external scaler's certificates.
@@ -139,15 +136,15 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		// The Go module path: the one switch. It runs before every other
 		// keep, because a kept file still has to import the renamed module.
 		{Name: "module-path", Class: "module", Pattern: `(?:^|[^/.\w-])(?P<m>github\.com/(?:llm-d/llm-d-workload-variant-autoscaler|ev-shindin/llm-scaling-manager)(?:/internal|/api|/cmd|/test|/pkg)?)(?:$|[^\w.-])`,
-			Fn: moduleSwap(t.Module), NotPaths: append([]string{"README.md", "CONTRIBUTING.md", "docs/**", ".github/**", "Dockerfile.warmpool-proxy", "OWNERS"}, historyPaths...),
+			Fn: moduleSwap(t.Module), NotPaths: []string{"README.md", "CONTRIBUTING.md", "docs/**", ".github/**", "Dockerfile.warmpool-proxy", "OWNERS"},
 			Contexts: []string{CtxText, CtxComment, CtxString, CtxImport}},
 		{Name: "module-path-docs", Class: "module", Pattern: `github\.com/llm-d/llm-d-workload-variant-autoscaler/(?:internal|api|cmd|test|pkg)\b`,
-			Fn: moduleSwap(t.Module), Contexts: []string{CtxText}, NotPaths: historyPaths},
+			Fn: moduleSwap(t.Module), Contexts: []string{CtxText}},
 
 		kept("keep-upstream-slug", "external", `llm-d/llm-d-workload-variant-autoscaler`, "names the repository this project forked from"),
 		kept("keep-ig-wva", "external", `(?:github\.com/llm-d-incubation/)?ig-wva`, "a separate repository"),
 		kept("keep-llmd-docs", "external", `llm-d\.ai/docs/architecture/Components/workload-variant-autoscaler|README\.wva\.md`, "a page in another project's docs"),
-		kept("keep-upstream-prose", "external", `(?i:llm-d's) (?:workload-variant-autoscaler|WVA)(?: \(WVA\))?|workload-variant-autoscaler \(WVA\)|still named WVA`, "names the other product"),
+		kept("keep-upstream-prose", "external", `(?i:llm-d's) (?:workload-variant-autoscaler|WVA)(?: \(WVA\))?|workload-variant-autoscaler \(WVA\)|still named WVA|[Uu]pstream WVA|WVA upstream`, "names the other product"),
 
 		// What an older release wrote, kept as it wrote it: a test reads these
 		// to prove the new code still understands them.
@@ -166,16 +163,6 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		{Name: "fixture-sort-order-shell", Class: "testdata", Pattern: `wva-ctl`, Replace: "zz-ctl",
 			Paths: []string{"hack/check-watch-namespace-list.sh"}},
 
-		// Files that keep their names, so what links to them keeps the name too.
-		{Name: "keep-history-file-names", Class: "file-ref", Pattern: `proposals/wva-[a-z-]+\.md|wva-vs-keda-scaling-study|wva-external-scaler-(?:proposal|alternative)|exp[0-9a-z]+_wva\.png`, Action: Keep,
-			Contexts: []string{CtxText, CtxComment, CtxString}, Why: "plans, proposals and studies keep their file names"},
-
-		// History keeps its names; only links to moved files change, below.
-		{Name: "history-file-link", Class: "file-ref", Pattern: `two-variant-wva-benchmark|infra_wva\.sh|build-wva-image-local\.sh|two-variant-wva\.yaml|tail_wva_logs|dump_wva_(?:full|target)_timeseries`,
-			Fn: renameFileWord, Paths: historyPaths},
-		{Name: "keep-history", Class: "history", Pattern: residualPattern, Action: Keep, Paths: historyPaths,
-			Contexts: []string{CtxText, CtxPath}, Why: "plans, proposals and studies are records of their time"},
-
 		{Name: "keep-whole-file", Class: "legacy-alias", Pattern: residualPattern, Action: Keep, Paths: keepWholeFiles,
 			Contexts: []string{CtxText, CtxComment, CtxString, CtxTag, CtxPath}, Why: "the fall-back to the old names: the old names are the point"},
 
@@ -183,10 +170,13 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		kept("keep-warmpool-proxy", "image", `ghcr\.io/ev-shindin/(?:llm-scaler/)?warmpool-proxy`, "pinned by digest; no image exists under the new owner (see the report)"),
 		kept("keep-fma-image", "image", `ghcr\.io/ev-shindin/(?:dual-pods-controller|fma-launcher)|ev-shindin/llm-d-fast-model-actuation`, "another project's image or fork"),
 		kept("keep-old-repo-name", "repo-link", `github\.com/ev-shindin/llm-scaler/[^\s)\]"'`+"`"+`>]*`, "a numbered link on the repository's earlier name"),
-		{Name: "keep-rules-screenshots", Class: "image", Pattern: `wva\.rules(?:-firing)?\.png`, Action: Keep,
-			Contexts: []string{CtxText, CtxComment, CtxString, CtxPath}, Why: "a screenshot: the picture still shows the old group name"},
-		{Name: "keep-other-product-paths", Class: "external", Pattern: `from-upstream-wva|autoscaling-nvidia-mooncake-sglang-vs-wva`, Action: Keep,
-			Contexts: []string{CtxText, CtxComment, CtxString, CtxPath}, Why: "these files are about the other product, so their names stay"},
+		{Name: "keep-other-product-paths", Class: "external", Pattern: `from-upstream-wva`, Action: Keep,
+			Contexts: []string{CtxText, CtxComment, CtxString, CtxPath}, Why: "this guide is about the other product, so its name stays"},
+
+		// A market comparison: its WVA is the other product, by the repository it
+		// links and beside ig-wva, not this project under an earlier name.
+		{Name: "keep-positioning-doc", Class: "external", Pattern: `\bWVA\b`, Action: Keep,
+			Paths: []string{"docs/proposals/capacity-planner-positioning.md"}, Why: "names the other product"},
 
 		// The upstream guide talks about two installs at once: upstream's names
 		// on upstream's objects stay, and this project's names move.
@@ -236,6 +226,13 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		{Name: "tls-common-name-leaf", Class: "tls", Pattern: `serving "wva-external-scaler\.\$\{WVA_NS\}\.svc"`, Replace: `serving "llmsm-external-scaler.${LLMSM_NS}.svc"`, Paths: scalerTLS},
 		{Name: "tls-common-name-cert-manager", Class: "tls", Pattern: `commonName: \$\{dns1\}`, Replace: "commonName: llmsm-external-scaler.${LLMSM_NS}.svc", Paths: scalerTLS},
 
+		// An article in front of a name whose first sound changes. Only the
+		// article is claimed; the name goes on to its own row. wva- and
+		// workload-variant become scaling-manager, a consonant; wva_ and WVAName
+		// become llmsm_ and LLMSMName, said "el".
+		{Name: "article-before-consonant", Class: "prose", Pattern: `(?P<m>[Aa]n) `?(?:wva-|workload-variant)`, Fn: articleA},
+		{Name: "article-before-vowel-sound", Class: "prose", Pattern: `(?P<m>[Aa]) `?(?:wva_|WVA[A-Z_])`, Fn: articleAn},
+
 		// Metrics and alert names.
 		{Name: "metric-name", Class: "metric", Pattern: metricPattern(metrics), Replace: metricPre + "${s}"},
 		{Name: "alert-anchor", Class: "alert", Pattern: `#wva([a-z]{4,})`, Replace: "#llmsm$1", Contexts: []string{CtxText, CtxComment, CtxString}},
@@ -261,11 +258,11 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		{Name: "underscore-prefix", Class: "word", Pattern: `\bwva_`, Replace: metricPre},
 		{Name: "underscore-then-object", Class: "k8s-object", Pattern: `_wva-`, Replace: "_" + kubeName + "-"},
 		{Name: "underscore-inner", Class: "word", Pattern: `_wva_`, Replace: "_scaling_manager_"},
-		{Name: "underscore-suffix", Class: "word", Pattern: `_wva\b`, Replace: "_scaling_manager"},
+		pathToo(Rule{Name: "underscore-suffix", Class: "word", Pattern: `_wva\b`, Replace: "_scaling_manager"}),
 		pathToo(Rule{Name: "kube-prefix", Class: "k8s-object", Pattern: `\bwva-`, Replace: kubeName + "-"}),
 		pathToo(Rule{Name: "kube-suffix", Class: "k8s-object", Pattern: `-wva\b`, Replace: "-" + kubeName}),
 		{Name: "dir-word", Class: "k8s-object", Pattern: `/wva\b`, Replace: "/" + kubeName},
-		{Name: "dot-word", Class: "word", Pattern: `\bwva\.`, Replace: kubeName + "."},
+		pathToo(Rule{Name: "dot-word", Class: "word", Pattern: `\bwva\.`, Replace: kubeName + "."}),
 		{Name: "bare-word", Class: "word", Pattern: `\bwva\b`, Replace: kubeName},
 
 		// Prose. The first rows see the word before WVA so an article is not
@@ -319,6 +316,9 @@ func renameFileWord(claimed, _ string) string {
 		"tail_wva_", "tail_scaling_manager_", "wva", kubeName)
 	return r.Replace(claimed)
 }
+
+func articleA(claimed, _ string) string  { return claimed[:1] }
+func articleAn(claimed, _ string) string { return claimed + "n" }
 
 // moduleSwap keeps what follows the module path and swaps the path itself.
 func moduleSwap(target string) func(string, string) string {
