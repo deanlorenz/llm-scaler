@@ -1442,6 +1442,85 @@ many rows changed and the first change with its sign and size.
 `TestGoldens_OLSSweepReplayFitsOLS`. If your change moves them, update them in
 the test and say why in the PR.
 
+#### The `goldens:` section
+
+A PR that moves a golden names it in its body. CI fails the PR when it does
+not. The format is strict, line by line:
+
+```markdown
+## goldens:
+
+- `acceptance/results.csv` - decode demand up on 12 cycles, by at most 0.5 %
+- `throughput-sweep/*.csv` - new fixture
+- `throughput-sweep/recording.jsonl.gz` - new fixture
+- `goldens.yaml` - lists it
+- `engine-run-event-counts.txt` - one `settle.Observe` line per cycle
+
+### Replay summary
+
+(for the learner goldens, the per-output summary from `make learner-goldens-check`)
+```
+
+**What counts as a golden:** every file under
+`internal/engines/analyzers/learnreplay/testdata/goldens/` (outputs,
+recordings and `goldens.yaml`), `cmd/whatif/testdata/*.golden`,
+`cmd/whatif/testdata/schema-v*.txt`, and
+`internal/engines/steadystate/testdata/engine-run-event-counts.txt`.
+
+**The section.** It starts at one line that is exactly `## goldens:`, at column
+0. A body with two such lines fails. It ends at the next line that starts with
+`#`, or at the end of the body. A PR that moves no golden needs no section, and
+the check does not read one.
+
+**Its lines.** A blank line is allowed. Every other line must be one of:
+
+- `none`, which fails if a golden moved.
+- A dash, a space, one name in backticks, and optionally ` - ` and free text.
+
+Anything else fails, and the check gives the line's number in the body. That
+covers prose, tables, fences, comments and indented lines, whatever they would
+render as, so prose and pasted output go under the next heading.
+
+**Names.**
+
+| name | names |
+| --- | --- |
+| `acceptance/results.csv` | that output |
+| `acceptance/*.csv` | the outputs of that fixture. Name its `recording.jsonl.gz` as well if it moved |
+| `ttft-staircase-*/*.csv` | those outputs of each fixture that matches |
+| `goldens.yaml` | the manifest. A new fixture changes it, so name it |
+| `engine-run-event-counts.txt`, `ttft-*.golden` | a golden outside the learnreplay directory, by file name or by its full path |
+
+A full repository path also works, and then names only a golden under that
+path. A name with a wildcard needs at least 3 literal characters in its file part,
+a fixture part that is literal or has at least 6 literal characters, and, with no
+fixture part, a file part that starts with a literal character. So
+`acceptance/*`, `*/results.csv`, `*/*.csv` and `*.golden` are refused. A bare name
+that matches goldens under two directories fails. `*` stops at a slash.
+
+**What the check does not do.** It catches honest mistakes, not an adversary: a
+PR runs its own copy of it. It compares file names with the section. It does not
+run a replay, read a CSV, or check the direction or the summary: those are for
+the reviewer. Naming a file that did not move is not an error.
+
+**How it runs.** `.github/workflows/ci-goldens-gate.yaml` runs on `opened`,
+`edited`, `reopened` and `synchronize`, so editing the body re-runs it without a
+new commit. It has its own workflow because `edited` on `ci-pr-checks.yaml` would
+restart the e2e jobs on every title change. The workflow passes
+`github.event.pull_request.body` to `deploy/ci-pr-checks/goldens-section.sh` in
+the `PR_BODY` environment variable, and diffs the merge commit against its first
+parent. It runs on `pull_request`, with a `contents: read` token. The script
+never evaluates the body and never prints it.
+
+To try a body before you open the PR:
+
+```bash
+PR_BODY="$(cat body.md)" bash deploy/ci-pr-checks/goldens-section.sh "$(git merge-base main HEAD)" HEAD
+```
+
+`hack/check-goldens-section.sh` runs the script on fixture PRs, and holds the
+workflow to its event, token and env var. `make lint-deploy-scripts` runs it.
+
 #### Write the acceptance run again
 
 To write the acceptance run as a raw recording:
@@ -1537,7 +1616,7 @@ one is a row in `known-failures.yaml` with these fields:
 | `expect` | the violation kind the case fails with |
 | `finding` | the defect |
 | `measured` | how often it failed, and the first failure, when the row was written |
-| `owner` | what clears it: a PR of the plan (`PR 3`), an issue (`#391`), or `open` |
+| `owner` | what clears it: an issue (`#394`), or `open`. `CheckLedger` checks that form and reads no tracker, so a closed issue passes |
 
 The test is strict both ways:
 

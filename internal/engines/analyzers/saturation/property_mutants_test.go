@@ -56,7 +56,7 @@ var findings = []finding{
 	{row: "pinned B from unsteady readings", status: statusCaught},
 	{row: "k2 at 8 % behind a step", status: statusCaught},
 	{row: "Full fit never runs at N >= 2, B stays 6 ms (#273 A3)", status: statusCaught},
-	{row: "k == 0 unsettles (#273 A4)", status: statusEscaping, why: "a k == 0 row restarting a settle is a settle-tracker defect; 2.3 puts its negative control in PR 1, the first PR with a tracker that reads the presence bits"},
+	{row: "k == 0 unsettles (#273 A4)", status: statusCaught},
 	{row: "router queue without engine metrics", status: statusEscaping, why: "missing-duplicated/k2/unknown-gauges passes on today's code, and no row edit reproduces the pre-fix reading of a router queue as the engine's"},
 	{row: "Instant k against a rate[1m] ITL (#273 A5)", status: statusCaught},
 	{row: "Sum of per-pod one-minute peaks", status: statusCaught},
@@ -81,12 +81,15 @@ var findings = []finding{
 	{row: "prefill never learns (#144)", status: statusCaught},
 	{row: "Imbalance audit (load moved between replicas)", status: statusCaught},
 	{row: "Settle holes: restart", status: statusCaught},
-	{row: "Settle holes: fall, rate escape, idle return, lend", status: statusEscaping, why: "only the restart and joiner events have a case; the others need the settle tracker (PR 1)"},
+	{row: "Settle holes: fall", status: statusCaught},
+	{row: "Settle holes: rate escape", status: statusCaught},
+	{row: "Settle holes: idle return", status: statusCaught},
+	{row: "Settle holes: lend", status: statusCaught},
 	{row: "Restart fix stubbed", status: statusCaught},
 	{row: "k2 adopts its first reading (#392)", status: statusCaught},
 	{row: "Speculative decoding prices the ITL step as a token (#274)", status: statusCaught},
 	{row: "KV per request assumes one output length (#276)", status: statusCaught},
-	{row: "'For good' self-sealing low mu", status: statusEscaping, why: "the closed-loop probe lands in PR 3"},
+	{row: "'For good' self-sealing low mu", status: statusEscaping, why: "today's code has it, so no mutant can put it back: TestClosedLoopProbe_KnownFailing_ASlowReplicaInsideTheServedBoundSealsTheFleet holds the probe to seeing it, and the fix is #495's"},
 }
 
 // Mutant levels.
@@ -133,7 +136,32 @@ func propertyMutants() []propMutant {
 		t.SteadyGate.SteadyFor = config.PolicyDuration(time.Nanosecond)
 	}))
 	neverSteady := steadinessOf(tuningWith(func(t *config.AnalyzerTuning) { t.SteadyGate.MaxKDrift = 1e-12 }))
+	neverIdle := steadinessOf(tuningWith(func(t *config.AnalyzerTuning) { t.SteadyGate.IdleRows = 1000 }))
+	idleOnKeyTrace := func() itlLearner {
+		l := newTrackerITL(steadinessOf(tuningDefault))
+		l.adm.IdleOnEvidence = false
+		return l
+	}
 	return []propMutant{
+		{row: "k == 0 unsettles (#273 A4)", caseID: "missing-duplicated/itl/failed-itl-query-not-idle", level: levelStub,
+			how:   "Admission.IdleOnEvidence off: rows whose KV and ITL were not read count as idle, so the next good row restarts the settle",
+			check: checkITLNoSettle(idleOnKeyTrace, noSettleFailedQuery)},
+		{row: "Settle holes: fall", caseID: "transient/k2/fall-moved-off", level: levelPolicy,
+			how: "k2Settle.maxRise 1e9: a fall of any size still reads as settled",
+			check: checkK2Fall(func(p *config.ScalingPolicy) {
+				p.AnalyzerTuning.K2Settle = config.K2SettleTuning{MaxRise: 1e9}
+			})},
+		{row: "Settle holes: rate escape", caseID: "transient/k2/rate-without-residency", level: levelPolicy,
+			how: "k2Settle.rateFraction 1e-9: the rate and the residency each pass at any level, so a rate alone admits",
+			check: checkK2RateEscape(func(p *config.ScalingPolicy) {
+				p.AnalyzerTuning.K2Settle = config.K2SettleTuning{RateFraction: 1e-9}
+			})},
+		{row: "Settle holes: idle return", caseID: "transient/itl/idle-rows-positive-evidence", level: levelPolicy,
+			how:   "steadyGate.idleRows 1000: no idle run is long enough, so load returning starts no settle",
+			check: checkITLSettleEvent(func() itlLearner { return newTrackerITL(neverIdle) }, settleIdle)},
+		{row: "Settle holes: lend", caseID: "transient/settle/lent-again", level: levelRows,
+			how:   "rows with LentSince cleared: a Pod lent again to the same variant inside the absence tolerance keeps its key and its settle",
+			check: checkSettleLentAgain(func(rm *domain.ReplicaMetrics) { rm.LentSince = time.Time{} })},
 		{row: "GPS ratio first raw", caseID: "first-sample/mu/low-first-reading", level: levelPolicy,
 			how:   "muChoice.minMeasuredOfDerived 1e-9: the low-first-reading guard off",
 			check: checkMuFirstSample(tuningWith(func(t *config.AnalyzerTuning) { t.MuChoice.MinMeasuredOfDerived = 1e-9 }))},
