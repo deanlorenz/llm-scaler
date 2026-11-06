@@ -987,7 +987,7 @@ func readFleet(input domain.AnalyzerInput) fleetReading {
 		out += w * rm.AvgOutputTokens
 		hit += w * rm.PrefixCacheHitRate
 		weight += w
-		if rm.AvgOutputTokensSquaredKnown && rm.AvgOutputTokensSquared > 0 && whatif.Finite(rm.AvgOutputTokensSquared) {
+		if rm.AvgOutputTokensSquaredKnown && rm.AvgOutputTokensSquared > 0 {
 			squared += w * rm.AvgOutputTokensSquared
 		} else {
 			spreadRead = false

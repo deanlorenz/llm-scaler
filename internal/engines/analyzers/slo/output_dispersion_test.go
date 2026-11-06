@@ -46,11 +46,18 @@ func wide(rm *domain.ReplicaMetrics) {
 	rm.AvgOutputTokensSquared, rm.AvgOutputTokensSquaredKnown = 2e6, true
 }
 
+// wider is D = 4: half of it, the mean of a row beside one that read nothing,
+// is still a spread, so a mix counted as a reading shows.
+func wider(rm *domain.ReplicaMetrics) {
+	rm.AvgOutputTokensSquared, rm.AvgOutputTokensSquaredKnown = 4e6, true
+}
+
 // Fill 0.6 of 100000 tokens holds 120 requests of KVreq 500, and 60 at D = 2,
 // so the replica's rate halves on and stands as it was off.
 func TestKVOutputDispersion_TheSwitch(t *testing.T) {
 	assert.InDelta(t, 60/0.044, dispersionRate(t, true, wide), 1e-6)
 	assert.InDelta(t, 120/0.044, dispersionRate(t, false, wide), 1e-6)
+	assert.True(t, New(nil, nil).kvOutputDispersion, "on from the constructor")
 }
 
 // With a row that read no bound there is no reading of the fleet: the mix of
@@ -59,7 +66,7 @@ func TestKVOutputDispersion_TheSwitch(t *testing.T) {
 func TestKVOutputDispersion_NoReadingIsNoSpread(t *testing.T) {
 	unread := func(rm *domain.ReplicaMetrics) {
 		if rm.PodName != "agg-a" {
-			wide(rm)
+			wider(rm)
 		}
 	}
 	assert.InDelta(t, 120/0.044, dispersionRate(t, true, unread), 1e-6)
@@ -68,7 +75,7 @@ func TestKVOutputDispersion_NoReadingIsNoSpread(t *testing.T) {
 	}
 	assert.InDelta(t, 120/0.044, dispersionRate(t, true, notANumber), 1e-6)
 	knownButZero := func(rm *domain.ReplicaMetrics) {
-		wide(rm)
+		wider(rm)
 		if rm.PodName == "agg-a" {
 			rm.AvgOutputTokensSquared = 0
 		}
