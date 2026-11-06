@@ -20,7 +20,7 @@ func ManagerConfigPassive(data map[string]string) (passive, set bool) {
 	if err := yaml.Unmarshal([]byte(data[ManagerConfigKey]), &m); err != nil {
 		return false, false
 	}
-	v, found := m["WVA_PASSIVE"]
+	v, found := lookupWithLegacy(m, "WVA_PASSIVE")
 	if !found {
 		return false, false
 	}

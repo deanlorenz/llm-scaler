@@ -6,6 +6,28 @@
 # containsElement(), should_skip_helm_repo_update().
 #
 
+# legacy_env_refuse stops on an install variable that still uses the old
+# prefix. After the rename such a variable is read by nothing, so it would
+# install into the default namespace without a word, and the wrong namespace is
+# a second controller on the cluster. The argument is the current prefix, which
+# the rename changes; the old one below it does not, so until the rename the two
+# are equal and this does nothing. Remove it one release after the rename.
+legacy_env_refuse() {
+    local current=$1 name found=
+    local legacy=WVA_ # rename:keep
+    [ "$current" = "$legacy" ] && return 0
+    while IFS= read -r name; do
+        case "$name" in
+            "$legacy"*)
+                found=1
+                echo "ERROR: $name was renamed to $current${name#"$legacy"}. Set that instead and unset $name." >&2
+                ;;
+        esac
+    done < <(compgen -e)
+    [ -z "$found" ]
+}
+legacy_env_refuse WVA_ || exit 1
+
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1" >&2
 }

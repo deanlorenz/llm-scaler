@@ -261,6 +261,9 @@ const defaultLogVerbosity = logging.DEFAULT
 
 // nolint:gocyclo
 func main() {
+	// First, before anything reads a setting.
+	legacyEnv := config.ApplyLegacyEnv()
+
 	// Command-line flags
 
 	loggerVerbosity := flag.Int("v", defaultLogVerbosity, "number for the log level verbosity")
@@ -391,6 +394,10 @@ func main() {
 
 	setupLog := ctrl.Log.WithName("setup")
 	setupLog.Info("Logger initialized")
+	for _, name := range legacyEnv {
+		setupLog.Info("Environment variable uses a name that will be removed in the next release: read as the new name",
+			"variable", name, "prefix", config.EnvPrefix)
+	}
 	// A test aid never stops scaling: options a recording cannot start with
 	// are logged, and the controller runs without one.
 	learnerRecording := learnrec.Options{Dir: *learnerRecordingDir, CapBytes: *learnerRecordingCap,

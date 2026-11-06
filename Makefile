@@ -1,3 +1,15 @@
+# The install variables' prefix. Once it differs from the legacy one, a variable
+# still using the legacy prefix stops the run: read by nothing, it would install
+# into the default namespace without a word. Remove one release after the rename.
+LEGACY_ENV_PREFIX := $(strip WVA_) # rename:keep
+ENV_PREFIX := WVA_
+ifneq ($(ENV_PREFIX),$(strip $(LEGACY_ENV_PREFIX)))
+legacy_env_set := $(filter $(strip $(LEGACY_ENV_PREFIX))%,$(.VARIABLES))
+ifneq ($(legacy_env_set),)
+$(error $(legacy_env_set): renamed, use the $(ENV_PREFIX) prefix and unset the old names)
+endif
+endif
+
 # Image URL to use all building/pushing image targets
 # This branch's manifests pass --external-scaler-bind-address, a flag no
 # RELEASED image has: ghcr.io/llm-d/...:latest crash-loops on it with "unknown
@@ -3046,6 +3058,8 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# rebalances the quoting and hands jq a truncated program. Both have
 	@# happened here; the even one shipped.
 	@bash hack/check-quoted-programs.sh
+	@echo "Checking the guard on old install variables..."
+	@bash hack/check-legacy-env.sh
 	@echo "Checking that no tracked file names an internal cluster..."
 	@bash hack/check-cluster-names.sh
 	@echo "Checking the jq marker predicates..."

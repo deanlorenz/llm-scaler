@@ -9,6 +9,11 @@ import (
 )
 
 const (
+	// EnvPrefix is the prefix of the controller's own settings, in the
+	// environment and in the manager ConfigMap. legacy_env.go compares it with
+	// the prefix they had before the rename.
+	EnvPrefix = "WVA_"
+
 	// DefaultConfigMapName is the default name of the ConfigMap containing autoscaler configuration
 	DefaultConfigMapName = "wva-manager-config"
 	// DefaultScalingPolicyConfigMapName is the default name of the ConfigMap
