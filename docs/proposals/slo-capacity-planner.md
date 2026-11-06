@@ -733,7 +733,7 @@ tier, an assumed `R_q`, a pooled `R_q` on a bucket, a coarse TPOT bucket, the
 engine TPOT histogram used in place of the router's, a line the recording's rows
 do not support (`LineMismatch`), a rate held down by decode
 admission, flow control inferred off, above a
-flow-control onset, several priority bands, and UNVALIDATED on TTFT. The decode
+flow-control onset, and UNVALIDATED on TTFT ([several priority bands is cut](#ttft-as-built)). The decode
 library's flags today: `AssumedTPOTRatio`, `CoarseTPOTBucket`,
 `BelowFittedBand` (a fill, or the knee, read at the band's bottom because it
 sits below the band the line was fitted over) and `KVBoundSlots` (admission
@@ -921,6 +921,18 @@ Two more flags are S1's (#486):
   quantile for the percentile: p70 0.79, p80 1.30, p85 1.66, p88 1.96, p90 2.22,
   p92 2.56, p93 2.78, p94 and up 3. Above it a larger `cv` can price a shorter
   floor and a higher rate. At the assumed 2 it is raised at p88 and below.
+
+**Cut: several priority bands, and `edf` or `slo` ordering.** The spec prices the
+highest band, flagged, and flags an ordering that breaks the first-come wait. Neither
+is built, because no recording can say either. The collector sums the router's
+flow-control wait over priority (`QueryFlowControlWaitBuckets`), the queue series
+drop the label (`flow_control_pool_models`), and nothing reads the router's bands or
+its ordering from its configuration: there is no such field in `domain` or `config`.
+A flag raised from a stated `--priority-bands` would only repeat the flag it was
+given. To build it, the collector needs the queue split by `priority` and the
+ordering read from the router, and the recorder needs both. Until then TTFT prices one
+band, first come, whatever the router runs, and the page's
+[limit](slo-capacity-planner-ttft.md#where-it-is-most-wrong) stands.
 
 **Reading the output.** Question 2 adds the rows below. The operating rate is the
 headroom times the lower knee, so the prefill knee can set it. The TPOT is then
