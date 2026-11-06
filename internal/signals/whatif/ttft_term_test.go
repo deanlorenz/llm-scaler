@@ -262,7 +262,6 @@ func TestTerm_RefusesWhatNoReadingGives(t *testing.T) {
 		{Engine: PromptLine{HeldPromptTokens: -1}},
 		{Hop: PromptLine{HeldPromptTokens: -1}},
 	} {
-		term := term
 		u, ok := TTFTAt(termFleet(&term), 1, 0.9).(Unanswerable)
 		if !ok || u.Reason != InvalidInput {
 			t.Errorf("%+v: %#v", term, TTFTAt(termFleet(&term), 1, 0.9))

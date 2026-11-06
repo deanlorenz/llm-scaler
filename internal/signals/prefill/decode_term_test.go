@@ -210,11 +210,11 @@ func TestDecodeWindow_NoPromptAdmitsNothing(t *testing.T) {
 	assert.Empty(t, w.decode)
 }
 
-// hopCycle is one cycle of a steady fleet: engines p and d, the router's mean
-// over its window, rate requests a second.
-func hopCycle(at time.Time, p, d, router, rate, prompt float64) DecodeTermCycle {
-	pre := domain.ReplicaMetrics{PodName: "p", Ready: true, AvgTTFT: p, AvgTTFTKnown: true, RequestRate: rate, RequestRateKnown: true}
-	dec := domain.ReplicaMetrics{PodName: "d", Ready: true, AvgTTFT: d, AvgTTFTKnown: true, RequestRate: rate, RequestRateKnown: true}
+// hopCycle is one cycle of a steady fleet: engines at 50 and 30 ms, the
+// router's mean over its window, rate requests a second.
+func hopCycle(at time.Time, router, rate, prompt float64) DecodeTermCycle {
+	pre := domain.ReplicaMetrics{PodName: "p", Ready: true, AvgTTFT: 0.05, AvgTTFTKnown: true, RequestRate: rate, RequestRateKnown: true}
+	dec := domain.ReplicaMetrics{PodName: "d", Ready: true, AvgTTFT: 0.03, AvgTTFTKnown: true, RequestRate: rate, RequestRateKnown: true}
 	var rl *domain.RouterLatency
 	if router > 0 {
 		rl = &domain.RouterLatency{WindowSeconds: 300, TTFTSumRate: router * rate, TTFTCountRate: rate}
@@ -226,7 +226,7 @@ func hopCycle(at time.Time, p, d, router, rate, prompt float64) DecodeTermCycle 
 func hopRun(w *DecodeTermWindow, start time.Time, minutes int, r, prompt float64) time.Time {
 	at := start
 	for range minutes * 4 {
-		w.Observe(hopCycle(at, 0.05, 0.03, 0.08+r, 10, prompt))
+		w.Observe(hopCycle(at, 0.08+r, 10, prompt))
 		at = at.Add(15 * time.Second)
 	}
 	return at
@@ -259,7 +259,7 @@ func TestHop_TwoPromptsGiveALine(t *testing.T) {
 // A window a queue or a ramp spoiled moves the median by nothing: one in ten
 // reading a second off.
 func TestHop_TheMedianHoldsAgainstOneWindow(t *testing.T) {
-	var s []hopSample
+	s := make([]hopSample, 0, 21)
 	for i := range 21 {
 		r := 0.007
 		if i%10 == 0 {
@@ -275,7 +275,7 @@ func TestHop_TheMedianHoldsAgainstOneWindow(t *testing.T) {
 // A hop that falls with the prompt is held at the largest median, not priced
 // down: the side that asks for more.
 func TestHop_AFallingLineIsHeldHigh(t *testing.T) {
-	var s []hopSample
+	s := make([]hopSample, 0, 10)
 	for range 5 {
 		s = append(s, hopSample{r: 0.02, prompt: 1000}, hopSample{r: 0.01, prompt: 8000})
 	}
@@ -298,19 +298,19 @@ func TestHop_Refusals(t *testing.T) {
 func TestHop_TheWindowGates(t *testing.T) {
 	short := NewDecodeTermWindow()
 	for i := range 8 {
-		short.Observe(hopCycle(termT0.Add(time.Duration(i)*15*time.Second), 0.05, 0.03, 0.09, 10, 1000))
+		short.Observe(hopCycle(termT0.Add(time.Duration(i)*15*time.Second), 0.09, 10, 1000))
 	}
 	assert.Empty(t, short.hops, "two minutes of a five-minute window")
 
 	for name, cycle := range map[string]func(i int, at time.Time) DecodeTermCycle{
 		"rate ramp": func(i int, at time.Time) DecodeTermCycle {
-			return hopCycle(at, 0.05, 0.03, 0.09, 5+float64(i), 1000)
+			return hopCycle(at, 0.09, 5+float64(i), 1000)
 		},
 		"prompt ramp": func(i int, at time.Time) DecodeTermCycle {
-			return hopCycle(at, 0.05, 0.03, 0.09, 10, 1000+100*float64(i))
+			return hopCycle(at, 0.09, 10, 1000+100*float64(i))
 		},
 		"too few requests": func(_ int, at time.Time) DecodeTermCycle {
-			return hopCycle(at, 0.05, 0.03, 0.09, MinHopRequestRate/2, 1000)
+			return hopCycle(at, 0.09, MinHopRequestRate/2, 1000)
 		},
 	} {
 		w := NewDecodeTermWindow()
@@ -326,7 +326,7 @@ func TestHop_TheWindowGates(t *testing.T) {
 func TestHop_NoRouterMeanNoHop(t *testing.T) {
 	w := NewDecodeTermWindow()
 	for i := range 80 {
-		c := hopCycle(termT0.Add(time.Duration(i)*15*time.Second), 0.05, 0.03, 0.09, 10, 1000)
+		c := hopCycle(termT0.Add(time.Duration(i)*15*time.Second), 0.09, 10, 1000)
 		c.Router.TTFTSumRate = 0
 		w.Observe(c)
 	}

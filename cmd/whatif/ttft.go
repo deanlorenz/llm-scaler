@@ -457,6 +457,9 @@ func (pf *pricedFleet) effectivePrompt(il float64) float64 {
 	return pf.pv.shape.ILeff
 }
 
+// sideOmitted is an input left out of the price.
+const sideOmitted = "omitted"
+
 // decodeSide is decode's part of the TTFT: the decode variant's line when
 // it prices, else the decode engine's measured TTFT, which holds the KV pull
 // (TTFTFleet.DecodeTTFT), else nothing, flagged by P3.
@@ -464,7 +467,7 @@ func (pf *pricedFleet) decodeSide() {
 	pf.in.TransferSecondsPerToken = pf.fleet.Prefill.TransferSecondsPerToken
 	pf.in.TransferSource = shapeMeasured
 	if pf.in.TransferSecondsPerToken == 0 {
-		pf.in.TransferSource = "omitted"
+		pf.in.TransferSource = sideOmitted
 	}
 	if pf.pv != nil {
 		if _, ok := whatif.KneeRate(pf.pv.decode).(whatif.Answer); ok {
@@ -483,7 +486,7 @@ func (pf *pricedFleet) decodeSide() {
 		pf.in.DecodeTTFTPromptTokens = pf.fleet.DecodeTTFT.PromptTokens
 		return
 	}
-	pf.in.DecodeSide = "omitted"
+	pf.in.DecodeSide = sideOmitted
 }
 
 // decodeTerm is the term on the decode line: what the recording's cycles
@@ -494,7 +497,7 @@ func (pf *pricedFleet) decodeTerm() {
 	pf.in.DecodeTermSource = shapeMeasured
 	switch {
 	case t.EngineOmitted:
-		pf.in.DecodeTermSource = "omitted"
+		pf.in.DecodeTermSource = sideOmitted
 		pf.assume("decode term omitted (no fit and no decode engine TTFT): T_xfer + ITL stands for it")
 	case t.StepAssumed:
 		pf.in.DecodeTermSource = shapeAssumed
