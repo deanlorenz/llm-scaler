@@ -143,6 +143,9 @@ type Analyzer struct {
 	// ttftMeasuredTransfer SwitchTTFTMeasuredTransfer (ttft.go): on from the
 	// constructor; a replay turns them off (SetSwitchesForReplay).
 	ttftMeasuredSpread, ttftMeasuredTransfer bool
+	// ttftQuietTransfer is SwitchTTFTQuietTransfer (ttft.go): on from the
+	// constructor; a replay turns it off (SetSwitchesForReplay).
+	ttftQuietTransfer bool
 	// ttftDecodeTerm is SwitchTTFTDecodeTerm (ttft.go): on from the
 	// constructor; a replay turns it off (SetSwitchesForReplay).
 	ttftDecodeTerm bool
@@ -216,6 +219,7 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 
 		ttftMeasuredSpread:   true,
 		ttftMeasuredTransfer: true,
+		ttftQuietTransfer:    true,
 		ttftDecodeTerm:       true,
 		imbalance:            make(map[string]*imbalanceWindow),
 		prompts:              make(map[string]*promptSpreadWindow),

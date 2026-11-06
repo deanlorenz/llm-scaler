@@ -265,6 +265,23 @@ func (a *Analyzer) noteShare(key string, pods int, share float64, ok bool, now t
 type decodeTTFTWindow struct {
 	cycles []whatif.DecodeTTFT
 	seen   time.Time
+	// quietTransfer is the last quietTransferPerToken above 0.
+	quietTransfer float64
+}
+
+// noteQuietTransfer folds a cycle's quiet figure into the window under key and
+// returns the figure held. With no window, the cycle's own.
+func (a *Analyzer) noteQuietTransfer(key string, cycle float64) float64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	w := a.decodeTTFT[key]
+	if w == nil {
+		return cycle
+	}
+	if cycle > 0 {
+		w.quietTransfer = cycle
+	}
+	return w.quietTransfer
 }
 
 // noteDecodeTTFT folds the cycle's decode-engine TTFT into the variant's
@@ -338,6 +355,17 @@ func decodeEngineTTFT(rows []domain.ReplicaMetrics) (float64, bool) {
 		return sum / float64(n), true
 	}
 	return 0, false
+}
+
+// quietTransferPerToken is transferPerToken of the rows with an empty queue.
+func quietTransferPerToken(rows []domain.ReplicaMetrics, prompt float64) float64 {
+	quiet := make([]domain.ReplicaMetrics, 0, len(rows))
+	for _, rm := range rows {
+		if rm.QueueLength == 0 {
+			quiet = append(quiet, rm)
+		}
+	}
+	return transferPerToken(quiet, prompt)
 }
 
 // transferPerToken is the mean AvgKVTransferTime over the serving rows that

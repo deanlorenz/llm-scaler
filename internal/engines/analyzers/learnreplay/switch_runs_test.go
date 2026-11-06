@@ -139,6 +139,11 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// (heldBy); the CLI, which has no switch, moves its own goldens.
 	slo.SwitchTTFTDecodeTerm: nil,
 
+	// Which rows the transfer is read from. It moves no golden: no committed
+	// recording prices a line (the decode term's reason, above). Its unit test
+	// holds it (heldBy).
+	slo.SwitchTTFTQuietTransfer: nil,
+
 	saturation.SwitchPrefillCapacityObserve: nil,
 
 	// #495: mu on learn's list of learners
@@ -665,6 +670,8 @@ func withSeams(more, rows map[string][]string) map[string][]string {
 // test that holds the same on either side is a control, not a hold, and is
 // not listed here.
 var heldBy = map[string][]heldTest{
+	// Runs the switch on and off and asserts both.
+	slo.SwitchTTFTQuietTransfer: {{"../slo", "TestTTFT_TheQuietTransferSwitch"}},
 	// The decode term: the first prices one fleet on and off and asserts both
 	// (the term and its flags on, the old sum unflagged off); the second runs
 	// the switch through Analyze (a window kept on, none off). The third has

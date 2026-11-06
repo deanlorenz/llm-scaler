@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"slices"
 	"strconv"
@@ -25,7 +24,10 @@ import (
 // (docs/plans/analyzers/ttft-staircase-repeat.md): a warm-up recording and a
 // spec in, one JSON file out, the same bytes for the same inputs. It reads the
 // fleet as slo-to-rate does (ttft.go), with the spec's shape and replica counts
-// in place of the recorded ones, so a staircase scores what the CLI answers.
+// in place of the recorded ones, so a staircase scores what the CLI answers. It
+// departs from the CLI in three places, each recorded in the file: the prompt's
+// spread is the spec's, the arrivals and the flow-control state are the spec's,
+// and the prefix hit rate is 0, since the driver's prompts share no prefix.
 // The file holds no clock, path, namespace or pod name.
 
 // frozenVersion is the frozen file's format.
@@ -113,13 +115,18 @@ type frozenBucket struct {
 	VP        float64 `json:"vp"`
 	A         float64 `json:"a"`
 	Imbalance float64 `json:"imbalance"`
-	// TransferSecondsPerToken is the quiet transfer priced (transferAt); 0 kept
-	// the recorded one.
-	TransferSecondsPerToken float64        `json:"transferSecondsPerToken"`
-	Flags                   []whatif.Flag  `json:"flags"`
-	Assumed                 []string       `json:"assumed"`
-	Targets                 []frozenTarget `json:"targets"`
-	Curve                   []frozenPoint  `json:"curve"`
+	// TransferSecondsPerToken is the transfer priced, as slo-to-rate reads it.
+	// AllRowsTransferSeconds is the same read from every row, queued or not, kept
+	// beside it: the figure the rule moved away from.
+	TransferSecondsPerToken float64 `json:"transferSecondsPerToken"`
+	AllRowsTransferSeconds  float64 `json:"allRowsTransferSeconds"`
+	// RecordedPrefixHitRate is the warm-up's hit rate, which is not priced: see
+	// runFreeze.
+	RecordedPrefixHitRate float64        `json:"recordedPrefixHitRate"`
+	Flags                 []whatif.Flag  `json:"flags"`
+	Assumed               []string       `json:"assumed"`
+	Targets               []frozenTarget `json:"targets"`
+	Curve                 []frozenPoint  `json:"curve"`
 	// Refused is why the bucket has no prediction; "" with one.
 	Refused string `json:"refused,omitempty"`
 }
@@ -216,7 +223,10 @@ func runFreeze(ctx context.Context, args []string, out, warn io.Writer) error {
 	}
 	sum := sha256.Sum256(raw)
 	// The driver's prompts share no prefix: a warm-up's hit rate is not theirs.
+	// The CLI would price it; the file says what was dropped.
+	hitRates := map[string]float64{}
 	for i := range st.Variants {
+		hitRates[st.Variants[i].Variant] = st.Variants[i].Shape.PrefixHitRate
 		st.Variants[i].Shape.PrefixHitRate = 0
 	}
 	file := frozenFile{Version: frozenVersion, RecordingSHA256: hex.EncodeToString(sum[:]), SpecSHA256: specSum,
@@ -224,15 +234,14 @@ func runFreeze(ctx context.Context, args []string, out, warn io.Writer) error {
 	for _, p := range spec.Percentiles {
 		file.TPOTRatio = append(file.TPOTRatio, frozenRatioOf(st, p/100))
 	}
-	transfers, err := learnreplay.QuietTransfers(raw)
-	if err != nil {
-		return fmt.Errorf("%s: %w", f.recording, err)
-	}
 	refused := false
 	for _, b := range spec.Buckets {
-		fb, err := f.priceBucket(st, spec, b, held, transfers)
+		fb, err := f.priceBucket(st, spec, b, held)
 		if err != nil {
 			return err
+		}
+		for _, rate := range hitRates {
+			fb.RecordedPrefixHitRate = max(fb.RecordedPrefixHitRate, rate)
 		}
 		refused = refused || fb.Refused != ""
 		file.Buckets = append(file.Buckets, fb)
@@ -358,7 +367,7 @@ func gateOf(st *learnreplay.State) frozenGate {
 // priceBucket prices one bucket. A refusal is the bucket's, in the file; an error
 // is a question this command cannot ask.
 func (f *freezeFlags) priceBucket(st *learnreplay.State, spec *freezeSpec, b freezeBucket,
-	held map[string]map[float64]float64, transfers []learnreplay.TransferReading) (frozenBucket, error) {
+	held map[string]map[float64]float64) (frozenBucket, error) {
 	out := frozenBucket{freezeBucket: b, Flags: []whatif.Flag{}, Assumed: []string{}, Targets: []frozenTarget{}, Curve: []frozenPoint{}}
 	if v, ok := f.ca2[b.Name]; ok {
 		out.Ca2 = v
@@ -388,10 +397,8 @@ func (f *freezeFlags) priceBucket(st *learnreplay.State, spec *freezeSpec, b fre
 	}
 	off := pf.fleet
 	off.Prefill.PromptCV, off.Prefill.PromptCVAssumed = spec.PromptCV, false
-	if x, ok := transferAt(transfers, b.Prompt); ok {
-		off.Prefill.TransferSecondsPerToken = x
-		out.TransferSecondsPerToken = x
-	}
+	out.TransferSecondsPerToken = off.Prefill.TransferSecondsPerToken
+	out.AllRowsTransferSeconds = variants[0].state.DecodeTTFT.AllRowsTransferSeconds
 	// ArrivalCV2 reads 0 as Poisson, and a Poisson bucket flags no burst.
 	off.Prefill.ArrivalCV2 = 0
 	if out.Ca2 != 1 {
@@ -437,28 +444,6 @@ func (f *freezeFlags) priceBucket(st *learnreplay.State, spec *freezeSpec, b fre
 		out.Curve = append(out.Curve, modelPoint(off, rate))
 	}
 	return out, nil
-}
-
-// transferAt is the transfer per token of the reading whose prompt is nearest
-// prompt, by ratio: transfer is not proportional to the prompt (M2's light rows,
-// 8.0 us per token at 1000 and 3.7 at 8500), so one figure does not serve all.
-func transferAt(readings []learnreplay.TransferReading, prompt float64) (float64, bool) {
-	best, found := 0.0, false
-	for _, r := range readings {
-		if r.PromptTokens <= 0 {
-			continue
-		}
-		dist := math.Abs(math.Log(r.PromptTokens / prompt))
-		if !found || dist < math.Abs(math.Log(best/prompt)) {
-			best, found = r.PromptTokens, true
-		}
-	}
-	for _, r := range readings {
-		if found && r.PromptTokens == best {
-			return r.Seconds / r.PromptTokens, true
-		}
-	}
-	return 0, false
 }
 
 // settledAssumed is the fleet's assumptions, less those the spec settles: what the

@@ -1537,13 +1537,16 @@ analysis read over a window past the stop. On M2's warm-up `whatif freeze` gives
 knees, onsets, `R_q` and mean TPOT of the frozen file. Its targets differ, as they
 should: the frozen file predates the decode term.
 
-**One departure from the CLI.** `whatif freeze` reads `T_xfer` from decode rows with
-an empty queue, nearest the bucket's prompt (`learnreplay.QuietTransfers`). The CLI
-reads the recording's last cycles, and M2's warm-up ends saturated: 0.34 s at 8000
-tokens, which floors the priced figure at 414 ms through `DecodeTermFloored`. The
-reader gives 20 ms at 8000 tokens and 6.6 ms at 1000, where M2's freeze, picked by
-hand, took 31 and 8.0 ms. On a priced term this input only sets the old sum's floor.
-`whatif slo-to-rate` on such a recording still reads the high figure.
+**A saturated transfer no longer floors the price.** S1 and the CLI read `T_xfer` from
+decode rows with an empty queue (`slo.SwitchTTFTQuietTransfer`), and hold that figure
+through a busy stretch. Every row stands in only until a quiet one is read, or after a
+restart, when nothing is held. Before this, M2's warm-up, which ends saturated, read
+0.34 s at 8000 tokens, which floored the priced figure at 414 ms through
+`DecodeTermFloored`. The frozen file stores both figures. It moves no golden.
+
+**Where a freeze departs from the CLI.** Each is recorded in the file: the prompt's
+spread, the arrivals and the flow-control state are the spec's, and the prefix hit
+rate is 0, since the driver's prompts share no prefix.
 
 **Not checked.** `staircase.sh` has run only against stubs: no cluster has run this
 tree. M2 ran its scratch form, and changing replicas between phases, which M2 never

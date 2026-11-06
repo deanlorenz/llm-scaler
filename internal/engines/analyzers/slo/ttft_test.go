@@ -689,6 +689,30 @@ func TestTTFT_TransferOmittedStandsUntilAReading(t *testing.T) {
 		"a value the presence bit denies")
 }
 
+// A pod behind on its pulls reads ten times its quiet transfer. On, the quiet
+// figure stands, held through a busy cycle; off, the cycle's rows, as before.
+func TestTTFT_TheQuietTransferSwitch(t *testing.T) {
+	rows := func(queue int, seconds float64) []domain.ReplicaMetrics {
+		dec := decodeRows("dec", 2)
+		for i := range dec {
+			dec[i].QueueLength, dec[i].AvgKVTransferTime, dec[i].AvgKVTransferTimeKnown = queue, seconds, true
+		}
+		return dec
+	}
+	const prompt, key = 8000.0, "ns|model|dec"
+	busy, quiet := rows(9, 0.34), rows(0, 0.03)
+	r := newTTFTRig(ttftEstimate(), nil)
+	r.a.noteDecodeTTFT(key, whatif.DecodeTTFT{}, time.Now())
+
+	assert.InDelta(t, 0.34/prompt, r.a.transferPerToken(key, busy, prompt), 1e-15, "no quiet row yet: every row")
+	assert.InDelta(t, 0.03/prompt, r.a.transferPerToken(key, quiet, prompt), 1e-15)
+	assert.InDelta(t, 0.03/prompt, r.a.transferPerToken(key, busy, prompt), 1e-15, "held through a busy cycle")
+	assert.InDelta(t, 0.34/prompt, r.a.transferPerToken("", busy, prompt), 1e-15, "no window, nothing held")
+
+	require.NoError(t, r.a.SetSwitchesForReplay(map[string]bool{SwitchTTFTQuietTransfer: false}))
+	assert.InDelta(t, 0.34/prompt, r.a.transferPerToken(key, busy, prompt), 1e-15, "off, the cycle's rows")
+}
+
 // Test 11, narrowed to what holds. From cv 0.3 up to the peak for the
 // percentile, a larger cv never prices a shorter TTFT at the current rate, from
 // 0.05 of the knee, nor a higher rate at the target, on seeded fleets. Past the
