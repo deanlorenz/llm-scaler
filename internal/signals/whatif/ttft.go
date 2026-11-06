@@ -878,7 +878,7 @@ func RateForTTFT(fl TTFTFleet, t TTFTTarget) Result {
 	}
 	floor := zero.out.Floor
 	if floor >= t.Seconds {
-		return refuse(TargetBelowFloor, fmt.Sprintf("target %g s at or below the TTFT floor %g s", t.Seconds, floor))
+		return refuse(TargetBelowFloor, fmt.Sprintf("target %.4g s at or below the TTFT floor %.4g s", t.Seconds, floor))
 	}
 	limit, limitBy := pl.lowestKnee(), Bound("")
 	if pl.fc.State == FlowControlOn && pl.d != nil && pl.onsets.Decode < limit {
@@ -888,7 +888,7 @@ func RateForTTFT(fl TTFTFleet, t TTFTTarget) Result {
 	if !(full > 0) {
 		// The floor is under the target, but by less than the bisection
 		// resolves: no positive rate is known to meet it.
-		return refuse(TargetBelowFloor, fmt.Sprintf("target %g s: no positive rate meets it (TTFT floor %g s)", t.Seconds, floor))
+		return refuse(TargetBelowFloor, fmt.Sprintf("target %.4g s: no positive rate meets it (TTFT floor %.4g s)", t.Seconds, floor))
 	}
 	alone := pl.bisect(t, limit, false)
 

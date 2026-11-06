@@ -60,6 +60,41 @@ cannot read; `whatifsource.IsInputError`); 1 anything else (a failed
 Prometheus query, `whatifsource.ErrQueryFailed`, or a `generate` that fails
 inside the analyzers).
 
+## Asking for TTFT
+
+The answer commands price a P/D fleet's TTFT when a TTFT flag is given:
+
+```
+whatif replicas-to-slo --recording run.jsonl --ttft-percentile 90 [--assume-vp TOKENS] [--prefill N]
+whatif slo-to-rate     --recording run.jsonl --tpot 4ms --ttft 200ms@p95 [--assume-vp TOKENS] [--prefill N]
+```
+
+`--prometheus` takes the same flags, and gives the same answer.
+
+- **Treat every TTFT figure as unvalidated.** Each prints `UNVALIDATED`, and it
+  is not a bound. At the assumed prompt `cv` 2, which is what the CLI prints
+  today, it read 1.1x to 4.1x the router's percentile on the P2 recordings; at
+  the spread the load generator sent (`cv` 0.06) up to 34% under it. Do not
+  size from it yet.
+- **Read the `assumed` row first.** It names each input the recording did not
+  give. `V_P ASSUMED` means `--assume-vp` supplied `V_P`.
+- **`--assume-vp` overrides,** as every `--assume-*` flag does. Give it when
+  `NoPrefillCapacity` is refused, because the pods never queued long enough for
+  `V_P` to be learned, or to ask what another `V_P` would do. A learned figure
+  is printed beside it: `V_P 130000 ASSUMED, learned 115621`.
+- **A decode row can rest on `V_P` too.** Where the prefill knee is the lower,
+  it sets the operating rate, and the rate and TPOT rows say so and carry the
+  verdict.
+- **`NoFixedLatency` has no flag.** The window needs low-load minutes at more
+  than one prompt length, for `a` to be learned.
+- **`Saturated` means the rate is at or above the knee.** It is a refusal, exit
+  `3`, not a figure.
+- **Aggregated fleets and per-bucket answers are refused:** the planner's M1.
+
+Exit codes are `0`, `3` for a refusal, `2` for a usage error and `1` for an
+internal one. The inputs, the rows and the JSON are in
+[TTFT, as built](../proposals/slo-capacity-planner.md#ttft-as-built).
+
 ## Load on Prometheus
 
 A capture turns every query the controller asks into one range query over

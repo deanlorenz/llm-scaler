@@ -77,6 +77,10 @@ estimate from cycles 1-226, not a guarantee; see basis (-o json)
   operating-point cap first.
 - **Bands**: 10th to 90th percentile of a block bootstrap, so not symmetric.
 
+These are the proposal's figures, at `cv` 1. [As built](#ttft-as-built) the CLI
+assumes S1's `cv` 2, prints no TTFT band and adds a `prefill knee` row: the same
+commands read 353 ms and 1.19 r/s.
+
 Refusals, flags, the standalone mode and exit codes are in the
 [CLI reference](#cli-reference).
 
@@ -470,6 +474,7 @@ is made.**
 | P1 | `internal/signals/prefill`, observing: `V_P`, `a`, `f`; logs only; switch `prefill-capacity-observe`. On `ols-sweep` it fits `a` and refuses `V_P` and `f` | none | — |
 | P2 | The prefill-stress recordings as goldens, and P3 checked against them: runs 1 to 4 ([the recordings](slo-tiers.md#the-p2-recordings)). [As built](slo-capacity-planner-ttft.md#as-built-p2): P3 under-predicts the router's TTFT at light load and at saturation | adds four | P1, R1, the runs |
 | P3 | The TTFT model in `whatif`; UNVALIDATED; no switch. Built before P2, against closed-form and synthetic cases, because the prefill-stress runs were blocked on cluster access: [as built](slo-capacity-planner-ttft.md#as-built-p3) | none | P2 (to validate), D2 |
+| TTFT CLI | `--ttft`, `--ttft-percentile`, `--assume-vp` and `--prefill` on both questions, from every source: [as built](#ttft-as-built) | none | P3, D4 |
 | S1, S2 | The SLO analyzer prices TTFT, shadow then enforce, on the same `prefill` and `whatif` library: [SLO tiers, phase 2](slo-tiers.md#phase-2-ttft) | with its switch | S1: P3. S2: S1, Q1, M2 |
 | M1 | Per-bucket and mix answers; aggregated TTFT | none | P3, R1, #276 |
 | M2 | The staircase run; an operator page in `docs/reference/`; drops UNVALIDATED if it passes | — | D4, P3 |
@@ -668,8 +673,7 @@ Exit codes: `0` every role answered; `3` a role refused (output still printed);
 
 `whatif replicas-to-slo` and `whatif slo-to-rate` answer for decode from a
 recording, `--recording FILE --cycle N|last`. TTFT, prefill and the fleet row
-are not supported in this build: `--ttft`, `--ttft-percentile`,
-`--assume-vp` and `--prefill` are a usage error.
+came later: [TTFT, as built](#ttft-as-built).
 
 - **Shape.** Each length is measured or assumed, and the output says which.
   Measured is the request-rate-weighted mean of the variant's last 20 cycles
@@ -790,6 +794,122 @@ whatif replicas-to-slo|slo-to-rate --prometheus URL --namespace NS
   `source.recording` is empty. The field is new and optional, absent in
   recording mode, so `schemaVersion` stays `1`.
 
+### TTFT, as built
+
+`whatif replicas-to-slo` and `whatif slo-to-rate` answer TTFT for one P/D
+fleet, from `--recording`, from the files `capture` and `generate` write, and
+from `--prometheus`. All three replay the same recording, so they give the
+same answer: `TestPrometheus_TheTTFTAnswerIsTheFilesAnswer` holds them to it,
+byte for byte, on both questions, answers and refusals. No flag about TTFT, no
+TTFT: the decode answers are as they were.
+
+| Flag | What it does |
+| --- | --- |
+| `--ttft 200ms@p95` | `slo-to-rate`: the end-to-end target, a mean (`200ms`) or a percentile. Without `--tpot`, only TTFT is asked |
+| `--ttft-percentile 90` | `replicas-to-slo`: the percentile. Default: the policy's `slo.ttft`, else 90. On `slo-to-rate`, beside a plain `--ttft` |
+| `--assume-vp 30000` | `V_P`, prompt tokens per second, in place of the learned one, as every `--assume-*` flag overrides the recording. Neither rescaled nor margined |
+| `--prefill N` | Prefill pods to price; 0 takes the serving pods at the cycle |
+| `--prefill-variant V` | The prefill variant to price, when the model has several: the CLI prices one fleet, and a usage error says so otherwise. It gets the whole rate, named as assumed |
+
+**Where each input comes from.**
+
+| Input | Source | With no source |
+| --- | --- | --- |
+| `V_P` | `--assume-vp`, flagged `AssumedVP` and printed `V_P ASSUMED`, with any learned figure beside it (`V_P 130000 ASSUMED, learned 115621`, and `vpLearned` in the JSON); else P1's estimate at the cycle, read through the replay | `NoPrefillCapacity`. It never defaults |
+| `a` | P1's estimate at the cycle | `NoFixedLatency`. There is no `--assume-a`, and S1 has no assumption for it |
+| `f` | P1's own at the pod count, `--prefill N` included: a reading of that count, so unflagged, where S1 clamps at any other count | One pod: none, exactly 1. Otherwise `min(N_p, max(1.5, f))`, `f` the learned figure at the recorded count or the raw share, flagged `AssumedImbalance` (S1, decision 1). The raw share is the largest over the last 5 cycles that read one, at the current pod count: a pod with no rate counts as one that computed nothing, and an idle tail forgets nothing, as in S1. It reads serving rows, not S1's settled ones: a pod warming up reads low, which raises the share, the permitted side |
+| Prompt | `--assume-input-tokens`, else computed tokens over requests on the prefill rows, over the last 20 cycles with traffic | The decode variant's `IL·(1 − hit)`, named. Neither is `NoTraffic` |
+| `cv` | No recording has one: it needs Q1's histogram | 2, flagged `AssumedPromptSpread` (S1) |
+| Arrivals | None | Poisson, flagged `AssumedPoissonArrivals`, the S1 flag, kept in `cmd/whatif` because P3 has none |
+| `T_xfer` | Decode rows' `AvgKVTransferTime` over the measured prompt | Left out, flagged `TransferOmitted` |
+| Decode side | The decode variant's line, if `whatif.KneeRate` prices it | The decode engine's `AvgTTFT`, readings above 0 only: the largest of the last 5 cycles, with that cycle's prompt, flagged `DecodeEngineMeasured`. A cycle with no reading holds an empty slot, so the figure ages out of an idle tail. Else left out, flagged `DecodeSideOmitted` and `DecodeTTFTUnmeasured` |
+| Flow control | On when the scheduler queue, a pool joined to the model or its wait histogram exists at the cycle | Off, flagged `FlowControlInferredOff`. On takes the upstream thresholds 5 and 0.8, and is named as assumed. On with no decode line is answered, flagged `DecodeOnsetUnchecked`; S1 refuses that case, a planner reads the flag. `--flow-control` is not built |
+
+Every assumed input is named on the `assumed` row, and in `ttft.assumed` in the
+JSON, the two whole-rate assumptions among them: `--prefill-variant` gives one
+variant the whole rate, and with several decode variants each is priced at the
+model's whole rate, as S1 prices decode.
+
+Two more flags are S1's (#486):
+
+- **`RoutingBound`** is `f / N_p` of at least 0.8, sustained: a learned `f`, or a
+  raw share at that level over all of a full 5-cycle window. **`ImbalanceNotSustained`**
+  is that level not held: chance alone can read it at two pods. Either way the
+  answer is priced at that `f`, the side that asks for more replicas, and the
+  flag is read at the recorded count only.
+- **`PromptSpreadAbovePeak`** is a `cv` above the peak of a mean-one gamma's
+  quantile for the percentile: p70 0.79, p80 1.30, p85 1.66, p88 1.96, p90 2.22,
+  p92 2.56, p93 2.78, p94 and up 3. Above it a larger `cv` can price a shorter
+  floor and a higher rate. At the assumed 2 it is raised at p88 and below.
+
+**Reading the output.** Question 2 adds the rows below. The operating rate is the
+headroom times the lower knee, so the prefill knee can set it. The TPOT is then
+read at that rate, and a figure read there rests on `V_P`: the rate and TPOT
+rows carry the knee's flags and print the verdict, and the decode role's JSON
+gives `inputs.rate` and `inputs.rateSource`. On `ols-sweep` at `--assume-vp 8000`
+the rate is 6.80 r/s and the mean TPOT 2.38 ms, against 11.32 and 3.66 with the
+decode knee the lower. That rate has no band: `V_P` has no resamples. Question 1
+adds a `prefill` row, the rate at the target alone, and a `fleet` row, the
+smallest of the roles' rates and the operating point of the lower knee, each
+named under `bound by`.
+
+```
+prefill knee    30.00 r/s   N_p 1 x V_P 30000 / (f 1 x 1000 tokens); UNVALIDATED; V_P ASSUMED
+TTFT p90        353.4 ms                     end to end; UNVALIDATED; V_P ASSUMED
+                (323.4 ms if prefill and decode waits were independent)
+                (floor 113.3 ms, pooled 311.4 ms, worst pod utilization 0.377)
+ttft inputs     V_P 30000 ASSUMED; a 11.04 ms learned; f 1 (one pod); N_p 1 (--prefill); prompt 1000 tokens (assumed); decode by its line
+assumed         V_P 30000 tok/s (--assume-vp); prompt 1000 tokens (--assume-input-tokens); prompt cv 2 (no computed-prompt histogram); flow control off (no series); Poisson arrivals
+```
+
+That is the worked example with the CLI's `cv` of 2, so 353 ms where the page,
+at `cv` 1, has 160 ms; `a` is P1's 11.04 ms. Question 1 at 200 ms p95 reads
+1.19 r/s where the page has 11.10.
+`TestTTFT_TheWorkedExampleFromTheRecording` puts `cv` 1 back on the fleet the
+CLI read, and gets the page's figures within 1 ms, 1.6 ms lower as the page
+says. `TestTTFT_HandComputedAtCV2` holds a figure at `cv` 2 through the command
+to a calculation that reads no Go: 4.752942 s on run 4 at `--assume-vp 130000`.
+Both check the arithmetic. Neither validates the model. The `ttft-*.golden`
+files are regression pins, read back from the code.
+
+**Every TTFT output says what it is.** Each figure prints `UNVALIDATED`, and
+`V_P ASSUMED` when `--assume-vp` supplied it. The closing line, and the JSON's
+`note`, give the direction for what the CLI can print: "at the assumed prompt
+cv 2 it read 1.1x to 4.1x the router's percentile on the P2 recordings; at the
+sent spread (cv 0.06) up to 34% under it". At `cv` 2 the frozen table in
+`ttft_validation_test.go` reads 13 of 14 levels over the 25% mark, none under,
+and one pass; `TestTTFTFrozen_TheNotesFigures` holds the note to the table. With
+a measured `cv` (Q1) the note keeps only the sent spread's half.
+
+**Refusals.** A refusal is a row, not a number, and exit `3`, with the rest of
+the output printed. A rate at or above the knee is `Saturated`. Aggregated TTFT
+is `NoPrefillReplicas`, with a detail that names M1. `--input-bucket` is a usage
+error that names M1. A bad flag is exit `2`, whatever the recording holds. TTFT
+has no band: `V_P`, `a` and `f` have no resamples, and a band on the ITL line
+alone would read narrower than the truth. A rate the prefill knee sets has none
+either.
+
+**What the committed recordings answer.** None of the four prefill-stress
+goldens has both `V_P` and `a`, so none answers from learned figures alone:
+`ttft-open-loop-short` learns `a` and answers with `--assume-vp`;
+`ttft-saturated` learns `V_P`, and `ttft-three-pods` a lower bound on it, and
+both refuse `NoFixedLatency`; `ttft-open-loop-long` refuses `V_P` and `a`. On
+all four the decode side is the decode engine's TTFT, or the refusal comes first:
+none prices a decode line. A fleet with both figures is tested on a built
+state (`TestTTFT_VPOrder`), not on a recording.
+
+**The JSON** adds roles `prefill` and, on question 1, `fleet`; `ttft` on the
+prefill role, with each input and its source; `results.ttft`, with `parts`
+beside the value; `basis.prefillOnlyRate`; and `inputs.rateSource` on the decode
+role. A TTFT rate's `basis.floor` and `basis.kneeRate` are the TTFT's. Every key
+is new and absent with no TTFT asked, so `schemaVersion` stays `1`, as for
+`source.window`.
+
+**Replay.** `learnreplay.State` gains `Prefill`, `FlowControlSeries` and each
+variant's `DecodeTTFT` (`state_ttft.go`). They are read from the cycles' rows and
+the saturation analyzer's stash, and nothing is fed back: no switch, no golden
+moves.
+
 ### JSON output
 
 `-o json` (or `--output json`) writes one object. Abridged from the worked
@@ -899,7 +1019,7 @@ four results only `meanTPOT` is kept here):
 
 | Field | Meaning |
 | --- | --- |
-| `schemaVersion` | The schema below; a change to any key is a new version. |
+| `schemaVersion` | The schema below. Removing, renaming or retyping a key, or changing its meaning, is a new version; a key absent unless a new flag asks for it is not. `cmd/whatif` is in no release. |
 | `question` | `replicas-to-slo` or `slo-to-rate`. |
 | `source` | The recording, the model, `firstCycle` (1), `lastCycle` (the cycle answered at) and `totalCycles` (the recording's), with their clocks. With `--prometheus`, `recording` is empty and `window` names the window: `prometheus` (the URL's scheme and host alone), `from`, `to`, `stepSeconds`, and `roles` (`kube-state-metrics` or `role-of`); absent in recording mode. Absent on an error object. |
 | `bands` | How the bands were drawn: block bootstrap, `blockCycles`, `resamples`, `seed`, the percentiles. Absent on an error object. |
@@ -963,6 +1083,7 @@ roles[].inputs.line.tierChanges number
 roles[].inputs.line.toCycle number
 roles[].inputs.ranks number
 roles[].inputs.rate number
+roles[].inputs.rateSource string
 roles[].inputs.replicas number
 roles[].inputs.replicasFrom string
 roles[].inputs.shape object
@@ -992,6 +1113,7 @@ roles[].results.knee.answer.basis.boundBy[] string
 roles[].results.knee.answer.basis.fill number
 roles[].results.knee.answer.basis.floor number
 roles[].results.knee.answer.basis.kneeRate number
+roles[].results.knee.answer.basis.prefillOnlyRate number
 roles[].results.knee.answer.basis.tier string
 roles[].results.knee.answer.basis.uncapped number
 roles[].results.knee.answer.flags array
@@ -1012,6 +1134,7 @@ roles[].results.meanTPOT.answer.basis.boundBy[] string
 roles[].results.meanTPOT.answer.basis.fill number
 roles[].results.meanTPOT.answer.basis.floor number
 roles[].results.meanTPOT.answer.basis.kneeRate number
+roles[].results.meanTPOT.answer.basis.prefillOnlyRate number
 roles[].results.meanTPOT.answer.basis.tier string
 roles[].results.meanTPOT.answer.basis.uncapped number
 roles[].results.meanTPOT.answer.flags array
@@ -1032,6 +1155,7 @@ roles[].results.operatingRate.answer.basis.boundBy[] string
 roles[].results.operatingRate.answer.basis.fill number
 roles[].results.operatingRate.answer.basis.floor number
 roles[].results.operatingRate.answer.basis.kneeRate number
+roles[].results.operatingRate.answer.basis.prefillOnlyRate number
 roles[].results.operatingRate.answer.basis.tier string
 roles[].results.operatingRate.answer.basis.uncapped number
 roles[].results.operatingRate.answer.flags array
@@ -1052,6 +1176,7 @@ roles[].results.percentileTPOT.answer.basis.boundBy[] string
 roles[].results.percentileTPOT.answer.basis.fill number
 roles[].results.percentileTPOT.answer.basis.floor number
 roles[].results.percentileTPOT.answer.basis.kneeRate number
+roles[].results.percentileTPOT.answer.basis.prefillOnlyRate number
 roles[].results.percentileTPOT.answer.basis.tier string
 roles[].results.percentileTPOT.answer.basis.uncapped number
 roles[].results.percentileTPOT.answer.flags array
@@ -1072,6 +1197,7 @@ roles[].results.rate.answer.basis.boundBy[] string
 roles[].results.rate.answer.basis.fill number
 roles[].results.rate.answer.basis.floor number
 roles[].results.rate.answer.basis.kneeRate number
+roles[].results.rate.answer.basis.prefillOnlyRate number
 roles[].results.rate.answer.basis.tier string
 roles[].results.rate.answer.basis.uncapped number
 roles[].results.rate.answer.flags array
@@ -1081,7 +1207,76 @@ roles[].results.rate.answer.value number
 roles[].results.rate.refused object
 roles[].results.rate.refused.detail string
 roles[].results.rate.refused.reason string
+roles[].results.ttft object
+roles[].results.ttft.answer object
+roles[].results.ttft.answer.basis object
+roles[].results.ttft.answer.basis.boundBy array
+roles[].results.ttft.answer.basis.boundBy[] string
+roles[].results.ttft.answer.basis.fill number
+roles[].results.ttft.answer.basis.floor number
+roles[].results.ttft.answer.basis.kneeRate number
+roles[].results.ttft.answer.basis.prefillOnlyRate number
+roles[].results.ttft.answer.basis.tier string
+roles[].results.ttft.answer.basis.uncapped number
+roles[].results.ttft.answer.flags array
+roles[].results.ttft.answer.flags[] string
+roles[].results.ttft.answer.parts object
+roles[].results.ttft.answer.parts.decodeEngine number
+roles[].results.ttft.answer.parts.decodeKnee number
+roles[].results.ttft.answer.parts.decodeShare number
+roles[].results.ttft.answer.parts.decodeWait number
+roles[].results.ttft.answer.parts.decodeWaitProbability number
+roles[].results.ttft.answer.parts.engineWait number
+roles[].results.ttft.answer.parts.firstStep number
+roles[].results.ttft.answer.parts.independent number
+roles[].results.ttft.answer.parts.onsets object
+roles[].results.ttft.answer.parts.onsets.decode number
+roles[].results.ttft.answer.parts.onsets.prefill number
+roles[].results.ttft.answer.parts.ownPrefill number
+roles[].results.ttft.answer.parts.pooled number
+roles[].results.ttft.answer.parts.prefillKnee number
+roles[].results.ttft.answer.parts.prefillUtilization number
+roles[].results.ttft.answer.parts.vpMarginApplied number
+roles[].results.ttft.answer.parts.waitOffset number
+roles[].results.ttft.answer.parts.waitScale number
+roles[].results.ttft.answer.unit string
+roles[].results.ttft.answer.value number
+roles[].results.ttft.refused object
+roles[].results.ttft.refused.detail string
+roles[].results.ttft.refused.reason string
 roles[].role string
+roles[].ttft object
+roles[].ttft.arrivalsSource string
+roles[].ttft.assumed array
+roles[].ttft.assumed[] string
+roles[].ttft.decodeSide string
+roles[].ttft.decodeTTFTPromptTokens number
+roles[].ttft.decodeTTFTSeconds number
+roles[].ttft.decodeVariant string
+roles[].ttft.fixedLatencySeconds number
+roles[].ttft.fixedLatencySource string
+roles[].ttft.flowControl string
+roles[].ttft.imbalance number
+roles[].ttft.imbalanceSource string
+roles[].ttft.percentile number
+roles[].ttft.promptCV number
+roles[].ttft.promptCVSource string
+roles[].ttft.promptFromCycle number
+roles[].ttft.promptSource string
+roles[].ttft.promptToCycle number
+roles[].ttft.promptTokens number
+roles[].ttft.rate number
+roles[].ttft.rateSource string
+roles[].ttft.replicas number
+roles[].ttft.replicasFrom string
+roles[].ttft.targetSeconds number
+roles[].ttft.transferSecondsPerToken number
+roles[].ttft.transferSource string
+roles[].ttft.vp number
+roles[].ttft.vpLearned number
+roles[].ttft.vpOrigin string
+roles[].ttft.vpPromptTokens number
+roles[].ttft.vpSource string
 roles[].variant string
 schemaVersion number
 source object

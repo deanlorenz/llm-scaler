@@ -25,6 +25,12 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/whatifsource"
 )
 
+// The questions, as their commands name them.
+const (
+	replicasQuestion = "replicas-to-slo"
+	rateQuestion     = "slo-to-rate"
+)
+
 // The output formats -o takes.
 const (
 	outputText = "text"
@@ -40,11 +46,13 @@ type answerFlags struct {
 	inputTokens, outputTokens                float64
 	headroom, tpotRatio                      float64
 	seed                                     uint64
-	// ttft, prefill and assumeVP are the TTFT half's flags, refused until
-	// the TTFT model lands (the planner's P3).
-	ttft, ttftPercentile, assumeVP string
-	prefill                        int
-	set                            map[string]bool
+	// ttft, ttftPercentile, assumeVP, prefill and prefillVariant are the
+	// TTFT half's flags (ttft.go); inputBucket only refuses per-bucket
+	// answers.
+	ttft, ttftPercentile, prefillVariant, inputBucket string
+	assumeVP                                          float64
+	prefill                                           int
+	set                                               map[string]bool
 	// window is the --prometheus mode's flags, capture's own, and its
 	// namespace the --namespace both modes take; captured is the window
 	// read, once it is. question names the command, and warn is where a
@@ -79,10 +87,12 @@ func (f *answerFlags) register(fs *flag.FlagSet) {
 	fs.Uint64Var(&f.seed, "seed", whatif.DefaultResampling().Seed, "the seed of the bands' bootstrap")
 	fs.StringVar(&f.output, "o", outputText, "output: text or json")
 	fs.StringVar(&f.output, "output", outputText, "output: text or json (the same as -o)")
-	fs.StringVar(&f.ttft, "ttft", "", "TTFT target: not supported in this build")
-	fs.StringVar(&f.ttftPercentile, "ttft-percentile", "", "TTFT percentile: not supported in this build")
-	fs.StringVar(&f.assumeVP, "assume-vp", "", "prefill token throughput: not supported in this build")
-	fs.IntVar(&f.prefill, "prefill", 0, "prefill replicas: not supported in this build")
+	fs.StringVar(&f.ttft, "ttft", "", "the TTFT target of slo-to-rate, end to end: a mean (200ms) or a percentile (200ms@p95)")
+	fs.StringVar(&f.ttftPercentile, "ttft-percentile", "", "the TTFT percentile, in percent (90); on replicas-to-slo, default the policy's, else 90")
+	fs.Float64Var(&f.assumeVP, "assume-vp", 0, "V_P, a prefill pod's prompt tokens per second, in place of the learned one (flagged)")
+	fs.IntVar(&f.prefill, "prefill", 0, "prefill replicas to price; 0 takes the recorded count")
+	fs.StringVar(&f.prefillVariant, "prefill-variant", "", "the prefill variant to price, when the model has several")
+	fs.StringVar(&f.inputBucket, "input-bucket", "", "not supported: per-bucket answers are the planner's M1")
 	f.window.registerWindow(fs)
 	fs.Lookup("prometheus").Usage = "answer from a window of this Prometheus (base URL), captured and generated in memory, in place of --recording"
 	fs.Lookup("from").Usage = "with --prometheus, the window's start: RFC 3339 or Unix seconds, to the millisecond (required)"
@@ -93,12 +103,10 @@ func (f *answerFlags) register(fs *flag.FlagSet) {
 func (f *answerFlags) check(fs *flag.FlagSet) error {
 	f.set = map[string]bool{}
 	fs.Visit(func(fl *flag.Flag) { f.set[fl.Name] = true })
-	for _, name := range []string{"ttft", "ttft-percentile", "assume-vp", "prefill"} {
-		if f.set[name] {
-			return usagef("--%s: TTFT and prefill are not supported in this build", name)
-		}
-	}
 	if err := f.checkSource(); err != nil {
+		return err
+	}
+	if err := f.checkTTFT(); err != nil {
 		return err
 	}
 	switch {

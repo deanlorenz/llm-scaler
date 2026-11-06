@@ -1,16 +1,18 @@
 // Command whatif is the what-if capacity planner's command line
 // (docs/proposals/slo-capacity-planner.md, "CLI reference"). It captures a
 // past window from Prometheus, turns a capture into a learner recording, and
-// answers the planner's two questions for decode from a recording, replayed
-// through the analyzers to the cycle asked for:
+// answers the planner's two questions from a recording, replayed through the
+// analyzers to the cycle asked for:
 //
 //	whatif capture         --prometheus URL --namespace NS (--kube-state-metrics | --role-of ROLE=SELECTOR ...)
 //	                       --from T0 --to T1 [--step 15s] [--policy FILE] -o run.capture.jsonl.gz
 //	whatif generate        -in run.capture.jsonl.gz -o run.jsonl
 //	whatif replicas-to-slo --recording FILE [--cycle N|last] [--model M] [--decode N]
-//	                       [--headroom H | --rate R] [--tpot-percentile P [--assume-tpot-ratio R]] [-o json]
+//	                       [--headroom H | --rate R] [--tpot-percentile P [--assume-tpot-ratio R]]
+//	                       [--ttft-percentile P] [--prefill N] [--prefill-variant V] [--assume-vp TOKENS] [-o json]
 //	whatif slo-to-rate     --recording FILE [--cycle N|last] [--model M] [--decode N]
-//	                       --tpot 4ms[@p90] [--assume-tpot-ratio R] [--headroom H] [-o json]
+//	                       --tpot 4ms[@p90] [--assume-tpot-ratio R] [--headroom H]
+//	                       [--ttft 200ms[@p95]] [--prefill N] [--prefill-variant V] [--assume-vp TOKENS] [-o json]
 //	whatif replicas-to-slo|slo-to-rate --prometheus URL --namespace NS (--kube-state-metrics | --role-of ROLE=SELECTOR ...)
 //	                       --from T0 --to T1 [capture's flags] [the question's flags]
 //
@@ -22,6 +24,10 @@
 // recording (learnreplay.StateAt): a file, or with --prometheus the
 // recording capture and generate would write for the window, made in
 // memory along the same path, so that the answer is the files' answer.
+//
+// A TTFT is asked for by a TTFT flag; with none, the answers are decode's
+// alone. It prices a P/D fleet (ttft.go), and prints UNVALIDATED. Aggregated
+// TTFT and per-bucket answers are not built (the planner's M1).
 //
 // Exit codes: 0 done, and every role answered; 3 a role refused (the
 // output is still printed); 2 a usage or input error (a bad flag, an
