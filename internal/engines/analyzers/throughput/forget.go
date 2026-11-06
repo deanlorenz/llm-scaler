@@ -97,6 +97,10 @@ func (a *ThroughputAnalyzer) forgetLearnerLocked(name, namespace, modelID, varia
 	case learn.K2:
 		// k2 is the saturation analyzer's alone: this analyzer learns none.
 		return 0, nil, true
+	case learn.Mu:
+		// Mu is the saturation analyzer's alone: this analyzer keeps no
+		// measured service rate.
+		return 0, nil, true
 	case learn.Start:
 		// The start time is the saturation analyzer's alone: this analyzer
 		// keeps no start estimate.

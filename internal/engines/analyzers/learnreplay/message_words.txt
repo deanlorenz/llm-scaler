@@ -1631,6 +1631,7 @@ moved
 ms
 mu
 mu-exact-repeat-is-use
+mu-forget-reported
 mu-key-bucket-held
 mu-latch-restores-safe-side
 mu-margin-clamp
@@ -1650,6 +1651,7 @@ muChoice.returnRatio
 muCycles
 muDecModel
 muDivisor
+muForgotten
 muInputTokens
 muKey
 muKeyMoved

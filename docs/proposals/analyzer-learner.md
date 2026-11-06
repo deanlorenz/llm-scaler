@@ -1456,7 +1456,9 @@ only; `restored` is rendered as a separate column.
 ### 6.2 Metrics
 
 - Labels: `namespace`, `model_name`, `variant_name`, `role`, and
-  `controller_instance` when set. No pod, no bucket. The vocabulary is
+  `controller_instance` when set; one metric takes `learner` rather than one
+  name per learner ([as built](#reports-restored-and-mus-forget-as-built-495)).
+  No pod, no bucket. The vocabulary is
   [Every signal as a metric](signals-as-metrics.md), within its budget of about
   60 series per model.
 - Series are per variant. A gauge describes the key that priced the variant
@@ -1468,8 +1470,9 @@ only; `restored` is rendered as a separate column.
 - **Deletion.** There are no per-key series, so nothing is deleted per key.
   A variant's learner series are deleted when the model is deleted, where the
   engine deletes the others. When the pricing key changes they are set from
-  the new key; when no key remains (every key forgotten), the variant's
-  learner series are deleted.
+  the new key; when the key last published is forgotten and no other prices,
+  the variant's learner series are deleted. A cycle no key priced leaves the
+  series, so the age stays visible through a stall.
 - **Forget reaches every learner.** The `Report` carries `pricingKey` and
   `forgotten{key, by: operator | evicted}`; the engine applies both. Every
   learner implements `Forget(key, by)`. The `llm-d.ai/forget-learned-state`
@@ -3457,6 +3460,70 @@ package's first switch, with its own hook (`Tracker.SetSwitchesForReplay`,
   an earlier pass showed an export filter and a clone were dead, both removed, and
   that the claim and the spare order were not reached, which tests now reach.
 
+#### Reports, restored and mu's forget, as built (#495)
+
+Built on main f7130a9cb. One replay switch, `saturation.SwitchMuForgetReported`
+(`mu-forget-reported`), on from the constructor, for mu on the list; the series
+and the `restored` field have none, because no replay output reads either.
+
+- **Reports reach the engine (6.2, 6.3, 3.6).** `TakeLearnerReports` hands them
+  over and keeps none, and the engine takes them at the end of each cycle.
+  It is a capability (`learnerReporter`), as `TakeRestoreOutcomes` is.
+  `LearnerReports` stays for the replay. The take is unrecorded: nothing the
+  analyzer prices or stores reads the reports, so `coverage_test.go` files it
+  with the readers.
+- **One series.** `wva_learned_state_last_admitted_timestamp_seconds`, labels as
+  6.2 plus `learner`, at most 4 per variant (k2, mu, itl, start), against the
+  budget of about 60 per model. The `learner` label is bounded by
+  `learn.Learners`, and a test holds a variant to one series through 1000 key
+  changes. Only the saturation analyzer files reports, so the throughput and slo
+  ITL lines publish nothing here.
+
+  | overlapping series | kept or replaced |
+  | --- | --- |
+  | `wva_learned_state_k2_age_seconds` | kept. It is the age of the k2 that priced the variant this cycle, the donor's for `P2-borrow`, and goes when nothing was priced. The new series is the variant's own key, and stays |
+  | `wva_learned_state_k2_source` | kept: it says which source, which the new series does not |
+
+- **`pricingKey` and `forgotten`, applied.** 6.2's "no key remains" cannot be read
+  from a report: an empty `PricingKey` also means the variant priced from a key
+  with no window while its other keys stand, and reports do not list them. So the
+  metrics layer remembers the key behind each series, and deletes only when a
+  report with no `PricingKey` names that key `Forgotten`. A report with no key
+  leaves the series, and so does a model parked, or one whose `Analyze` failed.
+  A key whose only window is in a stash is named too, on a forget and when the
+  sweep evicts the stash, or the series of a key set aside by an args change
+  would stand for good. The series also goes when the variant is deleted, which
+  takes two tests: it is missing from `KnownVariantAutoscalings`, and a read of
+  the scale target recorded at publish time says NotFound or finds it being
+  deleted. The registry alone will not do: a KEDA outage past `DefaultTTL` empties
+  it, and a trigger typo drops a variant from it. Any other read keeps the series,
+  Forbidden included, and `learnerSeriesMissingMax` (24 h, an assumed figure, not
+  measured) ends it whatever the reads say. Not where the engine deletes the
+  analyzer series: those follow the active set, and a model at zero replicas is
+  not in it. Nor where the
+  k2-source series goes on a cycle with no replica rows: that one describes this
+  cycle, this one the evidence. Reasons, writes and forgets are not published: 6.3
+  lists them in the Report, and no alert or operator question needs them yet.
+- **`restored` (6.1).** On `learner-write` for k2, mu and ITL, as start already
+  had it, and on `k2-decision` at `P2-hist` for `dump_k2_decisions.py`'s Restored
+  column. V(3) lines only: the default level gains nothing. The marks live on the
+  figure (`RollingAverage.Restored`, `itl.Tracker.Restored`), so a stash, a forget
+  and an eviction need no rule, and the snapshot is unchanged. Mu's exact repeat
+  is use, not a write, so a fleet whose rate does not move stays restored while
+  it serves, and its `LastAdmitted` stays old with it. That is what 6.1 says, and
+  a test holds it. An ITL intercept put back from `itlBaselineStash` reads
+  `false`, restored or not: the args change that stashes it sweeps the key.
+- **Mu on Forget (6.2).** On `learn.Learners`, so the slo and throughput forgets
+  each gained a `learn.Mu` case that drops nothing. `previousValue` was stale, by
+  test, not only by reading: `muLogged` is `scopeShared`, so `dropVariantLocked`
+  skipped it, and the first line after a forget read the value from before it.
+  `forgetMuLocked` clears it, and counts the entries the variant's forget counted
+  before. The prefill bound shares mu's maps: its keys still go with the variant,
+  and are not reported. Eviction reports too, as k2's does.
+- **Open.** `learner-write` and `learn.Report` for `slo` (6.1), left for after
+  #493 and #494. B's own last-admitted stamp (Deferred). `restoredKeys` for ITL on
+  `learner-start`. Not measured on a cluster: no run has read this series.
+
 ## 8. Risks and limits
 
 - **One shared bug.** A defect in the settle tracker reaches every learner at
@@ -3504,11 +3571,11 @@ Round-3 lows, each settled in the PR named.
 | The recorder volume's `sizeLimit` is the per-volume ceiling (two recordings at the cap) plus headroom for the export. The writer stops each recording at the cap and deletes the oldest closed recording before the ceiling | 0b |
 | The export also pseudonymises args and config strings and borrowed-line donors, with a per-export key that is not committed | 0b |
 | `learner-write`'s `pods` lists at most 16, lowest reading first, with `podsOmitted` | 2 |
-| Forget reaches every learner through a plain list of learner names in `learn`, not a registry; it is a named change of its own; when no key remains, the variant's learner series are deleted. Built for the saturation analyzer (2), the slo line (#431) and the throughput line ([as built](#the-throughput-lines-forget-as-built)). No learner series exists yet, so the deletion still has nothing to apply to | 2 |
+| Forget reaches every learner through a plain list of learner names in `learn`, not a registry; it is a named change of its own; when no key remains, the variant's learner series are deleted. Built for the saturation analyzer (2), the slo line (#431) and the throughput line ([as built](#the-throughput-lines-forget-as-built)). The deletion is built with the first series ([as built](#reports-restored-and-mus-forget-as-built-495)) | 2 |
 | Each operator-column cell names its metric series, or "metrics: none" | each PR |
 | A witness column per learner in 3.4 ("witnessed when", "non-saturating witness"), which also tells the probe which side to drive | 3 |
 | 3.6's cycle-count clocks become durations, or record the cycle interval in the threshold | each learner's PR |
-| The snapshot gains a last-admitted stamp for start time and B, as an additive `omitempty` field of v1; a document without it publishes 0 (as old as can be) | 5, or the first PR that publishes a start-time or B age, whichever is earlier |
+| The snapshot gains a last-admitted stamp for start time and B, as an additive `omitempty` field of v1; a document without it publishes 0 (as old as can be) | Start time: 5c. B: still open; a line with an empty window publishes its held slope's fit, and 0 on an intercept with no slope ([as built](#reports-restored-and-mus-forget-as-built-495)) |
 
 ## Review notes (round 1)
 

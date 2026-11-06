@@ -41,6 +41,9 @@ Reads the following log lines:
                                     replica of several engine ranks has a
                                     full rank: the demand added so its
                                     capacity is not released on its mean
+  - learner-write                  (saturation_v2) per learned key, when its
+                                    figure moves: read here for its restored
+                                    field, the Restored column
   - Applied saturation decision via shared cache
                                     (steadystate) the actual, post-enforcement
                                     target replica count for the variant this
@@ -113,6 +116,7 @@ SQ_MSG = "scheduler-queue-demand"
 # collected: nothing in this report rendered it, and a line no build emits
 # should not look like one the report expects.
 TFLOOR_MSG = "throughput-demand-floor"
+LEARNER_MSG = "learner-write"
 
 MESSAGES = {
     K2_MSG,
@@ -129,6 +133,7 @@ MESSAGES = {
     "itl-window",
     "itl-fit",
     "derived-mu",
+    LEARNER_MSG,
     DECISION_MSG,
 }
 
@@ -181,6 +186,20 @@ def md_table(headers, rows):
 # columns — kept short so each row fits on one line.
 BOUND_LEGEND = "k1=memory-bound won, k2=compute-bound won"
 DECISION_LEGEND = "DN = the controller decided N replicas (post scale-to-zero/min-replica enforcement)"
+RESTORED_LEGEND = ("the learners whose line this cycle says restored: true, a figure a snapshot "
+                   "carried with no reading admitted since. k2 from each k2-decision that read "
+                   "its window; every learner from learner-write, which logs only when a figure "
+                   "moves. A restored figure keeps its source, so Priority still reads P2-hist")
+
+
+def restored_label(k2s, writes):
+    """The Restored column for one variant's cycle: the learners that say so
+    on this cycle's lines, sorted, or "-". P-codes stay in Priority: a restore
+    is a field, not a source."""
+    learners = {e.get("learner", "?") for e in writes if e.get("restored")}
+    if any(k.get("restored") for k in k2s):
+        learners.add("k2")
+    return ",".join(sorted(learners)) if learners else "-"
 
 
 def format_bound(bound_by):
@@ -285,6 +304,7 @@ def build_cycle_row(cycle, variant):
     per replica. Returns None when this variant did not report in this cycle."""
     rcs = [e for e in cycle if e["_msg"] == RC_MSG and e.get("variant") == variant]
     k2s = [e for e in cycle if e["_msg"] == K2_MSG and e.get("variant") == variant]
+    writes = [e for e in cycle if e["_msg"] == LEARNER_MSG and e.get("variant") == variant]
     if not rcs and not k2s:
         return None
 
@@ -336,6 +356,7 @@ def build_cycle_row(cycle, variant):
         # through to), so it only counts when there are no capacity lines.
         "n": len(rcs) if rcs else len(k2s),
         "priority_label": ",".join(sorted(set(priorities))) if priorities else "?",
+        "restored_label": restored_label(k2s, writes),
         "k1": k1_common[0][0] if k1_common else "?",
         "k2": k2_common[0][0] if k2_common else "?",
         "bound_label": ",".join(sorted(bound_counts)) if bound_counts else "?",
@@ -574,15 +595,17 @@ def render_report(events, start, stop, cycle_gap, workload_line=None):
                      "followed by the tier it fell through to). Time is HH:MM:SS on the run date "
                      "above.")
         lines.append("")
-        lines.append(f"Legend — Bound: {BOUND_LEGEND}.  Decision: {DECISION_LEGEND}.")
+        lines.append(f"Legend — Bound: {BOUND_LEGEND}.  Decision: {DECISION_LEGEND}.  "
+                     f"Restored: {RESTORED_LEGEND}.")
         lines.append("")
 
         detail_rows = [[
-            r["time_short"], r["n"], r["priority_label"], r["k2"], r["k1"], r["bound_label"],
+            r["time_short"], r["n"], r["priority_label"], r["restored_label"], r["k2"], r["k1"],
+            r["bound_label"],
             r["tokens_in_use"], r["local_queue"], r["epp_queue"], r["total_demand"], r["decision"],
         ] for r in rows]
         lines.extend(md_table(
-            ["Time", "N", "Priority", "k2", "k1", "Bound", "KVinUse", "LocalQ", "EPPq",
+            ["Time", "N", "Priority", "Restored", "k2", "k1", "Bound", "KVinUse", "LocalQ", "EPPq",
              "TotalDemand", "Decision"],
             detail_rows))
         lines.append("")
