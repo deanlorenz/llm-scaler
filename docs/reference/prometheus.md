@@ -593,7 +593,7 @@ across a restart, are otherwise visible only in the logs.
 - **Type**: Counter
 - **Description**: Total number of metrics collection errors
 - **Labels**:
-  - `query_type`: Type of metrics query that failed. `pod_list` is the controller's per-namespace Pod listing, a Kubernetes API read rather than a Prometheus query. `router_latency` is the router's TTFT histogram and TPOT mean the `slo` analyzer reads. `learner_recording` is a query only a learner recording reads (the TTFT inputs: per-pod histograms and means, the router's TPOT and flow-control wait histograms, the flow-control pools); these run only while `LEARNER_RECORDING_DIR` names a directory, so the series never appears otherwise, and a failure there leaves scaling untouched: it shows on this counter and does not raise `WVAMetricsCollectionFailing`. A `router_latency` or `learner_recording` failure is counted once per query the controller ran, not once per model that read its result in the same cycle. Before the TTFT recorder (R1) `router_latency` counted once per model per failed query, so with several models in a namespace the same outage now reads a lower rate
+  - `query_type`: Type of metrics query that failed. `pod_list` is the controller's per-namespace Pod listing, a Kubernetes API read rather than a Prometheus query. `router_latency` is the router's TTFT histogram and TPOT mean the `slo` analyzer reads. `learner_recording` is a query only a learner recording reads (the TTFT inputs: per-pod histograms and means, the router's TPOT and flow-control wait histograms, the flow-control pools); these run only while `LEARNER_RECORDING_DIR` names a directory, so the series never appears otherwise, and a failure there leaves scaling untouched: it shows on this counter and does not raise `WVAMetricsCollectionFailing`. `ttft_inputs` is a per-pod query the shadow TTFT pricing reads (the queue minimum, the computed-prefill-token histogram, the KV transfer time): these run in a namespace with a model whose policy has a TTFT target and lists the `slo` analyzer, and while recording. A failure leaves scaling untouched and does not raise `WVAMetricsCollectionFailing` either: the pricing reads the input as unknown and flags it. A `router_latency`, `learner_recording` or `ttft_inputs` failure is counted once per query the controller ran, not once per model that read its result in the same cycle. Before the TTFT recorder (R1) `router_latency` counted once per model per failed query, so with several models in a namespace the same outage now reads a lower rate
   - `reason`: Reason for the error. For `pod_list`: `forbidden`, `unavailable` or `other`
 - **Use Case**: Track metrics collection failures and identify problematic queries. A failed `pod_list` makes the controller treat every Pod in that namespace as Ready and present for the cycle, so a not-Ready Pod's saturated reading can become its variant's k2; a steady rate of `pod_list` errors (`reason="forbidden"` after an RBAC change) is worth an alert
 - **Example**:
@@ -1382,7 +1382,7 @@ model reads all of them `0`, including the two marked "on every answer":
 | flag | meaning |
 | --- | --- |
 | `UnvalidatedTTFT` | On every answer: the model has not passed its validation. |
-| `AssumedPromptSpread` | No prompt histogram: a spread of 2 is assumed. |
+| `AssumedPromptSpread` | No computed-token histogram read, or no request in it: a spread of 2 is assumed. SGLang has no such histogram. |
 | `AssumedPoissonArrivals` | On every answer: Poisson arrivals are assumed, which over-promises on bursty traffic. |
 | `AssumedImbalance` | The imbalance `f` was not learned at this pod count: assumed, at least 1.5. |
 | `ImbalanceNotSustained` | One pod read 80% of the work or more, but not over the whole window: priced at that high `f`, not `routing-bound`. |
@@ -1390,7 +1390,7 @@ model reads all of them `0`, including the two marked "on every answer":
 | `VPAboveSlopeBound` | `V_P` is above what the low-load fit allows: one of the two is wrong. |
 | `VPShapeMoved` | The mean prompt is more than 1.2 times away from the one `V_P` was learned at, with no curve to rescale by. |
 | `VPScaledToPrompt` | `V_P` was rescaled to a longer prompt. It read 1.5% high on the one measured point. |
-| `TransferOmitted` | No KV transfer time measured: left out, so TTFT reads low. |
+| `TransferOmitted` | No decode pod read a KV transfer time: left out, so TTFT reads low. A pod with no NIXL connector, or an SGLang pod, has none. |
 | `DecodeEngineMeasured` | No decode line: decode's part is the decode engine's measured mean TTFT, held at the rate it was measured at. |
 | `DecodeSideOmitted`, `DecodeTTFTUnmeasured` | No decode line and no measured TTFT: decode's part is left out, so TTFT reads low. They always come together. |
 | `FlowControlInferredOff` | `slo.flowControl` is unset and the flow-control queue series does not exist. A scrape gap looks the same: declare it. |

@@ -815,9 +815,9 @@ P3's on the answer.
 | `f` | [Decision 1](#1-the-imbalance-f), at `pods` |
 | `N_p` | `pods`: the variant's Ready replicas for S1, each `N'` for S2. Counted by `prefill.Serving` (Ready, not a warm-pool bridge), the rule P1 counts `FByPods` by, so `f` is read at the count it was learned at |
 | `PromptTokens` | The effective prompt, `E[I_eff]` (prefix hits are not prefill work), as P1 reads it |
-| `PromptCV` | Measured from the computed-prefill-token histogram where a row carries it (Q1); otherwise 2, flagged `AssumedPromptSpread` ([below](#the-prompt-spread)) |
+| `PromptCV` | Measured from the computed-prefill-token histogram where a row carries it (Q1, read in a namespace with a TTFT target); otherwise 2, flagged `AssumedPromptSpread` ([below](#the-prompt-spread)) |
 | `ArrivalCV2` | 0, Poisson (P3's open question 5), flagged `AssumedPoissonArrivals`: an S1 flag, since P3 has none for it. Poisson over-promises on bursty traffic. Lifted by the staircase's bursty bucket ([which bucket lifts which flag](slo-capacity-planner-ttft.md#ground-truth-and-the-staircase)) |
-| `TransferSecondsPerToken` | Measured: the mean of the R1 field `AvgKVTransferTime` over Ready decode rows with `AvgKVTransferTimeKnown`, divided by `E[I_eff]`. Run 2 recorded it on 374 of 386 decode rows. `TransferOmitted` (0 passed) only where no decode row carries it, which in production is until Q1 issues the query. With no decode line and `DecodeTTFT` measured, P3 does not price it (the decode engine's TTFT holds the pull) |
+| `TransferSecondsPerToken` | Measured: the mean of the R1 field `AvgKVTransferTime` over Ready decode rows with `AvgKVTransferTimeKnown`, divided by `E[I_eff]`. Run 2 recorded it on 374 of 386 decode rows. `TransferOmitted` (0 passed) only where no decode row carries one. With no decode line and `DecodeTTFT` measured, P3 does not price it (the decode engine's TTFT holds the pull) |
 | `DecodeTTFT` | With no decode line only: the decode variant's measured `AvgTTFT` and the prompt it was read at ([below](#3-what-s1-passes-to-ttftat-and-rateforttft)); 0 when no row carries it (`DecodeTTFTUnmeasured`) |
 | `Decode` | The model's decode variant, from the inputs S1 already prices TPOT with: its line, band, capacity tokens, `KVreq`, `O`, batch cap times ranks, and Ready replicas `N_d`. Only when the model has exactly one decode variant and its line prices (`own` or `pinned`; not `pinned-default`, `no-line` or `declined`) |
 | `FlowControl` | The tier's `slo.flowControl` when it is set ([below](#the-flow-control-state)): `enabled` passes `FlowControlOn`, `disabled` passes `FlowControlOff`. Unset, it is inferred from the series: on when the router's flow-control queue series exists for the model, `FlowControlNoSeries` (flagged `FlowControlInferredOff`) otherwise. On always carries the upstream detector thresholds 5 and 0.8, which this repository's install leaves unchanged, so P3's `FlowControlUnknown` cannot arise |
@@ -1386,14 +1386,14 @@ P2](slo-capacity-planner-ttft.md#as-built-p3-after-p2), 7 each at p90 and p95:
    reading it would have made a replay differ from production
    (`TestTTFT_TheFlowControlStateDoesNotDependOnARecording`). The what-if CLI
    reads the same rule, `domain.AnalyzerInput.FlowControlSeries`. `AvgKVTransferTime`
-   still differs that way: it is recorded and not collected, so `TransferOmitted`
-   stands in production until Q1.
+   differed that way until Q1, which reads it every cycle where a target asks for
+   it, so `TransferOmitted` now means no decode pod read a transfer time.
 7. **Flags.** `PromptSpreadAbovePeak` and `ImbalanceNotSustained` join the list.
    With the rate refused the flags are `TTFTAt`'s where it answered, and none
    where neither call did, so `UnvalidatedTTFT` and `AssumedPoissonArrivals`
    read 0 on those cycles.
 8. **`ComputedTokensBuckets`** is a new row field S1 reads for the measured
-   `cv`. No collector fills it: that is Q1.
+   `cv`. Q1 fills it ([as built](#as-built-q1)).
 9. **`prefill.Bound.PromptTokens` is not added.** A back-pressure bound has no
    `VPPromptTokens`, so it reads `VPShapeMoved`, the safe side.
 
@@ -1440,6 +1440,94 @@ flow-control paths ran on synthetic fleets only. The `f` floor 1.5, the 0.8, the
   per variant per cycle today; S2's search multiplies it by `N_p + cap`.
 - **The no-act list** gains `PromptSpreadAbovePeak`
   ([decision 5](#5-s2-as-a-sketch)).
+
+##### As built (Q1)
+
+Q1 takes three inputs off record-only, so S1 and the what-if CLI read them on
+every cycle. S1 stays shadow.
+
+**What is read, and where.** A namespace reads them when a model in it has a
+policy with a TTFT target that also lists the `slo` analyzer
+(`ScalingPolicy.PricesTTFT`). A target with the analyzer unlisted is read by
+nothing, so it costs nothing. The engine names the namespaces when it opens the
+collector's cycle (`Engine.beginCollectorCycle`, collector `ReadTTFTInputsIn`),
+and every model of a named namespace gets the rows, in whatever order they are
+collected.
+
+| Query | Series | Row field | Window |
+| --- | --- | --- | --- |
+| `queue_min` | `num_requests_waiting` (SGLang `num_queue_reqs`) | `QueueMin` | `[1m]` |
+| `avg_kv_transfer_time` | `nixl_xfer_time_seconds` (vLLM only) | `AvgKVTransferTime` | `[1m]` |
+| `computed_tokens_buckets` (new) | `request_prefill_kv_computed_tokens_bucket` (vLLM only) | `ComputedTokensBuckets` | `[1m]`, the window of the computed-token rate the mean comes from |
+
+**Cost.** One namespace's replica queries a cycle, measured by
+`TestTTFTReadQueries_TheBudget`:
+
+| Engines | Before | With a TTFT target | Recording, before and after |
+| --- | --- | --- | --- |
+| vLLM or SGLang | 24 | 27 | 32, 33 |
+| Both | 43 | 47 | 56, 57 |
+
+A namespace with no target asks exactly what it asked before. The queries add
+no log line at the shipped verbosity, read or failing
+(`TestTTFTReadQueries_AddNoLogLine`). The histogram costs about 15 series per
+pod: the recordings' prompt histogram, on the same bucket scheme, has 15 bounds.
+
+**A missing series reads unknown.** The collector has no capability check for a
+new series: an absent one simply returns nothing. So an SGLang pod, a pod with
+no NIXL connector, a NaN (a window with no request) and a failed query all leave
+`QueueMinKnown` and `AvgKVTransferTimeKnown` false and the histogram nil, never
+a zero (`TestTTFTInputs_AMissingSeriesReadsUnknown`). S1 then raises
+`AssumedPromptSpread` or `TransferOmitted`, as it did. A zero transfer reading
+is known, but it is no transfer time, so `TransferOmitted` stands
+(`TestTTFT_TransferOmittedStandsUntilAReading`).
+
+**A failure is its own type.** The three count under
+`query_type="ttft_inputs"`, once per query sent, and do not raise
+`WVAMetricsCollectionFailing`: nothing that scales reads them.
+
+**The reader moved.** `readPromptSpread` is `whatif.ReadPromptSpread` now, in its
+own file, so S1 and the CLI share one rule; what it computes did not change. The
+CLI sums the histogram over the cycles it reads the prompt from, and names a
+held `cv` as `clamped`. `whatif` prices as before.
+
+**Switches.** `slo-ttft-measured-spread` and `slo-ttft-measured-transfer`. Off,
+each reads as production did before Q1. Neither moves a golden: no recording has
+the histogram, and neither S1 golden (`ols-sweep-slo`, its restart) carries a
+transfer time. Unit tests hold them.
+
+**What moves, measured on the prefill-stress recordings.** No recording has the
+computed-token histogram, so its size is an estimate: `PromptTokensBuckets` stood
+in for it, in a throwaway replay of S1 at the stitched estimate of
+`TestS1_PricedOnRecordedRows`. The two read the same on these runs only if
+prefix hits are low, and the prompt histogram is over `[5m]`, not `[1m]`. The
+prediction, as a ratio to `cv` 2:
+
+| Recording | Cycles with a prediction | Least | Median | Most | Clamped cycles |
+| --- | --- | --- | --- | --- | --- |
+| `ttft-open-loop-short` | 99 | 0.354 | 0.663 | 0.920 | 0 of 105 |
+| `ttft-open-loop-long` | 86 | 0.602 | 1.094 | 1.320 | 58 of 93 |
+| `ttft-saturated` | 16 | 0.350 | 1.977 | 2.000 | 167 of 193 |
+
+On the short run the figure closes on the router's p90: 1.82x to 1.67x at 2k
+tokens, 1.74x to 1.13x at 4k, 1.62x to 1.07x at 16k. At 1k it goes from 1.10x
+over to 0.95x under.
+
+**The histogram stops at 20000 tokens on these runs.** Past that bound a prompt
+lands in `+Inf`, so `cv` is held at 3 and flagged `PromptSpreadClamped`, whatever
+the true spread. The 30k and 37k prompts sent at `cv` 0.06 read that way. So on
+prompts longer than the top bound Q1 raises the figure instead of correcting it,
+and S2's gate on `PromptSpreadClamped` stops it acting there.
+
+**The transfer term did not move a figure.** Off against on, the prediction read
+the same on all three recordings (ratio 1.0000), and no cycle gained
+`TransferOmitted`: each is `DecodeEngineMeasured`, where the decode engine's TTFT
+holds the pull and the transfer is not priced. The term prices only with a decode
+line, which no recording here has.
+
+**Not run.** Q1 has not run against a live vLLM, so the name and buckets of
+`request_prefill_kv_computed_tokens_bucket` are from the `_sum` the collector
+already reads and from the prompt histogram, not read off a scrape.
 
 ### Phase 3: the attainment trim
 
