@@ -310,6 +310,7 @@ report_undeclared_pools() {
 cmd_create() {
   require NAMESPACE namespace
   require WVA_NAMESPACE wva-namespace
+  wva_check_so_name "wva-warm-pool-${POOL_NAME}" || exit 1
 
   # The proxy image defaults to the one config/warmpool pins, which is published
   # and pullable, so a pool can be created without building anything first.
@@ -1699,8 +1700,6 @@ while [ $# -gt 0 ]; do
     *) usage; log_error "unknown option: $1" ;;
   esac
 done
-
-wva_check_so_name "wva-warm-pool-${POOL_NAME}" || exit 1
 
 case "$ACTION" in
   plan)   cmd_plan ;;

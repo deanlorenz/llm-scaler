@@ -19,6 +19,16 @@ make undeploy-wva NAMESPACE=<namespace>
 Learned state, tuned policy, labels on namespaces and ScaledObject addresses are
 not carried over. Install again from the renamed tree and re-create what you need.
 
+The tree no longer removes what older installs left behind, because those objects
+are not rendered any more and no code looks for them. If you reinstall on a cluster
+that had an older install and did not uninstall it with the old tree, delete these
+two by hand:
+
+```bash
+kubectl delete secret wva-controller-manager-token -n <namespace>
+kubectl delete clusterrolebinding wva-prometheus-cluster-monitoring-view-<suffix>
+```
+
 ## Run order
 
 ```bash
@@ -113,5 +123,6 @@ characters and the longest port name 10.
 - **ScaledObject names:** KEDA names the HPA `keda-hpa-<ScaledObject>` and refuses
   one over 63, so a ScaledObject name holds 54. The generated names use the short
   form, so a workload name holds 48 with `<workload>-llmsm`, and a pool name 38 with
-  `llmsm-warm-pool-<pool>`. Past that, `llmsm_check_so_name` stops the install with
-  the name in the message.
+  `llmsm-warm-pool-<pool>`. Past that, `llmsm_check_so_name` stops an install or a
+  pool creation with the name in the message. A ScaledObject that names its own HPA
+  with `spec.advanced.horizontalPodAutoscalerConfig.name` is not bound by this.

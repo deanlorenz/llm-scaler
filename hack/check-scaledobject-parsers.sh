@@ -56,7 +56,7 @@ for fn in so_model_id so_resolve_env_ref; do
     }
 done
 
-EXPECT_CASES=124
+EXPECT_CASES=125
 RAN=0
 FAILED=0
 
@@ -762,6 +762,12 @@ check 'so name: the longest name KEDA takes passes' \
 check 'so name: one more is refused, and says so' \
     '1|keda-hpa' \
     "$( out="$( (wva_check_so_name "$(printf 'a%.0s' $(seq 55))") 2>&1 )"; rc=$?; printf '%s|%s' "$rc" "$(printf '%s' "$out" | grep -o 'keda-hpa' | head -1)")"
+# Only creating a pool checks: delete, monitor and plan must still reach a pool
+# whose name is already over the limit.
+check 'so name: a pool is checked where it is created, and nowhere else' \
+    'cmd_create' \
+    "$(awk '/^[a-z_]+\(\) \{/{fn=$1} /^[[:space:]]*wva_check_so_name/{print (fn == "" ? "top level" : fn)}' \
+        "$(dirname "$0")/../deploy/warmpool.sh" | tr -d '()' | paste -sd, -)"
 
 if [ "$FAILED" -gt 0 ]; then
     printf '\n%d model-identification assertion(s) failed.\n' "$FAILED" >&2

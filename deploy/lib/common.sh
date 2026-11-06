@@ -72,10 +72,12 @@ kc_not_found() {
 
 # wva_check_so_name refuses a ScaledObject name KEDA would refuse later. KEDA
 # names the HPA keda-hpa-<ScaledObject> and an HPA name holds 63 characters, so a
-# ScaledObject name holds 54. Stopped here it is a line with the name in it;
-# past here it is a ScaledObject that never gets an HPA.
+# ScaledObject name holds 54 (KEDA v2.21.0, scaledobject_webhook.go). Stopped here
+# it is a line with the name in it; past here it is a ScaledObject that never
+# gets an HPA. Only for objects this repository generates, which never set
+# spec.advanced.horizontalPodAutoscalerConfig.name.
 wva_check_so_name() {
-    [ "${#1}" -le 54 ] || log_error "ScaledObject name $1 is ${#1} characters, and KEDA takes 54: keda-hpa-<name> must fit in 63. Shorten the workload or pool name."
+    [ "${#1}" -le 54 ] || log_error "ScaledObject name $1 is ${#1} characters, and KEDA takes 54: keda-hpa-<name> must fit in 63. Shorten the workload or pool name, or set spec.advanced.horizontalPodAutoscalerConfig.name on your own ScaledObject."
 }
 
 # wva_make_cmd echoes the make command that repeats THIS install's shape for
