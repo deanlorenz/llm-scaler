@@ -106,6 +106,7 @@ func (a *SaturationAnalyzer) noteITLLearner(namespace, modelID, variant, role, k
 	if r.Held > 0 {
 		report.LastAdmitted = a.itlTracker.Newest(key)
 	}
+	restored := a.itlTracker.Restored(key)
 	a.mu.Lock()
 	report.Forgotten = a.itlForgotten[model][variant]
 	delete(a.itlForgotten[model], variant)
@@ -139,7 +140,7 @@ func (a *SaturationAnalyzer) noteITLLearner(namespace, modelID, variant, role, k
 		"role", role, "key", key, "a", r.Model.A, "b", r.Model.B,
 		"previousA", last.a, "previousB", last.b, "firstWrite", !logged,
 		"source", source, "previousSource", last.source, "samples", r.Held,
-		"steadyHeld", r.SteadyHeld, "slopeAgeSeconds", r.SlopeAge(now).Seconds())
+		"restored", restored, "steadyHeld", r.SteadyHeld, "slopeAgeSeconds", r.SlopeAge(now).Seconds())
 }
 
 // closeITLCycle ends the ITL line's cycle for a model: its reports join k2's

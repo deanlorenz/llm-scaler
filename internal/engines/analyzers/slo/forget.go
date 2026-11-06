@@ -96,6 +96,10 @@ func (a *Analyzer) forgetLearnerLocked(name, namespace, modelID, variant string)
 		// k2 is the saturation analyzer's alone: this analyzer reads the
 		// capacity store, which that analyzer's forget clears.
 		return 0, nil, true
+	case learn.Mu:
+		// Mu is the saturation analyzer's alone: this analyzer keeps no
+		// measured service rate.
+		return 0, nil, true
 	case learn.Start:
 		// The start time is the saturation analyzer's alone: this analyzer
 		// keeps no start estimate.

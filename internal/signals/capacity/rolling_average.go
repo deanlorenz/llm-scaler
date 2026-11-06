@@ -175,6 +175,11 @@ type RollingAverage struct {
 	maxSize     int
 	lastUsed    time.Time
 	lastWritten time.Time
+	// restored is set by RestoreRollingAverage and cleared by the first
+	// write: the window holds what a snapshot carried and nothing admitted
+	// since. Never stored: a window restored twice with no write between is
+	// restored both times, and one written before the export is not.
+	restored bool
 }
 
 // NewRollingAverage creates a RollingAverage with the given window size, used
@@ -202,6 +207,7 @@ func (r *RollingAverage) AddAt(value float64, now time.Time) {
 	r.values = append(r.values, value)
 	r.lastUsed = now
 	r.lastWritten = now
+	r.restored = false
 }
 
 // Average returns the arithmetic mean of all stored values, or 0 if empty.
@@ -233,6 +239,7 @@ func (r *RollingAverage) TouchAt(t time.Time) {
 func (r *RollingAverage) ObservedAt(t time.Time) {
 	r.lastUsed = t
 	r.lastWritten = t
+	r.restored = false
 }
 
 // RaiseLastAt lifts the most recent value to v when v is higher, and counts as
@@ -253,6 +260,13 @@ func (r *RollingAverage) SetLastAt(v float64, now time.Time) {
 		r.values[n-1] = v
 	}
 	r.ObservedAt(now)
+}
+
+// Restored reports whether the window came from a snapshot and has not been
+// written since: LastWritten is still the restored stamp. TouchAt leaves it
+// set, because reading a window cannot make it this process's own.
+func (r *RollingAverage) Restored() bool {
+	return r.restored
 }
 
 // Last returns the most recent value, or 0 if empty. No production caller;

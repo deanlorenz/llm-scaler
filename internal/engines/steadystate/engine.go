@@ -250,6 +250,11 @@ type Engine struct {
 	// lastAnalyzerSeries.
 	publishedEngineConfig map[string]engineConfigPublished
 
+	// learnerSeries records the models whose learner reports were published
+	// (learner_reports.go), keyed identically. Unguarded for the same reason
+	// as lastAnalyzerSeries.
+	learnerSeries map[string]learnerSeriesModel
+
 	// lastDecided records, per scale target (keyed namespace/target), when the
 	// optimize loop last DECIDED for it -- as opposed to republished for it --
 	// and which incarnation of the target that decision was about. The sticky
@@ -1529,6 +1534,9 @@ func (e *Engine) optimizeV2(
 		activeKeys[utils.GetNamespacedKey(modelVAs[0].Namespace, modelVAs[0].Spec.ModelID)] = true
 	}
 	e.pruneLastGoodAnalysis(activeKeys)
+	// Before the prune: every model analyzed this cycle is active, and what
+	// the prune deletes must not come back from a report it did not see.
+	e.publishLearnerReports()
 	e.pruneAnalyzerSeries(activeKeys)
 	e.pruneBlockedModels(activeKeys)
 	// evaluated are the models whose scale-to-zero stage 3 resolves this cycle.

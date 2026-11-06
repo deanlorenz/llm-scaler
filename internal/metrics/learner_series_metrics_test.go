@@ -1,0 +1,189 @@
+package metrics
+
+import (
+	"testing"
+	"time"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
+)
+
+const lastAdmittedSeries = constants.WVALearnedStateLastAdmittedTimestampSeconds
+
+func report(learner, role, key string, at time.Time, forgotten ...string) learn.Report {
+	r := learn.Report{Learner: learner, Namespace: "ns", ModelID: "m", Variant: "v", Role: role,
+		PricingKey: key, LastAdmitted: at}
+	for _, k := range forgotten {
+		r.Forgotten = append(r.Forgotten, learn.Forgotten{Key: k, By: learn.ByOperator})
+	}
+	return r
+}
+
+func TestRecordLearnerReportsPublishesOneSeriesPerVariantAndLearner(t *testing.T) {
+	emitter, registry := engineConfigEmitter(t)
+	at := time.Unix(1_700_000_000, 500_000_000)
+	emitter.RecordLearnerReports([]learn.Report{
+		report(learn.K2, "decode", "k2-key", at),
+		report(learn.Mu, "decode", "mu-key", at.Add(time.Minute)),
+		report(learn.ITL, "decode", "itl-key", at.Add(2*time.Minute)),
+		report(learn.Start, "decode", "start-key", at.Add(3*time.Minute)),
+	})
+	if got := countSeries(t, registry, lastAdmittedSeries); got != 4 {
+		t.Fatalf("series = %d, want 4", got)
+	}
+	v, ok := seriesValue(t, registry, lastAdmittedSeries, map[string]string{
+		constants.LabelVariantName: "v", constants.LabelRole: "decode", constants.LabelLearner: learn.Mu,
+	})
+	if !ok || v != 1_700_000_060.5 {
+		t.Fatalf("mu = %v (present %v), want 1700000060.5", v, ok)
+	}
+}
+
+// A figure with no stamp is as old as can be, not the year 1.
+func TestRecordLearnerReportsPublishesZeroForNoStamp(t *testing.T) {
+	emitter, registry := engineConfigEmitter(t)
+	emitter.RecordLearnerReports([]learn.Report{report(learn.Start, "decode", "start-key", time.Time{})})
+	if v, ok := seriesValue(t, registry, lastAdmittedSeries, map[string]string{constants.LabelLearner: learn.Start}); !ok || v != 0 {
+		t.Fatalf("start = %v (present %v), want 0", v, ok)
+	}
+}
+
+// A change of pricing key sets the series from the new key, and however many
+// keys a variant moves through it holds one series: the key is no label.
+func TestRecordLearnerReportsAChangeOfKeyStaysOneSeries(t *testing.T) {
+	emitter, registry := engineConfigEmitter(t)
+	at := time.Unix(1_700_000_000, 0)
+	for i := range 1000 {
+		emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key-"+string(rune('a'+i%26)), at.Add(time.Duration(i)*time.Second))})
+	}
+	if got := countSeries(t, registry, lastAdmittedSeries); got != 1 {
+		t.Fatalf("series = %d, want 1", got)
+	}
+	if v, _ := seriesValue(t, registry, lastAdmittedSeries, map[string]string{constants.LabelLearner: learn.K2}); v != 1_700_000_999 {
+		t.Fatalf("value = %v, want the last report's", v)
+	}
+}
+
+// A new role moves the series, and leaves nothing behind under the old one.
+func TestRecordLearnerReportsAChangeOfRoleMovesTheSeries(t *testing.T) {
+	emitter, registry := engineConfigEmitter(t)
+	at := time.Unix(1_700_000_000, 0)
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key", at)})
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "both", "key", at)})
+	if got := countSeries(t, registry, lastAdmittedSeries); got != 1 {
+		t.Fatalf("series = %d, want 1", got)
+	}
+	if _, ok := seriesValue(t, registry, lastAdmittedSeries, map[string]string{constants.LabelRole: "decode"}); ok {
+		t.Fatal("the old role's series is still up")
+	}
+}
+
+// A report with no pricing key leaves the series: a learner that stopped
+// pricing still shows how old its evidence is. A forget of another key does
+// too. Only the key published going takes the series with it, and a key
+// after that publishes it again.
+func TestRecordLearnerReportsDeletesOnlyWhenThePublishedKeyIsForgotten(t *testing.T) {
+	emitter, registry := engineConfigEmitter(t)
+	at := time.Unix(1_700_000_000, 0)
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key", at)})
+
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "", time.Time{})})
+	if v, ok := seriesValue(t, registry, lastAdmittedSeries, map[string]string{constants.LabelLearner: learn.K2}); !ok || v != 1_700_000_000 {
+		t.Fatalf("no key priced: %v (present %v), want the value kept", v, ok)
+	}
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "", time.Time{}, "another-key")})
+	if got := countSeries(t, registry, lastAdmittedSeries); got != 1 {
+		t.Fatalf("another key forgotten: series = %d, want 1", got)
+	}
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "", time.Time{}, "another-key", "key")})
+	if got := countSeries(t, registry, lastAdmittedSeries); got != 0 {
+		t.Fatalf("the published key forgotten: series = %d, want 0", got)
+	}
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "new-key", at)})
+	if got := countSeries(t, registry, lastAdmittedSeries); got != 1 {
+		t.Fatalf("a new key: series = %d, want 1", got)
+	}
+}
+
+// A key forgotten with another pricing in the same report is a change of key.
+func TestRecordLearnerReportsAForgottenKeyWithANewOneKeepsTheSeries(t *testing.T) {
+	emitter, registry := engineConfigEmitter(t)
+	at := time.Unix(1_700_000_000, 0)
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key", at)})
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "new-key", at.Add(time.Second), "key")})
+	if v, ok := seriesValue(t, registry, lastAdmittedSeries, map[string]string{constants.LabelLearner: learn.K2}); !ok || v != 1_700_000_001 {
+		t.Fatalf("value = %v (present %v), want the new key's", v, ok)
+	}
+}
+
+// One learner's forget leaves the other learners' series.
+func TestRecordLearnerReportsAForgetIsPerLearner(t *testing.T) {
+	emitter, registry := engineConfigEmitter(t)
+	at := time.Unix(1_700_000_000, 0)
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key", at), report(learn.Mu, "decode", "key", at)})
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "", time.Time{}, "key")})
+	if _, ok := seriesValue(t, registry, lastAdmittedSeries, map[string]string{constants.LabelLearner: learn.Mu}); !ok {
+		t.Fatal("mu's series went with k2's forget")
+	}
+}
+
+func TestDeleteLearnerSeriesIsScoped(t *testing.T) {
+	emitter, registry := engineConfigEmitter(t)
+	at := time.Unix(1_700_000_000, 0)
+	seed := func() {
+		for _, r := range []learn.Report{
+			{Learner: learn.K2, Namespace: "ns", ModelID: "m", Variant: "v", Role: "decode", PricingKey: "k", LastAdmitted: at},
+			{Learner: learn.Mu, Namespace: "ns", ModelID: "m", Variant: "v", Role: "decode", PricingKey: "k", LastAdmitted: at},
+			{Learner: learn.K2, Namespace: "ns", ModelID: "m", Variant: "w", Role: "decode", PricingKey: "k", LastAdmitted: at},
+			{Learner: learn.K2, Namespace: "ns", ModelID: "other", Variant: "v", Role: "decode", PricingKey: "k", LastAdmitted: at},
+		} {
+			emitter.RecordLearnerReports([]learn.Report{r})
+		}
+	}
+	seed()
+	emitter.DeleteLearnerSeries("ns", "m", "v")
+	if got := countSeries(t, registry, lastAdmittedSeries); got != 2 {
+		t.Fatalf("after the variant: series = %d, want 2", got)
+	}
+	seed()
+	emitter.DeleteLearnerSeriesForModel("ns", "m")
+	if got := countSeries(t, registry, lastAdmittedSeries); got != 1 {
+		t.Fatalf("after the model: series = %d, want 1", got)
+	}
+	learnerPublishedMu.Lock()
+	defer learnerPublishedMu.Unlock()
+	if _, ok := learnerPublished[learnerSeriesID{"ns", "m", "v", learn.K2}]; ok {
+		t.Fatal("the bookkeeping kept a deleted series")
+	}
+}
+
+// No labels past the five documented, whatever the report holds: a pod, a
+// bucket or a key as a label would grow with the fleet.
+func TestLearnerSeriesLabelsAreBounded(t *testing.T) {
+	emitter, registry := engineConfigEmitter(t)
+	emitter.RecordLearnerReports([]learn.Report{report(learn.K2, "decode", "key", time.Unix(1, 0))})
+	mfs, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{constants.LabelNamespace: true, constants.LabelModelName: true,
+		constants.LabelVariantName: true, constants.LabelRole: true, constants.LabelLearner: true,
+		constants.LabelControllerInstance: true}
+	checked := 0
+	for _, mf := range mfs {
+		if mf.GetName() != lastAdmittedSeries {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			checked++
+			for _, l := range m.GetLabel() {
+				if !want[l.GetName()] {
+					t.Fatalf("unexpected label %q", l.GetName())
+				}
+			}
+		}
+	}
+	if checked != 1 {
+		t.Fatalf("checked %d series, want 1", checked)
+	}
+}

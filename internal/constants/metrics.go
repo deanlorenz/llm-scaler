@@ -312,6 +312,15 @@ const (
 	// analyzer series it keeps its last value through a cycle whose
 	// collection or analysis failed.
 	WVALearnedStateK2AgeSeconds = "wva_learned_state_k2_age_seconds"
+	// WVALearnedStateLastAdmittedTimestampSeconds is when the reading newest
+	// in the key that priced a variant was admitted, Unix seconds, per
+	// learner: time() minus it is the age of the evidence, and it keeps
+	// growing through a stalled analyzer, which an age gauge cannot. Labels:
+	// namespace, model_name, variant_name, role, learner (k2, mu, itl,
+	// start). At most one series per variant and learner. 0 when the figure
+	// has no stamp (a start estimate or an ITL intercept with none stored):
+	// as old as can be.
+	WVALearnedStateLastAdmittedTimestampSeconds = "wva_learned_state_last_admitted_timestamp_seconds"
 	// WVALearnedStateRestoresTotal counts variants whose restored learned
 	// state was checked against their engine configuration
 	// (LEARNED_STATE_SNAPSHOT), by outcome: whole, args, prior, incomplete or
@@ -1238,6 +1247,7 @@ const (
 	LabelControllerInstance = "controller_instance"
 	LabelProvider           = "provider"
 	LabelRole               = "role"
+	LabelLearner            = "learner"
 	LabelStatus             = "status"
 	LabelLimiterName        = "limiter_name"
 	LabelPolicyType         = "policy_type"
