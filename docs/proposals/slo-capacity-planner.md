@@ -368,7 +368,7 @@ age. **Bands**: a block bootstrap, blocks of 4 cycles (15 s cycles over 1-minute
 rates overlap by three quarters), admission and tier rerun per resample, 200
 resamples, a fixed printed seed; "tier unstable" when more than 10% of resamples
 change tier. `V_P` from a peak and `f` are extreme statistics, so they get a
-±15% sensitivity sweep instead. **Extrapolation**: a fill or prompt length
+[±15% sensitivity sweep](#ttft-as-built) instead. **Extrapolation**: a fill or prompt length
 outside the window's range is flagged with the distance; outside the band the
 tool clamps, as `whatif.PricingK` and `whatif.PriceTPOT` do. **The line check** runs on every
 answer and a mismatch above 15% away from a ramp is printed
@@ -915,14 +915,16 @@ read at that rate, and a figure read there rests on `V_P`: the rate and TPOT
 rows carry the knee's flags and print the verdict, and the decode role's JSON
 gives `inputs.rate` and `inputs.rateSource`. On `ols-sweep` at `--assume-vp 8000`
 the rate is 6.80 r/s and the mean TPOT 2.38 ms, against 11.32 and 3.66 with the
-decode knee the lower. That rate has no band: `V_P` has no resamples. Question 1
+decode knee the lower. That rate has a sweep's band and no bootstrap: `V_P` has no
+resamples. Question 1
 adds a `prefill` row, the rate at the target alone, and a `fleet` row, the
 smallest of the roles' rates and the operating point of the lower knee, each
 named under `bound by`.
 
 ```
-prefill knee    30.00 r/s   N_p 1 x V_P 30000 / (f 1 x 1000 tokens); UNVALIDATED; V_P ASSUMED
-TTFT p90        373.4 ms                     end to end; UNVALIDATED; V_P ASSUMED
+prefill knee    30.00 r/s   [25.50 .. 34.50] N_p 1 x V_P 30000 / (f 1 x 1000 tokens); UNVALIDATED; V_P ASSUMED
+TTFT p90        373.4 ms    [302.6 .. 489.1] end to end; UNVALIDATED; V_P ASSUMED
+                (bands: V_P +-15%, a sweep, not a confidence interval)
                 (343.4 ms if prefill and decode waits were independent)
                 (floor 133.3 ms, pooled 331.4 ms, worst pod utilization 0.377)
 ttft inputs     V_P 30000 ASSUMED; a 11.04 ms learned; f 1 (one pod); N_p 1 (--prefill); prompt 1000 tokens (assumed); decode by its line, term omitted, hop assumed
@@ -952,10 +954,21 @@ a measured `cv` (Q1) the note keeps only the sent spread's half.
 **Refusals.** A refusal is a row, not a number, and exit `3`, with the rest of
 the output printed. A rate at or above the knee is `Saturated`. Aggregated TTFT
 is `NoPrefillReplicas`, with a detail that names M1. `--input-bucket` is a usage
-error that names M1. A bad flag is exit `2`, whatever the recording holds. TTFT
-has no band: `V_P`, `a` and `f` have no resamples, and a band on the ITL line
-alone would read narrower than the truth. A rate the prefill knee sets has none
-either.
+error that names M1. A bad flag is exit `2`, whatever the recording holds.
+
+**The sweep.** TTFT has no bootstrap: `V_P`, `a` and `f` have no resamples, and a band
+on the ITL line alone would read narrower than the truth. So the prefill knee, each
+TTFT and each TTFT rate, the fleet row, and an operating rate the prefill knee sets
+print a span instead: the figure at `V_P` and `f` each 15% either way, in the corners
+(`whatif.SensitivityFleets`), `f` held between 1 and `N_p`. One pod has one `f`, so
+only `V_P` moves there. The rate of question 2 is held while `V_P` moves: an operator
+who believes the figure runs at that rate. So at a headroom of 0.85, where the prefill
+knee sets the rate, `V_P` 15% down is the knee, and the span prints `Saturated` on its
+worse side (`[2384.1 .. Saturated]`). That is the point of it: such an operating rate has
+no 15% to spare. The JSON gives `sensitivity` beside `value`, with `refused` set.
+It is a sweep, not a confidence interval, and it does not widen a decode figure read
+at a rate `V_P` set: mean TPOT there keeps its line's band. `a` is not swept: it is
+measured at low load, not a peak.
 
 **What the committed recordings answer.** None of the four prefill-stress
 goldens has both `V_P` and `a`, so none answers from learned figures alone:
@@ -1229,6 +1242,10 @@ roles[].results.knee.answer.basis.tier string
 roles[].results.knee.answer.basis.uncapped number
 roles[].results.knee.answer.flags array
 roles[].results.knee.answer.flags[] string
+roles[].results.knee.answer.sensitivity object
+roles[].results.knee.answer.sensitivity.hi number
+roles[].results.knee.answer.sensitivity.lo number
+roles[].results.knee.answer.sensitivity.refused string
 roles[].results.knee.answer.unit string
 roles[].results.knee.answer.value number
 roles[].results.knee.refused object
@@ -1253,6 +1270,10 @@ roles[].results.meanTPOT.answer.basis.tier string
 roles[].results.meanTPOT.answer.basis.uncapped number
 roles[].results.meanTPOT.answer.flags array
 roles[].results.meanTPOT.answer.flags[] string
+roles[].results.meanTPOT.answer.sensitivity object
+roles[].results.meanTPOT.answer.sensitivity.hi number
+roles[].results.meanTPOT.answer.sensitivity.lo number
+roles[].results.meanTPOT.answer.sensitivity.refused string
 roles[].results.meanTPOT.answer.unit string
 roles[].results.meanTPOT.answer.value number
 roles[].results.meanTPOT.refused object
@@ -1277,6 +1298,10 @@ roles[].results.operatingRate.answer.basis.tier string
 roles[].results.operatingRate.answer.basis.uncapped number
 roles[].results.operatingRate.answer.flags array
 roles[].results.operatingRate.answer.flags[] string
+roles[].results.operatingRate.answer.sensitivity object
+roles[].results.operatingRate.answer.sensitivity.hi number
+roles[].results.operatingRate.answer.sensitivity.lo number
+roles[].results.operatingRate.answer.sensitivity.refused string
 roles[].results.operatingRate.answer.unit string
 roles[].results.operatingRate.answer.value number
 roles[].results.operatingRate.refused object
@@ -1301,6 +1326,10 @@ roles[].results.percentileTPOT.answer.basis.tier string
 roles[].results.percentileTPOT.answer.basis.uncapped number
 roles[].results.percentileTPOT.answer.flags array
 roles[].results.percentileTPOT.answer.flags[] string
+roles[].results.percentileTPOT.answer.sensitivity object
+roles[].results.percentileTPOT.answer.sensitivity.hi number
+roles[].results.percentileTPOT.answer.sensitivity.lo number
+roles[].results.percentileTPOT.answer.sensitivity.refused string
 roles[].results.percentileTPOT.answer.unit string
 roles[].results.percentileTPOT.answer.value number
 roles[].results.percentileTPOT.refused object
@@ -1325,6 +1354,10 @@ roles[].results.rate.answer.basis.tier string
 roles[].results.rate.answer.basis.uncapped number
 roles[].results.rate.answer.flags array
 roles[].results.rate.answer.flags[] string
+roles[].results.rate.answer.sensitivity object
+roles[].results.rate.answer.sensitivity.hi number
+roles[].results.rate.answer.sensitivity.lo number
+roles[].results.rate.answer.sensitivity.refused string
 roles[].results.rate.answer.unit string
 roles[].results.rate.answer.value number
 roles[].results.rate.refused object
@@ -1366,6 +1399,10 @@ roles[].results.ttft.answer.parts.routerHop number
 roles[].results.ttft.answer.parts.vpMarginApplied number
 roles[].results.ttft.answer.parts.waitOffset number
 roles[].results.ttft.answer.parts.waitScale number
+roles[].results.ttft.answer.sensitivity object
+roles[].results.ttft.answer.sensitivity.hi number
+roles[].results.ttft.answer.sensitivity.lo number
+roles[].results.ttft.answer.sensitivity.refused string
 roles[].results.ttft.answer.unit string
 roles[].results.ttft.answer.value number
 roles[].results.ttft.refused object

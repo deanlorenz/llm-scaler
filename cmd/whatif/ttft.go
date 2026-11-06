@@ -763,7 +763,62 @@ func (pf *pricedFleet) knee() whatif.Result {
 	if pf.refused != nil {
 		return *pf.refused
 	}
-	return whatif.PrefillKnee(pf.fleet.Prefill)
+	price := func(fl whatif.TTFTFleet) whatif.Result { return whatif.PrefillKnee(fl.Prefill) }
+	return withSpan(price(pf.fleet), pf.corners(price))
+}
+
+// corners is the question asked of the fleet at each corner of the V_P and f
+// sweep (whatif.SensitivityFleets); none on a fleet refused before pricing.
+func (pf *pricedFleet) corners(price func(whatif.TTFTFleet) whatif.Result) []whatif.Result {
+	if pf.refused != nil {
+		return nil
+	}
+	fleets := whatif.SensitivityFleets(pf.fleet)
+	out := make([]whatif.Result, len(fleets))
+	for i, fl := range fleets {
+		out[i] = price(fl)
+	}
+	return out
+}
+
+// withSpan is r with its span over the corners. A refusal has no figure to
+// span, and stays as it is.
+func withSpan(r whatif.Result, corners []whatif.Result) whatif.Result {
+	switch v := r.(type) {
+	case whatif.Answer:
+		v.Sensitivity = whatif.SensitivitySpan(v.Value, corners)
+		return v
+	case whatif.TTFT:
+		v.Sensitivity = whatif.SensitivitySpan(v.Seconds, corners)
+		return v
+	}
+	return r
+}
+
+// sweptText names what the fleet's bands swept: one pod has one f.
+func (pf *pricedFleet) sweptText() string {
+	p := pf.fleet.Prefill
+	if p.Replicas < 2 || p.Imbalance < 1 {
+		return fmt.Sprintf("V_P +-%.0f%%", 100*whatif.SensitivityShare)
+	}
+	return fmt.Sprintf("V_P and f +-%.0f%%", 100*whatif.SensitivityShare)
+}
+
+// spanText prints a span in format, a refused corner in place of its worse
+// side: the higher TTFT, or the lower rate.
+func spanText(s *whatif.Sensitivity, format string, scale float64, worseIsHigh bool) string {
+	if s == nil {
+		return ""
+	}
+	lo, hi := fmt.Sprintf(format, scale*s.Lo), fmt.Sprintf(format, scale*s.Hi)
+	switch {
+	case s.Refused == "":
+	case worseIsHigh:
+		hi = string(s.Refused)
+	default:
+		lo = string(s.Refused)
+	}
+	return fmt.Sprintf("[%s .. %s]", lo, hi)
 }
 
 // operatingTTFT is question 2's TTFT on one fleet.
@@ -772,6 +827,9 @@ type operatingTTFT struct {
 	q     ttftQuestion
 	// knee is the prefill knee, and ttft the answer at rate.
 	knee, ttft whatif.Result
+	// rateSpan is the span of a rate the prefill knee set, nil on any other:
+	// the knee's, at the headroom.
+	rateSpan *whatif.Sensitivity
 	// prefillBinds says the prefill knee set the operating rate: it is the
 	// lower of the two, and no rate was given.
 	prefillBinds bool
@@ -804,11 +862,12 @@ func (pf *pricedFleet) atOperatingPoint(q ttftQuestion, query whatif.ReplicasQue
 		o.rate = headroom * lowest
 		if o.prefillBinds {
 			query.Rate, query.Headroom = o.rate, 0
+			o.rateSpan = &whatif.Sensitivity{Lo: headroom * pk.Sensitivity.Lo, Hi: headroom * pk.Sensitivity.Hi}
 		}
 	}
 	pf.in.Rate = &o.rate
 	price := func(fl whatif.TTFTFleet) whatif.Result { return whatif.TTFTAt(fl, o.rate, q.q) }
-	o.ttft = pf.priced(price)
+	o.ttft = withSpan(pf.priced(price), pf.corners(price))
 	pf.noteAssumedTerm(o.ttft, price)
 	return o, query
 }
@@ -822,6 +881,15 @@ func (o operatingTTFT) results() []whatif.Result { return []whatif.Result{o.knee
 func (o operatingTTFT) onDecode(r whatif.Result) whatif.Result {
 	if k, ok := o.knee.(whatif.Answer); ok && o.prefillBinds {
 		return withFlags(r, k.Flags)
+	}
+	return r
+}
+
+// onRate is the operating rate with its span, where the prefill knee set it.
+func (o operatingTTFT) onRate(r whatif.Result) whatif.Result {
+	if a, ok := r.(whatif.Answer); ok && o.rateSpan != nil {
+		a.Sensitivity = o.rateSpan
+		return a
 	}
 	return r
 }
@@ -918,11 +986,12 @@ func (pf *pricedFleet) kneeBasis(knee float64) string {
 func (o operatingTTFT) writeRows(b *strings.Builder) {
 	pf := o.fleet
 	if k, ok := o.knee.(whatif.Answer); ok {
-		row(b, "prefill knee", rateText(k.Value), "", pf.kneeBasis(k.Value))
+		row(b, "prefill knee", rateText(k.Value), spanText(k.Sensitivity, "%.2f", 1, false), pf.kneeBasis(k.Value))
 	}
 	switch v := o.ttft.(type) {
 	case whatif.TTFT:
-		row(b, o.q.label(), msText(v.Seconds), "", "end to end; "+pf.verdict())
+		row(b, o.q.label(), msText(v.Seconds), spanText(v.Sensitivity, "%.1f", 1000, true), "end to end; "+pf.verdict())
+		fmt.Fprintf(b, "%-16s(bands: %s, a sweep, not a confidence interval)\n", "", pf.sweptText())
 		if msText(v.Independent) != msText(v.Seconds) {
 			fmt.Fprintf(b, "%-16s(%s if prefill and decode waits were independent)\n", "", msText(v.Independent))
 		}
@@ -939,7 +1008,7 @@ func writeRateRows(b *strings.Builder, layout string, pf *pricedFleet, fleets in
 	role := pf.label(rolePrefill, fleets)
 	switch r := ttft.(type) {
 	case whatif.Answer:
-		fmt.Fprintf(b, layout, role, rateText(r.Value), ttftBoundText(q, r.Basis.BoundBy), pf.verdict())
+		fmt.Fprintf(b, layout, role, rateText(r.Value), ttftBoundText(q, r.Basis.BoundBy), pf.sweptBasis(r))
 	case whatif.Unanswerable:
 		fmt.Fprintf(b, "%-9s%s\n", role, refusedText(r))
 	}
@@ -947,8 +1016,13 @@ func writeRateRows(b *strings.Builder, layout string, pf *pricedFleet, fleets in
 	role = pf.label("fleet", fleets)
 	switch r := fleet.(type) {
 	case whatif.Answer:
-		fmt.Fprintf(b, layout, role, rateText(r.Value), boundText(r.Basis.BoundBy), pf.verdict())
+		fmt.Fprintf(b, layout, role, rateText(r.Value), boundText(r.Basis.BoundBy), pf.sweptBasis(r))
 	case whatif.Unanswerable:
 		fmt.Fprintf(b, "%-9s%s\n", role, refusedText(r))
 	}
+}
+
+// sweptBasis is a rate's basis on question 1: the verdict and the rate's span.
+func (pf *pricedFleet) sweptBasis(a whatif.Answer) string {
+	return fmt.Sprintf("%s %s at %s", pf.verdict(), spanText(a.Sensitivity, "%.2f", 1, false), pf.sweptText())
 }

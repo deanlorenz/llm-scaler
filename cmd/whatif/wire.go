@@ -290,6 +290,25 @@ type wireAnswer struct {
 	Band  *wireInterval `json:"band,omitempty"`
 	Basis wireBasis     `json:"basis"`
 	Flags []string      `json:"flags"`
+	// Sensitivity is the figure's span at V_P and f either way, absent on a
+	// figure that does not rest on them.
+	Sensitivity *wireSensitivity `json:"sensitivity,omitempty"`
+}
+
+// wireSensitivity is whatif.Sensitivity on the wire: Refused is a corner's
+// reason, and then the worse side of the span says nothing.
+type wireSensitivity struct {
+	Lo      float64 `json:"lo"`
+	Hi      float64 `json:"hi"`
+	Refused string  `json:"refused,omitempty"`
+}
+
+// toWireSensitivity is a span on the wire.
+func toWireSensitivity(s *whatif.Sensitivity) *wireSensitivity {
+	if s == nil {
+		return nil
+	}
+	return &wireSensitivity{Lo: s.Lo, Hi: s.Hi, Refused: string(s.Refused)}
 }
 
 // wireTTFTResult is a priced TTFT or a refusal, never both.
@@ -306,6 +325,8 @@ type wireTTFTAnswer struct {
 	Basis wireBasis     `json:"basis"`
 	Flags []string      `json:"flags"`
 	Parts wireTTFTParts `json:"parts"`
+	// Sensitivity is as on wireAnswer.
+	Sensitivity *wireSensitivity `json:"sensitivity,omitempty"`
 }
 
 // wireTTFTParts is the figures beside the union bound, and its parts' means,
@@ -385,7 +406,7 @@ const (
 func toWire(r whatif.Result, unit string) *wireResult {
 	switch v := r.(type) {
 	case whatif.Answer:
-		a := &wireAnswer{Value: v.Value, Unit: unit, Flags: []string{}, Basis: wireBasis{
+		a := &wireAnswer{Value: v.Value, Unit: unit, Flags: []string{}, Sensitivity: toWireSensitivity(v.Sensitivity), Basis: wireBasis{
 			Fill: v.Basis.Fill, KneeRate: v.Basis.KneeRate, Floor: v.Basis.Floor, Uncapped: v.Basis.Uncapped,
 			BoundBy: []string{}, Tier: v.Basis.Tier,
 		}}
@@ -412,7 +433,7 @@ func toWire(r whatif.Result, unit string) *wireResult {
 func toWireTTFT(r whatif.Result) *wireTTFTResult {
 	switch v := r.(type) {
 	case whatif.TTFT:
-		a := &wireTTFTAnswer{Value: v.Seconds, Unit: unitSeconds, Flags: []string{}, Basis: wireBasis{
+		a := &wireTTFTAnswer{Value: v.Seconds, Unit: unitSeconds, Flags: []string{}, Sensitivity: toWireSensitivity(v.Sensitivity), Basis: wireBasis{
 			Floor: v.Floor, KneeRate: v.PrefillKnee, BoundBy: []string{}, Tier: v.Tier,
 		}, Parts: wireTTFTParts{
 			Independent: v.Independent, Pooled: v.Pooled, DecodeShare: v.DecodeShare,

@@ -247,6 +247,9 @@ type Answer struct {
 	Basis Basis
 	Flags []Flag
 	Band  *Interval
+	// Sensitivity is the figure's span over V_P and f either way, nil on a
+	// figure that does not rest on them.
+	Sensitivity *Sensitivity
 }
 
 func (Answer) result() {}

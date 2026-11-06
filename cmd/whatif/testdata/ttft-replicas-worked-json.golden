@@ -205,7 +205,11 @@
               "AssumedVP",
               "AssumedPromptSpread",
               "TransferOmitted"
-            ]
+            ],
+            "sensitivity": {
+              "lo": 25.5,
+              "hi": 34.5
+            }
           }
         },
         "ttft": {
@@ -248,6 +252,10 @@
               "decodeWaitProbability": 0.03177493097709786,
               "prefillKnee": 30,
               "decodeKnee": 13.313632625239457
+            },
+            "sensitivity": {
+              "lo": 0.3025852532584969,
+              "hi": 0.4891439530276733
             }
           }
         }

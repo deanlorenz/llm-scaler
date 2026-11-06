@@ -159,9 +159,13 @@ func (a *rateAnswer) priceTTFT(t ttftQuestion, headroom float64) {
 	price := func(fl whatif.TTFTFleet) whatif.Result {
 		return whatif.RateForTTFT(fl, whatif.TTFTTarget{Seconds: t.seconds, Percentile: t.q})
 	}
-	a.ttft = a.fleet.priced(price)
+	corners := a.fleet.corners(price)
+	a.ttft = withSpan(a.fleet.priced(price), corners)
 	a.fleet.noteAssumedTerm(a.ttft, price)
-	a.fleetRate = fleetRate(t, headroom, a.result, a.ttft)
+	for i, c := range corners {
+		corners[i] = fleetRate(t, headroom, a.result, c)
+	}
+	a.fleetRate = withSpan(fleetRate(t, headroom, a.result, a.ttft), corners)
 }
 
 // wireTTFT is the answer's prefill and fleet roles, none with no TTFT asked.

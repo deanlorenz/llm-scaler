@@ -134,7 +134,7 @@ func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) erro
 		slo.Rate = pv.qualify(slo.Rate)
 		slo.MeanTPOT = pv.qualify(pv.band(slo.MeanTPOT, on(func(s whatif.DecodeSLO) whatif.Result { return s.MeanTPOT })))
 		if at != nil {
-			slo.Rate, slo.MeanTPOT = at.onDecode(slo.Rate), at.onDecode(slo.MeanTPOT)
+			slo.Rate, slo.MeanTPOT = at.onRate(at.onDecode(slo.Rate)), at.onDecode(slo.MeanTPOT)
 		}
 		if slo.PercentileTPOT != nil {
 			p := pv.band(slo.PercentileTPOT, on(func(s whatif.DecodeSLO) whatif.Result { return s.PercentileTPOT }))
@@ -271,7 +271,7 @@ func writeReplicasText(out io.Writer, f *answerFlags, st *learnreplay.State, var
 					why += "; " + a.ttft.fleet.verdict()
 				}
 			}
-			row(&b, "operating rate", rateText(r.Value), "", why)
+			row(&b, "operating rate", rateText(r.Value), spanText(r.Sensitivity, "%.2f", 1, false), why)
 		case whatif.Unanswerable:
 			fmt.Fprintf(&b, "%-16s%s\n", "operating rate", refusedText(r))
 		}
@@ -333,5 +333,5 @@ func row(b *strings.Builder, label, value, band, basis string) {
 		fmt.Fprintf(b, "%-16s%-12s%s\n", label, value, basis)
 		return
 	}
-	fmt.Fprintf(b, "%-16s%-12s%-17s%s\n", label, value, band, basis)
+	fmt.Fprintf(b, "%-16s%-12s%-16s %s\n", label, value, band, basis)
 }

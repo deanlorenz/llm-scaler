@@ -135,7 +135,11 @@
             "flags": [
               "UnvalidatedTTFT",
               "AssumedPromptSpread"
-            ]
+            ],
+            "sensitivity": {
+              "lo": 2.9440620132284576,
+              "hi": 3.9831427237796775
+            }
           }
         },
         "ttft": {
@@ -175,6 +179,11 @@
               "decodeWaitProbability": 0,
               "prefillKnee": 3.4636023685040676,
               "decodeKnee": 0
+            },
+            "sensitivity": {
+              "lo": 7.423901727165208,
+              "hi": 14.634239395210875,
+              "refused": "Saturated"
             }
           }
         }

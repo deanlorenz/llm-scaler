@@ -169,7 +169,12 @@
               "BelowFittedBand",
               "AssumedShape",
               "AssumedPoissonArrivals"
-            ]
+            ],
+            "sensitivity": {
+              "lo": 0.25063609988609226,
+              "hi": 1.6396930872300244,
+              "refused": "TargetBelowFloor"
+            }
           }
         }
       }
@@ -204,7 +209,12 @@
               "AssumedShape",
               "AssumedPoissonArrivals",
               "LineNearGate"
-            ]
+            ],
+            "sensitivity": {
+              "lo": 0.25063609988609226,
+              "hi": 1.6396930872300244,
+              "refused": "TargetBelowFloor"
+            }
           }
         }
       }
