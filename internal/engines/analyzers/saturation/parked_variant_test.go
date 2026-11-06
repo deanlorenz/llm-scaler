@@ -101,9 +101,9 @@ var _ = Describe("a variant that still exists keeps what it learned", func() {
 	})
 
 	It("keeps the variant's accelerator memo alive, so its key does not move on wake", func() {
-		// Backdated past its horizon on the analyzer's clock, then stamped.
-		// On the wall clock this case held only while the wall stayed within
-		// 23 days of the rig's fixed date.
+		// Backdated from the analyzer's clock, which the sweep reads. Backdated
+		// from the wall clock, this control stopped holding once the wall clock
+		// was 30 days past the fixed date above, less the retention.
 		a.mu.Lock()
 		a.lastAccelerator[ns+"/v"] = acceleratorMemo{name: accel, lastUsed: now.Add(-30 * 24 * time.Hour)}
 		a.lastAccelerator[ns+"/gone"] = acceleratorMemo{name: accel, lastUsed: now.Add(-30 * 24 * time.Hour)}
