@@ -27,7 +27,8 @@ const engineFixture = "engine"
 // the engine layer landed. The others were recorded before it.
 var engineFixtures = []string{engineFixture, "pd-restart", olsFixture, olsSLOFixture, olsSLORestartFixture,
 	ttftThreePodsFixture, ttftSaturatedFixture, ttftOpenLongFixture, ttftOpenShortFixture,
-	startSeedFixture, startSeedRestartFixture, startSeedRestart2Fixture, startRestoredFixture}
+	startSeedFixture, startSeedRestartFixture, startSeedRestart2Fixture, startRestoredFixture,
+	throughputSweepFixture, throughputSweepRestartFixture}
 
 // Each golden that carries engine events lists every engine output, and no
 // other lists one. Each compares rows in each, but for an output its replay
@@ -113,8 +114,7 @@ func TestEngineGoldens_WithoutTheEngineFixtureNoEnginePathRuns(t *testing.T) {
 	// this list, a reviewed change. The throughput line's held slope is the
 	// engine fixture's alone too (learner PR 4b-1): its light load after a
 	// fitted line is the only one long enough for the window to age out.
-	want := []string{steadystate.PathCompositeHold, steadystate.PathCompositeReleaseBound,
-		steadystate.PathCompositeExternalResult, steadystate.PathCompositeGrace,
+	want := []string{steadystate.PathCompositeExternalResult, steadystate.PathCompositeGrace,
 		steadystate.PathCompositeReplicaClamped, steadystate.PathWarmPoolSupply,
 		settlePathPrefix + string(settle.Lent), throughput.PathITLHeld}
 	require.Len(t, c.Uncovered, len(want), strings.Join(c.Uncovered, "\n"))

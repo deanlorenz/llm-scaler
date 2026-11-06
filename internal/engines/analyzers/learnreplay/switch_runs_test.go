@@ -103,8 +103,11 @@ import (
 //     order (throughput/settle.go, observeOwnSettle), and the goldens came
 //     back byte for byte to main's. Its unit tests hold it.
 //   - SwitchITLWaitsAfterRestart moves nothing: an analyzer with no engine
-//     view never waits. It moves the throughput-sweep-restart recording when
-//     that lands (recorded on 4b-0, with the view). Its unit tests hold it.
+//     view never waits. On the throughput-sweep recordings, which have the
+//     view, it moves no output file either, but every settling reading they
+//     hold rests on it: off, throughput-itl-settling falls 5 -> 0 and 8 -> 0,
+//     and TestGoldens_ThroughputSweepFloors replays that. Its unit tests hold
+//     it.
 //   - The other four move nothing, as their 4a twins moved nothing; their
 //     unit tests hold them.
 //
@@ -114,14 +117,13 @@ import (
 // replica at the sequence cap its engine states, with requests waiting and
 // preemption at most itlBand.capMaxPreemptionRate, is the band's. Its base
 // is main after 4b-2 merged (891c071c4, #458), whose goldens are 4b-1's
-// all-on run byte for byte. Measured alone against all off, it moves
-// nothing, by construction: the three in-process fixtures that run the
-// throughput analyzer predate start.ThroughputConfig, so the replay builds
-// it with no capacity store, and with no store it knows no cap; no cluster
-// recording runs the analyzer. The throughput-sweep recordings, when they
-// land, state the store, but their sweep does not hold the decode pod at
-// its cap without preempting (analyzer-learner.md, PR 4b). Its unit tests
-// hold it (heldBy).
+// all-on run byte for byte. On the three in-process fixtures that run the
+// throughput analyzer it moves nothing, by construction: they predate
+// start.ThroughputConfig, so the replay builds it with no capacity store,
+// and with no store it knows no cap. Its unit tests hold it there (heldBy).
+// The throughput-sweep recordings state the store, and the restart
+// recording's load holds the decode pod at its cap of 64 for 20 admitted
+// readings, so it moves that fixture's outputs, its row below.
 //
 // The what-if PR P1 (docs/proposals/slo-capacity-planner.md, the PR plan)
 // adds one: the saturation analyzer's prefill observation
@@ -131,7 +133,15 @@ import (
 // stashes. Its unit tests hold it (heldBy).
 var replaySwitches = map[string][]string{
 	saturation.SwitchPrefillCapacityObserve: nil,
-	throughput.SwitchITLAdmitsAtSequenceCap: nil,
+	throughput.SwitchITLAdmitsAtSequenceCap: {
+		"throughput-sweep-restart/composite-holds.csv",
+		"throughput-sweep-restart/composite-release.csv",
+		"throughput-sweep-restart/composite-results.csv",
+		"throughput-sweep-restart/composite-roles.csv",
+		"throughput-sweep-restart/composite-variants.csv",
+		"throughput-sweep-restart/results.csv",
+		"throughput-sweep-restart/variant-capacities.csv",
+	},
 
 	// The forget-learned-state annotation reaches the throughput analyzer's
 	// line, one switch, recorded as an event of its own
@@ -243,6 +253,11 @@ var replaySwitches = map[string][]string{
 		// start-restored, recorded on a 5d build: a StartAdmittedAt row per
 		// key per export.
 		"start-restored/learned-state.csv",
+		// The throughput-sweep goldens, added after 5c merged.
+		"throughput-sweep-restart/composite-results.csv",
+		"throughput-sweep-restart/results.csv",
+		"throughput-sweep/composite-results.csv",
+		"throughput-sweep/results.csv",
 	},
 
 	// Learner PR 5d, on main after 5c and #482 (59772fce2). Measured, each
@@ -306,6 +321,22 @@ var learner4b1Seams = map[string][]string{
 		"engine/composite-holds.csv", "engine/composite-release.csv", "engine/composite-variants.csv",
 		"engine/results.csv", "engine/variant-capacities.csv",
 		"mu-paths/results.csv", "mu-paths/variant-capacities.csv",
+		"throughput-sweep-restart/composite-holds.csv",
+		"throughput-sweep-restart/composite-release.csv",
+		"throughput-sweep-restart/composite-results.csv",
+		"throughput-sweep-restart/composite-roles.csv",
+		"throughput-sweep-restart/composite-variants.csv",
+		"throughput-sweep-restart/results.csv",
+		"throughput-sweep-restart/variant-capacities.csv",
+		"throughput-sweep-restart/warm-pool-pressure.csv",
+		"throughput-sweep/composite-holds.csv",
+		"throughput-sweep/composite-release.csv",
+		"throughput-sweep/composite-results.csv",
+		"throughput-sweep/composite-roles.csv",
+		"throughput-sweep/composite-variants.csv",
+		"throughput-sweep/results.csv",
+		"throughput-sweep/variant-capacities.csv",
+		"throughput-sweep/warm-pool-pressure.csv",
 	},
 	throughput.SwitchITLKeepsWindowOnGPSMismatch: {
 		"acceptance/variant-capacities.csv", "engine/variant-capacities.csv", "mu-paths/variant-capacities.csv",
@@ -336,6 +367,10 @@ var learner4aSeams = map[string][]string{
 		"mu-paths/learned-state.csv", "mu-paths/lines.csv", "mu-paths/variant-capacities.csv",
 		"ols-sweep-slo-restart/composite-results.csv", "ols-sweep-slo-restart/lines.csv",
 		"ols-sweep-slo-restart/results.csv", "ols-sweep-slo-restart/variant-capacities.csv",
+		"throughput-sweep-restart/composite-results.csv",
+		"throughput-sweep-restart/lines.csv",
+		"throughput-sweep-restart/results.csv",
+		"throughput-sweep-restart/variant-capacities.csv",
 	},
 	saturation.SwitchITLKeepsSettleThroughMissingRow: nil,
 	saturation.SwitchITLReadsFinitePodMean:           nil,
@@ -395,19 +430,31 @@ var earlierSeams = withMoves(startSeedSeamMoves, withSeams(learner4b2Seams, with
 		"pd-restart/store-records.csv", "pd-restart/variant-capacities.csv", "pd-restart/warm-pool-pressure.csv",
 		"ttft-saturated/composite-variants.csv", "ttft-saturated/store-records.csv", "ttft-saturated/variant-capacities.csv",
 		"ttft-three-pods/composite-variants.csv", "ttft-three-pods/store-records.csv", "ttft-three-pods/variant-capacities.csv",
+		"throughput-sweep-restart/variant-capacities.csv",
 	},
-	saturation.SwitchK2ReadsSettle:   nil,
-	saturation.SwitchMuKeyBucketHeld: nil,
-	saturation.SwitchMuMarginClamp:   nil,
-	saturation.SwitchMuSwapFreeze:    nil,
+	saturation.SwitchK2ReadsSettle: nil,
+	// No golden moved until the start-seed goldens (startSeedSeamMoves) and
+	// throughput-sweep-restart. Its unit tests still hold it.
+	saturation.SwitchMuKeyBucketHeld: {
+		"throughput-sweep-restart/composite-results.csv",
+		"throughput-sweep-restart/composite-roles.csv",
+		"throughput-sweep-restart/results.csv",
+		"throughput-sweep-restart/variant-capacities.csv",
+	},
+	saturation.SwitchMuMarginClamp: nil,
+	saturation.SwitchMuSwapFreeze:  nil,
 	saturation.SwitchK2WaitsAfterRestart: {
 		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
 	},
-	saturation.SwitchMuRepeatIsUse:        nil,
-	saturation.SwitchMuUnknownAgeSafe:     nil,
-	saturation.SwitchMuLatchRestoresSafe:  nil,
-	saturation.SwitchIdleBand:             nil,
-	saturation.SwitchK2KeyBucketHeld:      nil,
+	saturation.SwitchMuRepeatIsUse:       nil,
+	saturation.SwitchMuUnknownAgeSafe:    nil,
+	saturation.SwitchMuLatchRestoresSafe: nil,
+	saturation.SwitchIdleBand:            nil,
+	// As SwitchMuKeyBucketHeld: only the start-seed goldens
+	// (startSeedSeamMoves) and throughput-sweep-restart move it.
+	saturation.SwitchK2KeyBucketHeld: {
+		"throughput-sweep-restart/variant-capacities.csv",
+	},
 	saturation.SwitchBatchCapDeclared:     nil,
 	saturation.SwitchBatchCapLearned:      nil,
 	saturation.SwitchBatchCapITLAdmission: nil,
@@ -425,6 +472,21 @@ var earlierSeams = withMoves(startSeedSeamMoves, withSeams(learner4b2Seams, with
 	saturation.SwitchKVPerRequestOutputDispersion: {
 		"ttft-three-pods/composite-results.csv", "ttft-three-pods/composite-roles.csv",
 		"ttft-three-pods/results.csv", "ttft-three-pods/variant-capacities.csv",
+		"throughput-sweep-restart/composite-release.csv",
+		"throughput-sweep-restart/composite-results.csv",
+		"throughput-sweep-restart/composite-roles.csv",
+		"throughput-sweep-restart/composite-variants.csv",
+		"throughput-sweep-restart/results.csv",
+		"throughput-sweep-restart/store-records.csv",
+		"throughput-sweep-restart/variant-capacities.csv",
+		"throughput-sweep-restart/warm-pool-pressure.csv",
+		"throughput-sweep/composite-release.csv",
+		"throughput-sweep/composite-results.csv",
+		"throughput-sweep/composite-roles.csv",
+		"throughput-sweep/composite-variants.csv",
+		"throughput-sweep/results.csv",
+		"throughput-sweep/variant-capacities.csv",
+		"throughput-sweep/warm-pool-pressure.csv",
 	},
 	// Issue #431 routes the forget-learned-state annotation to the slo
 	// analyzer's line, one switch, recorded as an event of its own
@@ -934,6 +996,16 @@ var switchBase = map[string]string{
 	"start-restored/composite-results.csv": "9838f3fcbd4a6d6f1aa2786eb7c24ba97c1da456d976903eb9307c7f363eab9e",
 	"start-restored/learned-state.csv":     "7bcb943f4f131f080ab70e27571c1dcffaad974d840ddb11954f9ef79d88afee",
 	"start-restored/results.csv":           "6b7a8e062c42203b92eff8e2a1738a98aafb91c69a29c229dbcbfd3b5821cc0d",
+	// The throughput-sweep goldens, replayed with this PR's switches all off.
+	"throughput-sweep-restart/composite-holds.csv":    "e753e8d995badf84c780c9ae9e7f077ef0a6e0d738a1b6e46d330d10964d9092",
+	"throughput-sweep-restart/composite-release.csv":  "25f7d0a50cd3b20f344b3e83aca36ffc9ac74713319ab1dd840ad3f3f7c4f128",
+	"throughput-sweep-restart/composite-results.csv":  "16c8a61ca02f5a3778ad229b050c859e2890b3defeb148b3b7fa183025dfbd80",
+	"throughput-sweep-restart/composite-roles.csv":    "59600bea0bc8d602c87e06e7578bcf9c5d24b6ee25eb160dd37c4662518e7e45",
+	"throughput-sweep-restart/composite-variants.csv": "5c0e35f0a39c03ea40d80f241de739985e6f0b578cd98f9a045a0d56c234f7ae",
+	"throughput-sweep-restart/results.csv":            "c76fd421028227104c9f50de695dc8fdda959958c2547b1919827157269153cf",
+	"throughput-sweep-restart/variant-capacities.csv": "ff6bac8958d07f45c547edf83028dffac78aea3aeeadcd49eee719a7ef6c48ce",
+	"throughput-sweep/composite-results.csv":          "dde3434231c8217840247e6b379be47cd730063d362a8d2d6eb93a926b48c68a",
+	"throughput-sweep/results.csv":                    "95273482cb748258383bb0dfb1c1f8001eb6dcd3cc1248d62b7d840cef60f241",
 }
 
 // The slow tests of this package run in parallel with each other (each

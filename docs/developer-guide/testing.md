@@ -747,7 +747,25 @@ controller under load and leaves two recordings. Take it at a commit with
 analyzer's settings (`ThroughputConfig`), and a replay builds the analyzer
 as the run did.
 
-It needs 2 H200 (one decode, one prefill) for about 70 minutes, setup
+The committed run was recorded at 59772fce2, with the KV band at 0.12-0.70
+and a tail on the sweep (steps 2 and 4). What its replay reached, by
+`throughput.PathNames`:
+
+| Golden | Full fits | Pinned fits | Settling | At the cap | Held | Above band | Compressed |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `throughput-sweep` | 18 | 9 | 5 | 0 | 0 | 0 | 166 KB |
+| `throughput-sweep-restart` | 10 | 14 | 8 | 20 | 0 | 0 | 595 KB |
+
+`TestGoldens_ThroughputSweepFloors` requires each non-zero count above zero.
+Every settling reading is the wait after a controller start: no joiner is
+recorded, since the one decode pod never scales. The test replays with
+`throughput.SwitchITLWaitsAfterRestart` off, and with
+`throughput.SwitchITLAdmitsAtSequenceCap` off, and requires exactly the
+floors each rests on to fail: settling for the first, at-cap and pinned
+(`throughput-sweep-restart`) for the second. The held slope ran 0 times: through the 35 minutes of light load the
+line was silent with cause `shape-change`, so the held slope stays synthetic.
+
+It needs 2 H200 (one decode, one prefill) for about 2 hours, setup
 included. It is a shared cluster: on any failure or abort, go straight to
 [Teardown](#teardown-of-the-throughput-sweep), which says where to start
 for each step.
@@ -794,10 +812,20 @@ so the controller, its policy map and the model all live there.
        score: 1.0
    ```
 
+   In the same entry, set a band that is not the default. The cap levels of
+   step 4 sit above its top edge:
+
+   ```yaml
+   analyzerTuning:
+     itlBand:
+       minObservableK: 0.12
+       maxObservableK: 0.70
+   ```
+
    This is the controller's global map: the controller registers the
    throughput analyzer only at start, and only when an entry of that map
-   lists it. Keep `analyzerTuning` at its defaults and the learned-state
-   snapshot off.
+   lists it. Keep the rest of `analyzerTuning` at its defaults and the
+   learned-state snapshot off.
 3. **The recorder, last.** It is the change that rolls the controller:
 
    ```bash
@@ -835,11 +863,18 @@ so the controller, its policy map and the model all live there.
    tear down.
 4. **The load.** Start the sweep in the background, with its PID kept for
    the teardown, and run the `--scale` check of the `ols-sweep` step 3 on
-   its first level:
+   its first level. The schedule is the default one with a tail, so give it
+   whole. The tail rises to 80 in flight over 48 s, so the sequences do not
+   start in step. It holds 80 for 8 minutes, 64 running and the rest waiting
+   at the decode pod's cap, and then 2 in flight for 35 minutes. `--scale`
+   would scale the tail too: if the check asks for it, scale the default
+   levels by hand and leave the tail as it is.
 
    ```bash
+   TAIL=6:16:1000:1200,6:24:1000:1200,6:32:1000:1200,6:40:1000:1200,6:48:1000:1200,6:56:1000:1200,6:64:1000:1200,6:72:1000:1200,240:80:1000:1200,240:80:1000:1000,2100:2:1000:500
+   BASE=300:10:1000:4000,270:24:1000:4000,270:10:1000:4000,270:24:1000:500,270:56:1000:500,270:5:6000:1000,270:11:6000:1000,270:4:6000:1000,270:24:1000:4000,270:20:1000:500,270:10:6000:1000,270:8:1000:4000
    nohup python3 hack/benchmark/closed_loop_sweep.py --url http://ROUTER:80 --model Qwen/Qwen3-0.6B \
-     > sweep.log 2>&1 &
+     --max-inflight 100 --schedule "$BASE,$TAIL" > sweep.log 2>&1 &
    echo $! > sweep.pid
    ```
 
@@ -874,7 +909,7 @@ so the controller, its policy map and the model all live there.
    ```
 
    The new Pod has a new, empty volume and opens its own recording. When
-   the sweep ends (`sweep.log` says so, about 55 minutes in), copy its
+   the sweep ends (`sweep.log` says so, about 98 minutes in), copy its
    files and log out by its name, to a directory of their own:
 
    ```bash
@@ -895,7 +930,12 @@ so the controller, its policy map and the model all live there.
      event: the restart restored nothing.
    - Each file holds `throughput.Analyze` events for the model.
    - **Count each side the same way**, for each file and its log, over the
-     file's window: from its start line's `Now` to its last event's `Now`.
+     file's window: from its start line's `Now` to one controller interval
+     (15 s) past its last event's `Now`. A cycle logs `analyzer-result` after
+     its last event, so a window that stops at that event loses the file's
+     last line: 19 ms and 15 ms late in the committed run, and at most 0.39 s
+     late on any cycle. Take the log straight after the file, so the log holds
+     no cycle the file does not.
      - *Log side.* The lines of `controller-N.log` whose message is
        `analyzer-result`, with `"analyzer":"throughput"` and the model's
        `modelID`, and a timestamp inside the window. That is one line a
@@ -920,7 +960,7 @@ so the controller, its policy map and the model all live there.
 7. **Add each file** under its own name, at that commit:
 
    ```bash
-   SRC="P/D benchmark scenario, flow control off, decode KV of 1024 blocks and 64 sequences on one decode replica, prefill 1-1, load sweeps of concurrency and shape, saturation and throughput listed, default analyzerTuning"
+   SRC="P/D benchmark scenario, flow control off, decode KV of 1024 blocks and 64 sequences on one decode replica, one prefill replica, load sweeps of concurrency and shape, then 80 in flight at the sequence cap and 35 minutes of 2 in flight, saturation and throughput listed, analyzerTuning KV band 0.12 to 0.70"
    make learner-golden-add RECORDING=recordings-1/learnrec-<first start>.jsonl NAME=throughput-sweep SOURCE="$SRC; up to a controller restart"
    make learner-golden-add RECORDING=recordings-2/learnrec-<second start>.jsonl NAME=throughput-sweep-restart SOURCE="$SRC; after a controller restart under load, snapshot off"
    ```

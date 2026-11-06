@@ -20,8 +20,10 @@ import (
 // sweep, the leader controller Pod deleted 20 min in, so the run gives two
 // recordings, throughput-sweep and throughput-sweep-restart
 // (analyzer-learner.md, PR 4b, "Recordings"). They are the only goldens whose
-// throughput line sees a real decode engine: warm-up readings from joiners,
-// readings above the band, and full fits.
+// throughput line sees a real decode engine: the wait after a controller
+// start, readings above the band, full fits, and a replica at its sequence
+// cap. No joiner is recorded: the one decode pod never scales. The run's
+// policy band is 0.12-0.70, not the default.
 const (
 	throughputSweepFixture        = "throughput-sweep"
 	throughputSweepRestartFixture = "throughput-sweep-restart"
@@ -29,22 +31,47 @@ const (
 
 // throughputSweepFloor is which of the throughput line's paths a recording's
 // own replay must reach. Each must be above zero (2.5's per-path counters):
-// full and pinned fits in both, settling readings in both (joiners, and after
-// the restart every replica already serving), and a held slope in the
-// restart recording, whose light load follows the restart. A floor is a
-// count, not a rate: the fixture's own replay at the commit that adds it
-// states the counts beside it, and a PR that lowers one says why.
+// full and pinned fits and settling readings in both, and readings admitted
+// at the sequence cap in the restart recording, whose load reaches the cap.
+// A floor is a count, not a rate. At the commit that added them the replay
+// counted 18 full, 9 pinned and 5 settling in throughput-sweep, and 10 full,
+// 14 pinned, 8 settling and 20 at the cap in throughput-sweep-restart; a PR
+// that lowers a floor says why.
+//
+// Every settling reading in both is the wait after a controller start: a
+// replica already serving when the controller started
+// (throughput.SwitchITLWaitsAfterRestart). With that switch off the path counts
+// 0 in both, though no output file moves, so a settling floor is all that
+// holds it here.
+//
+// Every pinned fit in the restart recording comes from the cap's readings:
+// with throughput.SwitchITLAdmitsAtSequenceCap off the path counts 0 pinned
+// there, and 7 above-band fits take their place.
+//
+// The held slope has no floor here: it ran 0 times in both. The restart
+// recording ends with 35 minutes of light load, and the line stayed silent
+// through them with cause shape-change: a shape change drops the held slope
+// with the window, and the load's shape changed as it went light. The held
+// slope stays synthetic (the engine fixture, and throughput's property cases).
 type throughputSweepFloor struct {
 	fixture string
 	// paths is the fewest runs of each path, by throughput.PathNames.
 	paths map[string]int64
+	// restsOn is, for a switch a floor rests on, the paths its replay with
+	// that switch off must fail, and only those, sorted.
+	restsOn map[string][]string
 }
 
 var throughputSweepFloors = []throughputSweepFloor{
 	{fixture: throughputSweepFixture, paths: map[string]int64{
-		throughput.PathITLOLS: 1, throughput.PathITLPinned: 1, throughput.PathITLSettling: 1}},
+		throughput.PathITLOLS: 1, throughput.PathITLPinned: 1, throughput.PathITLSettling: 1},
+		restsOn: map[string][]string{throughput.SwitchITLWaitsAfterRestart: {throughput.PathITLSettling}}},
 	{fixture: throughputSweepRestartFixture, paths: map[string]int64{
-		throughput.PathITLOLS: 1, throughput.PathITLPinned: 1, throughput.PathITLHeld: 1, throughput.PathITLSettling: 1}},
+		throughput.PathITLOLS: 1, throughput.PathITLPinned: 1, throughput.PathITLSettling: 1, throughput.PathITLAtCap: 1},
+		restsOn: map[string][]string{
+			throughput.SwitchITLWaitsAfterRestart:   {throughput.PathITLSettling},
+			throughput.SwitchITLAdmitsAtSequenceCap: {throughput.PathITLAtCap, throughput.PathITLPinned},
+		}},
 }
 
 // throughputFloorProblems names each path of floor a replay's counts fall
@@ -60,37 +87,17 @@ func throughputFloorProblems(f throughputSweepFloor, paths map[string]int64) []s
 	return out
 }
 
-// listedFixture reports whether the committed manifest lists a fixture.
-func listedFixture(t *testing.T, name string) bool {
-	t.Helper()
-	m, err := ReadManifest(goldenDir)
-	require.NoError(t, err)
-	for _, g := range m.Goldens {
-		if g.Name == name {
-			return true
-		}
-	}
-	return false
-}
-
 // Each throughput-sweep recording's own replay reaches every path of its
 // floor: a cluster golden of the throughput line that lost its full fits,
-// its settling stamp or its held slope would still pass the summed path
+// its settling stamp or its cap admission would still pass the summed path
 // check and the row comparison, which make learner-goldens rewrites. The
 // same replay with the line's steady gate off (the parent's line, which
-// counts nothing) is the negative control: every floor fails.
-//
-// Until the recordings land, the test skips: they are taken on a cluster
-// with 4b-0 merged (the recipe in testing.md), and land with base goldens
-// in their own commit.
+// counts nothing) shows only that a silent counter fails. So a floor that
+// rests on one switch (restsOn) is replayed with that switch off too, the rest
+// of the line on: the paths it names must fail, and no others.
 func TestGoldens_ThroughputSweepFloors(t *testing.T) {
 	for _, f := range throughputSweepFloors {
 		t.Run(f.fixture, func(t *testing.T) {
-			if !listedFixture(t, f.fixture) {
-				t.Skipf("no %s golden yet: the throughput-sweep cluster run (docs/developer-guide/testing.md, learner goldens; "+
-					"analyzer-learner.md, PR 4b, Recordings) has not landed. Once %s lists it, this test requires the floors %v",
-					f.fixture, ManifestName, f.paths)
-			}
 			rec := readGoldenRecording(t, f.fixture)
 			read, err := learnrec.Read(rec)
 			require.NoError(t, err)
@@ -109,6 +116,19 @@ func TestGoldens_ThroughputSweepFloors(t *testing.T) {
 			require.NoError(t, err)
 			assert.Len(t, throughputFloorProblems(f, off.Paths), len(f.paths),
 				"negative control: the parent's line reaches none of the floor's paths")
+
+			for name, paths := range f.restsOn {
+				sw, err := Replay(context.Background(), rec, Options{Mode: Normal, Switches: map[string]map[string]bool{
+					PackageThroughput: {name: false}}})
+				require.NoError(t, err)
+				t.Logf("%s: %s off, throughput line paths %v", f.fixture, name, throughputPaths(sw.Paths))
+				var want []string
+				for _, p := range paths {
+					want = append(want, fmt.Sprintf("%s: the throughput line's path %s ran 0 times, under its floor of %d",
+						f.fixture, p, f.paths[p]))
+				}
+				assert.Equal(t, want, throughputFloorProblems(f, sw.Paths), "%s off", name)
+			}
 		})
 	}
 }

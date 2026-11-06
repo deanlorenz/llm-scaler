@@ -29,12 +29,15 @@ const (
 	// above-band fallback (T2-above-band). Not required of the goldens: a
 	// recording reaches it only by starting into saturated load.
 	PathITLAboveBand = "throughput-itl-above-band"
+	// PathITLAtCap counts the readings above the band the line admitted
+	// because their replica was at its sequence cap (itl.Reading.Capped).
+	PathITLAtCap = "throughput-itl-at-cap"
 )
 
 // pathCounters is the analyzer's per-path counts. Atomic, so a path counts
 // without taking a.mu.
 type pathCounters struct {
-	ols, pinned, held, settling, aboveBand atomic.Int64
+	ols, pinned, held, settling, aboveBand, atCap atomic.Int64
 }
 
 // count counts one cycle's reading of a variant's line.
@@ -50,11 +53,12 @@ func (c *pathCounters) count(r itl.Reading) {
 		c.pinned.Add(1)
 	}
 	c.settling.Add(int64(r.Settling))
+	c.atCap.Add(int64(r.Capped))
 }
 
 // PathNames is every per-path counter PathCounts reports.
 func PathNames() []string {
-	return []string{PathITLOLS, PathITLPinned, PathITLHeld, PathITLSettling, PathITLAboveBand}
+	return []string{PathITLOLS, PathITLPinned, PathITLHeld, PathITLSettling, PathITLAboveBand, PathITLAtCap}
 }
 
 // PathCounts is how often each of the analyzer's learner paths ran since it
@@ -67,5 +71,6 @@ func (a *ThroughputAnalyzer) PathCounts() map[string]int64 {
 		PathITLHeld:      a.paths.held.Load(),
 		PathITLSettling:  a.paths.settling.Load(),
 		PathITLAboveBand: a.paths.aboveBand.Load(),
+		PathITLAtCap:     a.paths.atCap.Load(),
 	}
 }
