@@ -930,6 +930,7 @@ made before R1 replays unchanged:
 | Per pod | Queue-time mean and histogram | `request_queue_time_seconds` (`queue_time_seconds`) |
 | Per pod | Prefill-time mean | `request_prefill_time_seconds` (vLLM only) |
 | Per pod | KV transfer time mean | `nixl_xfer_time_seconds` (vLLM only) |
+| Per pod | Computed-prefill-token histogram, added by Q1 | `vllm:request_prefill_kv_computed_tokens_bucket`, over `[1m]` like the computed-token rate (vLLM only) |
 | Per model | Router TTFT and TPOT every cycle | a new `AnalyzerInput.RouterLatency`, collected by the engine every cycle while recording is on |
 | Per model | Router per-request TPOT histogram | `llm_d_epp_request_streaming_tpot_seconds_bucket`, as bucket rates beside the TTFT ones. `RouterLatency` keeps only the TPOT `_sum` and `_count` rates today, and the collector queries only those |
 | Per pod | Engine per-request TPOT histogram | `vllm:request_time_per_output_token_seconds_bucket`, the fallback source for the TPOT ratio (vLLM only) |
@@ -937,7 +938,12 @@ made before R1 replays unchanged:
 | Per model | Flow-control wait histogram, dispatched requests only (`outcome="Dispatched"`): only a dispatched request's wait is part of a TTFT | `flow_control_request_queue_duration_seconds`, which carries `model_name` and `target_model_name` as well as the pool, so it is read per model with the router latency (`RouterLatency.FlowControlWaitBuckets`), not through the pool join |
 | Per pool | Pool saturation by stage, outcomes | `flow_control_pool_saturation` (stages `prefill`, `decode` and `effective`, the larger of the two, which gates dispatch; a pool with no endpoint reads 1.0) and `flow_control_requests_total`. They carry `inference_pool`, not a model, so they are recorded per pool and joined to a model only when the pool serves one |
 
-**Cost.** Every query above runs only while a learner recording is on: the
+**Cost.** Q1 changed this for three of them: the queue minimum, the
+computed-token histogram and the KV transfer time also run every cycle in a
+namespace with a TTFT target ([as built](slo-tiers.md#as-built-q1)), and fail
+under `query_type="ttft_inputs"`. Q1 adds the histogram to the figures below:
+17 queries, not 16, and 9 per pod, not 8. As R1 shipped it, every query above
+ran only while a learner recording was on: the
 engine tells the collector at the start of each cycle whether its recorder
 is writing (`Engine.beginCollectorCycle`, collector `SetRecordTTFTInputs`),
 and with recording off a cycle issues exactly the queries it issued before

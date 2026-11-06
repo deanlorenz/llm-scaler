@@ -178,12 +178,12 @@ func (c *ReplicaMetricsCollector) queryReplicaSeries(
 	// - Shared: avg input tokens, avg output tokens
 	// - Per-request timings: avg ITL, avg service time
 	// - Throughput analyzer: generation token rate, instantaneous KV usage (k*), request rate
-	// - With a learner recording on, the TTFT model's inputs (recordOnlyReplicaQueries)
+	// - With a TTFT target in the namespace, what the TTFT pricing reads
+	//   (ttftReadReplicaQueries)
+	// - With a learner recording on, every TTFT input (recordOnlyReplicaQueries too)
 	recording := c.RecordsTTFTInputs()
-	engineSpecific, agnostic := scalingEngineSpecificQueries, scalingAgnosticQueries
-	if recording {
-		engineSpecific, agnostic = engineSpecificReplicaQueries, agnosticReplicaQueries
-	}
+	ttftRead := c.readsTTFTInputs(namespace)
+	engineSpecific, agnostic := replicaQueryLists(recording, ttftRead)
 	queries := buildEngineQueryList(engines, engineSpecific, agnostic)
 
 	// Execute the query with timing. refreshShared skips whatever another model
@@ -203,21 +203,19 @@ func (c *ReplicaMetricsCollector) queryReplicaSeries(
 		metrics.IncMetricsCollectionErrors(constants.QueryTypeCacheConfig, reason)
 		return nil, nil, fmt.Errorf("failed to refresh replica metrics: %w", err)
 	}
-	// A record-only query that failed is counted under its own type, so an
-	// operator who turned recording on can tell its failures from the
-	// scaling queries'. The scaling queries' own failures are counted where
-	// they are read, as before.
-	if recording {
-		recordOnly := make(map[string]bool)
-		for _, q := range buildEngineQueryList(engines, recordOnlyEngineSpecificQueries, recordOnlyAgnosticQueries) {
-			recordOnly[q] = true
+	// A record-only query or a TTFT reader's that failed is counted under its
+	// own type, so an operator can tell its failures from the scaling
+	// queries'. The scaling queries' own failures are counted where they are
+	// read, as before.
+	if recording || ttftRead {
+		typeOf := make(map[string]string)
+		for _, q := range buildEngineQueryList(engines, ttftReadEngineSpecificQueries, ttftReadAgnosticQueries) {
+			typeOf[q] = constants.QueryTypeTTFTInputs
 		}
-		countFailedIssued(issued, results, func(q string) string {
-			if recordOnly[q] {
-				return constants.QueryTypeLearnerRecording
-			}
-			return ""
-		})
+		for _, q := range buildEngineQueryList(engines, recordOnlyEngineSpecificQueries, recordOnlyAgnosticQueries) {
+			typeOf[q] = constants.QueryTypeLearnerRecording
+		}
+		countFailedIssued(issued, results, func(q string) string { return typeOf[q] })
 	}
 
 	// Re-key engine-specific results under their logical query names so the per-pod

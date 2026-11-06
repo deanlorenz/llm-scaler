@@ -48,6 +48,9 @@ var ttftHistograms = []struct {
 	{"PromptTokensBuckets", registration.QueryPromptTokensBuckets, func(m domain.ReplicaMetrics) []domain.LatencyBucket {
 		return asLatency(m.PromptTokensBuckets)
 	}},
+	{"ComputedTokensBuckets", registration.QueryComputedTokensBuckets, func(m domain.ReplicaMetrics) []domain.LatencyBucket {
+		return asLatency(m.ComputedTokensBuckets)
+	}},
 	{"OutputTokensBuckets", registration.QueryOutputTokensBuckets, func(m domain.ReplicaMetrics) []domain.LatencyBucket {
 		return asLatency(m.OutputTokensBuckets)
 	}},
@@ -257,7 +260,8 @@ func TestMergePodInstances_TTFTInputs(t *testing.T) {
 	rank := func(rate, queueTime float64, known bool, buckets []domain.LatencyBucket) domain.ReplicaMetrics {
 		return domain.ReplicaMetrics{PodName: "p", ModelID: "m", RequestRate: rate,
 			AvgQueueTime: queueTime, AvgQueueTimeKnown: known, TTFTBuckets: buckets,
-			PromptTokensBuckets: []domain.LengthBucket{{UpperBound: 100, Rate: rate}}}
+			PromptTokensBuckets:   []domain.LengthBucket{{UpperBound: 100, Rate: rate}},
+			ComputedTokensBuckets: []domain.LengthBucket{{UpperBound: 200, Rate: rate}}}
 	}
 	a := []domain.LatencyBucket{{UpperBound: 1, Rate: 1}, {UpperBound: math.Inf(1), Rate: 2}}
 	b := []domain.LatencyBucket{{UpperBound: 0.5, Rate: 1}, {UpperBound: 1, Rate: 3}, {UpperBound: math.Inf(1), Rate: 4}}
@@ -269,6 +273,14 @@ func TestMergePodInstances_TTFTInputs(t *testing.T) {
 	}
 	if want := []domain.LengthBucket{{UpperBound: 100, Rate: 4}}; !reflect.DeepEqual(got.PromptTokensBuckets, want) {
 		t.Errorf("PromptTokensBuckets = %v, want %v", got.PromptTokensBuckets, want)
+	}
+	if want := []domain.LengthBucket{{UpperBound: 200, Rate: 4}}; !reflect.DeepEqual(got.ComputedTokensBuckets, want) {
+		t.Errorf("ComputedTokensBuckets = %v, want %v", got.ComputedTokensBuckets, want)
+	}
+	noHistogram := rank(3, 0.3, true, b)
+	noHistogram.ComputedTokensBuckets = nil
+	if got := collapseToPods([]domain.ReplicaMetrics{rank(1, 0.1, true, a), noHistogram})[0]; got.ComputedTokensBuckets != nil {
+		t.Errorf("a rank without a computed-token histogram left the pod one: %v", got.ComputedTokensBuckets)
 	}
 	// (0.1 x 1 + 0.3 x 3) / 4
 	if !got.AvgQueueTimeKnown || math.Abs(got.AvgQueueTime-0.25) > 1e-12 {

@@ -1,8 +1,6 @@
 package slo
 
 import (
-	"math"
-	"slices"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
@@ -75,7 +73,7 @@ type ttftInputs struct {
 	shares shareWindow
 	// prompt is E[I_eff] and spread its coefficient of variation.
 	prompt float64
-	spread promptSpread
+	spread whatif.PromptSpread
 	// transfer is the KV transfer per prompt token, seconds; 0 unmeasured.
 	transfer float64
 	// decode is the decode side; nil with no decode line.
@@ -145,20 +143,20 @@ func ttftFleet(in ttftInputs, pods int) (whatif.TTFTFleet, []whatif.Flag) {
 		p.Imbalance = 1
 	}
 	p.PromptTokens = in.prompt
-	p.PromptCV, p.PromptCVAssumed = in.spread.cv, in.spread.assumed
+	p.PromptCV, p.PromptCVAssumed = in.spread.CV, in.spread.Assumed
 	p.TransferSecondsPerToken = in.transfer
 	fl := whatif.TTFTFleet{Prefill: p, Decode: in.decode, FlowControl: in.flow}
 	if in.decode == nil {
 		fl.DecodeTTFT = in.decodeTTFT
 	}
 	flags := []whatif.Flag{AssumedPoissonArrivals}
-	if in.spread.clamped {
+	if in.spread.Clamped {
 		flags = append(flags, PromptSpreadClamped)
 	}
 	if in.mismatch {
 		flags = append(flags, FlowControlMismatch)
 	}
-	if in.spread.cv > whatif.PromptCVPeak(float64(in.percent)/100) {
+	if in.spread.CV > whatif.PromptCVPeak(float64(in.percent)/100) {
 		flags = append(flags, PromptSpreadAbovePeak)
 	}
 	if _, transient := in.routing(); transient && pods == in.pods {
@@ -184,63 +182,6 @@ func flowControlState(p *config.SLOPolicy, seriesSeen bool) (whatif.FlowControl,
 		return on, false
 	}
 	return whatif.FlowControl{State: whatif.FlowControlNoSeries}, false
-}
-
-// promptSpread is the coefficient of variation of the effective prompt, and
-// how it was had.
-type promptSpread struct {
-	cv float64
-	// assumed is no histogram read; clamped is PromptSpreadClamped.
-	assumed, clamped bool
-}
-
-// readPromptSpread reads the spread from the computed-token histogram of the
-// variant's serving rows, pooled: each bucket's rate is summed over the pods
-// and cv computed once. mean is the exact E[I_eff].
-//
-// The second moment uses each bucket's upper bound, so cv reads high, never
-// low: that costs replicas, not safety. Mass past the last finite bound has no
-// upper bound, so cv is the top and flagged, as is a cv above it. With no
-// histogram it is whatif.AssumedPromptCV, flagged by the model.
-func readPromptSpread(rows []domain.ReplicaMetrics, mean float64) promptSpread {
-	assumed := promptSpread{cv: whatif.AssumedPromptCV, assumed: true}
-	pooled := map[float64]float64{}
-	for _, rm := range rows {
-		if !prefill.Serving(rm) {
-			continue
-		}
-		for _, b := range rm.ComputedTokensBuckets {
-			if !math.IsNaN(b.UpperBound) && whatif.Finite(b.Rate) && b.Rate >= 0 {
-				pooled[b.UpperBound] += b.Rate
-			}
-		}
-	}
-	total, ok := pooled[math.Inf(1)]
-	if !ok || !(total > 0) || !(mean > 0) {
-		return assumed
-	}
-	bounds := make([]float64, 0, len(pooled))
-	for b := range pooled {
-		if !math.IsInf(b, 1) {
-			bounds = append(bounds, b)
-		}
-	}
-	slices.Sort(bounds)
-	var second, below float64
-	for _, u := range bounds {
-		// Rates over a window can dip between bounds; a dip is no mass.
-		n := max(pooled[u]-below, 0)
-		second += n * u * u
-		below = max(below, pooled[u])
-	}
-	if total > below {
-		return promptSpread{cv: whatif.PromptCVStop, clamped: true}
-	}
-	cv := math.Sqrt(max(second/total/(mean*mean)-1, 0))
-	if !whatif.Finite(cv) || cv > whatif.PromptCVStop {
-		return promptSpread{cv: whatif.PromptCVStop, clamped: true}
-	}
-	return promptSpread{cv: cv}
 }
 
 // rawShare is f_raw's reading of one cycle: the busiest pod's share of the

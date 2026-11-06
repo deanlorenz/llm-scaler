@@ -54,11 +54,12 @@ func (s *askingSource) Refresh(_ context.Context, spec source.RefreshSpec) (map[
 
 func (s *askingSource) Get(string, map[string]string) *source.CachedValue { return nil }
 
-// recordOnlyNames is every record-only query, per pod and router.
+// recordOnlyNames is every query a cycle with no TTFT target issues only while
+// recording, per pod and router: the record-only ones and the TTFT readers'.
 var recordOnlyNames = []string{
 	registration.QueryPromptTokensBuckets, registration.QueryTTFTBuckets, registration.QueryAvgQueueTime,
 	registration.QueryQueueTimeBuckets, registration.QueryQueueMin, registration.QueryAvgPrefillTime,
-	registration.QueryAvgKVTransferTime, registration.QueryTPOTBuckets,
+	registration.QueryAvgKVTransferTime, registration.QueryTPOTBuckets, registration.QueryComputedTokensBuckets,
 	registration.QuerySLORouterTPOTBuckets, registration.QueryFlowControlWaitBuckets,
 	registration.QueryFlowControlPoolModels, registration.QueryFlowControlPoolSaturation, registration.QueryFlowControlOutcomes,
 }
@@ -104,7 +105,7 @@ func TestRecordOnlyQueries_IssuedOnlyWhileRecording(t *testing.T) {
 	}
 	// The spec's cost (analyzer-learner.md, 2.9): for a vLLM namespace whose
 	// models list no slo analyzer, the recording adds these queries a cycle.
-	assert.Equal(t, 16, total)
+	assert.Equal(t, 17, total)
 }
 
 // The recording flag is the cycle's: on, then off, then on again, each cycle
@@ -155,12 +156,14 @@ func TestRecordOnlyQueries_FailureCountedOnceUnderItsOwnType(t *testing.T) {
 
 		assert.Equal(t, 3.0, errorsOfType(t, registry, constants.QueryTypeRouterLatency),
 			"recording %v: the three slo router queries, once each", recording)
-		want := 0.0
+		want, wantRead := 0.0, 0.0
 		if recording {
-			// 8 per pod, 2 router histograms, 3 pool queries.
-			want = 13
+			// 6 per pod, 2 router histograms, 3 pool queries; and the 3 per
+			// pod the TTFT pricing reads, under their own type.
+			want, wantRead = 11, 3
 		}
 		assert.Equal(t, want, errorsOfType(t, registry, constants.QueryTypeLearnerRecording), "recording %v", recording)
+		assert.Equal(t, wantRead, errorsOfType(t, registry, constants.QueryTypeTTFTInputs), "recording %v", recording)
 	}
 }
 

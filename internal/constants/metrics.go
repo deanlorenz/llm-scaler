@@ -1286,6 +1286,11 @@ const (
 	// flow-control wait histograms, the flow-control pools). They run only
 	// while recording is on, so a failure here never touches scaling.
 	QueryTypeLearnerRecording = "learner_recording"
+	// QueryTypeTTFTInputs is every per-pod query the TTFT pricing reads (the
+	// queue minimum, the computed-token histogram, the KV transfer time).
+	// They run in a namespace with a TTFT target and while recording; the
+	// pricing is shadow, so a failure here never touches scaling either.
+	QueryTypeTTFTInputs = "ttft_inputs"
 )
 
 // Value for the LabelUnit Prometheus label: the metric carries an absolute
