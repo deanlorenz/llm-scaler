@@ -567,7 +567,7 @@ func excursion(r *rand.Rand) []float64 {
 // The edges of the choice, each as the fit it reads: x above 0 is admissible.
 var fitEdges = map[string]func(x float64) bool{
 	"base above 0": func(x float64) bool {
-		var s []decodeSample
+		s := make([]decodeSample, 0, 30)
 		for i := range 30 {
 			itl, p := 0.002+float64(i%7)*0.002, []float64{2000, 4000, 8000}[i%3]
 			s = append(s, decodeSample{ttft: 0.01*x + 3e-6*p + 5*itl, itl: itl, prompt: p})
@@ -575,7 +575,7 @@ var fitEdges = map[string]func(x float64) bool{
 		return fitDecode(s).Refused == ""
 	},
 	"perStep above 0": func(x float64) bool {
-		var s []decodeSample
+		s := make([]decodeSample, 0, 30)
 		for i := range 30 {
 			itl := 0.002 + float64(i%7)*0.002
 			s = append(s, decodeSample{ttft: 0.05 + x*itl, itl: itl, prompt: 1000})
@@ -583,7 +583,7 @@ var fitEdges = map[string]func(x float64) bool{
 		return fitDecode(s).Refused == ""
 	},
 	"perToken at least 0": func(x float64) bool {
-		var s []decodeSample
+		s := make([]decodeSample, 0, 30)
 		for i := range 30 {
 			itl, p := 0.002+float64(i%7)*0.002, []float64{2000, 4000, 8000}[i%3]
 			s = append(s, decodeSample{ttft: 0.05 + 1e-6*x*p + 5*itl, itl: itl, prompt: p})
@@ -591,7 +591,7 @@ var fitEdges = map[string]func(x float64) bool{
 		return fitDecode(s).Refused == ""
 	},
 	"step spread at least 1.5": func(x float64) bool {
-		var s []decodeSample
+		s := make([]decodeSample, 0, 30)
 		for i := range 30 {
 			itl := 0.004 * (1 + float64(i%2)*0.5*(1+0.5*x))
 			s = append(s, decodeSample{ttft: 0.05 + 5*itl, itl: itl, prompt: 1000})
@@ -599,22 +599,24 @@ var fitEdges = map[string]func(x float64) bool{
 		return fitDecode(s).Refused == ""
 	},
 	"minutes at least 10": func(x float64) bool {
-		var s []decodeSample
-		for i := range max(int(math.Round(MinDecodeMinutes-0.5+3*x)), 0) {
+		n := max(int(math.Round(MinDecodeMinutes-0.5+3*x)), 0)
+		s := make([]decodeSample, 0, n)
+		for i := range n {
 			itl := 0.002 + float64(i%7)*0.002
 			s = append(s, decodeSample{ttft: 0.05 + 5*itl, itl: itl, prompt: 1000})
 		}
 		return fitDecode(s).Refused == ""
 	},
 	"windows at least 5": func(x float64) bool {
-		var s []hopSample
-		for range max(int(math.Round(MinHopWindows-0.5+3*x)), 0) {
+		n := max(int(math.Round(MinHopWindows-0.5+3*x)), 0)
+		s := make([]hopSample, 0, n)
+		for range n {
 			s = append(s, hopSample{r: 0.007, prompt: 1000})
 		}
 		return fitHop(s).Refused == ""
 	},
 	"medians above 0": func(x float64) bool {
-		var s []hopSample
+		s := make([]hopSample, 0, 20)
 		for range 10 {
 			s = append(s, hopSample{r: 0.01 * x, prompt: 1000}, hopSample{r: 0.01, prompt: 8000})
 		}
