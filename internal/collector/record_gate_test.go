@@ -153,8 +153,8 @@ func TestRecordOnlyQueries_FailureCountedOnceUnderItsOwnType(t *testing.T) {
 		c := NewReplicaMetricsCollector(src, nil, nil, nil, nil)
 		collectAll(c, recording)
 
-		assert.Equal(t, 3.0, errorsOfType(t, registry, constants.QueryTypeRouterLatency),
-			"recording %v: the three slo router queries, once each", recording)
+		assert.Equal(t, 5.0, errorsOfType(t, registry, constants.QueryTypeRouterLatency),
+			"recording %v: the five slo router queries, once each", recording)
 		want := 0.0
 		if recording {
 			// 8 per pod, 2 router histograms, 3 pool queries.
@@ -177,7 +177,7 @@ func TestCollectRouterLatency_RefreshErrorCountedPerIssuedQuery(t *testing.T) {
 	c.BeginRecordingCycle(true)
 	assert.Nil(t, c.CollectRouterLatency(context.Background(), "model-a", "ns"))
 	c.EndCycle()
-	assert.Equal(t, 3.0, errorsOfType(t, registry, constants.QueryTypeRouterLatency))
+	assert.Equal(t, 5.0, errorsOfType(t, registry, constants.QueryTypeRouterLatency))
 	assert.Equal(t, 2.0, errorsOfType(t, registry, constants.QueryTypeLearnerRecording))
 }
 

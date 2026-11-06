@@ -13,6 +13,11 @@ const (
 	// QuerySLORouterTTFTBuckets is the router's TTFT histogram, as per-second
 	// bucket rates, per model.
 	QuerySLORouterTTFTBuckets = "slo_router_ttft_buckets"
+	// QuerySLORouterTTFTSum and QuerySLORouterTTFTCount are the rates of that
+	// histogram's _sum and _count, per model: the router's mean TTFT, which
+	// the TTFT model's hop term is read from (prefill.DecodeTermWindow).
+	QuerySLORouterTTFTSum   = "slo_router_ttft_sum"
+	QuerySLORouterTTFTCount = "slo_router_ttft_count"
 	// QuerySLORouterTPOTSum and QuerySLORouterTPOTCount are the rates of the
 	// router's streaming time-per-output-token histogram's _sum and _count.
 	QuerySLORouterTPOTSum   = "slo_router_tpot_sum"
@@ -24,7 +29,7 @@ const (
 	// learner recording is on.
 	QuerySLORouterTPOTBuckets = "slo_router_tpot_buckets"
 
-	// SLORouterWindow is the rate window of the four queries above. Five
+	// SLORouterWindow is the rate window of the queries above. Five
 	// minutes, not the one minute the engine queries use: a percentile and an
 	// attainment need enough requests to mean anything, and the analyzer
 	// refuses to report either below a sample minimum.
@@ -48,6 +53,10 @@ const (
 const (
 	sloRouterTTFTBuckets = `sum by (model_name, target_model_name, le) (` +
 		`rate(llm_d_epp_request_ttft_seconds_bucket{namespace="{{.namespace}}",streaming="true"}[` + SLORouterWindow + `]))`
+	sloRouterTTFTSum = `sum by (model_name, target_model_name) (` +
+		`rate(llm_d_epp_request_ttft_seconds_sum{namespace="{{.namespace}}",streaming="true"}[` + SLORouterWindow + `]))`
+	sloRouterTTFTCount = `sum by (model_name, target_model_name) (` +
+		`rate(llm_d_epp_request_ttft_seconds_count{namespace="{{.namespace}}",streaming="true"}[` + SLORouterWindow + `]))`
 	sloRouterTPOTSum = `sum by (model_name, target_model_name) (` +
 		`rate(llm_d_epp_request_streaming_tpot_seconds_sum{namespace="{{.namespace}}"}[` + SLORouterWindow + `]))`
 	sloRouterTPOTCount = `sum by (model_name, target_model_name) (` +
@@ -74,6 +83,20 @@ func RegisterSLOQueries(sourceRegistry *source.SourceRegistry) {
 		Template:    sloRouterTTFTBuckets,
 		Params:      []string{source.ParamNamespace},
 		Description: "Router (EPP) TTFT histogram bucket rates per model, streaming requests only; includes the flow-control queue",
+	})
+	registry.MustRegister(source.QueryTemplate{
+		Name:        QuerySLORouterTTFTSum,
+		Type:        source.QueryTypePromQL,
+		Template:    sloRouterTTFTSum,
+		Params:      []string{source.ParamNamespace},
+		Description: "Router (EPP) TTFT histogram _sum rate per model, streaming requests only",
+	})
+	registry.MustRegister(source.QueryTemplate{
+		Name:        QuerySLORouterTTFTCount,
+		Type:        source.QueryTypePromQL,
+		Template:    sloRouterTTFTCount,
+		Params:      []string{source.ParamNamespace},
+		Description: "Router (EPP) TTFT histogram _count rate per model, streaming requests only",
 	})
 	registry.MustRegister(source.QueryTemplate{
 		Name:        QuerySLORouterTPOTSum,

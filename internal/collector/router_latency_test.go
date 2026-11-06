@@ -178,6 +178,46 @@ func TestCollectRouterLatency_SkipsUnreadableBoundsAndKeepsTPOTAlone(t *testing.
 	assert.Equal(t, 1.0, got.TPOTCountRate)
 }
 
+// TestCollectRouterLatency_ReadsTheTTFTMean pins the router's mean TTFT, which
+// the decode term's hop is read from: a model reached under both labels sums
+// into one pair, and with either query failed there is no pair, as for TPOT.
+func TestCollectRouterLatency_ReadsTheTTFTMean(t *testing.T) {
+	sum := func(v float64) *source.MetricResult {
+		return &source.MetricResult{Values: []source.MetricValue{
+			{Labels: map[string]string{seriesTargetModelLabel: "model-a"}, Value: v},
+			{Labels: map[string]string{"model_name": "model-a"}, Value: v},
+			{Labels: map[string]string{seriesTargetModelLabel: "model-b"}, Value: 99},
+		}}
+	}
+	collect := func(s, c *source.MetricResult) *domain.RouterLatency {
+		mockSource := &mockMetricsSource{
+			refreshFunc: func(_ context.Context, _ source.RefreshSpec) (map[string]*source.MetricResult, error) {
+				return map[string]*source.MetricResult{
+					registration.QuerySLORouterTTFTBuckets: {Values: []source.MetricValue{
+						{Labels: map[string]string{seriesTargetModelLabel: "model-a", "le": "0.1"}, Value: 1},
+					}},
+					registration.QuerySLORouterTTFTSum:   s,
+					registration.QuerySLORouterTTFTCount: c,
+				}, nil
+			},
+		}
+		return NewReplicaMetricsCollector(mockSource, nil, nil, nil, nil).CollectRouterLatency(context.Background(), "model-a", "ns")
+	}
+	got := collect(sum(0.5), sum(5))
+	require.NotNil(t, got)
+	assert.Equal(t, 1.0, got.TTFTSumRate)
+	assert.Equal(t, 10.0, got.TTFTCountRate)
+
+	failed := &source.MetricResult{Error: errors.New("query timed out")}
+	got = collect(failed, sum(5))
+	require.NotNil(t, got, "the buckets still stand")
+	assert.Zero(t, got.TTFTSumRate, "half a pair is no mean")
+	assert.Zero(t, got.TTFTCountRate)
+	got = collect(sum(0.5), failed)
+	assert.Zero(t, got.TTFTSumRate)
+	assert.Zero(t, got.TTFTCountRate)
+}
+
 // TestCollectRouterLatency_CountsAFailedQuery pins that a failed query is
 // counted, so a Prometheus outage is not read as a router that is not scraped.
 // The failure is carried the way the real Prometheus source carries it: on
@@ -199,7 +239,7 @@ func TestCollectRouterLatency_CountsAFailedQuery(t *testing.T) {
 	assert.Nil(t, NewReplicaMetricsCollector(failing, nil, nil, nil, nil).
 		CollectRouterLatency(context.Background(), "model-a", "ns"))
 
-	assert.Equal(t, 3.0, errorsOfType(t, registry, constants.QueryTypeRouterLatency), "one per failed query")
+	assert.Equal(t, 5.0, errorsOfType(t, registry, constants.QueryTypeRouterLatency), "one per failed query")
 	assert.Zero(t, errorsOfType(t, registry, constants.QueryTypeLearnerRecording), "recording off: nothing record-only ran")
 }
 

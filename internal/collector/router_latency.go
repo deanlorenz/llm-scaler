@@ -20,7 +20,8 @@ import (
 // as an unjudged SLO rather than a met or a missed one.
 //
 // The slo analyzer calls it for each model whose policy lists it, and reads
-// three queries: the TTFT buckets and the TPOT _sum and _count. While a
+// five queries: the TTFT buckets, _sum and _count, and the TPOT _sum and
+// _count. While a
 // learner recording is on (SetRecordTTFTInputs) the engine also calls it for
 // every model every cycle, and it adds two more, the router's TPOT histogram
 // and the flow-control wait histogram, which only the recording reads.
@@ -31,6 +32,8 @@ func (c *ReplicaMetricsCollector) CollectRouterLatency(
 	logger := ctrl.LoggerFrom(ctx)
 	queries := []string{
 		registration.QuerySLORouterTTFTBuckets,
+		registration.QuerySLORouterTTFTSum,
+		registration.QuerySLORouterTTFTCount,
 		registration.QuerySLORouterTPOTSum,
 		registration.QuerySLORouterTPOTCount,
 	}
@@ -67,22 +70,13 @@ func (c *ReplicaMetricsCollector) CollectRouterLatency(
 	// input is recorded every cycle, and a map's order would make two
 	// identical cycles record different bytes.
 	out.TTFTBuckets = routerBuckets(results[registration.QuerySLORouterTTFTBuckets], modelID)
+	out.TTFTSumRate, out.TTFTCountRate = routerMeanRates(results[registration.QuerySLORouterTTFTSum],
+		results[registration.QuerySLORouterTTFTCount], modelID)
 	// The mean is sum over count, so the pair is one reading: with either
 	// query failed it is none. Summing the half that came back published a
 	// mean of 0 -- a met TPOT -- whenever the _sum query alone failed.
-	sum, count := results[registration.QuerySLORouterTPOTSum], results[registration.QuerySLORouterTPOTCount]
-	if sum != nil && !sum.HasError() && count != nil && !count.HasError() {
-		for _, v := range modelValues(sum, modelID) {
-			out.TPOTSumRate += v.Value
-		}
-		for _, v := range modelValues(count, modelID) {
-			out.TPOTCountRate += v.Value
-		}
-		// No time per token at all is not a reading of streams either.
-		if !(out.TPOTSumRate > 0) {
-			out.TPOTSumRate, out.TPOTCountRate = 0, 0
-		}
-	}
+	out.TPOTSumRate, out.TPOTCountRate = routerMeanRates(results[registration.QuerySLORouterTPOTSum],
+		results[registration.QuerySLORouterTPOTCount], modelID)
 	// The two histograms ride along for a recording, read by nothing yet.
 	// Either one keeps the struct, so the recording holds it; the slo
 	// analyzer judges only what RouterLatency.Judgeable says is a reading,
@@ -104,6 +98,25 @@ func routerQueryType(query string) string {
 		return constants.QueryTypeLearnerRecording
 	}
 	return constants.QueryTypeRouterLatency
+}
+
+// routerMeanRates is one model's _sum and _count rates of a router histogram,
+// a model reached under both labels summed. Both zero with either query failed
+// or no time at all, which is not a reading of requests.
+func routerMeanRates(sum, count *source.MetricResult, modelID string) (sumRate, countRate float64) {
+	if sum == nil || sum.HasError() || count == nil || count.HasError() {
+		return 0, 0
+	}
+	for _, v := range modelValues(sum, modelID) {
+		sumRate += v.Value
+	}
+	for _, v := range modelValues(count, modelID) {
+		countRate += v.Value
+	}
+	if !(sumRate > 0) {
+		return 0, 0
+	}
+	return sumRate, countRate
 }
 
 // routerBuckets is one model's bucket rates of a router histogram, a model
