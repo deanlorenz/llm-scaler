@@ -127,7 +127,7 @@ func TestRecordLearnerReportsAForgetIsPerLearner(t *testing.T) {
 	}
 }
 
-func TestDeleteLearnerSeriesIsScoped(t *testing.T) {
+func TestRetainLearnerSeriesKeepsOnlyWhatIsKnown(t *testing.T) {
 	emitter, registry := engineConfigEmitter(t)
 	at := time.Unix(1_700_000_000, 0)
 	seed := func() {
@@ -141,7 +141,9 @@ func TestDeleteLearnerSeriesIsScoped(t *testing.T) {
 		}
 	}
 	seed()
-	emitter.DeleteLearnerSeries("ns", "m", "v")
+	emitter.RetainLearnerSeries(func(namespace, modelID, variant string) bool {
+		return !(modelID == "m" && variant == "v")
+	})
 	if got := countSeries(t, registry, lastAdmittedSeries); got != 2 {
 		t.Fatalf("after the variant: series = %d, want 2", got)
 	}
@@ -152,9 +154,20 @@ func TestDeleteLearnerSeriesIsScoped(t *testing.T) {
 		t.Fatal("the bookkeeping lost a same-named variant of another model")
 	}
 	seed()
-	emitter.DeleteLearnerSeriesForModel("ns", "m")
+	emitter.RetainLearnerSeries(func(namespace, modelID, variant string) bool { return modelID != "m" })
 	if got := countSeries(t, registry, lastAdmittedSeries); got != 1 {
 		t.Fatalf("after the model: series = %d, want 1", got)
+	}
+	emitter.RetainLearnerSeries(func(string, string, string) bool { return false })
+	if got := countSeries(t, registry, lastAdmittedSeries); got != 0 {
+		t.Fatalf("after everything: series = %d, want 0", got)
+	}
+	seed()
+	emitter.RecordLearnerReports([]learn.Report{{Learner: learn.K2, Namespace: "ns", ModelID: "m", Variant: "v",
+		Role: "both", PricingKey: "k", LastAdmitted: at}})
+	emitter.RetainLearnerSeries(func(string, string, string) bool { return false })
+	if got := countSeries(t, registry, lastAdmittedSeries); got != 0 {
+		t.Fatalf("a series that moved role: series = %d, want 0", got)
 	}
 	learnerPublishedMu.Lock()
 	defer learnerPublishedMu.Unlock()

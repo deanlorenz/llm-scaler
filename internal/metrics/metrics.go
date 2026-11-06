@@ -2382,19 +2382,6 @@ func (m *MetricsEmitter) RecordLearnerReports(reports []learn.Report) {
 	}
 	for _, r := range reports {
 		id := learnerSeriesID{namespace: r.Namespace, modelID: r.ModelID, variant: r.Variant, learner: r.Learner}
-		labels := func(role string) prometheus.Labels {
-			l := prometheus.Labels{
-				constants.LabelNamespace:   r.Namespace,
-				constants.LabelModelName:   r.ModelID,
-				constants.LabelVariantName: r.Variant,
-				constants.LabelRole:        role,
-				constants.LabelLearner:     r.Learner,
-			}
-			if controllerInstance != "" {
-				l[constants.LabelControllerInstance] = controllerInstance
-			}
-			return l
-		}
 		learnerPublishedMu.Lock()
 		prev, had := learnerPublished[id]
 		switch {
@@ -2408,12 +2395,27 @@ func (m *MetricsEmitter) RecordLearnerReports(reports []learn.Report) {
 		}
 		learnerPublishedMu.Unlock()
 		if r.PricingKey != "" {
-			learnedStateLastAdmitted.With(labels(r.Role)).Set(unixSeconds(r.LastAdmitted))
+			learnedStateLastAdmitted.With(id.labels(r.Role)).Set(unixSeconds(r.LastAdmitted))
 		}
 		if had && (r.PricingKey == "" || prev.role != r.Role) {
-			learnedStateLastAdmitted.Delete(labels(prev.role))
+			learnedStateLastAdmitted.Delete(id.labels(prev.role))
 		}
 	}
+}
+
+// labels is the series' labels under role.
+func (id learnerSeriesID) labels(role string) prometheus.Labels {
+	l := prometheus.Labels{
+		constants.LabelNamespace:   id.namespace,
+		constants.LabelModelName:   id.modelID,
+		constants.LabelVariantName: id.variant,
+		constants.LabelRole:        role,
+		constants.LabelLearner:     id.learner,
+	}
+	if controllerInstance != "" {
+		l[constants.LabelControllerInstance] = controllerInstance
+	}
+	return l
 }
 
 // unixSeconds is t in Unix seconds, and 0 for a zero t: a Unix time of the
@@ -2425,42 +2427,25 @@ func unixSeconds(t time.Time) float64 {
 	return float64(t.UnixMilli()) / 1000
 }
 
-// DeleteLearnerSeries removes one variant's last-admitted series, of every
-// learner. modelID is part of the match, as in DeleteLearnedStateBorrows.
-func (m *MetricsEmitter) DeleteLearnerSeries(namespace, modelID, variantName string) {
-	if learnedStateLastAdmitted != nil {
-		learnedStateLastAdmitted.DeletePartialMatch(prometheus.Labels{
-			constants.LabelNamespace:   namespace,
-			constants.LabelModelName:   modelID,
-			constants.LabelVariantName: variantName,
-		})
-	}
+// RetainLearnerSeries removes the last-admitted series of every variant known
+// does not report true for. The caller's test is whether the variant still
+// exists, not whether it is running: unlike the k2-source series these describe
+// the evidence, not this cycle's pricing, and it ages on through a park.
+func (m *MetricsEmitter) RetainLearnerSeries(known func(namespace, modelID, variant string) bool) {
+	gone := map[learnerSeriesID]string{}
 	learnerPublishedMu.Lock()
-	defer learnerPublishedMu.Unlock()
-	for id := range learnerPublished {
-		if id.namespace == namespace && id.modelID == modelID && id.variant == variantName {
+	for id, s := range learnerPublished {
+		if !known(id.namespace, id.modelID, id.variant) {
+			gone[id] = s.role
 			delete(learnerPublished, id)
 		}
 	}
-}
-
-// DeleteLearnerSeriesForModel removes every last-admitted series of a model
-// that is no longer reconciled. Not of one parked or with no replica
-// reporting: unlike the k2-source series these describe the evidence, not
-// this cycle's pricing, and it ages on through a park.
-func (m *MetricsEmitter) DeleteLearnerSeriesForModel(namespace, modelID string) {
-	if learnedStateLastAdmitted != nil {
-		learnedStateLastAdmitted.DeletePartialMatch(prometheus.Labels{
-			constants.LabelNamespace: namespace,
-			constants.LabelModelName: modelID,
-		})
+	learnerPublishedMu.Unlock()
+	if learnedStateLastAdmitted == nil {
+		return
 	}
-	learnerPublishedMu.Lock()
-	defer learnerPublishedMu.Unlock()
-	for id := range learnerPublished {
-		if id.namespace == namespace && id.modelID == modelID {
-			delete(learnerPublished, id)
-		}
+	for id, role := range gone {
+		learnedStateLastAdmitted.Delete(id.labels(role))
 	}
 }
 

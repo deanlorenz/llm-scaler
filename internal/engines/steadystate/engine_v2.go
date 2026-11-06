@@ -742,7 +742,6 @@ func (e *Engine) evictStaleAnalyzerSeries(namespace, modelID string, current ana
 			// only when no analyzer reports the variant any more.
 			if _, still := reported[prev.variant]; !still {
 				e.metricsEmitter.DeleteLearnedStateBorrows(namespace, modelID, prev.variant)
-				e.metricsEmitter.DeleteLearnerSeries(namespace, modelID, prev.variant)
 			}
 		}
 	}
@@ -804,7 +803,6 @@ func (e *Engine) pruneAnalyzerSeries(activeKeys map[string]bool) {
 	// apart from lastAnalyzerSeries.
 	e.retainLoadBalance(activeKeys)
 	e.retainSettle(activeKeys)
-	e.retainLearnerSeries(activeKeys)
 }
 
 // evictAllAnalyzerSeries removes every analyzer series the engine has published,
@@ -828,7 +826,6 @@ func (e *Engine) evictAllAnalyzerSeries() {
 	}
 	e.retainLoadBalance(nil)
 	e.retainSettle(nil)
-	e.retainLearnerSeries(nil)
 }
 
 // livenessThreshold is how long an analyzer stays live after its last

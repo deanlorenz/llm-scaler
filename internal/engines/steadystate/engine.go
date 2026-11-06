@@ -250,11 +250,6 @@ type Engine struct {
 	// lastAnalyzerSeries.
 	publishedEngineConfig map[string]engineConfigPublished
 
-	// learnerSeries records the models whose learner reports were published
-	// (learner_reports.go), keyed identically. Unguarded for the same reason
-	// as lastAnalyzerSeries.
-	learnerSeries map[string]learnerSeriesModel
-
 	// lastDecided records, per scale target (keyed namespace/target), when the
 	// optimize loop last DECIDED for it -- as opposed to republished for it --
 	// and which incarnation of the target that decision was about. The sticky
@@ -844,6 +839,9 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 		logger.Error(err, "Unable to get active variant autoscalings")
 		return err
 	}
+	// Here, not with the analyzer series: those go with the active set, and a
+	// fleet at zero replicas is exactly what these series are kept for.
+	e.retainLearnerSeries(ctx)
 	// Before anything decides: which variants are only observed this cycle.
 	e.observePassive(logger, activeVAs)
 

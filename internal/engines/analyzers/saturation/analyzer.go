@@ -1142,18 +1142,22 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 	})
 	// A window put aside under arguments the variant no longer runs ages as
 	// it did in use: a bucket retention after it was last read.
+	var k2StashGone, muStashGone []string
 	for key, ra := range a.k2Stash {
 		if ra.StaleAt(now, bucketRetention) {
 			delete(a.k2Stash, key)
 			evicted.StashedWindows++
+			k2StashGone = append(k2StashGone, stashedKey(key))
 		}
 	}
 	for key, st := range a.throughputStash {
 		if st.window.StaleAt(now, bucketRetention) {
 			delete(a.throughputStash, key)
 			evicted.StashedWindows++
+			muStashGone = append(muStashGone, stashedKey(key))
 		}
 	}
+	a.noteStashesGoneLocked(k2StashGone, muStashGone)
 	// A held mark describes a window a rollback took back, and is read only
 	// when that window is set aside again under the same arguments: once the
 	// window is gone or carries other arguments, nothing reads it.

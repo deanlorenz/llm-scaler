@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest/observer"
@@ -179,6 +180,20 @@ func TestLearnerWrite_TheITLLineSaysRestoredUntilAReadingIsKept(t *testing.T) {
 		clock = clock.Add(time.Minute)
 		cycle(first, replica(0.06, 0.01))
 	}
+	// The window has aged out and the line rests on its slope: as old as the
+	// fit, not as old as can be.
+	itlReport := func(a *SaturationAnalyzer) learn.Report {
+		t.Helper()
+		reports := reportsOf(a.LearnerReports()["test-ns|test-model"], learn.ITL)
+		require.Len(t, reports, 1)
+		return reports[0]
+	}
+	quiet := itlReport(first)
+	require.Zero(t, quiet.Samples, "premise: the window has aged out")
+	require.Equal(t, itlSourceHeld, quiet.Source, "premise: a held slope")
+	assert.False(t, quiet.LastAdmitted.Before(loadEnd), "the last fit")
+	assert.True(t, quiet.LastAdmitted.Before(clock), "the last fit")
+
 	raw, err := json.Marshal(first.ExportLearnedState())
 	require.NoError(t, err)
 	var doc LearnedState
@@ -191,6 +206,7 @@ func TestLearnerWrite_TheITLLineSaysRestoredUntilAReadingIsKept(t *testing.T) {
 	require.Len(t, lines, 1, "a restored line logs its first write")
 	assert.Equal(t, true, lines[0]["restored"])
 	assert.Equal(t, itlSourceHeld, lines[0]["source"], "and keeps its source")
+	assert.True(t, quiet.LastAdmitted.Equal(itlReport(second).LastAdmitted), "a restored slope keeps its fit's age")
 
 	clock = clock.Add(LearnerHeartbeat)
 	lines = cycle(second, replica(0.06, 0.01))
@@ -201,6 +217,16 @@ func TestLearnerWrite_TheITLLineSaysRestoredUntilAReadingIsKept(t *testing.T) {
 	lines = cycle(second, replica(0.40, 0.03)) // in the band: a reading kept
 	require.Len(t, lines, 1)
 	assert.Equal(t, false, lines[0]["restored"])
+}
+
+// Only a line with no reading and no slope has no stamp.
+func TestITLLearner_AnInterceptWithNoSlopeHasNoStamp(t *testing.T) {
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	a.noteITLLearner("ns", "m", "v", domain.RoleDecode, "ns|m|v|k", itl.Reading{Tier: itl.TierPinnedB},
+		restartT0, logr.Discard())
+	require.Len(t, a.itlCycles["ns|m"], 1)
+	assert.NotEmpty(t, a.itlCycles["ns|m"][0].PricingKey)
+	assert.True(t, a.itlCycles["ns|m"][0].LastAdmitted.IsZero())
 }
 
 // muForgetRig is a variant with a mu window and a line logged of it, and the
@@ -383,6 +409,122 @@ func TestForgottenKeyIsThePricingKeyPublished(t *testing.T) {
 		r.a.ForgetVariant("test-ns", "test-model", "v", "token-1")
 		after := r.cycle(t, t.Context(), itlSettleFleet())
 		assert.Contains(t, learn.Keys(after.Forgotten), last.PricingKey)
+	})
+}
+
+// stashRig is muForgetRig with k2's and mu's windows put aside under other
+// arguments, as a rollout puts them, and their keys.
+func stashRig(t *testing.T, on bool) (r *restartRig, k2, mu string) {
+	t.Helper()
+	r, mu = muForgetRig(t, on)
+	k2 = firstKey(r.a)
+	r.a.mu.Lock()
+	defer r.a.mu.Unlock()
+	r.a.k2Stash[stashKey(k2, "old")] = r.a.computeCapacityHistory[k2]
+	delete(r.a.computeCapacityHistory, k2)
+	r.a.throughputStash[stashKey(mu, "old")] = stashedThroughput{window: r.a.saturatedThroughput[mu]}
+	delete(r.a.saturatedThroughput, mu)
+	return r, k2, mu
+}
+
+// reportedForgotten is what one cycle's reports of a learner say was forgotten.
+func reportedForgotten(t *testing.T, r *restartRig, learner string) []learn.Forgotten {
+	t.Helper()
+	r.cycle(unqueuedRow(), decodeVariants("v"))
+	reports := reportsOf(r.a.LearnerReports()["test-ns|test-model"], learner)
+	require.Len(t, reports, 1, learner)
+	return reports[0].Forgotten
+}
+
+// A key whose only window is in a stash is still the key last published: a
+// forget names it, or the variant's series stands for good.
+func TestForget_NamesAKeyWhoseWindowIsInAStash(t *testing.T) {
+	r, k2, mu := stashRig(t, true)
+	r.a.ForgetVariant("test-ns", "test-model", "v", "token-1")
+	r.a.mu.Lock()
+	assert.Empty(t, r.a.k2Stash)
+	assert.Empty(t, r.a.throughputStash)
+	r.a.mu.Unlock()
+	r.cycle(unqueuedRow(), decodeVariants("v"))
+	reports := r.a.LearnerReports()["test-ns|test-model"]
+	assert.Equal(t, []learn.Forgotten{{Key: k2, By: learn.ByOperator}}, reportsOf(reports, learn.K2)[0].Forgotten)
+	assert.Equal(t, []learn.Forgotten{{Key: mu, By: learn.ByOperator}}, reportsOf(reports, learn.Mu)[0].Forgotten)
+}
+
+// ageStashes puts every stashed window past the retention.
+func ageStashes(r *restartRig) {
+	aged := r.now.Add(-r.a.horizons.BucketRetention - time.Hour)
+	r.a.mu.Lock()
+	defer r.a.mu.Unlock()
+	for _, ra := range r.a.k2Stash {
+		ra.TouchAt(aged)
+	}
+	for _, st := range r.a.throughputStash {
+		st.window.TouchAt(aged)
+	}
+}
+
+// The sweep evicting the last window of a key reports it, by eviction. A key
+// with a live window or another stash can still price, and is not reported;
+// a prefill bound's stash is not mu's.
+func TestStashEviction_NamesAKeyWithNoWindowLeft(t *testing.T) {
+	t.Run("the last window", func(t *testing.T) {
+		r, k2, mu := stashRig(t, true)
+		ageStashes(r)
+		r.a.EvictStaleHistory()
+		r.cycle(unqueuedRow(), decodeVariants("v"))
+		reports := r.a.LearnerReports()["test-ns|test-model"]
+		assert.Equal(t, []learn.Forgotten{{Key: k2, By: learn.ByEvicted}}, reportsOf(reports, learn.K2)[0].Forgotten)
+		assert.Equal(t, []learn.Forgotten{{Key: mu, By: learn.ByEvicted}}, reportsOf(reports, learn.Mu)[0].Forgotten)
+	})
+	t.Run("mu's switch off", func(t *testing.T) {
+		r, k2, _ := stashRig(t, false)
+		ageStashes(r)
+		r.a.EvictStaleHistory()
+		r.cycle(unqueuedRow(), decodeVariants("v"))
+		reports := r.a.LearnerReports()["test-ns|test-model"]
+		assert.Equal(t, []string{k2}, learn.Keys(reportsOf(reports, learn.K2)[0].Forgotten))
+		assert.Empty(t, reportsOf(reports, learn.Mu)[0].Forgotten)
+	})
+	t.Run("a live window remains", func(t *testing.T) {
+		r, key := muForgetRig(t, true)
+		k2 := firstKey(r.a)
+		r.a.mu.Lock()
+		r.a.k2Stash[stashKey(k2, "old")] = capacity.NewRollingAverage(capacity.RollingAverageWindowSize, r.now)
+		r.a.throughputStash[stashKey(key, "old")] = stashedThroughput{
+			window: capacity.NewRollingAverage(capacity.RollingAverageWindowSize, r.now)}
+		r.a.mu.Unlock()
+		ageStashes(r)
+		r.a.EvictStaleHistory()
+		r.cycle(unqueuedRow(), decodeVariants("v"))
+		reports := r.a.LearnerReports()["test-ns|test-model"]
+		assert.Empty(t, reportsOf(reports, learn.K2)[0].Forgotten)
+		assert.Empty(t, reportsOf(reports, learn.Mu)[0].Forgotten)
+	})
+	t.Run("another stash remains", func(t *testing.T) {
+		r, k2, mu := stashRig(t, true)
+		ageStashes(r)
+		r.a.mu.Lock()
+		r.a.k2Stash[stashKey(k2, "newer")] = capacity.NewRollingAverage(capacity.RollingAverageWindowSize, r.now)
+		r.a.throughputStash[stashKey(mu, "newer")] = stashedThroughput{
+			window: capacity.NewRollingAverage(capacity.RollingAverageWindowSize, r.now)}
+		r.a.mu.Unlock()
+		r.a.EvictStaleHistory()
+		r.cycle(unqueuedRow(), decodeVariants("v"))
+		reports := r.a.LearnerReports()["test-ns|test-model"]
+		assert.Empty(t, reportsOf(reports, learn.K2)[0].Forgotten)
+		assert.Empty(t, reportsOf(reports, learn.Mu)[0].Forgotten)
+	})
+	t.Run("the prefill bound", func(t *testing.T) {
+		r, _ := muForgetRig(t, true)
+		bound := "test-ns|v|test-model|H200|1|" + prefillBoundRole + "|imedium|medium|q5"
+		r.a.mu.Lock()
+		r.a.throughputStash[stashKey(bound, "old")] = stashedThroughput{
+			window: capacity.NewRollingAverage(capacity.RollingAverageWindowSize, r.now)}
+		r.a.mu.Unlock()
+		ageStashes(r)
+		r.a.EvictStaleHistory()
+		assert.Empty(t, reportedForgotten(t, r, learn.Mu))
 	})
 }
 

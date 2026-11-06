@@ -3484,11 +3484,15 @@ and the `restored` field have none, because no replay output reads either.
   metrics layer remembers the key behind each series, and deletes only when a
   report with no `PricingKey` names that key `Forgotten`. A report with no key
   leaves the series, and so does a model parked, or one whose `Analyze` failed.
-  The series also goes when the variant leaves, and with the model, where the
-  engine deletes the others. It does not go where the k2-source series goes on a
-  cycle with no replica rows: that one describes this cycle, this one the
-  evidence. Reasons, writes and forgets are not published: 6.3 lists them in the
-  Report, and no alert or operator question needs them yet.
+  A key whose only window is in a stash is named too, on a forget and when the
+  sweep evicts the stash, or the series of a key set aside by an args change
+  would stand for good. The series also goes when the variant leaves the
+  registry (`KnownVariantAutoscalings`), which is what "the model is deleted"
+  comes to here. Not where the engine deletes the analyzer series: those follow
+  the active set, and a model at zero replicas is not in it. Nor where the
+  k2-source series goes on a cycle with no replica rows: that one describes this
+  cycle, this one the evidence. Reasons, writes and forgets are not published: 6.3
+  lists them in the Report, and no alert or operator question needs them yet.
 - **`restored` (6.1).** On `learner-write` for k2, mu and ITL, as start already
   had it, and on `k2-decision` at `P2-hist` for `dump_k2_decisions.py`'s Restored
   column. V(3) lines only: the default level gains nothing. The marks live on the
@@ -3560,7 +3564,7 @@ Round-3 lows, each settled in the PR named.
 | Each operator-column cell names its metric series, or "metrics: none" | each PR |
 | A witness column per learner in 3.4 ("witnessed when", "non-saturating witness"), which also tells the probe which side to drive | 3 |
 | 3.6's cycle-count clocks become durations, or record the cycle interval in the threshold | each learner's PR |
-| The snapshot gains a last-admitted stamp for start time and B, as an additive `omitempty` field of v1; a document without it publishes 0 (as old as can be) | Start time: 5c. B: still open; its line publishes 0 while the window is empty ([as built](#reports-restored-and-mus-forget-as-built-495)) |
+| The snapshot gains a last-admitted stamp for start time and B, as an additive `omitempty` field of v1; a document without it publishes 0 (as old as can be) | Start time: 5c. B: still open; a line with an empty window publishes its held slope's fit, and 0 on an intercept with no slope ([as built](#reports-restored-and-mus-forget-as-built-495)) |
 
 ## Review notes (round 1)
 

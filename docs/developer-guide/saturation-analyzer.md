@@ -426,7 +426,10 @@ The engine takes the cycle's reports once, at the end of the cycle
 (`publishLearnerReports`, `TakeLearnerReports`), and publishes each learner's
 `wva_learned_state_last_admitted_timestamp_seconds`. `RecordLearnerReports`
 remembers the key behind each series, which no label carries, and deletes the
-series only when a report without a `PricingKey` names that key `Forgotten`.
+series only when a report without a `PricingKey` names that key `Forgotten`,
+or when the variant has left the registry (`retainLearnerSeries`,
+`utils.KnownVariantAutoscalings`). The active set is not the test: a variant at
+zero replicas is in no model group, and its series must outlive the park.
 
 `RollingAverage.Restored` is true from `RestoreRollingAverage` until the
 window's first write, and `itl.Tracker.Restored` from `RestoreBaseline` or

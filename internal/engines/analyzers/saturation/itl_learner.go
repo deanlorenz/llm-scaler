@@ -103,8 +103,14 @@ func (a *SaturationAnalyzer) noteITLLearner(namespace, modelID, variant, role, k
 	if source != itlSourceNoLine {
 		report.PricingKey = key
 	}
-	if r.Held > 0 {
+	// A line resting on a held slope is as old as its fit once the window has
+	// aged out, or holds nothing since a restart. Only a line with neither has
+	// no stamp.
+	switch {
+	case r.Held > 0:
 		report.LastAdmitted = a.itlTracker.Newest(key)
+	case r.SlopeHeld:
+		report.LastAdmitted = r.SlopeFittedAt
 	}
 	restored := a.itlTracker.Restored(key)
 	a.mu.Lock()

@@ -334,7 +334,15 @@ func (a *SaturationAnalyzer) forgetMuLocked(namespace, modelID, variant string, 
 			keys = append(keys, key)
 		}
 	}
+	// A window put aside under other arguments is the key's too: the key may
+	// be the one last published, and nothing else would name it.
+	for key := range a.throughputStash {
+		if isMuKey(key) {
+			keys = append(keys, stashedKey(key))
+		}
+	}
 	slices.Sort(keys)
+	keys = slices.Compact(keys)
 	n := 0
 	for _, m := range a.muMapsLocked() {
 		n += m.dropIf(isMuKey)

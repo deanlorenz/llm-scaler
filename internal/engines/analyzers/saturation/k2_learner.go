@@ -393,7 +393,6 @@ func (a *SaturationAnalyzer) forgetK2Locked(namespace, modelID, variant string, 
 			keys = append(keys, key)
 		}
 	}
-	sort.Strings(keys)
 	for _, key := range keys {
 		delete(a.computeCapacityHistory, key)
 		n++
@@ -408,8 +407,11 @@ func (a *SaturationAnalyzer) forgetK2Locked(namespace, modelID, variant string, 
 		if strings.HasPrefix(key, prefix) {
 			delete(a.k2Stash, key)
 			n++
+			keys = append(keys, stashedKey(key))
 		}
 	}
+	slices.Sort(keys)
+	keys = slices.Compact(keys)
 	for key := range a.k2Logged {
 		if strings.HasPrefix(key, prefix) {
 			delete(a.k2Logged, key)
@@ -425,6 +427,58 @@ func (a *SaturationAnalyzer) forgetK2Locked(namespace, modelID, variant string, 
 	a.spendLowerBoundsLocked(prefix, a.now())
 	a.noteForgottenLocked(namespace, modelID, variant, keys, by)
 	return n
+}
+
+// stashedKey is the window key of a stash key (stashKey): the key a report
+// named when the window was live.
+func stashedKey(key string) string {
+	base, _, _ := strings.Cut(key, "#")
+	return base
+}
+
+// stashHolds reports whether stash holds a window of key under any arguments.
+func stashHolds[V any](stash map[string]V, key string) bool {
+	for k := range stash {
+		if stashedKey(k) == key {
+			return true
+		}
+	}
+	return false
+}
+
+// noteStashesGoneLocked reports the keys whose last window was a stash the
+// sweep just evicted, as forgotten by eviction. A key that still holds a live
+// window or another stash is not forgotten: it can still price. Callers hold
+// a.mu.
+func (a *SaturationAnalyzer) noteStashesGoneLocked(k2, mu []string) {
+	note := func(key string, file func(ns, model, variant string)) {
+		if name, model, ok := variantOfKey(key); ok {
+			if ns, variant, ok := strings.Cut(name, "/"); ok {
+				file(ns, model, variant)
+			}
+		}
+	}
+	slices.Sort(k2)
+	for _, key := range slices.Compact(k2) {
+		if _, live := a.computeCapacityHistory[key]; live || stashHolds(a.k2Stash, key) {
+			continue
+		}
+		note(key, func(ns, model, variant string) {
+			a.noteForgottenLocked(ns, model, variant, []string{key}, learn.ByEvicted)
+		})
+	}
+	if !a.muForgetReported {
+		return
+	}
+	slices.Sort(mu)
+	for _, key := range slices.Compact(mu) {
+		if _, live := a.saturatedThroughput[key]; live || isPrefillBoundKey(key) || stashHolds(a.throughputStash, key) {
+			continue
+		}
+		note(key, func(ns, model, variant string) {
+			fileForgotten(a.muForgotten, ns+"|"+model, variant, []string{key}, learn.ByEvicted)
+		})
+	}
 }
 
 // noteForgottenLocked files keys of a variant as forgotten, by by, for the
