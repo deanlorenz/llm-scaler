@@ -367,7 +367,7 @@ func TestStateAt_TheBandBracketsTheControllersLineOnAScopedPrior(t *testing.T) {
 // A full fit kept under the set values by the tier latch (issue #495) is
 // refitted by the clear values: the same line, not the pinned fit.
 func TestVariantState_ALatchedFullFitIsRefitted(t *testing.T) {
-	var obs []itl.Observation
+	obs := make([]itl.Observation, 0, 19)
 	for i := range 19 {
 		k := 0.46 + 0.015*float64(i)
 		obs = append(obs, itl.Observation{K: k, ITLSec: 0.03*k + 0.0025})

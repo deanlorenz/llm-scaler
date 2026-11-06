@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"testing"
 	"time"
 
@@ -178,7 +179,7 @@ func probeClearRows(_ *rand.Rand, n float64) (bool, error) {
 		return false, err
 	}
 	fleet := tierProbeFleet()
-	ks := append(fleet[:int(n)-1:int(n)-1], fleet[20])
+	ks := slices.Concat(fleet[:int(n)-1], fleet[20:21])
 	r := tr.Observe(propITLKey, "v", tierProbeRows(ks, 1), tierGuardAdm(), propStart.Add(propCycle))
 	return r.Tier == itl.TierOLS, nil
 }

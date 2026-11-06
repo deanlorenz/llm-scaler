@@ -36,7 +36,7 @@
           "fromCycle": 197,
           "toCycle": 220,
           "resamples": 200,
-          "tierChanges": 22
+          "tierChanges": 10
         },
         "fillBand": {
           "lo": 0.15,
@@ -71,8 +71,8 @@
             "value": 11.316587731453538,
             "unit": "r/s",
             "band": {
-              "lo": 11.217957797115359,
-              "hi": 11.375803589684955
+              "lo": 11.207013286686124,
+              "hi": 11.373692515251156
             },
             "basis": {
               "fill": 0.4740967917873882,
@@ -85,7 +85,6 @@
               "tier": "ols"
             },
             "flags": [
-              "LineNearGate",
               "AssumedShape"
             ]
           }

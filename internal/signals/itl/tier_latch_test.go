@@ -254,8 +254,9 @@ func TestDwellTier_TheSweepDropsTheLatchAndARefitReadsIt(t *testing.T) {
 		t.Fatalf("%d latches left after the sweep", n)
 	}
 
-	var steady []Observation
-	for _, k := range latchPods(0.46, 0.73) {
+	pods := latchPods(0.46, 0.73)
+	steady := make([]Observation, 0, len(pods))
+	for _, k := range pods {
 		steady = append(steady, Observation{K: k, ITLSec: latchA*k + latchB, Timestamp: latchStart})
 	}
 	if got := Refit(steady, steady, latchB, 0, Admission{}); got.Tier != TierPinnedB {
@@ -278,9 +279,9 @@ func TestDwellTier_APinnedLineIsPricedOneSided(t *testing.T) {
 	l.tr.mu.Lock()
 	l.tr.latches[latchKey] = tierLatch{tier: TierOLS, since: latchStart}
 	l.tr.mu.Unlock()
-	var ks []float64
-	for i := range 12 {
-		ks = append(ks, 0.86+0.002*float64(i))
+	ks := make([]float64, 12)
+	for i := range ks {
+		ks[i] = 0.86 + 0.002*float64(i)
 	}
 	r := l.see(15*time.Second, ks, 1)
 	if r.TierHeld || !r.PinnedAtLeastITL {
