@@ -807,6 +807,7 @@ TTFT: the decode answers are as they were.
 | `--ttft 200ms@p95` | `slo-to-rate`: the end-to-end target, a mean (`200ms`) or a percentile. Without `--tpot`, only TTFT is asked |
 | `--ttft-percentile 90` | `replicas-to-slo`: the percentile. Default: the policy's `slo.ttft`, else 90. On `slo-to-rate`, beside a plain `--ttft` |
 | `--assume-vp 30000` | `V_P`, prompt tokens per second, in place of the learned one, as every `--assume-*` flag overrides the recording. Neither rescaled nor margined |
+| `--assume-a 11ms` | `a`, the fixed latency one request pays on a prefill pod, in place of the learned one, flagged `AssumedA` and printed `a ASSUMED`, with any learned figure beside it (`a 8.00 ms ASSUMED, learned 11.04 ms`, and `fixedLatencyLearned` in the JSON). For a fleet of one prompt length, which gives P1 no fit |
 | `--assume-router-hop 8ms` | The hop between the router and the engines, in place of the learned or default one, flagged `RouterHopAssumed` |
 | `--prefill N` | Prefill pods to price; 0 takes the serving pods at the cycle |
 | `--prefill-variant V` | The prefill variant to price, when the model has several: the CLI prices one fleet, and a usage error says so otherwise. It gets the whole rate, named as assumed |
@@ -816,7 +817,7 @@ TTFT: the decode answers are as they were.
 | Input | Source | With no source |
 | --- | --- | --- |
 | `V_P` | `--assume-vp`, flagged `AssumedVP` and printed `V_P ASSUMED`, with any learned figure beside it (`V_P 130000 ASSUMED, learned 115621`, and `vpLearned` in the JSON); else P1's estimate at the cycle, read through the replay | `NoPrefillCapacity`. It never defaults |
-| `a` | P1's estimate at the cycle | `NoFixedLatency`. There is no `--assume-a`, and S1 has no assumption for it |
+| `a` | `--assume-a`, flagged `AssumedA` (CLI only: S1 has no assumption for it); else P1's estimate at the cycle | `NoFixedLatency`, which names `--assume-a`. It never defaults |
 | `f` | P1's own at the pod count, `--prefill N` included: a reading of that count, so unflagged, where S1 clamps at any other count | One pod: none, exactly 1. Otherwise `min(N_p, max(1.5, f))`, `f` the learned figure at the recorded count or the raw share, flagged `AssumedImbalance` (S1, decision 1). The raw share is the largest over the last 5 cycles that read one, at the current pod count: a pod with no rate counts as one that computed nothing, and an idle tail forgets nothing, as in S1. It reads serving rows, not S1's settled ones: a pod warming up reads low, which raises the share, the permitted side |
 | Prompt | `--assume-input-tokens`, else computed tokens over requests on the prefill rows, over the last 20 cycles with traffic | The decode variant's `IL·(1 − hit)`, named. Neither is `NoTraffic` |
 | `cv` | The computed-token histogram (Q1), pooled over the prompt's cycles and pods, through the window S1 keeps too (`whatif.PromptWindow`). Held at 3 and named `clamped` past the histogram's last bound. A recording made before Q1 has none | 2, flagged `AssumedPromptSpread` (S1) |
@@ -875,8 +876,8 @@ to a calculation that reads no Go: 4.752942 s on run 4 at `--assume-vp 130000`.
 Both check the arithmetic. Neither validates the model. The `ttft-*.golden`
 files are regression pins, read back from the code.
 
-**Every TTFT output says what it is.** Each figure prints `UNVALIDATED`, and
-`V_P ASSUMED` when `--assume-vp` supplied it. The closing line, and the JSON's
+**Every TTFT output says what it is.** Each figure prints `UNVALIDATED`, with
+`V_P ASSUMED` when `--assume-vp` supplied it and `a ASSUMED` when `--assume-a` did. The closing line, and the JSON's
 `note`, give the direction for what the CLI can print: "at the assumed prompt
 cv 2 it read 1.1x to 4.1x the router's percentile on the P2 recordings; at the
 sent spread (cv 0.06) up to 34% under it". At `cv` 2 the frozen table in
@@ -896,7 +897,8 @@ either.
 goldens has both `V_P` and `a`, so none answers from learned figures alone:
 `ttft-open-loop-short` learns `a` and answers with `--assume-vp`;
 `ttft-saturated` learns `V_P`, and `ttft-three-pods` a lower bound on it, and
-both refuse `NoFixedLatency`; `ttft-open-loop-long` refuses `V_P` and `a`. On
+both refuse `NoFixedLatency`, or answer with `--assume-a`; `ttft-open-loop-long`
+refuses `V_P` and `a`. On
 all four the decode side is the decode engine's TTFT, or the refusal comes first:
 none prices a decode line. A fleet with both figures is tested on a built
 state (`TestTTFT_VPOrder`), not on a recording.
@@ -1282,6 +1284,7 @@ roles[].ttft.decodeTTFTSeconds number
 roles[].ttft.decodeTermRefused string
 roles[].ttft.decodeTermSource string
 roles[].ttft.decodeVariant string
+roles[].ttft.fixedLatencyLearned number
 roles[].ttft.fixedLatencySeconds number
 roles[].ttft.fixedLatencySource string
 roles[].ttft.flowControl string

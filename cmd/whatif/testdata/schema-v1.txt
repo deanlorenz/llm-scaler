@@ -232,6 +232,7 @@ roles[].ttft.decodeTTFTSeconds number
 roles[].ttft.decodeTermRefused string
 roles[].ttft.decodeTermSource string
 roles[].ttft.decodeVariant string
+roles[].ttft.fixedLatencyLearned number
 roles[].ttft.fixedLatencySeconds number
 roles[].ttft.fixedLatencySource string
 roles[].ttft.flowControl string

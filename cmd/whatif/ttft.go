@@ -50,6 +50,10 @@ const (
 	imbalanceNotSustained whatif.Flag = "ImbalanceNotSustained"
 )
 
+// assumedA is a --assume-a supplied: P3 has no flag for it, as S1 has no
+// assumption for a.
+const assumedA whatif.Flag = "AssumedA"
+
 // The closing note's measured halves. The figures are the frozen P2 table's
 // (TestTTFTFrozen_TheNotesFigures, learnreplay).
 const (
@@ -85,11 +89,15 @@ func (f *answerFlags) checkTTFT() error {
 		return usagef("--assume-vp %g, want a finite throughput above 0, in prompt tokens per second", f.assumeVP)
 	case f.set["assume-router-hop"] && f.assumeRouterHop < 0:
 		return usagef("--assume-router-hop %s, want a duration of 0 or more", f.assumeRouterHop)
+	case f.set["assume-a"] && !(f.assumeA > 0):
+		return usagef("--assume-a %s, want a duration above 0", f.assumeA)
+	case f.set["assume-a"] && f.question == rateQuestion && f.ttft == "":
+		return usagef("--assume-a needs a --ttft target on slo-to-rate")
 	case f.prefill < 0:
 		return usagef("--prefill %d, want 0 (the recorded count) or more", f.prefill)
-	case f.ttftFlagged() && f.set["headroom"] && f.question == replicasQuestion && !(f.headroom > 0 && f.headroom < 1):
+	case f.asksTTFT() && f.set["headroom"] && f.question == replicasQuestion && !(f.headroom > 0 && f.headroom < 1):
 		return usagef("--headroom %g, want a fraction of the knee in (0, 1): at the knee no TTFT exists", f.headroom)
-	case f.ttftFlagged() && f.set["headroom"] && !(f.headroom > 0 && f.headroom <= 1):
+	case f.asksTTFT() && f.set["headroom"] && !(f.headroom > 0 && f.headroom <= 1):
 		return usagef("--headroom %g, want a fraction of the knee in (0, 1]", f.headroom)
 	}
 	return nil
@@ -101,11 +109,14 @@ func (f *answerFlags) ttftFlagged() bool {
 		func(name string) bool { return f.set[name] })
 }
 
+// asksTTFT reports whether any flag asks about TTFT, --assume-a among them.
+func (f *answerFlags) asksTTFT() bool { return f.ttftFlagged() || f.set["assume-a"] }
+
 // replicasTTFT reads question 2's TTFT flags, before any replay, so that a
 // bad flag is refused at once: nil when none asks about TTFT, and q 0 with no
 // --ttft-percentile, for policyPercentile to fill.
 func (f *answerFlags) replicasTTFT() (*ttftQuestion, error) {
-	if !f.ttftFlagged() {
+	if !f.asksTTFT() {
 		return nil, nil
 	}
 	if f.ttft != "" {
@@ -198,8 +209,9 @@ type pricedFleet struct {
 	// promptAssumed is a prompt --assume-input-tokens supplied: no reading of
 	// the decode rows' prompt says what its prefix hits are.
 	promptAssumed bool
-	// assumedVP is a V_P --assume-vp supplied.
-	assumedVP bool
+	// assumedVP is a V_P --assume-vp supplied, and assumedA an a --assume-a
+	// supplied.
+	assumedVP, assumedA bool
 	// flags are the fleet's own, beside P3's.
 	flags []whatif.Flag
 	// inputsText is where the fleet's inputs came from, for the human
@@ -355,7 +367,8 @@ func (pf *pricedFleet) assume(format string, args ...any) {
 // prefillInputs is V_P, a, f and N_p. V_P is --assume-vp, as every --assume-*
 // flag overrides the recording, with P1's figure printed beside it; else P1's,
 // read through the replay; else NoPrefillCapacity: it is never defaulted. a
-// has no assumption to fall back on: with none, NoFixedLatency.
+// is --assume-a in the same way, else P1's, else NoFixedLatency: it has no
+// default either, and a fleet of one prompt length never gives P1 a fit.
 func (f *answerFlags) prefillInputs(pf *pricedFleet, ps *learnreplay.PrefillState, cycle int) (whatif.Prefill, *whatif.Unanswerable) {
 	est := ps.Estimate
 	learned := ps.EstimateRead && est.VP > 0 && est.VPRefused == ""
@@ -380,12 +393,24 @@ func (f *answerFlags) prefillInputs(pf *pricedFleet, ps *learnreplay.PrefillStat
 		return whatif.Prefill{}, &whatif.Unanswerable{Reason: whatif.NoPrefillCapacity,
 			Detail: why + "; pass --assume-vp for a flagged answer"}
 	}
-	if !ps.EstimateRead {
+	if f.set["assume-a"] {
+		if ps.EstimateRead && est.A > 0 && est.ARefused == "" {
+			a := est.A
+			pf.in.FixedLatencyLearned = &a
+		}
+		est.A, est.ARefused = f.assumeA.Seconds(), ""
+		pf.assumedA = true
+		pf.flags = append(pf.flags, assumedA)
+		pf.assume("a %s (--assume-a)", f.assumeA)
+	} else if !ps.EstimateRead {
 		return whatif.Prefill{}, &whatif.Unanswerable{Reason: whatif.NoFixedLatency,
-			Detail: fmt.Sprintf("no P1 estimate of %s at cycle %d", ps.Variant, cycle)}
+			Detail: fmt.Sprintf("no P1 estimate of %s at cycle %d; pass --assume-a for a flagged answer", ps.Variant, cycle)}
 	}
 	p, refused := whatif.PrefillFromEstimate(est)
 	if refused != nil {
+		if refused.Reason == whatif.NoFixedLatency {
+			refused.Detail += "; pass --assume-a for a flagged answer"
+		}
 		return whatif.Prefill{}, refused
 	}
 	if pf.assumedVP {
@@ -395,6 +420,9 @@ func (f *answerFlags) prefillInputs(pf *pricedFleet, ps *learnreplay.PrefillStat
 	}
 	pf.in.VP, pf.in.VPPromptTokens = p.VP, p.VPPromptTokens
 	pf.in.FixedLatencySeconds, pf.in.FixedLatencySource = p.FixedLatency, sourceLearned
+	if pf.assumedA {
+		pf.in.FixedLatencySource = shapeAssumed
+	}
 
 	p.Replicas = ps.Pods
 	pf.in.Replicas, pf.in.ReplicasFrom = ps.Pods, "recording"
@@ -623,7 +651,7 @@ func (pf *pricedFleet) describe() {
 	default:
 		fmt.Fprintf(&b, "learned (%s)", pf.in.VPOrigin)
 	}
-	fmt.Fprintf(&b, "; a %.2f ms learned; f %.4g (%s); N_p %d (%s)", 1000*p.FixedLatency, pf.in.Imbalance, pf.in.ImbalanceSource,
+	fmt.Fprintf(&b, "; a %s; f %.4g (%s); N_p %d (%s)", pf.aText(), pf.in.Imbalance, pf.in.ImbalanceSource,
 		p.Replicas, pf.in.ReplicasFrom)
 	fmt.Fprintf(&b, "; prompt %s tokens (%s", num(round(p.PromptTokens)), pf.in.PromptSource)
 	if pf.in.PromptFromCycle > 0 {
@@ -641,12 +669,29 @@ func (pf *pricedFleet) describe() {
 	pf.inputsText = b.String()
 }
 
+// aText is a as the inputs row prints it: the learned figure beside an
+// assumed one, as for V_P.
+func (pf *pricedFleet) aText() string {
+	a := fmt.Sprintf("%.2f ms", 1000*pf.fleet.Prefill.FixedLatency)
+	switch {
+	case pf.assumedA && pf.in.FixedLatencyLearned != nil:
+		return fmt.Sprintf("%s ASSUMED, learned %.2f ms", a, 1000**pf.in.FixedLatencyLearned)
+	case pf.assumedA:
+		return a + " ASSUMED"
+	}
+	return a + " learned"
+}
+
 // verdict is the words every TTFT figure prints beside it.
 func (pf *pricedFleet) verdict() string {
+	v := "UNVALIDATED"
 	if pf.assumedVP {
-		return "UNVALIDATED; V_P ASSUMED"
+		v += "; V_P ASSUMED"
 	}
-	return "UNVALIDATED"
+	if pf.assumedA {
+		v += "; a ASSUMED"
+	}
+	return v
 }
 
 // footerNote is the fleets' closing note. The direction turns on the spread:
@@ -658,6 +703,9 @@ func footerNote(fleets []*pricedFleet) string {
 	}
 	if slices.ContainsFunc(fleets, func(pf *pricedFleet) bool { return pf.assumedVP }) {
 		note += " V_P ASSUMED."
+	}
+	if slices.ContainsFunc(fleets, func(pf *pricedFleet) bool { return pf.assumedA }) {
+		note += " a ASSUMED."
 	}
 	return note
 }

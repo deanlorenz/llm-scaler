@@ -107,7 +107,8 @@ type wireTTFT struct {
 	ReplicasFrom  string   `json:"replicasFrom,omitempty"`
 	// VP is V_P, tokens/s, as learned or assumed (VPSource); VPOrigin is P1's
 	// source, and VPPromptTokens the prompt it was read at. VPLearned is P1's
-	// figure an --assume-vp stands in place of.
+	// figure an --assume-vp stands in place of, and FixedLatencyLearned the
+	// one an --assume-a does.
 	VP                  float64  `json:"vp,omitempty"`
 	VPSource            string   `json:"vpSource,omitempty"`
 	VPOrigin            string   `json:"vpOrigin,omitempty"`
@@ -115,6 +116,7 @@ type wireTTFT struct {
 	VPLearned           *float64 `json:"vpLearned,omitempty"`
 	FixedLatencySeconds float64  `json:"fixedLatencySeconds,omitempty"`
 	FixedLatencySource  string   `json:"fixedLatencySource,omitempty"`
+	FixedLatencyLearned *float64 `json:"fixedLatencyLearned,omitempty"`
 	Imbalance           float64  `json:"imbalance,omitempty"`
 	ImbalanceSource     string   `json:"imbalanceSource,omitempty"`
 	PromptTokens        float64  `json:"promptTokens,omitempty"`
