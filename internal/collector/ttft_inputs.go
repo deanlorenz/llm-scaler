@@ -191,8 +191,9 @@ func mergeKnownSum(group []domain.ReplicaMetrics, field func(domain.ReplicaMetri
 //     on the pod that served it, so the two rates differ only by requests in
 //     flight at the window's edges;
 //   - AvgKVTransferTime by request rate, which is NOT its count: the NIXL
-//     mean is per transfer, and a request may need several transfers, or none
-//     on a pod that did not prefill it. The transfer count is not queried.
+//     mean is per transfer handle, and a request may post several at once
+//     (one per remote rank it reads from, or per memory kind), or none on a
+//     pod that did not prefill it. The transfer count is not queried.
 //
 // A pod of one rank, the common case, is its rank's mean whatever the weight.
 func mergeKnownMean(group []domain.ReplicaMetrics, field func(domain.ReplicaMetrics) (float64, bool),

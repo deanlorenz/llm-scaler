@@ -43,7 +43,8 @@ const SwitchTTFTPrice = "slo-ttft-price"
 
 // SwitchTTFTMeasuredSpread is the replay switch for the measured prompt
 // spread: on, the pricing reads cv from the rows' computed-token histogram
-// where they carry one (whatif.ReadPromptSpread). Off, cv is the assumed
+// where they carry one, over the variant's prompt window
+// (whatif.PromptWindow). Off, cv is the assumed
 // whatif.AssumedPromptCV, flagged, as production read before the collector
 // issued the histogram. It moves no golden: no committed recording carries
 // the histogram. A recording made since replays both ways, so what Q1 moved
@@ -332,7 +333,7 @@ func (a *Analyzer) priceTTFTVariants(logger logr.Logger, input domain.AnalyzerIn
 		prompt, _ := prefill.MeanEffectivePrompt(rows, a.sglang(input, []string{v}))
 		in := ttftInputs{
 			est: est, estimateAt: estimateAt, pods: pods, otherPods: readyPrefill - pods, percent: cfg.SLO.TTFTPercentile(),
-			prompt: prompt, spread: a.promptSpread(rows, prompt),
+			prompt: prompt, spread: a.promptSpread(ttftWindowKey(input.Namespace, input.ModelID, v), rows, now),
 			shares:   a.noteShare(ttftWindowKey(input.Namespace, input.ModelID, v), pods, share, shareOK, now),
 			transfer: a.transferPerToken(decodeRows, prompt), decode: decode, decodeVariant: decodeVariant,
 			decodeTTFT: measured, flow: flow, mismatch: mismatch,
@@ -348,13 +349,34 @@ func (a *Analyzer) priceTTFTVariants(logger logr.Logger, input domain.AnalyzerIn
 	return out
 }
 
-// promptSpread is the variant's prompt spread: read from its rows' pooled
-// computed-token histogram, or assumed with SwitchTTFTMeasuredSpread off.
-func (a *Analyzer) promptSpread(rows []domain.ReplicaMetrics, mean float64) whatif.PromptSpread {
-	if !a.ttftMeasuredSpread {
-		rows = nil
+// promptSpreadWindow is a prefill variant's prompt window, kept once a row has
+// carried a histogram: until then it could only read assumed.
+type promptSpreadWindow struct {
+	window whatif.PromptWindow
+	seen   time.Time
+}
+
+// promptSpread folds the cycle's rows into the variant's prompt window and
+// reads its spread, the what-if CLI's reading of the same traffic; assumed
+// with SwitchTTFTMeasuredSpread off. The cycle's mean is not what cv is read
+// at: the window's is, so the mean and the histogram cover the same cycles.
+func (a *Analyzer) promptSpread(key string, rows []domain.ReplicaMetrics, now time.Time) whatif.PromptSpread {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	w := a.prompts[key]
+	if w == nil {
+		if len(whatif.PoolComputedBuckets(nil, rows)) == 0 {
+			return whatif.ReadPromptSpread(nil, 0)
+		}
+		w = &promptSpreadWindow{}
+		a.prompts[key] = w
 	}
-	return whatif.ReadPromptSpread(whatif.PoolComputedBuckets(nil, rows), mean)
+	w.seen = now
+	w.window.Note(rows, int(a.cycle))
+	if !a.ttftMeasuredSpread {
+		return whatif.ReadPromptSpread(nil, 0)
+	}
+	return w.window.Spread()
 }
 
 // transferPerToken is transferPerToken of the rows, or 0 with

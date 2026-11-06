@@ -439,9 +439,9 @@ func (f *answerFlags) prefillShape(pf *pricedFleet, ps *learnreplay.PrefillState
 	}
 	pf.in.PromptTokens = p.PromptTokens
 
-	// Read at the measured prompt, whatever the prompt asked: a cv is a figure
-	// of the traffic the histogram counted.
-	spread := whatif.ReadPromptSpread(ps.ComputedBuckets, ps.PromptTokens)
+	// The window's, whatever the prompt asked: a cv is a figure of the traffic
+	// the histogram counted.
+	spread := ps.PromptWindow.Spread()
 	p.PromptCV, p.PromptCVAssumed = spread.CV, spread.Assumed
 	pf.in.PromptCV, pf.in.PromptCVSource = spread.CV, shapeMeasured
 	switch {

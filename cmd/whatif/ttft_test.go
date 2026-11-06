@@ -15,6 +15,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/registration"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/learnreplay"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/prefill"
@@ -138,13 +139,16 @@ func TestTTFT_TheNoteFollowsTheSpread(t *testing.T) {
 // not move a cv, a figure of the traffic the histogram counted.
 func TestTTFT_TheSpreadOrder(t *testing.T) {
 	inf := math.Inf(1)
-	withBuckets := func(b map[float64]float64) *learnreplay.State {
+	withBuckets := func(b []domain.LengthBucket) *learnreplay.State {
 		st := learnedState()
-		st.Prefill[0].ComputedBuckets = b
+		w := &whatif.PromptWindow{}
+		w.Note([]domain.ReplicaMetrics{{Ready: true, PrefillComputedTokenRate: 2000, PrefillComputedTokenRateKnown: true,
+			RequestRate: 1, RequestRateKnown: true, ComputedTokensBuckets: b}}, 1)
+		st.Prefill[0].PromptWindow = w
 		return st
 	}
-	measured := map[float64]float64{5000: 2, inf: 2}
-	want := whatif.ReadPromptSpread(measured, 2000)
+	measured := []domain.LengthBucket{{UpperBound: 5000, Rate: 2}, {UpperBound: inf, Rate: 2}}
+	want := whatif.ReadPromptSpread(map[float64]float64{5000: 2, inf: 2}, 2000)
 	require.False(t, want.Assumed)
 	require.Positive(t, want.CV)
 
@@ -160,13 +164,13 @@ func TestTTFT_TheSpreadOrder(t *testing.T) {
 	asked := fleetOf(t, withBuckets(measured), answerFlags{inputTokens: 500}, "assume-input-tokens")
 	assert.Equal(t, want.CV, asked.fleet.Prefill.PromptCV)
 
-	pf = fleetOf(t, withBuckets(map[float64]float64{1000: 1, inf: 2}), answerFlags{})
+	pf = fleetOf(t, withBuckets([]domain.LengthBucket{{UpperBound: 1000, Rate: 1}, {UpperBound: inf, Rate: 2}}), answerFlags{})
 	assert.Equal(t, whatif.PromptCVStop, pf.fleet.Prefill.PromptCV)
 	assert.False(t, pf.fleet.Prefill.PromptCVAssumed)
 	assert.Equal(t, shapeClamped, pf.in.PromptCVSource)
 	assert.Contains(t, strings.Join(pf.in.Assumed, " "), "prompt cv 3 (the histogram")
 
-	for name, st := range map[string]*learnreplay.State{"nil": learnedState(), "empty": withBuckets(map[float64]float64{})} {
+	for name, st := range map[string]*learnreplay.State{"nil": learnedState(), "empty": withBuckets(nil)} {
 		pf = fleetOf(t, st, answerFlags{})
 		assert.Equal(t, whatif.AssumedPromptCV, pf.fleet.Prefill.PromptCV, name)
 		assert.True(t, pf.fleet.Prefill.PromptCVAssumed, name)

@@ -30,26 +30,11 @@ func goldenState(t *testing.T, fixture string, cycle int) *State {
 	return st
 }
 
-// The histogram sums over the cycles promptOf reads, so a cycle with no traffic
-// adds nothing, and a recording with no histogram has none, which the CLI reads
-// as an assumed spread and not as cv 0.
-func TestBucketsOf(t *testing.T) {
-	inf := math.Inf(1)
-	got := bucketsOf([]promptSample{
-		{buckets: map[float64]float64{1000: 1, inf: 2}},
-		{buckets: nil},
-		{buckets: map[float64]float64{1000: 2, inf: 2}},
-	})
-	assert.Equal(t, map[float64]float64{1000: 3, inf: 4}, got)
-	assert.Empty(t, bucketsOf(nil))
-	assert.True(t, whatif.ReadPromptSpread(bucketsOf(nil), 1000).Assumed)
-}
-
 // A recording made since Q1 reaches the state with a spread, and one made before
 // reads as none. No golden has the histogram, so the prompt histogram of one,
 // under the field's name, stands in for it.
 func TestStateAt_ReadsTheHistogramFromTheRows(t *testing.T) {
-	gz, err := os.ReadFile(filepath.Join(goldenDir, ttftOpenShortFixture, RecordingName))
+	gz, err := os.ReadFile(filepath.Join(goldenDir, ttftSaturatedFixture, RecordingName))
 	require.NoError(t, err)
 	raw, err := gunzip(gz)
 	require.NoError(t, err)
@@ -59,11 +44,12 @@ func TestStateAt_ReadsTheHistogramFromTheRows(t *testing.T) {
 	st, err := StateAt(context.Background(), carrying, Options{}, StateQuery{Cycle: 0})
 	require.NoError(t, err)
 	require.Len(t, st.Prefill, 1)
-	got := whatif.ReadPromptSpread(st.Prefill[0].ComputedBuckets, st.Prefill[0].PromptTokens)
+	got := st.Prefill[0].PromptWindow.Spread()
 	assert.False(t, got.Assumed)
+	assert.True(t, got.Clamped, "this run's prompts pass the histogram's last bound: %+v", got)
 
-	before := goldenState(t, ttftOpenShortFixture, 0)
-	assert.Empty(t, before.Prefill[0].ComputedBuckets)
+	before := goldenState(t, ttftSaturatedFixture, 0)
+	assert.True(t, before.Prefill[0].PromptWindow.Spread().Assumed)
 }
 
 // A row's histogram reaches the state with its cycle's rates, Serving rows
@@ -80,7 +66,13 @@ func TestTTFTSamples_CarryTheHistogram(t *testing.T) {
 	s := newTTFTSamples()
 	s.note(in, 1)
 	s.note(in, 2)
-	assert.Equal(t, map[float64]float64{5000: 4, inf: 4}, bucketsOf(s.prompts["pre"]))
+	// What the slo analyzer's window reads from the same rows.
+	var same whatif.PromptWindow
+	same.Note(in.ReplicaMetrics, 1)
+	same.Note(in.ReplicaMetrics, 2)
+	assert.Equal(t, same.Spread(), s.prompts["pre"].Spread())
+	assert.False(t, same.Spread().Assumed)
+	assert.Equal(t, 2, func() int { _, _, _, n := s.prompts["pre"].Prompt(); return n }())
 }
 
 // The figures P2's comparison reads from each run's analyzer log, read here
@@ -155,11 +147,12 @@ func TestTTFTSamples_Prompt(t *testing.T) {
 	s.note(pdInput(prefillRow("p0", 1000, 1)), 1)
 	s.note(pdInput(prefillRow("p0", 9000, 3)), 2)
 	s.note(pdInput(prefillRow("p0", 0, 0)), 3)
-	tokens, from, to, cycles := promptOf(s.prompts["pre"])
+	tokens, from, to, cycles := s.prompts["pre"].Prompt()
 	assert.InDelta(t, 2500, tokens, 1e-9)
 	assert.Equal(t, []int{1, 2, 2}, []int{from, to, cycles})
 
-	got, _, _, n := promptOf(nil)
+	var none *whatif.PromptWindow
+	got, _, _, n := none.Prompt()
 	assert.Zero(t, got)
 	assert.Zero(t, n)
 }
@@ -172,7 +165,7 @@ func TestTTFTSamples_ReadsServingRowsOnly(t *testing.T) {
 	bridge := prefillRow("p2", 100000, 1)
 	bridge.FromWarmPool = true
 	s.note(pdInput(prefillRow("p0", 2000, 1), notReady, bridge), 1)
-	tokens, _, _, _ := promptOf(s.prompts["pre"])
+	tokens, _, _, _ := s.prompts["pre"].Prompt()
 	assert.InDelta(t, 2000, tokens, 1e-9)
 	require.NotNil(t, s.shares["pre"])
 	assert.Equal(t, 1, s.shares["pre"].pods)

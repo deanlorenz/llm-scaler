@@ -574,10 +574,63 @@ func TestTTFT_TheMeasuredSpreadSwitch(t *testing.T) {
 
 	spread := func(on bool) whatif.PromptSpread {
 		r := rig(on)
-		return r.a.promptSpread(r.in.ReplicaMetrics, 2000)
+		return r.a.promptSpread("k", r.in.ReplicaMetrics, r.now)
 	}
 	assert.False(t, spread(true).Assumed)
 	assert.Equal(t, whatif.PromptSpread{CV: whatif.AssumedPromptCV, Assumed: true}, spread(false))
+}
+
+// S1 reads cv from the window the CLI reads, not from the cycle. A rare long
+// prompt that fell in an earlier minute is still in it: read from this minute
+// alone, cv is 0.48, unflagged, where the same traffic in the CLI is above 1.
+func TestTTFT_TheSpreadIsTheWindowsNotTheCycles(t *testing.T) {
+	inf := math.Inf(1)
+	minute := func(long float64) []domain.ReplicaMetrics {
+		short := 40 - long
+		return []domain.ReplicaMetrics{{VariantName: "pre", Ready: true,
+			PrefillComputedTokenRate: (short*1800 + long*20000) / 60, PrefillComputedTokenRateKnown: true,
+			RequestRate: 40.0 / 60, RequestRateKnown: true,
+			ComputedTokensBuckets: []domain.LengthBucket{
+				bucket(1000, 0), bucket(2000, short/60), bucket(20000, 40.0/60), bucket(inf, 40.0/60)}}}
+	}
+	r := newTTFTRig(ttftEstimate(), nil)
+	var cli whatif.PromptWindow
+	for i, rows := range [][]domain.ReplicaMetrics{minute(4), minute(0)} {
+		cli.Note(rows, i)
+		got := r.a.promptSpread("k", rows, r.now)
+		assert.Equal(t, cli.Spread(), got, "S1 and the CLI, cycle %d", i)
+	}
+	var alone whatif.PromptWindow
+	alone.Note(minute(0), 0)
+	assert.InDelta(t, 0.484, alone.Spread().CV, 0.001, "this minute alone")
+	assert.Greater(t, cli.Spread().CV, 1.0, "the window holds the long prompts")
+}
+
+// The window lives as the other TTFT windows do: a variant with no histogram
+// has none, a forget drops it, a parked variant keeps it, and it ages out.
+func TestTTFT_ThePromptWindowsLife(t *testing.T) {
+	rows := prefillRows("pre", 4000)
+	r := newTTFTRig(ttftEstimate(), rows)
+	r.one(t)
+	assert.Empty(t, r.a.prompts, "no histogram, no window")
+
+	r.in.ReplicaMetrics[0].ComputedTokensBuckets = []domain.LengthBucket{bucket(5000, 2), bucket(math.Inf(1), 2)}
+	r.one(t)
+	require.Contains(t, r.a.prompts, "ns|m|pre")
+	n, _ := r.a.forgetVariant("ns", "m", "pre")
+	assert.Positive(t, n)
+	assert.Empty(t, r.a.prompts, "forgotten")
+
+	r.one(t)
+	require.Contains(t, r.a.prompts, "ns|m|pre")
+	r.now = r.now.Add(r.a.stateTimeout * 2 / 3)
+	r.a.noteVariantsPresent("ns", "m", []string{"pre"})
+	r.now = r.now.Add(r.a.stateTimeout * 2 / 3)
+	r.a.evictStale(r.now)
+	assert.Contains(t, r.a.prompts, "ns|m|pre", "a variant parked at zero is still present")
+	r.now = r.now.Add(r.a.stateTimeout * 2)
+	assert.Positive(t, r.a.evictStale(r.now).TTFTWindows)
+	assert.Empty(t, r.a.prompts, "aged out")
 }
 
 // Q1's scope addition: a decode row's transfer time clears TransferOmitted,

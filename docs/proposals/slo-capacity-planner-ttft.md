@@ -161,8 +161,8 @@ alone: `S_work = I_eff/V_P`, `ρ = λ·E[I_eff]/V_P`.
    `k2ReasonObsDownstream`). `V_P` is the median of `PrefillComputedTokenRate`
    over at least 5 such minutes. On P/D this is rare: saturation has never
    recorded a non-back-pressured prefill saturation there. As built, the
-   minimum is the recorder's per-pod `QueueMin`, read only while a learner
-   recording is on. A minute on a KV-full prefill pod is not busy, and only
+   minimum is the per-pod `QueueMin`, read in a namespace with a TTFT target
+   ([Q1](slo-tiers.md#as-built-q1)) and while a learner recording is on. A minute on a KV-full prefill pod is not busy, and only
    the last 30 minutes are read. A busy minute reads at or below capacity:
    data-parallel pods (flagged a lower bound) and stalls under-read
    ([P1 and busy minutes](slo-capacity-planner.md#pr-plan)).
@@ -1038,9 +1038,10 @@ TTFT histogram) and for P1 (an overhead that grows with the prompt).
 2. **Model the dispatch-gate delay?** *Recommend:* not until the staircase shows
    a residual at the onset larger than the proxy hop.
 3. **Is `nixl_xfer_time_seconds` per request or per chunk?** (carried from
-   [SLO tiers](slo-tiers.md) open question 4). `T_xfer` as a per-request term
-   depends on it. *Recommend:* settle it on the staircase's P/D run before
-   `T_xfer` leaves "omitted".
+   [SLO tiers](slo-tiers.md) open question 4). Neither: it is per NIXL handle.
+   From vLLM's source, not measured: [Q1, as built](slo-tiers.md#as-built-q1).
+   A request posts its handles together, so they overlap and do not add. The
+   mean reads under the slowest of them, which is what a request waits for.
 4. **Does `V_P` vary with prompt length?** It does: run 3's low-load medians
    cost about 60% more per token from 30k to 37k than from 8k to 30k. `a`
    takes the curve (above), and P3 rescales `V_P` along it to the prompt

@@ -31,16 +31,16 @@ type PrefillState struct {
 	Estimate     prefill.Estimate
 	EstimateRead bool
 	// PromptTokens is E[I_eff], computed tokens over requests, over the
-	// variant's latest shapeCycles cycles with traffic, so that a recording
+	// variant's latest cycles with traffic (whatif.PromptWindow), so that a recording
 	// that ends idle is priced at the traffic it last served; 0 with none.
 	// PromptFromCycle, PromptToCycle and PromptCycles say which cycles.
 	PromptTokens                                 float64
 	PromptFromCycle, PromptToCycle, PromptCycles int
-	// ComputedBuckets is the computed-token histogram of the same cycles,
-	// each bound's rate summed over the pods and the cycles, the spread of
-	// that prompt: what whatif.ReadPromptSpread reads. Nil or empty with
-	// none, as a recording made before the collector read it has none.
-	ComputedBuckets map[float64]float64
+	// PromptWindow is those cycles, as the slo analyzer keeps them: its
+	// Spread is the spread of that prompt, assumed when the window is nil or
+	// holds no computed-token histogram, as a recording made before the
+	// collector read one does not.
+	PromptWindow *whatif.PromptWindow
 	// RawShare is f_raw, the busiest pod's share of the computed-token rate
 	// over the mean share, not de-biased: the largest over the latest
 	// whatif.TTFTWindowCycles cycles that read one at the cycle's pod count. A pod with
@@ -65,15 +65,6 @@ type DecodeTTFTState struct {
 	// TransferSeconds is the mean KV transfer time over the rows that read
 	// one, over the latest shapeCycles cycles with a reading; 0 with none.
 	TransferSeconds float64
-}
-
-// promptSample is one cycle's computed tokens and requests of a prefill
-// variant, per second, and its pooled computed-token histogram (nil with
-// none).
-type promptSample struct {
-	cycle             int
-	computed, request float64
-	buckets           map[float64]float64
 }
 
 // shareWindow is a prefill variant's raw shares at its current pod count. A
@@ -107,14 +98,14 @@ func (w *shareWindow) read() (largest, least float64, full bool) {
 
 // ttftSamples is the windows of the rows a TTFT question reads, by variant.
 type ttftSamples struct {
-	prompts    map[string][]promptSample
+	prompts    map[string]*whatif.PromptWindow
 	shares     map[string]*shareWindow
 	engineTTFT map[string][]whatif.DecodeTTFT
 	transfers  map[string][]float64
 }
 
 func newTTFTSamples() *ttftSamples {
-	return &ttftSamples{prompts: map[string][]promptSample{}, shares: map[string]*shareWindow{},
+	return &ttftSamples{prompts: map[string]*whatif.PromptWindow{}, shares: map[string]*shareWindow{},
 		engineTTFT: map[string][]whatif.DecodeTTFT{}, transfers: map[string][]float64{}}
 }
 
@@ -149,7 +140,6 @@ type prefillRows struct {
 	pods                  int
 	sum, busiest          float64
 	computedRate, reqRate float64
-	rows                  []domain.ReplicaMetrics
 }
 
 // positive reports a reading above 0 that is finite: a zero is no reading of
@@ -176,7 +166,6 @@ func (t *ttftSamples) note(in domain.AnalyzerInput, cycle int) {
 		v := rm.VariantName
 		if p := pre[v]; p != nil {
 			p.pods++
-			p.rows = append(p.rows, rm)
 			if !rm.PrefillComputedTokenRateKnown || !positive(rm.PrefillComputedTokenRate) {
 				continue
 			}
@@ -217,9 +206,11 @@ func (t *ttftSamples) note(in domain.AnalyzerInput, cycle int) {
 		if p.computedRate > 0 {
 			allComputed += p.computedRate
 			allRequests += p.reqRate
-			t.prompts[v] = keepLast(t.prompts[v], promptSample{cycle: cycle, computed: p.computedRate, request: p.reqRate,
-				buckets: whatif.PoolComputedBuckets(nil, p.rows)}, shapeCycles)
 		}
+		if t.prompts[v] == nil {
+			t.prompts[v] = &whatif.PromptWindow{}
+		}
+		t.prompts[v].Note(rowsOfVariant(in.ReplicaMetrics, v), cycle)
 	}
 	for v, d := range decode {
 		if d.transferRows > 0 {
@@ -246,32 +237,15 @@ func rawShare(pods int, sum, busiest float64) (float64, bool) {
 	return busiest * float64(pods) / sum, true
 }
 
-// promptOf is a prefill variant's mean effective prompt over its samples,
-// and the cycles they span: each cycle weighs by its requests, which is
-// computed tokens over requests across them.
-func promptOf(samples []promptSample) (tokens float64, from, to, cycles int) {
-	if len(samples) == 0 {
-		return 0, 0, 0, 0
-	}
-	var computed, requests float64
-	for _, s := range samples {
-		computed += s.computed
-		requests += s.request
-	}
-	return computed / requests, samples[0].cycle, samples[len(samples)-1].cycle, len(samples)
-}
-
-// bucketsOf is a prefill variant's computed-token histogram over its samples:
-// summed, as promptOf sums their rates, so the histogram and the prompt cover
-// the same requests.
-func bucketsOf(samples []promptSample) map[float64]float64 {
-	pooled := map[float64]float64{}
-	for _, s := range samples {
-		for bound, rate := range s.buckets {
-			pooled[bound] += rate
+// rowsOfVariant is rows of the variant.
+func rowsOfVariant(rows []domain.ReplicaMetrics, variant string) []domain.ReplicaMetrics {
+	var out []domain.ReplicaMetrics
+	for _, rm := range rows {
+		if rm.VariantName == variant {
+			out = append(out, rm)
 		}
 	}
-	return pooled
+	return out
 }
 
 // fillTTFT sets what the state says of a TTFT question, from the samples
@@ -292,8 +266,8 @@ func (r *replayer) fillTTFT(st *State, in domain.AnalyzerInput, t *ttftSamples) 
 		if w := t.shares[v]; w != nil {
 			ps.RawShare, ps.RawShareLeast, ps.RawShareFull = w.read()
 		}
-		ps.PromptTokens, ps.PromptFromCycle, ps.PromptToCycle, ps.PromptCycles = promptOf(t.prompts[v])
-		ps.ComputedBuckets = bucketsOf(t.prompts[v])
+		ps.PromptTokens, ps.PromptFromCycle, ps.PromptToCycle, ps.PromptCycles = t.prompts[v].Prompt()
+		ps.PromptWindow = t.prompts[v].Clone()
 		ps.Estimate, ps.EstimateRead = estimateAt(r.sat.PrefillEstimate, in.Namespace, in.ModelID, v, st.At)
 		st.Prefill = append(st.Prefill, ps)
 	}
