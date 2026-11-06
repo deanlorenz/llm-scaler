@@ -41,6 +41,12 @@ import (
 // and the snapshot's TTFT stays nil.
 const SwitchTTFTPrice = "slo-ttft-price"
 
+// SwitchTTFTDecodeTerm is the replay switch for the decode term: on, decode's
+// part of a TTFT on a decode line is whatif.DecodeTerm, D(I, ITL(k)) + R learned
+// per variant and flagged when assumed; off, as before, the sum T_xfer + ITL(k)
+// with ITL clamped to the band.
+const SwitchTTFTDecodeTerm = "slo-ttft-decode-term"
+
 // SwitchTTFTMeasuredSpread is the replay switch for the measured prompt
 // spread: on, the pricing reads cv from the rows' computed-token histogram
 // where they carry one, over the variant's prompt window
@@ -156,13 +162,19 @@ func priceTTFT(in ttftInputs, rate float64, target whatif.TTFTTarget) ttftPricin
 		if out.at != nil {
 			flags = out.at.Flags
 		}
+		// What the refusal rests on: its term's flags (publishedFlags takes
+		// each once).
+		flags = slices.Concat(flags, out.rateRefused.Flags)
 		// No fleet meets the target, so it is missed at any rate, whatever
-		// the prediction reads there.
+		// the prediction reads there. Not where an assumed term alone put the
+		// floor over the target: that says nothing of the fleet, and a
+		// prediction above the target rests on the same term. A rate past what
+		// the fleet serves is still a miss.
 		if out.rateRefused.Reason == whatif.TargetBelowFloor {
-			out.unmet = true
+			out.unmet = !out.rateRefused.AssumedTermDecides || out.atRefused != nil && out.unmet
 		}
 	}
-	if out.rate != nil || out.at != nil {
+	if out.rate != nil || out.at != nil || len(flags) > 0 {
 		out.flags = append(slices.Clone(flags), own...)
 	}
 	return out
@@ -269,7 +281,7 @@ func rowsOf(rows []domain.ReplicaMetrics, variants []string) []domain.ReplicaMet
 // The estimate is read before any lock of this analyzer is taken, and the
 // windows lock a.mu for themselves (prefill_estimates.go, the lock order).
 func (a *Analyzer) priceTTFTVariants(logger logr.Logger, input domain.AnalyzerInput, cfg *config.ScalingPolicy,
-	fleet fleetReading, lines []ttftDecodeLine, now time.Time) []metrics.SLOTTFTReading {
+	fleet fleetReading, lines []ttftDecodeLine, router *domain.RouterLatency, now time.Time) []metrics.SLOTTFTReading {
 	if !a.ttftPrice || cfg.SLO == nil || cfg.SLO.TTFT == nil {
 		return nil
 	}
@@ -314,6 +326,23 @@ func (a *Analyzer) priceTTFTVariants(logger logr.Logger, input domain.AnalyzerIn
 		}
 		measured = a.noteDecodeTTFT(ttftWindowKey(input.Namespace, input.ModelID, decodes[0]), cycle, now)
 	}
+	var term *whatif.DecodeTerm
+	if len(decodes) == 1 && a.ttftDecodeTerm {
+		accelerator := ""
+		for _, vs := range fleet.variants {
+			if vs.VariantName == decodes[0] {
+				accelerator = vs.AcceleratorName
+			}
+		}
+		est := a.noteDecodeTerm(ttftWindowKey(input.Namespace, input.ModelID, decodes[0]), accelerator,
+			a.engineParams(input.Namespace, input.ModelID, decodes[0]).ArgsTag(), prefill.DecodeTermCycle{
+				Now: now, Prefill: prefillRows, Decode: decodeRows, PromptTokens: modelPrompt, Router: router,
+				Settled:    &prefill.Settle{View: a.settleView(), Model: utils.GetNamespacedKey(input.Namespace, input.ModelID)},
+				RouterHeld: input.SchedulerQueue != nil && input.SchedulerQueue.QueueSize > 0,
+			})
+		t := whatif.TermFromEstimate(est)
+		term = &t
+	}
 	arrival := input.ArrivalRate
 	if !(arrival > 0) || !whatif.Finite(arrival) {
 		arrival = fleet.requestRate
@@ -336,7 +365,7 @@ func (a *Analyzer) priceTTFTVariants(logger logr.Logger, input domain.AnalyzerIn
 			prompt: prompt, spread: a.promptSpread(ttftWindowKey(input.Namespace, input.ModelID, v), rows, now),
 			shares:   a.noteShare(ttftWindowKey(input.Namespace, input.ModelID, v), pods, share, shareOK, now),
 			transfer: a.transferPerToken(decodeRows, prompt), decode: decode, decodeVariant: decodeVariant,
-			decodeTTFT: measured, flow: flow, mismatch: mismatch,
+			decodeTTFT: measured, term: term, legacyDecodeSum: !a.ttftDecodeTerm, flow: flow, mismatch: mismatch,
 		}
 		p := gateOrPrice(&in, fresh, arrival, target)
 		out = append(out, metrics.SLOTTFTReading{
@@ -471,6 +500,10 @@ func logTTFT(logger logr.Logger, input domain.AnalyzerInput, variant string, in 
 	if !log.Enabled() {
 		return
 	}
+	var term whatif.DecodeTerm
+	if in.term != nil {
+		term = *in.term
+	}
 	nan := math.NaN()
 	bound, independent, pooled, floor, beta, rho, theta := nan, nan, nan, nan, nan, nan, nan
 	knee, onsetPrefill, onsetDecode := nan, nan, nan
@@ -517,6 +550,12 @@ func logTTFT(logger logr.Logger, input domain.AnalyzerInput, variant string, in 
 		"prompt", in.prompt, "cv", in.spread.CV, "cvSource", cvSource, "transferPerToken", in.transfer,
 		"decodeVariant", in.decodeVariant, "decodeTTFT", in.decodeTTFT.Seconds,
 		"decodeTTFTPrompt", in.decodeTTFT.PromptTokens, "flowControl", flowControlName(in.flow.State),
+		// The decode term as priced: on no fit, base is the held D, read at
+		// heldPrompt and fromITL.
+		"decodeBase", term.Engine.Base, "decodePerToken", term.Engine.PerToken, "decodePerStep", term.PerStep,
+		"decodeHeldPrompt", term.Engine.HeldPromptTokens, "decodeFromITL", term.FromITL,
+		"decodeTermRefused", string(term.EngineRefused), "hopBase", term.Hop.Base, "hopPerToken", term.Hop.PerToken,
+		"hopHeldPrompt", term.Hop.HeldPromptTokens, "hopRefused", string(term.HopRefused),
 		// Both calls' refusals.
 		"rateRefused", refusal(p.rateRefused), "ttftRefused", refusal(p.atRefused))
 }

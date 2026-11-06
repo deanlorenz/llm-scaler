@@ -165,7 +165,7 @@ func TestProperty_TTFTFigures(t *testing.T) {
 		}
 		m := mustTTFT(t, ttftAt(t, fl, rate, 0))
 		p := m.Parts
-		relNear(t, "mean", m.Seconds, p.EngineWait+p.OwnPrefill+p.DecodeWait+p.FirstStep, 1e-12)
+		relNear(t, "mean", m.Seconds, p.EngineWait+p.OwnPrefill+p.DecodeWait+p.FirstStep+p.DecodeEngine+p.RouterHop, 1e-12)
 	}
 }
 

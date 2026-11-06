@@ -25,6 +25,15 @@ type RouterLatency struct {
 	// model.
 	TTFTBuckets []LatencyBucket
 
+	// TTFTSumRate and TTFTCountRate are the rates of the same histogram's
+	// _sum and _count, read for the TTFT model's hop term: their ratio is the
+	// mean TTFT over the window, which the buckets, 25 to 100 ms wide where
+	// it stands, cannot give to the 5 ms the term is. Both zero when absent,
+	// and left out of a learner recording then, so a recording made before
+	// they existed is written again byte for byte.
+	TTFTSumRate   float64 `learnrec:"omitzero"`
+	TTFTCountRate float64 `learnrec:"omitzero"`
+
 	// TPOTSumRate and TPOTCountRate are the rates of the streaming
 	// time-per-output-token histogram's _sum and _count. Their ratio is the
 	// mean TPOT over the window, request-weighted. Both zero when absent.

@@ -51,6 +51,7 @@ type answerFlags struct {
 	// answers.
 	ttft, ttftPercentile, prefillVariant, inputBucket string
 	assumeVP                                          float64
+	assumeRouterHop                                   time.Duration
 	prefill                                           int
 	set                                               map[string]bool
 	// window is the --prometheus mode's flags, capture's own, and its
@@ -90,6 +91,7 @@ func (f *answerFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.ttft, "ttft", "", "the TTFT target of slo-to-rate, end to end: a mean (200ms) or a percentile (200ms@p95)")
 	fs.StringVar(&f.ttftPercentile, "ttft-percentile", "", "the TTFT percentile, in percent (90); on replicas-to-slo, default the policy's, else 90")
 	fs.Float64Var(&f.assumeVP, "assume-vp", 0, "V_P, a prefill pod's prompt tokens per second, in place of the learned one (flagged)")
+	fs.DurationVar(&f.assumeRouterHop, "assume-router-hop", 0, "the hop between the router and the engines (8ms), in place of the learned or default one (flagged)")
 	fs.IntVar(&f.prefill, "prefill", 0, "prefill replicas to price; 0 takes the recorded count")
 	fs.StringVar(&f.prefillVariant, "prefill-variant", "", "the prefill variant to price, when the model has several")
 	fs.StringVar(&f.inputBucket, "input-bucket", "", "not supported: per-bucket answers are the planner's M1")

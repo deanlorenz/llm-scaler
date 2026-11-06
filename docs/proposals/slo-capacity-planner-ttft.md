@@ -26,7 +26,12 @@ adding percentiles.
 
 ## The terms
 
-    TTFT = W_router + W_engine + own_prefill + T_xfer + W_decode + ITL(k_d)
+    TTFT = W_router + W_engine + own_prefill + W_decode + D(I, ITL(k_d)) + R
+
+The design priced decode's part as `T_xfer + ITL(k_d)`. The staircase run
+showed that sum 13 to 101 ms short, so `D + R` replaced it on a decode line
+([the decode term](#as-built-the-decode-term)). `T_xfer` and `ITL(k_d)` below
+are the old sum, which stands only as a flagged fall-back.
 
 | Term | What it is | Model |
 | --- | --- | --- |
@@ -36,6 +41,8 @@ adding percentiles.
 | `T_xfer` | KV transfer to decode (P/D) | `I·κ/BW` once `nixl_xfer_time_seconds` is collected; omitted and flagged until then |
 | `W_decode` | Waiting for a decode slot | [The birth-death chain](#decode-admission) |
 | `ITL(k_d)` | Decode's first step, which streams the first token (P/D) | The decode line at its fill |
+| `D(I, ITL)` | The decode engine's TTFT: the KV pull and the steps a request waits on (P/D) | `base + perToken·I + perStep·ITL`, learned per variant |
+| `R` | The hop between the router and the engines | The router's mean less the engines', learned per variant |
 
 | | Flow control off (the upstream default) | Flow control on |
 | --- | --- | --- |
@@ -398,6 +405,10 @@ that is itself wrong (the exponential tail, Poisson arrivals, an omitted
 | TTL eviction (only where a TTL exists) | Evicted requests are not in the router histogram: the ground truth reads high near the TTL |
 | Proxy hop before the EPP | Over-promises by that hop |
 | `T_xfer` omitted (not collected) | Over-promises |
+| `D` fitted on the whole prompt and priced at `E[I_eff]` | Over-promises with prefix hits, by `perToken·(I − I_eff)`, down to the old sum, which floors it: the pull moves the whole prompt. Flagged `DecodeTermPrefixHits` past 10% of the prompt. No committed run has hits, so this is not measured |
+| `D` and `R` added at the mean to every percentile, but for their per-token parts | Over-promises at the tail. On the staircase run, bucket A's p90 and p95 read 9% and 13% under on average with the mean 8% over |
+| `D` read past the prompts or step times it was fitted on | Either way, and not flagged: the plane is a line in each. `MaxDecodeQueue` keeps the behind-on-pulls minutes out of the fit, so `D` does not reach them, and they read far above it |
+| `AssumedDecodeStepSlope`, `AssumedRouterHopSeconds` (no fit) | Under-promises if they stand above the fleet's true figures, which is the point. Each is flagged, and a refusal or a move of 25% that one alone decides says so. A long prompt may hop further than 20 ms |
 | `V_P` from a lower bound | Under-promises |
 | A mix of prompt lengths priced at its mean on a convex prefill curve ([a limit of P3](#prefill-capacity)) | Over-promises: an even 8k/52k mix at a `V_P` read at 30k is priced 32% under its prefill time. The rescale ([after P2](#as-built-p3-after-p2)) moves `V_P` to the mean, not the mix, and `VPShapeMoved`, comparing means, does not flag it |
 | `V_P` rescaled along the curve with no fixed cost per step, `s(I_vp)/s(I)` | Under-promises for a longer prompt only if P1's low-load `b` and `c` are the busy step's per-token cost, which is not measured: on run 2 at 37k it read 1.5% above the served `V_P` (over-promises), covered by the margin only from `ρ` 0.6. No-act (`VPScaledToPrompt`) until a second point confirms it. Held (not raised) for a shorter prompt |
@@ -444,8 +455,9 @@ the measured one fails; more than 25% below fails. The same mark is applied
 separately to the mean TPOT and to the per-request TPOT percentile. **Noise floor**: an M/G/1 queue at `ρ` 0.85 relaxes in about
 `E[S](1 + Cs²)/(1 − √ρ)²`, about 330 `E[S]` at `Cs²` = 1, 90 s for an 8000-token
 prefill at 30k tok/s; a step whose window holds fewer than 4 such times is
-flagged and lengthened. Until the run passes, every TTFT figure prints
-UNVALIDATED.
+flagged and lengthened. Repeat 1 failed the form before the decode term, and
+it chose the term, so it cannot validate that either. Validation is a fresh
+frozen run: until one passes, every TTFT figure prints UNVALIDATED.
 
 **Which bucket lifts which flag.** The SLO analyzer's S2 does not size on a
 figure carrying a flag below until the bucket named passes the mark above,
@@ -453,7 +465,7 @@ in all its repeats ([S1 decisions](slo-tiers.md#s1-decisions)):
 
 | Flag | Lifted by |
 | --- | --- |
-| `UnvalidatedTTFT` | Buckets A and B, flow control off and on |
+| `UnvalidatedTTFT` | Buckets A and B, flow control off and on, on a fresh frozen run of the current form |
 | `AssumedPoissonArrivals` | Bucket C, flow control off and on, predicted at the measured `Ca²` |
 | `AboveFlowControlOnset` (on a rate answer) | Buckets B and C with flow control on, with steps above the prefill onset |
 | `FlowControlInferredOff` | Never by the staircase: it is a missing series, fixed by scraping it |
@@ -508,6 +520,11 @@ roles' rates.
     TTFT_q = min over β of  Q_{1−(1−q−β)}(block 1) + Q_{1−β}(W_decode) + ITL(k_d)
     mean  = ρ_w·θ + a + E[I]·(1/V_P + κ/BW) + E[W_decode] + ITL(k_d)
     floor = a + I_q·(1/V_P + κ/BW) + ITL(band.lo)
+
+    with a decode line, the term replaces κ/BW and ITL(k_d) (after M2):
+    κ/BW     → perToken_D + perToken_R          in the own latency, so at I_q
+    ITL(k_d) → base_D + perStep·ITL(k) + base_R, k the actual fill, no clamp
+    the floor reads it at k = 0
 
     with no decode line (after P2):  W_decode = 0, κ/BW = 0 when D is measured, and
     ITL(k_d) → D·max(1, E[I]/I_D)      D the decode engine's mean TTFT, measured at I_D
@@ -1008,6 +1025,117 @@ not close them. Two reasons, both outside what these three changes model:
 Both would add a term fitted from these same recordings, which this change
 does not do. They are open items for S1's recorder-backed inputs (decode's
 TTFT histogram) and for P1 (an overhead that grows with the prompt).
+
+### As built: the decode term
+
+The staircase run (M2) showed why light-load figures read low on a decode line.
+The model priced decode's part as `T_xfer + ITL(k)`, and measured decode-engine
+TTFT is several steps long. Now, on a decode line:
+
+    decode's part = D(I, ITL(k)) + R
+    D(I, ITL)     = base + perToken·I + perStep·ITL
+    ITL(k)          the line at the actual fill, not clamped up to the band
+
+The clamp had to go: at `perStep` of about 7 it would overshoot bucket A's floor
+by about 28 ms. `BelowFittedBand` still stands below the band.
+
+**Where the coefficients come from.** Each is learned per decode variant
+(`prefill.DecodeTermWindow`), as `a` and `V_P` are, and flagged when assumed. No
+coefficient of this run is in the code, except as the fixture of a test.
+
+| Coefficient | Learned from | Read every cycle? | With no fit |
+| --- | --- | --- | --- |
+| `base`, `perToken`, `perStep` | Per-pod `AvgTTFT`, `AvgITL`, input tokens, request rate and queues | Yes: all are scaling queries. Nothing here needs Q1's always-on work | `D` from the last 5 minutes' quiet rows held, rising by `AssumedDecodeStepSlope` (10) from the ITL it was read at, flagged `DecodeStepSlopeAssumed`. With no quiet row, the old sum, flagged `DecodeTermOmitted` |
+| `R` | The router's TTFT `_sum` and `_count` over 5 minutes, less the engines' `AvgTTFT` over the same cycles | Only with this change: it adds the two queries, for a model whose policy lists the SLO analyzer | `AssumedRouterHopSeconds` (20 ms), flagged `RouterHopAssumed`. The CLI takes `--assume-router-hop` |
+
+The window is the variant's, under its accelerator and engine arguments: a change
+of either sweeps it, as it does the line. Why no fit stands (`NoStepSpread`,
+`NonPositiveDecodePlane`, `NoRouterMean` and so on) is carried with the term to the
+CLI's `assumed` row and JSON and to the `slo-ttft-variant` log, beside the term as
+priced.
+
+- **Why the router needed new queries.** The collector read only the histogram's
+  buckets, 25 to 100 ms wide around a 5 to 15 ms figure. Read from the buckets,
+  the warm-up's residual fell with the prompt, the wrong sign. Read from `_sum`
+  and `_count` over a steady 5-minute window, R's median was 4.6 and 4.9 ms on
+  bucket A, 11.4 and 11.6 ms on B, 12.5 and 12.5 ms on C, spread 0.6 ms on A and
+  about 4 ms on B.
+- **What a router window needs.** Steady rate and prompt, and no cycle with the
+  router holding requests: the router's mean starts before flow control, and a
+  held window would count the queue in R. A line needs every median above 0.
+- **What admits a minute.** A row with a read mean of both, at least 0.05 r/s,
+  its prompt steady to 15%, no speculation, its slot queue read and empty (an
+  unknown queue is not an empty one, so SGLang, which publishes none, takes the
+  fall-back), at most `MaxDecodeQueue` (9) waiting at all, and no more than 0.4 s
+  of them at its own request rate. Past that the pod is behind on KV pulls: of
+  3,300 staircase rows, 3% at 6 to 9 waiting read over 30 ms above the fit, against
+  44% at 10 to 14 and 81% at 15 to 24, and none under 0.4 s against 49% at 0.4 to
+  0.8 s. Both gates are stated from one model.
+- **What a slope needs.** Step time must span 1.5x. A fleet at flat load stays
+  refused (`NoStepSpread`) and prices the assumed slope. One prompt length gives
+  `base` as the whole prompt's part, held at the shortest prompt and scaled up
+  only. A plane must stand above 0 at the shortest prompt and step it read; its
+  intercept may not, since nothing reads it there.
+- **Nothing prices under the old sum,** fit or fall-back. Each figure (the
+  headline, the floor, the independent and the pooled one) is compared with the
+  old sum's at its own rate and percentile, and the old sum stands where it is
+  higher, flagged `DecodeTermFloored`
+  (`TestTerm_NoFitPricesUnderTheOldSum`: 100 random fits at five percentiles and
+  the rate answered). Before this a fit with a negative `base` gave 5.4x the rate,
+  unflagged.
+- **A latch keeps the choice from flapping.** A fit is priced after 30 cycles in a
+  row and given up after 15 refused ones, and holds its last value until then. Its
+  noise is assumed: phi 0.9 is not measured on the fit's own series.
+  See [3.5](analyzer-learner.md#35-hysteresis).
+- **The held `D` is quiet.** A busy row's TTFT holds the slot wait, which the model
+  prices apart as `W_decode`, and a load the question may not ask about: a 400 ms
+  reading gave a 509 ms floor. So only the rows that admit a minute are held.
+- **A refusal keeps what it rests on.** `TargetBelowFloor` carries the term's flags.
+  Where an assumed part alone puts the floor over the target, it says so, and
+  `wva_slo_ttft_unmet` is absent: that says nothing of the fleet.
+- **What the warm-up teaches.** `D` = −2.12 ms + 4.09 ms per 1000 tokens + 6.78
+  ITL, near the −2.98, 4.06 and 7.02 fitted outside the code. Its intercept is
+  under 0 and it stands above 0 wherever it was read. Of the 171 cycles a plane
+  was fitted it priced on 142; the first 29 were the latch. The tables below are
+  that learned `D`, with R the warm-up's Prometheus fit, since no recording holds
+  the router's mean.
+- **Measured versus assumed.** `perStep` fits 7.05, 6.68, 6.61, 6.44, 7.46 and
+  8.09 on the six phases alone, each from one prompt length, all on one small
+  model. Both assumed constants are stated, not measured in general, and neither
+  has been run on another model. The learned R has run on no build: no recording
+  holds the new fields, so every golden prices the 20 ms. Its estimator was checked
+  against the run's Prometheus series offline, and by unit tests.
+
+**What moved.** On the staircase's fleet, with the warm-up's learned `D` and R
+(`TestLadder_BeforeAndAfterTheTerm`, which also reproduces the old figures):
+
+| Bucket | Floor, mean, ms | Floor, p90, ms | First level, mean, ms | First level, p90, ms | Client at that level, mean / p90 |
+| --- | --- | --- | --- | --- | --- |
+| A | 30.1 → 36.7 | 31.0 → 37.3 | 30.2 → 43.7 | 31.1 → 44.4 | 39.5 / 47.3 |
+| B | 75.9 → 93.2 | 80.2 → 98.0 | 81.7 → 107.1 | 106.7 → 132.3 | 118.7 / 147.2 |
+| C | 75.9 → 93.2 | 80.2 → 98.0 | 98.7 → 124.2 | 159.7 → 185.2 | 132.3 / 182.6 |
+
+Against all 31 levels, predicted over the client's figure, old → new:
+
+| | Mean error | Range | Within 10% |
+| --- | --- | --- | --- |
+| Mean | −35.4% → −7.3% | −47.4…−23.6% → −17.2…+10.7% | 0 → 18 of 31 |
+| p90 | −28.0% → −7.3% | −54.5…+1.8% → −22.5…+18.1% | 8 → 8 of 31 |
+| p95 | −23.4% → −4.9% | −56.0…+14.3% → −24.6…+28.4% | 10 → 1 of 31 |
+
+**This is a consistency check, not a validation.** The form was chosen from M2's
+own data, so M2 cannot validate it, whichever split was fitted on: repeat 1
+failed the old form, and only a fresh frozen run can score this one.
+`UnvalidatedTTFT` stays. The p90
+and p95 errors are the tail this term does not touch: `Ca²` stays as given (no
+thinning), so C's tail still reads high, and B's and A's low. The service-time
+change is not in this work.
+
+S1 stays shadow. `slo.SwitchTTFTDecodeTerm` off replays the old sum unflagged. It
+moves no committed golden, since no recording with `slo.Analyze` prices a line.
+The CLI has no switch, and its goldens carry the fall-back: their recordings read
+no decode TTFT, so `DecodeTermOmitted`, `RouterHopAssumed` and 20 ms. A refusal, or
+a move of 25%, that an assumed term alone decides is named on the `assumed` row.
 
 ### What #482 took from this change
 

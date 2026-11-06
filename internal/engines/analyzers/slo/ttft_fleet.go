@@ -81,8 +81,12 @@ type ttftInputs struct {
 	// decodeVariant names the variant behind decode, for the log.
 	decodeVariant string
 	decodeTTFT    whatif.DecodeTTFT
-	flow          whatif.FlowControl
-	mismatch      bool
+	// term is decode's part with a line; nil with no reading window.
+	// legacyDecodeSum is SwitchTTFTDecodeTerm off.
+	term            *whatif.DecodeTerm
+	legacyDecodeSum bool
+	flow            whatif.FlowControl
+	mismatch        bool
 }
 
 // imbalance is f at pods, whether it is assumed, and where it came from.
@@ -148,6 +152,8 @@ func ttftFleet(in ttftInputs, pods int) (whatif.TTFTFleet, []whatif.Flag) {
 	fl := whatif.TTFTFleet{Prefill: p, Decode: in.decode, FlowControl: in.flow}
 	if in.decode == nil {
 		fl.DecodeTTFT = in.decodeTTFT
+	} else {
+		fl.DecodeTerm, fl.LegacyDecodeSum = in.term, in.legacyDecodeSum
 	}
 	flags := []whatif.Flag{AssumedPoissonArrivals}
 	if in.spread.Clamped {
@@ -283,6 +289,29 @@ func (a *Analyzer) noteDecodeTTFT(key string, cycle whatif.DecodeTTFT, now time.
 		}
 	}
 	return largest
+}
+
+// decodeTermWindow is a decode variant's readings of D and R
+// (prefill.DecodeTermWindow), held for as long as the variant is seen.
+type decodeTermWindow struct {
+	readings *prefill.DecodeTermWindow
+	seen     time.Time
+}
+
+// noteDecodeTerm folds the cycle, read under accelerator and args, into the
+// variant's window and returns what it supports.
+func (a *Analyzer) noteDecodeTerm(key, accelerator, args string, cycle prefill.DecodeTermCycle) prefill.DecodeTermEstimate {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	w := a.decodeTerms[key]
+	if w == nil {
+		w = &decodeTermWindow{readings: prefill.NewDecodeTermWindow()}
+		a.decodeTerms[key] = w
+	}
+	w.seen = cycle.Now
+	w.readings.Under(accelerator, args)
+	w.readings.Observe(cycle)
+	return w.readings.Estimate()
 }
 
 // decodeEngineTTFT is the decode rows' mean AvgTTFT, weighted by request rate
