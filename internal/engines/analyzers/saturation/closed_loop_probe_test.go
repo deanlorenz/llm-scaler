@@ -244,8 +244,8 @@ func TestClosedLoopProbe_OneSlowReplicaUnderTheServedBoundDoesNotSealTheFleet(t 
 // replica stops queueing in the larger fleet -- and recovers -- and nothing
 // saturates to correct the figure: the fleet stays over-ordered for good,
 // the self-sealing low mu of analyzer-learner.md 3.4 (cost side). The probe
-// must see it. Open: when a change fixes it, this test fails, and the fix
-// turns it into a passing case.
+// must see it. Open, on #495: when a change fixes it, this test fails, and
+// the fix turns it into a passing case.
 func TestClosedLoopProbe_KnownFailing_ASlowReplicaInsideTheServedBoundSealsTheFleet(t *testing.T) {
 	r := runProbe(t, slowReplicaCase(0.55))
 	t.Logf("need %d, final %d, peak %d; fleet by cycle %v", r.need, r.final, r.peak, r.trace)
