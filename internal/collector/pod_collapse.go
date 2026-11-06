@@ -322,6 +322,7 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	// has them and by request rate otherwise (mergeKnownMean), each present
 	// only when every rank had it.
 	pod.PromptTokensBuckets = mergeBuckets(group, func(m domain.ReplicaMetrics) []domain.LengthBucket { return m.PromptTokensBuckets })
+	pod.ComputedTokensBuckets = mergeBuckets(group, func(m domain.ReplicaMetrics) []domain.LengthBucket { return m.ComputedTokensBuckets })
 	pod.OutputTokensBuckets = mergeBuckets(group, func(m domain.ReplicaMetrics) []domain.LengthBucket { return m.OutputTokensBuckets })
 	pod.TTFTBuckets = mergeBuckets(group, func(m domain.ReplicaMetrics) []domain.LatencyBucket { return m.TTFTBuckets })
 	pod.QueueTimeBuckets = mergeBuckets(group, func(m domain.ReplicaMetrics) []domain.LatencyBucket { return m.QueueTimeBuckets })

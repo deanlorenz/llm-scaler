@@ -98,7 +98,8 @@ func (a *Analyzer) SlopeHoldFor() time.Duration { return a.slopeHoldFor }
 // SwitchITLReadsSettle, SwitchITLWaitsAfterRestart,
 // SwitchITLKeepsSettleThroughMissingRow, SwitchITLReadsFinitePodMean,
 // SwitchITLRestartUnderName, SwitchITLIdleOnEvidence and
-// SwitchITLForgetReachesTheLine, SwitchITLOneSidedAtCap and SwitchTTFTPrice; a
+// SwitchITLForgetReachesTheLine, SwitchITLOneSidedAtCap, SwitchTTFTPrice,
+// SwitchTTFTMeasuredSpread and SwitchTTFTMeasuredTransfer; a
 // name it does not know is an error, and sets nothing. Never called on a production
 // path; a test holds that.
 func (a *Analyzer) SetSwitchesForReplay(switches map[string]bool) error {
@@ -140,7 +141,9 @@ func (a *Analyzer) switchFields() map[string]*bool {
 
 		// S1: each prefill variant priced against the TTFT target, in shadow
 		// (ttft.go).
-		SwitchTTFTPrice: &a.ttftPrice,
+		SwitchTTFTPrice:            &a.ttftPrice,
+		SwitchTTFTMeasuredSpread:   &a.ttftMeasuredSpread,
+		SwitchTTFTMeasuredTransfer: &a.ttftMeasuredTransfer,
 		// The decode term of a TTFT on a decode line (ttft.go).
 		SwitchTTFTDecodeTerm: &a.ttftDecodeTerm,
 	}

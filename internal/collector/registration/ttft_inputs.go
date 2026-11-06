@@ -7,9 +7,12 @@ import (
 
 // The per-pod series the TTFT model learns from
 // (docs/proposals/analyzer-learner.md, 2.9). They are collected and recorded
-// (domain.ReplicaMetrics, "Recorded for the TTFT model"). One is read: the
-// saturation analyzer's prefill observation takes QueryQueueMin's busy
-// minutes; the rest are read by no analyzer yet.
+// (domain.ReplicaMetrics, "Recorded for the TTFT model"). Three are read:
+// the saturation analyzer's prefill observation takes QueryQueueMin's busy
+// minutes, and the slo analyzer's TTFT pricing and the what-if CLI take
+// QueryComputedTokensBuckets and QueryAvgKVTransferTime. Those three are
+// issued every cycle in a namespace with a TTFT target (collector
+// ReadTTFTInputsIn); the rest only while recording.
 //
 // Each is namespace-scoped like every other replica query, grouped by
 // (model_name, instance, pod) and cut down to the model in Go. A histogram is
@@ -21,6 +24,14 @@ const (
 	// request_prompt_tokens; SGLang prompt_tokens_histogram, behind
 	// --collect-tokens-histogram like its QueryAvgInputTokens.
 	QueryPromptTokensBuckets = "prompt_tokens_buckets"
+
+	// QueryComputedTokensBuckets is the per-request histogram of the prefill
+	// tokens computed, the prompt net of prefix hits, per instance, over the
+	// [1m] of QueryPrefillComputedTokenRate: the mean the spread is read
+	// against is taken over the same requests. vLLM only: SGLang publishes no
+	// per-stage figure, so it is registered once, under its bare name, and an
+	// SGLang pod returns no series.
+	QueryComputedTokensBuckets = "computed_tokens_buckets"
 
 	// QueryTTFTBuckets is the engine's time-to-first-token histogram per
 	// instance, over the [1m] QueryAvgTTFT is taken over. The same name on
@@ -79,6 +90,14 @@ func perPodBuckets(bucketMetric, window string) string {
 	return `sum by (model_name, instance, pod, le) (rate(` + bucketMetric + `{namespace="{{.namespace}}"}[` + window + `]))`
 }
 
+// perPodBucketsOnce is perPodBuckets with each rank read once however many
+// times its target is scraped, as QueryPrefillComputedTokenRate is. A pod
+// scraped twice would otherwise weigh double in the variant's pooled spread.
+func perPodBucketsOnce(bucketMetric, window string) string {
+	return `sum by (model_name, instance, pod, le) (max by (model_name, instance, pod, engine, le) (rate(` +
+		bucketMetric + `{namespace="{{.namespace}}"}[` + window + `])))`
+}
+
 // sglangPerPodBuckets is perPodBuckets for SGLang: a max, as SGLang's
 // QueryOutputTokensBuckets takes it, so a duplicate series does not double a
 // bucket.
@@ -102,6 +121,14 @@ func registerTTFTInputQueries(registry *source.QueryList) {
 		Template:    sglangPerPodBuckets("sglang:prompt_tokens_histogram_bucket", TTFTLengthWindow),
 		Params:      []string{source.ParamNamespace},
 		Description: "Prompt-length histogram per pod (5m rate, one series per bucket) (SGLang)",
+	})
+
+	registry.MustRegister(source.QueryTemplate{
+		Name:        QueryComputedTokensBuckets,
+		Type:        source.QueryTypePromQL,
+		Template:    perPodBucketsOnce("vllm:request_prefill_kv_computed_tokens_bucket", TTFTInputWindow),
+		Params:      []string{source.ParamNamespace},
+		Description: "Computed prefill tokens per request, histogram per pod (1m rate, one series per bucket) (vLLM only)",
 	})
 
 	registry.MustRegister(source.QueryTemplate{

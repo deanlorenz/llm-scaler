@@ -20,8 +20,9 @@ import (
 // as an unjudged SLO rather than a met or a missed one.
 //
 // The slo analyzer calls it for each model whose policy lists it, and reads
-// five queries: the TTFT buckets, _sum and _count, and the TPOT _sum and
-// _count. While a
+// three queries: the TTFT buckets and the TPOT _sum and _count. In a namespace
+// the TTFT pricing reads (ReadTTFTInputsIn), and while recording, it adds the
+// TTFT _sum and _count, the decode term's hop, and nothing else reads them. While a
 // learner recording is on (SetRecordTTFTInputs) the engine also calls it for
 // every model every cycle, and it adds two more, the router's TPOT histogram
 // and the flow-control wait histogram, which only the recording reads.
@@ -32,10 +33,11 @@ func (c *ReplicaMetricsCollector) CollectRouterLatency(
 	logger := ctrl.LoggerFrom(ctx)
 	queries := []string{
 		registration.QuerySLORouterTTFTBuckets,
-		registration.QuerySLORouterTTFTSum,
-		registration.QuerySLORouterTTFTCount,
 		registration.QuerySLORouterTPOTSum,
 		registration.QuerySLORouterTPOTCount,
+	}
+	if c.RecordsTTFTInputs() || c.readsTTFTInputs(namespace) {
+		queries = append(queries, registration.QuerySLORouterTTFTSum, registration.QuerySLORouterTTFTCount)
 	}
 	if c.RecordsTTFTInputs() {
 		queries = append(queries, registration.QuerySLORouterTPOTBuckets, registration.QueryFlowControlWaitBuckets)
@@ -91,11 +93,14 @@ func (c *ReplicaMetricsCollector) CollectRouterLatency(
 
 // routerQueryType is the query_type a failed router query is counted under:
 // the slo analyzer's three under router_latency, as before they were
-// recorded, and the two only a recording reads under learner_recording.
+// recorded, the TTFT pricing's two under ttft_inputs with its other inputs, and
+// the two only a recording reads under learner_recording.
 func routerQueryType(query string) string {
 	switch query {
 	case registration.QuerySLORouterTPOTBuckets, registration.QueryFlowControlWaitBuckets:
 		return constants.QueryTypeLearnerRecording
+	case registration.QuerySLORouterTTFTSum, registration.QuerySLORouterTTFTCount:
+		return constants.QueryTypeTTFTInputs
 	}
 	return constants.QueryTypeRouterLatency
 }

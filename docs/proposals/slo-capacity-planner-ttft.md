@@ -168,8 +168,8 @@ alone: `S_work = I_eff/V_P`, `ρ = λ·E[I_eff]/V_P`.
    `k2ReasonObsDownstream`). `V_P` is the median of `PrefillComputedTokenRate`
    over at least 5 such minutes. On P/D this is rare: saturation has never
    recorded a non-back-pressured prefill saturation there. As built, the
-   minimum is the recorder's per-pod `QueueMin`, read only while a learner
-   recording is on. A minute on a KV-full prefill pod is not busy, and only
+   minimum is the per-pod `QueueMin`, read in a namespace with a TTFT target
+   ([Q1](slo-tiers.md#as-built-q1)) and while a learner recording is on. A minute on a KV-full prefill pod is not busy, and only
    the last 30 minutes are read. A busy minute reads at or below capacity:
    data-parallel pods (flagged a lower bound) and stalls under-read
    ([P1 and busy minutes](slo-capacity-planner.md#pr-plan)).
@@ -1062,51 +1062,62 @@ priced.
 - **What admits a minute.** A row with a read mean of both, at least 0.05 r/s,
   its prompt steady to 15%, no speculation, its slot queue read and empty (an
   unknown queue is not an empty one, so SGLang, which publishes none, takes the
-  fall-back), and at most `MaxDecodeQueue` (9) waiting at all. Past that the pod is behind on KV
-  pulls: of 3,300 staircase rows, 3% at 6 to 9 waiting read over 30 ms above the
-  fit, against 44% at 10 to 14 and 81% at 15 to 24. That gate is stated from one
-  model.
+  fall-back), at most `MaxDecodeQueue` (9) waiting at all, and no more than 0.4 s
+  of them at its own request rate. Past that the pod is behind on KV pulls: of
+  3,300 staircase rows, 3% at 6 to 9 waiting read over 30 ms above the fit, against
+  44% at 10 to 14 and 81% at 15 to 24, and none under 0.4 s against 49% at 0.4 to
+  0.8 s. Both gates are stated from one model.
 - **What a slope needs.** Step time must span 1.5x. A fleet at flat load stays
   refused (`NoStepSpread`) and prices the assumed slope. One prompt length gives
   `base` as the whole prompt's part, held at the shortest prompt and scaled up
   only. A `base` not above 0 is refused: a request pays something at no prompt
   and no step, and such a plane prices under what was measured.
-- **Nothing prices under the old sum,** fit or fall-back. The figure is compared
-  with the old sum at its own rate and percentile, and the old sum stands where
-  it is higher, flagged `DecodeTermFloored`
-  (`TestTerm_NoFitPricesUnderTheOldSum`: 100 random fits at five percentiles,
-  latency, floor and rate; the floor bound on 272 figures). Before this a fit
-  with a negative `base` gave 5.4x the rate, unflagged.
+- **Nothing prices under the old sum,** fit or fall-back. Each figure (the
+  headline, the floor, the independent and the pooled one) is compared with the
+  old sum's at its own rate and percentile, and the old sum stands where it is
+  higher, flagged `DecodeTermFloored`
+  (`TestTerm_NoFitPricesUnderTheOldSum`: 100 random fits at five percentiles and
+  the rate answered). Before this a fit with a negative `base` gave 5.4x the rate,
+  unflagged.
+- **A latch keeps the choice from flapping.** A fit is priced after 30 cycles in a
+  row and given up after 15 refused ones, and holds its last value until then.
+  See [3.5](analyzer-learner.md#35-hysteresis).
 - **The held `D` is quiet.** A busy row's TTFT holds the slot wait, which the model
   prices apart as `W_decode`, and a load the question may not ask about: a 400 ms
   reading gave a 509 ms floor. So only the rows that admit a minute are held.
 - **A refusal keeps what it rests on.** `TargetBelowFloor` carries the term's flags.
   Where an assumed part alone puts the floor over the target, it says so, and
   `wva_slo_ttft_unmet` is absent: that says nothing of the fleet.
-- **Measured versus assumed.** `perStep` fits 7.05, 6.68, 6.61, 6.39, 7.46 and
-  8.10 on the six phases alone, each from one prompt length, all on one small
-  model. The warm-up alone gives `D` = 0.39 ms + 5.08 ms per 1000 tokens + 6.39
-  ITL. Both assumed constants are stated, not measured in general, and neither
+- **The warm-up's plane is refused.** The warm-up alone reads `D` = −2.12 ms +
+  4.09 ms per 1000 tokens + 6.78 ITL, near the −2.98, 4.06 and 7.02 fitted outside
+  the code. Its base is under 0, so `NonPositiveDecodeBase` refuses it, on 142 of
+  the 171 cycles a plane was fitted, and at the recording's end no quiet row is
+  left to hold: the learner prices the old sum, flagged, plus the assumed hop. A
+  fleet at one prompt length is not affected. The tables below are the form on
+  that plane, which the learner does not reach as it stands.
+- **Measured versus assumed.** `perStep` fits 7.05, 6.68, 6.61, 6.44, 7.46 and
+  8.09 on the six phases alone, each from one prompt length, all on one small
+  model. Both assumed constants are stated, not measured in general, and neither
   has been run on another model. The learned R has run on no build: no recording
   holds the new fields, so every golden prices the 20 ms. Its estimator was checked
   against the run's Prometheus series offline, and by unit tests.
 
-**What moved.** On the staircase's fleet, with `D` and R from the warm-up alone
+**What moved.** On the staircase's fleet, with the warm-up's plane and R
 (`TestLadder_BeforeAndAfterTheTerm`, which also reproduces the old figures):
 
 | Bucket | Floor, mean, ms | Floor, p90, ms | First level, mean, ms | First level, p90, ms | Client at that level, mean / p90 |
 | --- | --- | --- | --- | --- | --- |
-| A | 30.1 → 39.4 | 31.0 → 40.1 | 30.2 → 46.0 | 31.1 → 46.8 | 39.5 / 47.3 |
-| B | 75.9 → 102.9 | 80.2 → 108.3 | 81.7 → 116.3 | 106.7 → 141.6 | 118.7 / 147.2 |
-| C | 75.9 → 102.9 | 80.2 → 108.3 | 98.7 → 133.4 | 159.7 → 194.4 | 132.3 / 182.6 |
+| A | 30.1 → 36.7 | 31.0 → 37.3 | 30.2 → 43.7 | 31.1 → 44.4 | 39.5 / 47.3 |
+| B | 75.9 → 93.2 | 80.2 → 98.0 | 81.7 → 107.1 | 106.7 → 132.3 | 118.7 / 147.2 |
+| C | 75.9 → 93.2 | 80.2 → 98.0 | 98.7 → 124.2 | 159.7 → 185.2 | 132.3 / 182.6 |
 
 Against all 31 levels, predicted over the client's figure, old → new:
 
 | | Mean error | Range | Within 10% |
 | --- | --- | --- | --- |
-| Mean | −35.4% → −2.7% | −47.4…−23.6% → −12.1…+16.6% | 0 → 23 of 31 |
-| p90 | −28.0% → −3.9% | −54.5…+1.8% → −21.4…+20.1% | 8 → 10 of 31 |
-| p95 | −23.4% → −1.9% | −56.0…+14.3% → −21.2…+30.1% | 10 → 3 of 31 |
+| Mean | −35.4% → −7.3% | −47.4…−23.6% → −17.2…+10.7% | 0 → 18 of 31 |
+| p90 | −28.0% → −7.3% | −54.5…+1.8% → −22.5…+18.1% | 8 → 8 of 31 |
+| p95 | −23.4% → −4.9% | −56.0…+14.3% → −24.6…+28.4% | 10 → 1 of 31 |
 
 **This is a consistency check, not a validation.** The form was chosen from M2's
 own data, so M2 cannot validate it, whichever split was fitted on: repeat 1
@@ -1155,9 +1166,10 @@ a move of 25%, that an assumed term alone decides is named on the `assumed` row.
 2. **Model the dispatch-gate delay?** *Recommend:* not until the staircase shows
    a residual at the onset larger than the proxy hop.
 3. **Is `nixl_xfer_time_seconds` per request or per chunk?** (carried from
-   [SLO tiers](slo-tiers.md) open question 4). `T_xfer` as a per-request term
-   depends on it. *Recommend:* settle it on the staircase's P/D run before
-   `T_xfer` leaves "omitted".
+   [SLO tiers](slo-tiers.md) open question 4). Neither: it is per NIXL handle.
+   From vLLM's source, not measured: [Q1, as built](slo-tiers.md#as-built-q1).
+   A request posts its handles together, so they overlap and do not add. The
+   mean reads under the slowest of them, which is what a request waits for.
 4. **Does `V_P` vary with prompt length?** It does: run 3's low-load medians
    cost about 60% more per token from 30k to 37k than from 8k to 30k. `a`
    takes the curve (above), and P3 rescales `V_P` along it to the prompt

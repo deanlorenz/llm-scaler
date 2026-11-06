@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/registration"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/learnreplay"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/prefill"
@@ -129,6 +131,59 @@ func TestTTFT_TheNoteFollowsTheSpread(t *testing.T) {
 	got := footerNote([]*pricedFleet{{}})
 	assert.Equal(t, "TTFT is UNVALIDATED until a fresh frozen run passes, and is not a bound: at the sent spread (cv 0.06) "+
 		"it read up to 34% under the router's percentile on the P2 recordings.", got)
+}
+
+// The CLI reads the spread the histogram says, as S1 does: measured it is not
+// named as assumed and the model raises no flag; past its bounds it is held at
+// the top and named; with none it stays assumed; and --assume-input-tokens does
+// not move a cv, a figure of the traffic the histogram counted.
+func TestTTFT_TheSpreadOrder(t *testing.T) {
+	inf := math.Inf(1)
+	withBuckets := func(b []domain.LengthBucket) *learnreplay.State {
+		st := learnedState()
+		w := &whatif.PromptWindow{}
+		for i := range whatif.PromptWindowMinCycles {
+			w.Note([]domain.ReplicaMetrics{{Ready: true, PrefillComputedTokenRate: 2000, PrefillComputedTokenRateKnown: true,
+				RequestRate: 1, RequestRateKnown: true, ComputedTokensBuckets: b}}, i, time.Unix(int64(60*i), 0))
+		}
+		st.Prefill[0].PromptWindow = w
+		return st
+	}
+	measured := []domain.LengthBucket{{UpperBound: 5000, Rate: 2}, {UpperBound: inf, Rate: 2}}
+	want := whatif.ReadPromptSpread(map[float64]float64{5000: 2, inf: 2}, 2000)
+	require.False(t, want.Assumed)
+	require.Positive(t, want.CV)
+
+	pf := fleetOf(t, withBuckets(measured), answerFlags{})
+	require.Nil(t, pf.refused)
+	assert.Equal(t, want.CV, pf.fleet.Prefill.PromptCV)
+	assert.False(t, pf.fleet.Prefill.PromptCVAssumed)
+	assert.Equal(t, shapeMeasured, pf.in.PromptCVSource)
+	assert.NotContains(t, pf.inputsText, "prompt cv")
+	assert.NotContains(t, strings.Join(pf.in.Assumed, " "), "prompt cv")
+	assert.Contains(t, footerNote([]*pricedFleet{pf}), "at the sent spread (cv 0.06) it read up to 34%")
+
+	asked := fleetOf(t, withBuckets(measured), answerFlags{inputTokens: 500}, "assume-input-tokens")
+	assert.Equal(t, want.CV, asked.fleet.Prefill.PromptCV)
+
+	pf = fleetOf(t, withBuckets([]domain.LengthBucket{{UpperBound: 1000, Rate: 1}, {UpperBound: inf, Rate: 2}}), answerFlags{})
+	assert.Equal(t, whatif.PromptCVStop, pf.fleet.Prefill.PromptCV)
+	assert.False(t, pf.fleet.Prefill.PromptCVAssumed)
+	assert.Equal(t, shapeClamped, pf.in.PromptCVSource)
+	assert.Contains(t, strings.Join(pf.in.Assumed, " "), "prompt cv 3 (the histogram")
+
+	// A window with one cycle of a histogram has too little to read yet.
+	fresh := learnedState()
+	fresh.Prefill[0].PromptWindow = &whatif.PromptWindow{}
+	fresh.Prefill[0].PromptWindow.Note([]domain.ReplicaMetrics{{Ready: true, PrefillComputedTokenRate: 2000,
+		PrefillComputedTokenRateKnown: true, RequestRate: 1000, RequestRateKnown: true, ComputedTokensBuckets: measured}}, 1, time.Unix(0, 0))
+
+	for name, st := range map[string]*learnreplay.State{"nil": learnedState(), "empty": withBuckets(nil), "fresh": fresh} {
+		pf = fleetOf(t, st, answerFlags{})
+		assert.Equal(t, whatif.AssumedPromptCV, pf.fleet.Prefill.PromptCV, name)
+		assert.True(t, pf.fleet.Prefill.PromptCVAssumed, name)
+		assert.Equal(t, shapeAssumed, pf.in.PromptCVSource, name)
+	}
 }
 
 // The asked-for TTFT is priced from the same fleet the page's worked example
@@ -1079,7 +1134,7 @@ func TestPrometheus_TheTTFTInputsCrossTheCapture(t *testing.T) {
 	assert.Contains(t, in.Assumed, "flow-control thresholds 5 and 0.8 (upstream defaults)")
 	assert.Equal(t, "line", in.DecodeSide)
 	assert.Equal(t, "held by the decode term, not priced", in.TransferSource)
-	assert.Equal(t, "measured", in.DecodeTermSource)
+	assert.Equal(t, "assumed", in.DecodeTermSource, "too few cycles for a fit to settle")
 	assert.Equal(t, "assumed", in.RouterHopSource, "the fake publishes no router mean")
 	near(t, "transfer", in.TransferSecondsPerToken*in.PromptTokens, pdTransfer, 1e-9)
 	require.NotNil(t, w.Roles[i].Results.TTFT.Answer, out)

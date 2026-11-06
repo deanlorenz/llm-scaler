@@ -479,7 +479,7 @@ is made.**
 | S1, S2 | The SLO analyzer prices TTFT, shadow then enforce, on the same `prefill` and `whatif` library: [SLO tiers, phase 2](slo-tiers.md#phase-2-ttft) | with its switch | S1: P3. S2: S1, Q1, M2 |
 | M1 | Per-bucket and mix answers; aggregated TTFT | none | P3, R1, #276 |
 | M2 | The staircase run; an operator page in `docs/reference/`; drops UNVALIDATED if it passes | — | D4, P3 |
-| Q1 | Issue the queue-minimum query every cycle, not only while a recording is on, and add the per-request computed-prefill-token histogram (`vllm:request_prefill_kv_computed_tokens_bucket`, per instance), for namespaces holding a model whose policy sets a TTFT target: busy minutes fire in production, and the measured effective-prompt spread replaces S1's assumed `cv` 2. Before S2, not S1: [S1 decisions](slo-tiers.md#s1-decisions) | none for the queue minimum (recordings carry it); the histogram is new, so recordings made after Q1 carry it | P1's busy minutes (PR #470) |
+| Q1 | Issue the queue-minimum and KV-transfer-time queries every cycle, not only while a recording is on, and add the per-request computed-prefill-token histogram (`vllm:request_prefill_kv_computed_tokens_bucket`, per instance), for namespaces holding a model whose policy sets a TTFT target: busy minutes fire in production, the measured effective-prompt spread replaces S1's assumed `cv` 2, and `TransferOmitted` clears where a decode pod reads a transfer time. Before S2, not S1: [S1 decisions](slo-tiers.md#s1-decisions). [As built](slo-tiers.md#as-built-q1) | none: the queue minimum and transfer time are in recordings already; the histogram is new, so recordings made after Q1 carry it, and the switch `slo-ttft-measured-spread` replays those both ways | P1's busy minutes (PR #470) |
 | Only if asked | The controller endpoint and two gauges | none | P3 |
 | Later | Prefill line and learned batch cap in the snapshot; the floor's prefill mu from `V_P`; a shared prefill/decode budget; #275, #277 | — | — |
 
@@ -536,14 +536,12 @@ The observation log carries:
 
 Three limits:
 
-- The collector issues the queue-minimum query only while a learner
-  recording is on (`SetRecordTTFTInputs`), like every R1 field. With none
-  on, no row carries one and no new busy minute is read: `queueMinPods`
-  reads 0 with `busyMinutesOn=true`. Busy minutes already read stay for the
-  window, so for up to 30 minutes after a recording stops the log can show
-  `vpSource=busy-minutes` with `queueMinPods=0`. Issuing the query every
-  cycle is a collector change, left for P3 or the first consumer that
-  sizes from `V_P`.
+- The collector issues the queue-minimum query in a namespace with a TTFT
+  target (Q1, [as built](slo-tiers.md#as-built-q1)) and while a learner
+  recording is on. Elsewhere no row carries one and no new busy minute is
+  read: `queueMinPods` reads 0 with `busyMinutesOn=true`. Busy minutes
+  already read stay for the window, so for up to 30 minutes after a recording
+  stops the log can show `vpSource=busy-minutes` with `queueMinPods=0`.
 - The KV-full test reads the row's KV at the cycle, a one-minute row, so a
   pod that filled and drained within the minute is not caught.
 - No committed recording carries a queue minimum, so no golden moves; the
@@ -821,7 +819,7 @@ TTFT: the decode answers are as they were.
 | `a` | P1's estimate at the cycle | `NoFixedLatency`. There is no `--assume-a`, and S1 has no assumption for it |
 | `f` | P1's own at the pod count, `--prefill N` included: a reading of that count, so unflagged, where S1 clamps at any other count | One pod: none, exactly 1. Otherwise `min(N_p, max(1.5, f))`, `f` the learned figure at the recorded count or the raw share, flagged `AssumedImbalance` (S1, decision 1). The raw share is the largest over the last 5 cycles that read one, at the current pod count: a pod with no rate counts as one that computed nothing, and an idle tail forgets nothing, as in S1. It reads serving rows, not S1's settled ones: a pod warming up reads low, which raises the share, the permitted side |
 | Prompt | `--assume-input-tokens`, else computed tokens over requests on the prefill rows, over the last 20 cycles with traffic | The decode variant's `IL·(1 − hit)`, named. Neither is `NoTraffic` |
-| `cv` | No recording has one: it needs Q1's histogram | 2, flagged `AssumedPromptSpread` (S1) |
+| `cv` | The computed-token histogram (Q1), pooled over the prompt's cycles and pods, through the window S1 keeps too (`whatif.PromptWindow`). Held at 3 and named `clamped` past the histogram's last bound. A recording made before Q1 has none | 2, flagged `AssumedPromptSpread` (S1) |
 | Arrivals | None | Poisson, flagged `AssumedPoissonArrivals`, the S1 flag, kept in `cmd/whatif` because P3 has none |
 | `T_xfer` | Decode rows' `AvgKVTransferTime` over the measured prompt | Left out, flagged `TransferOmitted` |
 | Decode term | With a decode line: `D` and `R` as the recording's cycles teach them ([the decode term](slo-capacity-planner-ttft.md#as-built-the-decode-term)), in place of `T_xfer` and `ITL` | `D`: a quiet row's figure held at slope 10, flagged `DecodeStepSlopeAssumed`, or the old sum, flagged `DecodeTermOmitted`. `R`: 20 ms, or `--assume-router-hop`, flagged `RouterHopAssumed`. Each is named on the `assumed` row with why no fit stands, and in `ttft` in the JSON with the term as priced |

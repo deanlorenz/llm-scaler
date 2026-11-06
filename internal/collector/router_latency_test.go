@@ -201,7 +201,11 @@ func TestCollectRouterLatency_ReadsTheTTFTMean(t *testing.T) {
 				}, nil
 			},
 		}
-		return NewReplicaMetricsCollector(mockSource, nil, nil, nil, nil).CollectRouterLatency(context.Background(), "model-a", "ns")
+		collector := NewReplicaMetricsCollector(mockSource, nil, nil, nil, nil)
+		collector.BeginCycle()
+		defer collector.EndCycle()
+		collector.ReadTTFTInputsIn(map[string]bool{"ns": true})
+		return collector.CollectRouterLatency(context.Background(), "model-a", "ns")
 	}
 	got := collect(sum(0.5), sum(5))
 	require.NotNil(t, got)
@@ -216,6 +220,39 @@ func TestCollectRouterLatency_ReadsTheTTFTMean(t *testing.T) {
 	got = collect(sum(0.5), failed)
 	assert.Zero(t, got.TTFTSumRate)
 	assert.Zero(t, got.TTFTCountRate)
+}
+
+// The mean is the TTFT pricing's, so it is issued with its other inputs: a
+// namespace with no TTFT target, and no recording, pays nothing for it.
+func TestCollectRouterLatency_TheMeanIsIssuedWithTheTTFTInputs(t *testing.T) {
+	asked := func(prepare func(*ReplicaMetricsCollector)) map[string]int {
+		src := &askingSource{}
+		c := NewReplicaMetricsCollector(src, nil, nil, nil, nil)
+		prepare(c)
+		c.CollectRouterLatency(context.Background(), "model-a", "ns")
+		c.EndCycle()
+		return src.asked
+	}
+	for name, c := range map[string]struct {
+		prepare func(*ReplicaMetricsCollector)
+		want    bool
+	}{
+		"outside a cycle": {func(*ReplicaMetricsCollector) {}, false},
+		"a cycle of no TTFT target": {func(c *ReplicaMetricsCollector) {
+			c.BeginCycle()
+			c.ReadTTFTInputsIn(map[string]bool{"other": true})
+		}, false},
+		"a cycle of a TTFT target": {func(c *ReplicaMetricsCollector) {
+			c.BeginCycle()
+			c.ReadTTFTInputsIn(map[string]bool{"ns": true})
+		}, true},
+		"a recording": {func(c *ReplicaMetricsCollector) { c.BeginRecordingCycle(true) }, true},
+	} {
+		got := asked(c.prepare)
+		assert.Contains(t, got, registration.QuerySLORouterTTFTBuckets, name)
+		assert.Equal(t, c.want, got[registration.QuerySLORouterTTFTSum] > 0, name)
+		assert.Equal(t, c.want, got[registration.QuerySLORouterTTFTCount] > 0, name)
+	}
 }
 
 // TestCollectRouterLatency_CountsAFailedQuery pins that a failed query is
@@ -239,7 +276,7 @@ func TestCollectRouterLatency_CountsAFailedQuery(t *testing.T) {
 	assert.Nil(t, NewReplicaMetricsCollector(failing, nil, nil, nil, nil).
 		CollectRouterLatency(context.Background(), "model-a", "ns"))
 
-	assert.Equal(t, 5.0, errorsOfType(t, registry, constants.QueryTypeRouterLatency), "one per failed query")
+	assert.Equal(t, 3.0, errorsOfType(t, registry, constants.QueryTypeRouterLatency), "one per failed query")
 	assert.Zero(t, errorsOfType(t, registry, constants.QueryTypeLearnerRecording), "recording off: nothing record-only ran")
 }
 

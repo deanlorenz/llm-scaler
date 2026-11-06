@@ -141,6 +141,7 @@ Every
 ExtrapolatedFill
 FMA
 Failed
+FitNotSettled
 Fix
 FlowControlInferredOff
 FlowControlMismatch
@@ -2440,6 +2441,8 @@ slo-itl-waits-after-controller-restart
 slo-model
 slo-transient
 slo-ttft-decode-term
+slo-ttft-measured-spread
+slo-ttft-measured-transfer
 slo-ttft-price
 slo-ttft-variant
 slo-variant

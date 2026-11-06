@@ -48,6 +48,13 @@ const (
 	// the fit, against 44% at 10 to 14 and 81% at 15 to 24. Stated from
 	// that one model, not a property of the engine.
 	MaxDecodeQueue = 9
+	// MaxDecodeQueueWait is the longest the waiting count, over the row's
+	// request rate, may read in seconds (Little's law). MaxDecodeQueue alone
+	// let a saturating warm-up's rows through, 6 waiting at 8 r/s with a TTFT
+	// of 373 ms and an ITL of 2 ms, and that row was held as D. Of the
+	// staircase run's rows, none under 0.4 s read over 30 ms above the fit,
+	// against 49% at 0.4 to 0.8 s. Stated from that one model.
+	MaxDecodeQueueWait = 0.4
 	// MinDecodeMinutes is the fewest admitted pod-minutes D is fitted from.
 	MinDecodeMinutes = 10
 	// MinStepSpread is the least ratio of the longest to the shortest step
@@ -70,6 +77,19 @@ const (
 	// window's requests and the engines' by their cycles' rates; a ramp
 	// inside the window parts the two.
 	MaxHopRateRatio = 1.3
+	// FitSetCycles is how many consecutive cycles a fit must stand before it
+	// is priced, and so the dwell on a fall-back: one refused cycle restarts
+	// the count. FitClearCycles is how many consecutive refused cycles end a
+	// fit that is priced; until then the last fit stands. The fall-back is the
+	// safe side, the higher-priced source on every case read, so the way to it
+	// is the shorter. Tuned on AR(1) noise at phi 0.9, a correlation of about
+	// 10 cycles, around a crossing 80 cycles long at 0.3 of the excursion:
+	// one reversal per excursion over 400 draws, against about 9 flips with
+	// no latch. At 0.5 of it the mean is 2.0 flips, the worst 4. Shorter
+	// settings, 20 and 10, read 4 at 0.3 too. At 15 s a cycle: 7.5 minutes
+	// and 3.75.
+	FitSetCycles   = 30
+	FitClearCycles = 15
 	// HeldDecodeAge is how recent a quiet row must be for its TTFT to be held
 	// where no fit stands: the five cycles' window of the decode engine's
 	// measured TTFT, in minutes, since a row is sampled once a minute.
@@ -111,6 +131,9 @@ const (
 	NonPositiveHop Refusal = "NonPositiveHop"
 	// NoRouterMean is R with no router TTFT _sum and _count read at all.
 	NoRouterMean Refusal = "NoRouterMean"
+	// FitNotSettled is a fit that stands but has not for FitSetCycles: the
+	// fall-back is still priced.
+	FitNotSettled Refusal = "FitNotSettled"
 )
 
 // DecodeFit is D as learned: base + perToken*I + perStep*ITL, seconds.
@@ -224,11 +247,77 @@ type DecodeTermWindow struct {
 	routerSeen bool
 	// accelerator and args are what the readings were taken under.
 	accelerator, args string
+	// decodeLatch and hopLatch say whether a fit of D and of R is priced, and
+	// decodeFit and hopFit are what the last cycle priced. stoodDecode and
+	// stoodHop are the last fit that stood, which a priced fit holds to while
+	// refused readings count up to FitClearCycles.
+	decodeLatch, hopLatch  fitLatch
+	decodeFit, stoodDecode DecodeFit
+	hopFit, stoodHop       HopFit
+}
+
+// fitLatch is the choice between a fit and its fall-back. It is not persisted: a
+// restart comes up on the fall-back, the safe side, and needs FitSetCycles of a
+// fit again, which the empty window would need more than anyway.
+type fitLatch struct {
+	fit bool
+	// run counts the consecutive cycles against the choice.
+	run int
+}
+
+// step takes one cycle's verdict and returns the choice.
+func (l *fitLatch) step(admissible bool) bool {
+	if admissible == l.fit {
+		l.run = 0
+		return l.fit
+	}
+	l.run++
+	need := FitClearCycles
+	if admissible {
+		need = FitSetCycles
+	}
+	if l.run >= need {
+		l.fit, l.run = admissible, 0
+	}
+	return l.fit
+}
+
+// settle fits this cycle's readings and latches each fit against its fall-back.
+func (w *DecodeTermWindow) settle() {
+	d, h := fitDecode(w.decode), fitHop(w.hops)
+	if !w.routerSeen {
+		h.Refused = NoRouterMean
+	}
+	dOK, hOK := d.Refused == "", h.Refused == ""
+	if dOK {
+		w.stoodDecode = d
+	}
+	if hOK {
+		w.stoodHop = h
+	}
+	switch priced := w.decodeLatch.step(dOK); {
+	case priced:
+		w.decodeFit = w.stoodDecode
+	case dOK:
+		w.decodeFit = DecodeFit{Minutes: d.Minutes, Refused: FitNotSettled}
+	default:
+		w.decodeFit = d
+	}
+	switch priced := w.hopLatch.step(hOK); {
+	case priced:
+		w.hopFit = w.stoodHop
+	case hOK:
+		w.hopFit = HopFit{Windows: h.Windows, Refused: FitNotSettled}
+	default:
+		w.hopFit = h
+	}
 }
 
 // NewDecodeTermWindow returns an empty window.
 func NewDecodeTermWindow() *DecodeTermWindow {
-	return &DecodeTermWindow{lastAt: map[string]time.Time{}}
+	w := &DecodeTermWindow{lastAt: map[string]time.Time{}}
+	w.settle()
+	return w
 }
 
 // Under says what the next readings are taken under. D and R are properties of
@@ -252,6 +341,7 @@ func (w *DecodeTermWindow) Under(accelerator, args string) {
 
 // Observe takes one cycle.
 func (w *DecodeTermWindow) Observe(c DecodeTermCycle) {
+	defer w.settle()
 	w.now = c.Now
 	w.prune(c.Now)
 	if whole, ok := wholePrompt(c.Decode); ok {
@@ -291,7 +381,7 @@ func admittedDecodeRow(rm domain.ReplicaMetrics) (itl, ttft, prompt float64, ok 
 		return 0, 0, 0, false
 	}
 	rate, known := requestRate(rm)
-	if !known || !(rate >= MinDecodeRequestRate) {
+	if !known || !(rate >= MinDecodeRequestRate) || float64(rm.QueueLength)/rate > MaxDecodeQueueWait {
 		return 0, 0, 0, false
 	}
 	recent, long := rm.AvgInputTokensRecent, rm.AvgInputTokens
@@ -413,13 +503,10 @@ func (w *DecodeTermWindow) prune(now time.Time) {
 	maps.DeleteFunc(w.lastAt, func(_ string, at time.Time) bool { return now.Sub(at) > Retention })
 }
 
-// Estimate is what the window supports now.
+// Estimate is what the window supports now, as of its last cycle: each fit past
+// its latch, or its fall-back with the reason.
 func (w *DecodeTermWindow) Estimate() DecodeTermEstimate {
-	est := DecodeTermEstimate{Decode: fitDecode(w.decode), Hop: fitHop(w.hops), Held: w.held(), WholePromptTokens: w.whole}
-	if !w.routerSeen {
-		est.Hop.Refused = NoRouterMean
-	}
-	return est
+	return DecodeTermEstimate{Decode: w.decodeFit, Hop: w.hopFit, Held: w.held(), WholePromptTokens: w.whole}
 }
 
 // held is the largest TTFT of the last HeldDecodeAge's quiet rows, a pair from

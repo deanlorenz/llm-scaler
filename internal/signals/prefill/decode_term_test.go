@@ -2,6 +2,7 @@ package prefill
 
 import (
 	"math"
+	"math/rand/v2"
 	"testing"
 	"time"
 
@@ -48,7 +49,7 @@ func TestDecodeFit_RecoversThePlane(t *testing.T) {
 		itl, p := 0.002+float64(i%7)*0.002, prompts[i%4]
 		return decodeRow("d", truth(p, itl), itl, p)
 	})
-	f := w.Estimate().Decode
+	f := fitDecode(w.decode)
 	require.Empty(t, f.Refused)
 	assert.Equal(t, 40, f.Minutes)
 	assert.InDelta(t, 0.002, f.Base, 1e-9)
@@ -66,7 +67,7 @@ func TestDecodeFit_OnePromptIsHeld(t *testing.T) {
 		p := 8000 + float64(i%3)*100
 		return decodeRow("d", truth(8000, itl), itl, p)
 	})
-	f := w.Estimate().Decode
+	f := fitDecode(w.decode)
 	require.Empty(t, f.Refused)
 	assert.InDelta(t, 0.026, f.Base, 1e-9)
 	assert.InDelta(t, 5, f.PerStep, 1e-6)
@@ -80,7 +81,7 @@ func TestDecodeFit_FlatLoadIsRefused(t *testing.T) {
 	feedMinutes(w, 60, func(i int) domain.ReplicaMetrics {
 		return decodeRow("d", 0.02+float64(i%2)*1e-4, 0.003+float64(i%2)*1e-4, 1000)
 	})
-	f := w.Estimate().Decode
+	f := fitDecode(w.decode)
 	assert.Equal(t, NoStepSpread, f.Refused)
 	assert.Zero(t, f.PerStep, "a refused fit carries no slope")
 }
@@ -91,13 +92,13 @@ func TestDecodeFit_TooFewMinutes(t *testing.T) {
 		itl := 0.002 + float64(i)*0.002
 		return decodeRow("d", truth(1000, itl), itl, 1000)
 	})
-	assert.Equal(t, TooFewDecodeMinutes, w.Estimate().Decode.Refused)
+	assert.Equal(t, TooFewDecodeMinutes, fitDecode(w.decode).Refused)
 	w = NewDecodeTermWindow()
 	feedMinutes(w, MinDecodeMinutes, func(i int) domain.ReplicaMetrics {
 		itl := 0.002 + float64(i)*0.002
 		return decodeRow("d", truth(1000, itl), itl, 1000)
 	})
-	assert.Empty(t, w.Estimate().Decode.Refused)
+	assert.Empty(t, fitDecode(w.decode).Refused)
 }
 
 // The spread is read inside the ends: one stray minute does not open it.
@@ -110,7 +111,7 @@ func TestDecodeFit_OneStrayMinuteIsNoSpread(t *testing.T) {
 		}
 		return decodeRow("d", truth(1000, itl), itl, 1000)
 	})
-	assert.Equal(t, NoStepSpread, w.Estimate().Decode.Refused)
+	assert.Equal(t, NoStepSpread, fitDecode(w.decode).Refused)
 }
 
 // A slope, prompt or step, that reads below zero is no fit of what the term is.
@@ -121,7 +122,7 @@ func TestDecodeFit_RefusesWhatCannotBe(t *testing.T) {
 			itl, p := 0.002+float64(i%7)*0.002, prompts[i%len(prompts)]
 			return decodeRow("d", ttft(itl, p), itl, p)
 		})
-		return w.Estimate().Decode
+		return fitDecode(w.decode)
 	}
 	assert.Equal(t, NonPositiveStepSlope, steep(func(itl, _ float64) float64 { return 0.1 - 2*itl }, 1000).Refused)
 	assert.Equal(t, NonPositiveDecodeBase, steep(func(itl, _ float64) float64 { return 5*itl - 0.005 }, 1000).Refused)
@@ -150,6 +151,7 @@ func TestDecodeRow_TheGates(t *testing.T) {
 		"a slot queue":       func(r *domain.ReplicaMetrics) { r.CapacityQueueLength = 1 },
 		"slot queue unread":  func(r *domain.ReplicaMetrics) { r.CapacityQueueKnown = false },
 		"behind on pulls":    func(r *domain.ReplicaMetrics) { r.QueueLength = MaxDecodeQueue + 1 },
+		"a long wait":        func(r *domain.ReplicaMetrics) { r.QueueLength, r.RequestRate = 6, 8 },
 		"rate unread":        func(r *domain.ReplicaMetrics) { r.RequestRateKnown = false },
 		"too few requests":   func(r *domain.ReplicaMetrics) { r.RequestRate = MinDecodeRequestRate / 2 },
 		"rate NaN":           func(r *domain.ReplicaMetrics) { r.RequestRate = math.NaN() },
@@ -164,7 +166,7 @@ func TestDecodeRow_TheGates(t *testing.T) {
 		assert.False(t, ok, name)
 	}
 	r := good
-	r.QueueLength = MaxDecodeQueue
+	r.QueueLength, r.RequestRate = MaxDecodeQueue, 25
 	_, _, _, ok = admittedDecodeRow(r)
 	assert.True(t, ok, "the pull in transit is D")
 }
@@ -241,7 +243,7 @@ func hopRun(w *DecodeTermWindow, start time.Time, minutes int, r, prompt float64
 func TestHop_OnePromptIsHeld(t *testing.T) {
 	w := NewDecodeTermWindow()
 	hopRun(w, termT0, 15, 0.007, 8000)
-	f := w.Estimate().Hop
+	f := fitHop(w.hops)
 	require.Empty(t, f.Refused)
 	assert.InDelta(t, 0.007, f.Base, 1e-9)
 	assert.Zero(t, f.PerToken)
@@ -254,7 +256,7 @@ func TestHop_TwoPromptsGiveALine(t *testing.T) {
 	w := NewDecodeTermWindow()
 	at := hopRun(w, termT0, 15, 0.005, 1000)
 	hopRun(w, at, 15, 0.012, 8000)
-	f := w.Estimate().Hop
+	f := fitHop(w.hops)
 	require.Empty(t, f.Refused)
 	assert.InDelta(t, 1e-6, f.PerToken, 1e-9)
 	assert.InDelta(t, 0.004, f.Base, 1e-6)
@@ -454,4 +456,196 @@ func TestHop_OneWindowAMinute(t *testing.T) {
 	hopRun(w, termT0, 10, 0.007, 1000)
 	assert.LessOrEqual(t, len(w.hops), 6, "minutes 5 to 10")
 	assert.GreaterOrEqual(t, len(w.hops), 5)
+}
+
+// The latch: a fit is priced only after FitSetCycles in a row, one refused cycle
+// restarts that count, and a priced fit holds its last value through
+// FitClearCycles of refusals, then gives way.
+func TestLatch_SetAndClear(t *testing.T) {
+	var l fitLatch
+	for i := range FitSetCycles - 1 {
+		require.False(t, l.step(true), i)
+	}
+	require.False(t, l.step(false), "one refused cycle restarts the count")
+	for i := range FitSetCycles - 1 {
+		require.False(t, l.step(true), i)
+	}
+	require.True(t, l.step(true))
+	for i := range FitClearCycles - 1 {
+		require.True(t, l.step(false), i)
+	}
+	require.True(t, l.step(true), "one good cycle restarts the clear")
+	for i := range FitClearCycles - 1 {
+		require.True(t, l.step(false), i)
+	}
+	require.False(t, l.step(false))
+	assert.Less(t, FitClearCycles, FitSetCycles, "the way to the safe side is the shorter")
+}
+
+// The window prices past the latch: the fall-back until a fit has stood, the
+// last fit through a short refusal, the fall-back after a long one.
+func TestLatch_TheWindowPricesThroughIt(t *testing.T) {
+	w := NewDecodeTermWindow()
+	minute := 0
+	see := func(itl float64) {
+		w.Observe(DecodeTermCycle{Now: termT0.Add(time.Duration(minute) * time.Minute), PromptTokens: 1000,
+			Decode: []domain.ReplicaMetrics{decodeRow("d", 0.03+5*itl, itl, 1000)}})
+		minute++
+	}
+	for i := range MinDecodeMinutes + 2 {
+		see(0.002 + float64(i%5)*0.002)
+	}
+	require.Empty(t, fitDecode(w.decode).Refused, "a fit stands")
+	assert.Equal(t, FitNotSettled, w.Estimate().Decode.Refused, "and is not priced yet")
+	assert.Zero(t, w.Estimate().Decode.PerStep)
+	for i := range FitSetCycles {
+		see(0.002 + float64(i%5)*0.002)
+	}
+	got := w.Estimate().Decode
+	require.Empty(t, got.Refused)
+	assert.InDelta(t, 5, got.PerStep, 1e-6)
+
+	// The readings age out: the fit is refused, and held.
+	w.decode = nil
+	w.lastAt = map[string]time.Time{}
+	for range FitClearCycles - 1 {
+		w.settle()
+		assert.InDelta(t, 5, w.Estimate().Decode.PerStep, 1e-6)
+	}
+	w.settle()
+	assert.Equal(t, TooFewDecodeMinutes, w.Estimate().Decode.Refused)
+}
+
+// R goes through its own latch: enough windows stand before the fit is priced.
+func TestLatch_TheHopPricesThroughIt(t *testing.T) {
+	w := NewDecodeTermWindow()
+	at := hopRun(w, termT0, 10, 0.007, 1000)
+	require.Empty(t, fitHop(w.hops).Refused, "a fit stands")
+	assert.Equal(t, FitNotSettled, w.Estimate().Hop.Refused, "and is not priced yet")
+	assert.Zero(t, w.Estimate().Hop.Base)
+	hopRun(w, at, 10, 0.007, 1000)
+	got := w.Estimate().Hop
+	require.Empty(t, got.Refused)
+	assert.InDelta(t, 0.007, got.Base, 1e-9)
+}
+
+// A restart comes up on the fall-back: the latch is not persisted, and a window
+// swept by a change of engine loses it the same way.
+func TestLatch_ARestartIsTheSafeSide(t *testing.T) {
+	w := NewDecodeTermWindow()
+	w.Under("H100", "a")
+	w.decodeLatch, w.hopLatch = fitLatch{fit: true}, fitLatch{fit: true}
+	w.Under("H100", "b")
+	assert.False(t, w.decodeLatch.fit)
+	assert.False(t, w.hopLatch.fit)
+	assert.False(t, NewDecodeTermWindow().decodeLatch.fit)
+}
+
+// excursion is a metric that climbs through an edge at 0, stands, and falls back,
+// with AR(1) noise of the gauges' correlation, about 10 cycles.
+func excursion(r *rand.Rand) []float64 {
+	var x []float64
+	add := func(n int, from, to float64) {
+		for i := range n {
+			x = append(x, from+(to-from)*float64(i)/float64(n))
+		}
+	}
+	add(100, -1, -1)
+	add(80, -1, 1)
+	add(200, 1, 1)
+	add(80, 1, -1)
+	add(100, -1, -1)
+	const phi, sd = 0.9, 0.3
+	e := 0.0
+	for i := range x {
+		e = phi*e + r.NormFloat64()*sd*math.Sqrt(1-phi*phi)
+		x[i] += e
+	}
+	return x
+}
+
+// The edges of the choice, each as the fit it reads: x above 0 is admissible.
+var fitEdges = map[string]func(x float64) bool{
+	"base above 0": func(x float64) bool {
+		var s []decodeSample
+		for i := range 30 {
+			itl, p := 0.002+float64(i%7)*0.002, []float64{2000, 4000, 8000}[i%3]
+			s = append(s, decodeSample{ttft: 0.01*x + 3e-6*p + 5*itl, itl: itl, prompt: p})
+		}
+		return fitDecode(s).Refused == ""
+	},
+	"perStep above 0": func(x float64) bool {
+		var s []decodeSample
+		for i := range 30 {
+			itl := 0.002 + float64(i%7)*0.002
+			s = append(s, decodeSample{ttft: 0.05 + x*itl, itl: itl, prompt: 1000})
+		}
+		return fitDecode(s).Refused == ""
+	},
+	"perToken at least 0": func(x float64) bool {
+		var s []decodeSample
+		for i := range 30 {
+			itl, p := 0.002+float64(i%7)*0.002, []float64{2000, 4000, 8000}[i%3]
+			s = append(s, decodeSample{ttft: 0.05 + 1e-6*x*p + 5*itl, itl: itl, prompt: p})
+		}
+		return fitDecode(s).Refused == ""
+	},
+	"step spread at least 1.5": func(x float64) bool {
+		var s []decodeSample
+		for i := range 30 {
+			itl := 0.004 * (1 + float64(i%2)*0.5*(1+0.5*x))
+			s = append(s, decodeSample{ttft: 0.05 + 5*itl, itl: itl, prompt: 1000})
+		}
+		return fitDecode(s).Refused == ""
+	},
+	"minutes at least 10": func(x float64) bool {
+		var s []decodeSample
+		for i := range max(int(math.Round(MinDecodeMinutes-0.5+3*x)), 0) {
+			itl := 0.002 + float64(i%7)*0.002
+			s = append(s, decodeSample{ttft: 0.05 + 5*itl, itl: itl, prompt: 1000})
+		}
+		return fitDecode(s).Refused == ""
+	},
+	"windows at least 5": func(x float64) bool {
+		var s []hopSample
+		for range max(int(math.Round(MinHopWindows-0.5+3*x)), 0) {
+			s = append(s, hopSample{r: 0.007, prompt: 1000})
+		}
+		return fitHop(s).Refused == ""
+	},
+	"medians above 0": func(x float64) bool {
+		var s []hopSample
+		for range 10 {
+			s = append(s, hopSample{r: 0.01 * x, prompt: 1000}, hopSample{r: 0.01, prompt: 8000})
+		}
+		return fitHop(s).Refused == ""
+	},
+}
+
+// Around each edge, on noise with a correlation of about 10 cycles, an excursion
+// reverses the choice once each way. With no latch the same noise flips it far
+// more often, the negative control.
+func TestLatch_OneReversalPerExcursion(t *testing.T) {
+	for name, admissible := range fitEdges {
+		r := rand.New(rand.NewPCG(5, 7))
+		worst, raw := 0, 0
+		for range 40 {
+			var l fitLatch
+			last, flips, plain, prev := false, 0, 0, false
+			for i, x := range excursion(r) {
+				ok := admissible(x)
+				if i > 0 && ok != prev {
+					plain++
+				}
+				prev = ok
+				if on := l.step(ok); on != last {
+					flips++
+					last = on
+				}
+			}
+			worst, raw = max(worst, flips), raw+plain
+		}
+		assert.LessOrEqual(t, worst, 2, "%s: the latched choice", name)
+		assert.Greater(t, raw, 40*4, "%s: with no latch it chatters, or this tests nothing", name)
+	}
 }

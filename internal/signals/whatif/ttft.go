@@ -833,6 +833,9 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 		out.Seconds, out.Independent = mean, mean
 		if extras {
 			out.Pooled = pf.pooledWait(rate).mean() + out.Parts.OwnPrefill + out.Parts.DecodeWait + first
+			if pl.term != nil {
+				out.Pooled = max(out.Pooled, pf.pooledWait(rate).mean()+a+oldOwn.mean+out.Parts.DecodeWait+oldFirst)
+			}
 		}
 		return priced{out: out}
 	}
@@ -849,8 +852,9 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 	out.Seconds, out.DecodeShare = a+v+first, beta
 	var oldSeconds float64
 	// The split is the costly part: with neither of the term's parts under the
-	// old sum's, the old sum cannot stand over it.
-	if pl.term != nil && (first < oldFirst || pf.xfer < pl.term.oldTransfer) {
+	// old sum's, the old sum cannot stand over it, in any figure below.
+	oldCounts := pl.term != nil && (first < oldFirst || pf.xfer < pl.term.oldTransfer)
+	if oldCounts {
 		oldV, oldBeta := split(block{wait: wait, own: oldOwn}, dec, q)
 		oldSeconds = a + oldV + oldFirst
 		if oldSeconds > out.Seconds {
@@ -862,12 +866,22 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 	if extras {
 		// The two waits always sum (a single-piece wait and the decode
 		// chain's unshifted one); were they ever not to, the union bound
-		// stands for the independent figure, which it never undercuts.
+		// stands for the independent figure, which it never undercuts. Each
+		// figure takes the old sum's floor on its own, so each stays under
+		// the headline, which takes it too.
 		if both, ok := b1.wait.sum(dec); ok && len(dec.w) > 0 {
 			out.Independent = a + block{wait: both, own: own}.quantile(1-q) + first
+			if oldCounts {
+				out.Independent = max(out.Independent, a+block{wait: both, own: oldOwn}.quantile(1-q)+oldFirst)
+			}
 		}
-		pv, _ := split(block{wait: pf.pooledWait(rate), own: own}, dec, q)
+		pooled := pf.pooledWait(rate)
+		pv, _ := split(block{wait: pooled, own: own}, dec, q)
 		out.Pooled = a + pv + first
+		if oldCounts {
+			oldPv, _ := split(block{wait: pooled, own: oldOwn}, dec, q)
+			out.Pooled = max(out.Pooled, a+oldPv+oldFirst)
+		}
 	}
 	return priced{out: out}
 }

@@ -1,6 +1,7 @@
 package whatif
 
 import (
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"slices"
@@ -155,9 +156,7 @@ func TestTerm_AFallBackIsNeverUnderTheOldSum(t *testing.T) {
 		rate := 0.9 * r.Float64() * pl.lowestKnee()
 		for _, q := range []float64{0, 0.5, 0.9, 0.99} {
 			v, o := mustTTFT(t, ttftAt(t, fl, rate, q)), mustTTFT(t, ttftAt(t, old, rate, q))
-			if v.Seconds < o.Seconds*(1-1e-12) || v.Floor < o.Floor*(1-1e-12) {
-				t.Fatalf("%+v at %g, q %g: %g under the old sum's %g (floors %g, %g)", term, rate, q, v.Seconds, o.Seconds, v.Floor, o.Floor)
-			}
+			noneUnder(t, fmt.Sprintf("%+v at %g, q %g", term, rate, q), v, o)
 			if !v.HasFlag(RouterHopAssumed) || (!v.HasFlag(DecodeStepSlopeAssumed) && !v.HasFlag(DecodeTermOmitted)) {
 				t.Fatalf("flags %v", v.Flags)
 			}
@@ -222,9 +221,37 @@ func TestTerm_NeverNegative(t *testing.T) {
 	}
 }
 
-// No fit prices under the old sum, on any path: latency at every percentile and
-// rate, floor and the rate answered. Where the floor binds the flag says so, and
-// the parts still sum to the mean.
+// noneUnder fails if any published figure of v is under the old sum's o.
+func noneUnder(t *testing.T, what string, v, o TTFT) {
+	t.Helper()
+	const tol = 1 - 1e-12
+	if v.Seconds < o.Seconds*tol || v.Floor < o.Floor*tol || v.Independent < o.Independent*tol || v.Pooled < o.Pooled*tol {
+		t.Fatalf("%s: under the old sum: seconds %g, %g; floor %g, %g; independent %g, %g; pooled %g, %g",
+			what, v.Seconds, o.Seconds, v.Floor, o.Floor, v.Independent, o.Independent, v.Pooled, o.Pooled)
+	}
+}
+
+// The review's probe: a D just over the old step at the band's bottom, read at a
+// rate where the old sum stands over it. Every figure printed beside the
+// headline stands with it, at the mean and at p90.
+func TestTerm_TheFloorHoldsBesideTheHeadline(t *testing.T) {
+	old := workedFleet()
+	old.LegacyDecodeSum = true
+	fl := workedFleet()
+	d := *fl.Decode
+	fl.DecodeTerm = &DecodeTerm{Engine: PromptLine{Base: 1.01 * d.Line.ITLAt(d.Band.Lo)}}
+	for _, q := range []float64{0, 0.9} {
+		v, o := mustTTFT(t, ttftAt(t, fl, 8, q)), mustTTFT(t, ttftAt(t, old, 8, q))
+		noneUnder(t, fmt.Sprintf("q %g", q), v, o)
+		if !v.HasFlag(DecodeTermFloored) {
+			t.Errorf("q %g: flags %v", q, v.Flags)
+		}
+	}
+}
+
+// No fit prices under the old sum, on any path: every published figure at every
+// percentile and rate, and the rate answered. Where the floor binds the flag says
+// so, and the parts still sum to the mean.
 func TestTerm_NoFitPricesUnderTheOldSum(t *testing.T) {
 	r := rand.New(rand.NewPCG(7, 11))
 	bound := 0
@@ -245,11 +272,15 @@ func TestTerm_NoFitPricesUnderTheOldSum(t *testing.T) {
 		rate := 0.9 * r.Float64() * pl.lowestKnee()
 		for _, q := range []float64{0, 0.5, 0.9, 0.95, 0.99} {
 			v, o := mustTTFT(t, ttftAt(t, fl, rate, q)), mustTTFT(t, ttftAt(t, old, rate, q))
-			if v.Seconds < o.Seconds*(1-1e-12) || v.Floor < o.Floor*(1-1e-12) {
-				t.Fatalf("%+v at %g, q %g: %g under the old sum's %g (floors %g, %g)", term, rate, q, v.Seconds, o.Seconds, v.Floor, o.Floor)
+			noneUnder(t, fmt.Sprintf("%+v at %g, q %g", term, rate, q), v, o)
+			if !(v.Floor <= v.Seconds*(1+1e-9)) || !(v.Independent <= v.Seconds*(1+1e-9)) {
+				t.Fatalf("over the headline %g: floor %g, independent %g", v.Seconds, v.Floor, v.Independent)
 			}
-			if !(v.Floor <= v.Seconds*(1+1e-9)) {
-				t.Fatalf("floor %g over %g", v.Floor, v.Seconds)
+			// The pooled figure can stand over the worst pod's at cv under 1
+			// on the old sum too: the term must not make that so where it
+			// was not.
+			if v.Pooled > v.Seconds*(1+1e-9) && o.Pooled <= o.Seconds*(1+1e-9) {
+				t.Fatalf("pooled %g over the headline %g, and the old sum's was under", v.Pooled, v.Seconds)
 			}
 			if v.Seconds == o.Seconds && !v.HasFlag(DecodeTermFloored) {
 				t.Fatalf("%+v at %g, q %g: the old sum stands unflagged: %v", term, rate, q, v.Flags)

@@ -32,7 +32,8 @@
 #      and one that persists takes the series, and the page, away.
 #      metrics-collection-alerts: a failing scaling query raises
 #      WVAMetricsCollectionFailing; a failing learner_recording query, which
-#      feeds only a learner recording, does not.
+#      feeds only a learner recording, does not, nor does a ttft_inputs one,
+#      which feeds only the shadow TTFT pricing.
 #
 # PROMTOOL is the promtool binary (make promtool installs a pinned one); YQ is
 # mikefarah yq v4.

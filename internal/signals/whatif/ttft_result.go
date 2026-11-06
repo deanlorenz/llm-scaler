@@ -93,14 +93,14 @@ const (
 	// AssumedDecodeStepSlope from the ITL it was measured at. It never reads
 	// under the old sum (DecodeTerm).
 	DecodeStepSlopeAssumed Flag = "DecodeStepSlopeAssumed"
-	// RouterHopAssumed is a TTFT on a decode line with no fit of the hop
+	// RouterHopAssumed is a TTFT on a decode line with no settled fit of the hop
 	// between the router and the engines: R is AssumedRouterHopSeconds, or the
 	// operator's (--assume-router-hop).
 	RouterHopAssumed Flag = "RouterHopAssumed"
-	// DecodeTermFloored is a figure where the decode term read under the old
-	// sum T_xfer + ITL(k_d), which stands in its place. The term holds what
-	// was measured of the pull and the step, so a term under the old sum is
-	// wrong: this says its fit or its prompt does not hold here.
+	// DecodeTermFloored is a headline or a floor where the decode term read
+	// under the old sum T_xfer + ITL(k_d), which stands in its place. The term
+	// holds what was measured of the pull and the step, so a term under the old
+	// sum is wrong: this says its fit or its prompt does not hold here.
 	DecodeTermFloored Flag = "DecodeTermFloored"
 	// DecodeTermPrefixHits is a TTFT on a decode line with prefix hits past
 	// MaterialPrefixHitShare: D goes with the whole prompt, which the KV pull

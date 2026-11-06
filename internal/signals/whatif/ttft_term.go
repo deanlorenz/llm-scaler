@@ -42,9 +42,11 @@ func (l PromptLine) split(i float64) (fixed, perToken float64) {
 //	D(I, ITL) + R = Engine(I) + PerStep*max(ITL(k) - FromITL, 0) + Hop(I)
 //
 // ITL(k) is the line at the fill the rate runs at, with no clamp to the band.
-// The priced figure never falls under the old sum, on any path: where it would,
-// the old sum stands, flagged DecodeTermFloored. TermFromEstimate builds the
-// term from what the variant learned, flagged when assumed.
+// No published figure falls under the old sum's own, on any path (the
+// headline, the floor, Independent and Pooled): where one would, the old sum
+// stands, and on the headline or the floor it is flagged DecodeTermFloored.
+// TermFromEstimate builds the term from what the variant learned, flagged when
+// assumed.
 type DecodeTerm struct {
 	// Engine is D at no step time, and PerStep its seconds of TTFT per second
 	// of ITL. FromITL is 0 on a fit. On a measured D held at the ITL it was
