@@ -102,7 +102,7 @@ func ttftInputsAt(pods int, f float64) ttftInputs {
 	if u != nil {
 		panic(u)
 	}
-	in := ttftInputs{est: ttftEstimate(), base: base, pods: pods, percent: 90, prompt: 2000, spread: promptSpread{cv: 1},
+	in := ttftInputs{est: ttftEstimate(), base: base, pods: pods, percent: 90, prompt: 2000, spread: whatif.PromptSpread{CV: 1},
 		flow: whatif.FlowControl{State: whatif.FlowControlOff}}
 	if f > 0 {
 		in.est.FByPods = map[int]float64{pods: f}
@@ -458,21 +458,21 @@ func TestTTFT_TheRateIsTheModelsWithADecodeSide(t *testing.T) {
 // Finding T2/T3: a cv above the peak for the percentile, assumed or measured,
 // is flagged, at every percentile.
 func TestTTFT_ASpreadAboveThePeakIsFlagged(t *testing.T) {
-	flagged := func(percent int, spread promptSpread) bool {
+	flagged := func(percent int, spread whatif.PromptSpread) bool {
 		in := ttftInputsAt(1, 0)
 		in.percent, in.spread = percent, spread
 		_, own := ttftFleet(in, 1)
 		return slices.Contains(own, PromptSpreadAbovePeak)
 	}
-	assert.False(t, flagged(90, promptSpread{cv: 2.22}))
-	assert.True(t, flagged(90, promptSpread{cv: 2.23}), "under the old clamp's reach")
-	assert.False(t, flagged(90, promptSpread{cv: 2, assumed: true}), "the assumed 2 is under the peak at p90")
-	assert.True(t, flagged(85, promptSpread{cv: 2, assumed: true}), "and over it at p85")
-	assert.True(t, flagged(70, promptSpread{cv: 0.8}))
-	assert.True(t, flagged(50, promptSpread{cv: 0.1}))
-	assert.True(t, flagged(90, promptSpread{cv: 3, clamped: true}))
-	assert.False(t, flagged(94, promptSpread{cv: 3, clamped: true}), "still rising at the stop")
-	assert.False(t, flagged(99, promptSpread{cv: 3}))
+	assert.False(t, flagged(90, whatif.PromptSpread{CV: 2.22}))
+	assert.True(t, flagged(90, whatif.PromptSpread{CV: 2.23}), "under the old clamp's reach")
+	assert.False(t, flagged(90, whatif.PromptSpread{CV: 2, Assumed: true}), "the assumed 2 is under the peak at p90")
+	assert.True(t, flagged(85, whatif.PromptSpread{CV: 2, Assumed: true}), "and over it at p85")
+	assert.True(t, flagged(70, whatif.PromptSpread{CV: 0.8}))
+	assert.True(t, flagged(50, whatif.PromptSpread{CV: 0.1}))
+	assert.True(t, flagged(90, whatif.PromptSpread{CV: 3, Clamped: true}))
+	assert.False(t, flagged(94, whatif.PromptSpread{CV: 3, Clamped: true}), "still rising at the stop")
+	assert.False(t, flagged(99, whatif.PromptSpread{CV: 3}))
 	got := newTTFTRig(ttftEstimate(), prefillRows("pre", 4000))
 	got.in.Config.(*config.ScalingPolicy).SLO.TTFT.Percentile = 85
 	assert.Contains(t, got.one(t).Flags, string(PromptSpreadAbovePeak))
@@ -484,7 +484,7 @@ func TestTTFT_PromptCVPeakIsTheGammas(t *testing.T) {
 	floor := func(cv, q float64) float64 {
 		in := ttftInputsAt(1, 0)
 		in.base.FixedLatency = 1e-9
-		in.spread.cv = cv
+		in.spread.CV = cv
 		fl, _ := ttftFleet(in, 1)
 		at, ok := whatif.TTFTAt(fl, 0, q).(whatif.TTFT)
 		require.True(t, ok)
@@ -539,85 +539,9 @@ func TestTTFT_VPPromptFlags(t *testing.T) {
 
 func bucket(u, r float64) domain.LengthBucket { return domain.LengthBucket{UpperBound: u, Rate: r} }
 
-// Test 9: the measured spread.
-func TestReadPromptSpread(t *testing.T) {
-	inf := math.Inf(1)
-	withBuckets := func(sets ...[]domain.LengthBucket) []domain.ReplicaMetrics {
-		rows := make([]domain.ReplicaMetrics, len(sets))
-		for i, b := range sets {
-			rows[i] = domain.ReplicaMetrics{Ready: true, ComputedTokensBuckets: b}
-		}
-		return rows
-	}
-	// 2000-token prompts of which half hit 1800 tokens: I_eff 2000 or 200, a
-	// cv of 0.82, where the raw prompts have none.
-	got := readPromptSpread(withBuckets([]domain.LengthBucket{bucket(200, 1), bucket(2000, 2), bucket(inf, 2)}), 1100)
-	assert.False(t, got.assumed)
-	assert.False(t, got.clamped)
-	assert.GreaterOrEqual(t, got.cv, 0.818)
-
-	// A bucketed sample reads at or above the true cv.
-	r := rand.New(rand.NewPCG(1, 2))
-	bounds := []float64{100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000}
-	for range 200 {
-		xs := make([]float64, 0, 400)
-		for range 400 {
-			xs = append(xs, 100+r.Float64()*r.Float64()*40000)
-		}
-		var sum, sq float64
-		b := make([]domain.LengthBucket, 0, len(bounds)+1)
-		for _, x := range xs {
-			sum += x
-			sq += x * x
-		}
-		for _, u := range bounds {
-			n := 0.0
-			for _, x := range xs {
-				if x <= u {
-					n++
-				}
-			}
-			b = append(b, bucket(u, n))
-		}
-		b = append(b, bucket(inf, float64(len(xs))))
-		n := float64(len(xs))
-		mean := sum / n
-		truth := math.Sqrt(sq/n/(mean*mean) - 1)
-		assert.GreaterOrEqual(t, readPromptSpread(withBuckets(b), mean).cv, truth*(1-1e-12))
-	}
-
-	// Pooled over pods: each pod constant, the pool spread.
-	a := []domain.LengthBucket{bucket(1000, 1), bucket(10000, 1), bucket(inf, 1)}
-	b := []domain.LengthBucket{bucket(1000, 0), bucket(10000, 1), bucket(inf, 1)}
-	pooled := readPromptSpread(withBuckets(a, b), 5500)
-	assert.InDelta(t, math.Sqrt((1e6+1e8)/2/(5500.0*5500)-1), pooled.cv, 1e-9)
-
-	// A not-Ready pod's histogram is not read.
-	rows := withBuckets(a, b)
-	rows[1].Ready = false
-	assert.InDelta(t, 0, readPromptSpread(rows, 1000).cv, 1e-9)
-
-	// Mass past the last bound has no upper bound.
-	clamped := readPromptSpread(withBuckets([]domain.LengthBucket{bucket(1000, 9), bucket(inf, 10)}), 800)
-	assert.Equal(t, promptSpread{cv: 3, clamped: true}, clamped)
-	// A cv above 3.
-	over := readPromptSpread(withBuckets([]domain.LengthBucket{bucket(100, 99), bucket(100000, 100), bucket(inf, 100)}), 1000)
-	assert.Equal(t, promptSpread{cv: 3, clamped: true}, over)
-
-	// Constant 3000-token prompts read about 1.3 in the 2000-5000 bucket.
-	coarse := readPromptSpread(withBuckets([]domain.LengthBucket{bucket(2000, 0), bucket(5000, 1), bucket(inf, 1)}), 3000)
-	assert.InDelta(t, 1.33, coarse.cv, 0.01)
-}
-
-// Test 10: with no histogram, cv 2, and the model flags it.
+// Test 10: with no histogram, cv 2, and the model flags it. The reader's own
+// cases are whatif's (prompt_spread_test.go).
 func TestTTFT_TheAssumedSpread(t *testing.T) {
-	assumed := promptSpread{cv: 2, assumed: true}
-	assert.Equal(t, assumed, readPromptSpread(nil, 1000))
-	assert.Equal(t, assumed, readPromptSpread([]domain.ReplicaMetrics{{Ready: true}}, 1000))
-	noTotal := []domain.ReplicaMetrics{{Ready: true, ComputedTokensBuckets: []domain.LengthBucket{bucket(1000, 1)}}}
-	assert.Equal(t, assumed, readPromptSpread(noTotal, 1000), "no +Inf bucket: no total to read a share of")
-	zero := []domain.ReplicaMetrics{{Ready: true, ComputedTokensBuckets: []domain.LengthBucket{bucket(math.Inf(1), 0)}}}
-	assert.Equal(t, assumed, readPromptSpread(zero, 1000), "no request in the window")
 	got := newTTFTRig(ttftEstimate(), prefillRows("pre", 4000)).one(t)
 	assert.Contains(t, got.Flags, string(whatif.AssumedPromptSpread))
 }
@@ -630,6 +554,57 @@ func TestTTFT_AMeasuredSpreadThroughAnalyze(t *testing.T) {
 	got := newTTFTRig(ttftEstimate(), rows).one(t)
 	assert.Contains(t, got.Flags, string(PromptSpreadClamped))
 	assert.NotContains(t, got.Flags, string(whatif.AssumedPromptSpread))
+}
+
+// SwitchTTFTMeasuredSpread off reads the assumed spread from the rows a measured
+// one comes from, as production read before Q1, with the flag and the cv both.
+func TestTTFT_TheMeasuredSpreadSwitch(t *testing.T) {
+	rig := func(on bool) *ttftRig {
+		rows := prefillRows("pre", 4000)
+		rows[0].ComputedTokensBuckets = []domain.LengthBucket{bucket(5000, 2), bucket(math.Inf(1), 2)}
+		r := newTTFTRig(ttftEstimate(), rows)
+		require.NoError(t, r.a.SetSwitchesForReplay(map[string]bool{SwitchTTFTMeasuredSpread: on}))
+		return r
+	}
+	on := rig(true).one(t)
+	assert.NotContains(t, on.Flags, string(whatif.AssumedPromptSpread))
+	off := rig(false).one(t)
+	assert.Contains(t, off.Flags, string(whatif.AssumedPromptSpread))
+	assert.NotEqual(t, on.Predicted, off.Predicted, "the switch must reach the price")
+
+	spread := func(on bool) whatif.PromptSpread {
+		r := rig(on)
+		return r.a.promptSpread(r.in.ReplicaMetrics, 2000)
+	}
+	assert.False(t, spread(true).Assumed)
+	assert.Equal(t, whatif.PromptSpread{CV: whatif.AssumedPromptCV, Assumed: true}, spread(false))
+}
+
+// Q1's scope addition: a decode row's transfer time clears TransferOmitted,
+// and only a real reading does. A row with none, a NaN or a zero leaves it up,
+// and the switch off puts it back on the row that clears it.
+func TestTTFT_TransferOmittedStandsUntilAReading(t *testing.T) {
+	flags := func(on bool, read func(*domain.ReplicaMetrics)) []string {
+		dec := decodeRows("dec", 2)
+		for i := range dec {
+			read(&dec[i])
+		}
+		r := newTTFTRig(ttftEstimate(), append(prefillRows("pre", 4000), dec...))
+		r.in.VariantStates = append(r.in.VariantStates, decState)
+		require.NoError(t, r.a.SetSwitchesForReplay(map[string]bool{SwitchTTFTMeasuredTransfer: on}))
+		return r.one(t).Flags
+	}
+	reads := func(v float64) func(*domain.ReplicaMetrics) {
+		return func(rm *domain.ReplicaMetrics) { rm.AvgKVTransferTime, rm.AvgKVTransferTimeKnown = v, true }
+	}
+	const omitted = string(whatif.TransferOmitted)
+	assert.NotContains(t, flags(true, reads(0.02)), omitted, "a reading clears it")
+	assert.Contains(t, flags(false, reads(0.02)), omitted, "the switch off")
+	assert.Contains(t, flags(true, func(*domain.ReplicaMetrics) {}), omitted, "no series")
+	assert.Contains(t, flags(true, reads(0)), omitted, "a zero is no transfer time")
+	assert.Contains(t, flags(true, reads(math.NaN())), omitted, "NaN")
+	assert.Contains(t, flags(true, func(rm *domain.ReplicaMetrics) { rm.AvgKVTransferTime = 0.02 }), omitted,
+		"a value the presence bit denies")
 }
 
 // Test 11, narrowed to what holds. From cv 0.3 up to the peak for the
@@ -663,7 +638,7 @@ func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
 		}
 		var floor float64
 		for _, cv := range cvs {
-			in.spread.cv = cv
+			in.spread.CV = cv
 			fl, _ := ttftFleet(in, in.pods)
 			at, ok := whatif.TTFTAt(fl, 0, q).(whatif.TTFT)
 			require.True(t, ok)
@@ -677,7 +652,7 @@ func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
 		target := whatif.TTFTTarget{Seconds: floor * margin, Percentile: q}
 		prevT, prevR := 0.0, math.Inf(1)
 		for _, cv := range cvs {
-			in.spread.cv = cv
+			in.spread.CV = cv
 			fl, _ := ttftFleet(in, in.pods)
 			at, ok := whatif.TTFTAt(fl, rate, q).(whatif.TTFT)
 			require.True(t, ok)
@@ -703,7 +678,7 @@ func TestTTFT_TheP90FloorPeaksBelowCV3(t *testing.T) {
 	floor := func(cv, q float64) float64 {
 		in := ttftInputsAt(1, 0)
 		in.base.FixedLatency = 1e-6 // the prompt's part alone
-		in.spread.cv = cv
+		in.spread.CV = cv
 		fl, _ := ttftFleet(in, 1)
 		at, ok := whatif.TTFTAt(fl, 0, q).(whatif.TTFT)
 		require.True(t, ok)
@@ -718,7 +693,7 @@ func TestTTFT_TheP90FloorPeaksBelowCV3(t *testing.T) {
 // What the property above leaves out, pinned as false.
 func TestTTFT_TheCVClaimsThatDoNotHold(t *testing.T) {
 	at := func(in ttftInputs, cv, rate, q float64) float64 {
-		in.spread.cv = cv
+		in.spread.CV = cv
 		fl, _ := ttftFleet(in, in.pods)
 		r, ok := whatif.TTFTAt(fl, rate, q).(whatif.TTFT)
 		require.True(t, ok)
@@ -740,13 +715,13 @@ func TestTTFT_TheCVClaimsThatDoNotHold(t *testing.T) {
 		peak := whatif.PromptCVPeak(float64(percent) / 100)
 		in := ttftInputsAt(1, 0)
 		rateAt := func(cv float64, target whatif.TTFTTarget) float64 {
-			in.spread.cv = cv
+			in.spread.CV = cv
 			fl, _ := ttftFleet(in, 1)
 			a, ok := whatif.RateForTTFT(fl, target).(whatif.Answer)
 			require.True(t, ok)
 			return a.Value
 		}
-		in.spread.cv = peak
+		in.spread.CV = peak
 		fl, _ := ttftFleet(in, 1)
 		top, ok := whatif.TTFTAt(fl, 0, q).(whatif.TTFT)
 		require.True(t, ok)
@@ -1159,7 +1134,7 @@ func TestTTFT_TheReasonSet(t *testing.T) {
 		in.flow = whatif.FlowControl{State: whatif.FlowControlOn, QueueThreshold: 5, KVThreshold: 0.8}
 		in.decode.ReplicaCap, in.decode.CapacityTokens, in.decode.KVPerRequest = 1<<40, 1e15, 1
 	}))
-	assert.Equal(t, constants.SLOTTFTReasonInputInvalid, price(func(in *ttftInputs) { in.spread.cv = -1 }))
+	assert.Equal(t, constants.SLOTTFTReasonInputInvalid, price(func(in *ttftInputs) { in.spread.CV = -1 }))
 	assert.Equal(t, constants.SLOTTFTReasonDecodeBound, price(func(in *ttftInputs) {
 		in.decode.Replicas, in.decode.ReplicaCap = 1, 4
 	}))
@@ -1345,7 +1320,7 @@ func TestTTFT_ATargetBelowTheFloorIsUnmetAtAnyRate(t *testing.T) {
 	// With the target exactly at the floor the prediction does not miss it,
 	// and the floor still does: no prompt spread, no load, so the two are equal.
 	in := ttftInputsAt(1, 0)
-	in.spread.cv = 0
+	in.spread.CV = 0
 	fl, _ := ttftFleet(in, 1)
 	at, ok := whatif.TTFTAt(fl, 0, 0.9).(whatif.TTFT)
 	require.True(t, ok)

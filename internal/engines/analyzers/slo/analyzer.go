@@ -139,6 +139,10 @@ type Analyzer struct {
 	// ttftPrice is SwitchTTFTPrice (ttft.go): on from the constructor; a
 	// replay turns it off (SetSwitchesForReplay).
 	ttftPrice bool
+	// ttftMeasuredSpread is SwitchTTFTMeasuredSpread and
+	// ttftMeasuredTransfer SwitchTTFTMeasuredTransfer (ttft.go): on from the
+	// constructor; a replay turns them off (SetSwitchesForReplay).
+	ttftMeasuredSpread, ttftMeasuredTransfer bool
 	// imbalance is each prefill variant's raw shares and decodeTTFT each
 	// decode variant's measured TTFT, keyed namespace|model|variant, for the
 	// TTFT pricing (ttft_fleet.go). Under mu.
@@ -200,9 +204,12 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		itlForgetReachesLine: true,
 		itlOneSidedAtCap:     true,
 
-		ttftPrice:  true,
-		imbalance:  make(map[string]*imbalanceWindow),
-		decodeTTFT: make(map[string]*decodeTTFTWindow),
+		ttftPrice: true,
+
+		ttftMeasuredSpread:   true,
+		ttftMeasuredTransfer: true,
+		imbalance:            make(map[string]*imbalanceWindow),
+		decodeTTFT:           make(map[string]*decodeTTFTWindow),
 	}
 }
 

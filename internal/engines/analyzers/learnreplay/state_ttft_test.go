@@ -1,7 +1,9 @@
 package learnreplay
 
 import (
+	"bytes"
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -26,6 +28,59 @@ func goldenState(t *testing.T, fixture string, cycle int) *State {
 	st, err := StateAt(context.Background(), raw, Options{}, StateQuery{Cycle: cycle})
 	require.NoError(t, err)
 	return st
+}
+
+// The histogram sums over the cycles promptOf reads, so a cycle with no traffic
+// adds nothing, and a recording with no histogram has none, which the CLI reads
+// as an assumed spread and not as cv 0.
+func TestBucketsOf(t *testing.T) {
+	inf := math.Inf(1)
+	got := bucketsOf([]promptSample{
+		{buckets: map[float64]float64{1000: 1, inf: 2}},
+		{buckets: nil},
+		{buckets: map[float64]float64{1000: 2, inf: 2}},
+	})
+	assert.Equal(t, map[float64]float64{1000: 3, inf: 4}, got)
+	assert.Empty(t, bucketsOf(nil))
+	assert.True(t, whatif.ReadPromptSpread(bucketsOf(nil), 1000).Assumed)
+}
+
+// A recording made since Q1 reaches the state with a spread, and one made before
+// reads as none. No golden has the histogram, so the prompt histogram of one,
+// under the field's name, stands in for it.
+func TestStateAt_ReadsTheHistogramFromTheRows(t *testing.T) {
+	gz, err := os.ReadFile(filepath.Join(goldenDir, ttftOpenShortFixture, RecordingName))
+	require.NoError(t, err)
+	raw, err := gunzip(gz)
+	require.NoError(t, err)
+	carrying := bytes.ReplaceAll(raw, []byte("PromptTokensBuckets"), []byte("ComputedTokensBuckets"))
+	require.NotEqual(t, raw, carrying, "the golden holds no prompt histogram to stand in")
+
+	st, err := StateAt(context.Background(), carrying, Options{}, StateQuery{Cycle: 0})
+	require.NoError(t, err)
+	require.Len(t, st.Prefill, 1)
+	got := whatif.ReadPromptSpread(st.Prefill[0].ComputedBuckets, st.Prefill[0].PromptTokens)
+	assert.False(t, got.Assumed)
+
+	before := goldenState(t, ttftOpenShortFixture, 0)
+	assert.Empty(t, before.Prefill[0].ComputedBuckets)
+}
+
+// A row's histogram reaches the state with its cycle's rates, Serving rows
+// only, beside the prompt it is the spread of.
+func TestTTFTSamples_CarryTheHistogram(t *testing.T) {
+	inf := math.Inf(1)
+	row := func(ready bool) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{VariantName: "pre", Ready: ready, RequestRate: 1, RequestRateKnown: true,
+			PrefillComputedTokenRate: 2000, PrefillComputedTokenRateKnown: true,
+			ComputedTokensBuckets: []domain.LengthBucket{{UpperBound: 5000, Rate: 1}, {UpperBound: inf, Rate: 1}}}
+	}
+	in := domain.AnalyzerInput{ReplicaMetrics: []domain.ReplicaMetrics{row(true), row(true), row(false)},
+		VariantStates: []domain.VariantReplicaState{{VariantName: "pre", Role: domain.RolePrefill}}}
+	s := newTTFTSamples()
+	s.note(in, 1)
+	s.note(in, 2)
+	assert.Equal(t, map[float64]float64{5000: 4, inf: 4}, bucketsOf(s.prompts["pre"]))
 }
 
 // The figures P2's comparison reads from each run's analyzer log, read here

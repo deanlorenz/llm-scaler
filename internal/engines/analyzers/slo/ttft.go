@@ -41,6 +41,24 @@ import (
 // and the snapshot's TTFT stays nil.
 const SwitchTTFTPrice = "slo-ttft-price"
 
+// SwitchTTFTMeasuredSpread is the replay switch for the measured prompt
+// spread: on, the pricing reads cv from the rows' computed-token histogram
+// where they carry one (whatif.ReadPromptSpread). Off, cv is the assumed
+// whatif.AssumedPromptCV, flagged, as production read before the collector
+// issued the histogram. It moves no golden: no committed recording carries
+// the histogram. A recording made since replays both ways, so what Q1 moved
+// on it can be read.
+const SwitchTTFTMeasuredSpread = "slo-ttft-measured-spread"
+
+// SwitchTTFTMeasuredTransfer is the replay switch for the KV transfer term:
+// on, the pricing reads AvgKVTransferTime from the decode rows that carry one
+// (transferPerToken). Off, it reads none and raises whatif.TransferOmitted, as
+// production read before the collector issued the query on every cycle. The
+// recordings have always carried the field, so a replay read it already, and
+// off is the way to read what production published until Q1. It moves no
+// golden.
+const SwitchTTFTMeasuredTransfer = "slo-ttft-measured-transfer"
+
 const (
 	// decodeBoundRatio is how far the prefill side's own rate must exceed
 	// the full rate for decode to count as setting it: any decode wait lowers
@@ -314,9 +332,9 @@ func (a *Analyzer) priceTTFTVariants(logger logr.Logger, input domain.AnalyzerIn
 		prompt, _ := prefill.MeanEffectivePrompt(rows, a.sglang(input, []string{v}))
 		in := ttftInputs{
 			est: est, estimateAt: estimateAt, pods: pods, otherPods: readyPrefill - pods, percent: cfg.SLO.TTFTPercentile(),
-			prompt: prompt, spread: readPromptSpread(rows, prompt),
+			prompt: prompt, spread: a.promptSpread(rows, prompt),
 			shares:   a.noteShare(ttftWindowKey(input.Namespace, input.ModelID, v), pods, share, shareOK, now),
-			transfer: transferPerToken(decodeRows, prompt), decode: decode, decodeVariant: decodeVariant,
+			transfer: a.transferPerToken(decodeRows, prompt), decode: decode, decodeVariant: decodeVariant,
 			decodeTTFT: measured, flow: flow, mismatch: mismatch,
 		}
 		p := gateOrPrice(&in, fresh, arrival, target)
@@ -328,6 +346,24 @@ func (a *Analyzer) priceTTFTVariants(logger logr.Logger, input domain.AnalyzerIn
 		logTTFT(logger, input, v, in, p, arrival, target)
 	}
 	return out
+}
+
+// promptSpread is the variant's prompt spread: read from its rows' pooled
+// computed-token histogram, or assumed with SwitchTTFTMeasuredSpread off.
+func (a *Analyzer) promptSpread(rows []domain.ReplicaMetrics, mean float64) whatif.PromptSpread {
+	if !a.ttftMeasuredSpread {
+		rows = nil
+	}
+	return whatif.ReadPromptSpread(whatif.PoolComputedBuckets(nil, rows), mean)
+}
+
+// transferPerToken is transferPerToken of the rows, or 0 with
+// SwitchTTFTMeasuredTransfer off.
+func (a *Analyzer) transferPerToken(rows []domain.ReplicaMetrics, prompt float64) float64 {
+	if !a.ttftMeasuredTransfer {
+		return 0
+	}
+	return transferPerToken(rows, prompt)
 }
 
 // currentRefusal is the model's refusal of the current rate because the rate
@@ -440,7 +476,7 @@ func logTTFT(logger logr.Logger, input domain.AnalyzerInput, variant string, in 
 	}
 	_, _, fSource := in.imbalance(in.pods)
 	cvSource := cvSourceMeasured
-	if in.spread.assumed {
+	if in.spread.Assumed {
 		cvSource = cvSourceAssumed
 	}
 	log.Info("slo-ttft-variant",
@@ -456,7 +492,7 @@ func logTTFT(logger logr.Logger, input domain.AnalyzerInput, variant string, in 
 		"vp", in.est.VP, "vpSource", vpSource(in.est), "vpPromptTokens", in.est.VPPromptTokens,
 		"estimateAt", in.estimateAt, "a", in.est.A, "f", p.f, "fSource", fSource, "fRaw", in.shares.largest,
 		"fRawLeast", in.shares.least, "fRawWindowFull", in.shares.full, "otherPrefillPods", in.otherPods,
-		"prompt", in.prompt, "cv", in.spread.cv, "cvSource", cvSource, "transferPerToken", in.transfer,
+		"prompt", in.prompt, "cv", in.spread.CV, "cvSource", cvSource, "transferPerToken", in.transfer,
 		"decodeVariant", in.decodeVariant, "decodeTTFT", in.decodeTTFT.Seconds,
 		"decodeTTFTPrompt", in.decodeTTFT.PromptTokens, "flowControl", flowControlName(in.flow.State),
 		// Both calls' refusals.

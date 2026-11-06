@@ -36,6 +36,11 @@ type PrefillState struct {
 	// PromptFromCycle, PromptToCycle and PromptCycles say which cycles.
 	PromptTokens                                 float64
 	PromptFromCycle, PromptToCycle, PromptCycles int
+	// ComputedBuckets is the computed-token histogram of the same cycles,
+	// each bound's rate summed over the pods and the cycles, the spread of
+	// that prompt: what whatif.ReadPromptSpread reads. Nil or empty with
+	// none, as a recording made before the collector read it has none.
+	ComputedBuckets map[float64]float64
 	// RawShare is f_raw, the busiest pod's share of the computed-token rate
 	// over the mean share, not de-biased: the largest over the latest
 	// whatif.TTFTWindowCycles cycles that read one at the cycle's pod count. A pod with
@@ -63,10 +68,12 @@ type DecodeTTFTState struct {
 }
 
 // promptSample is one cycle's computed tokens and requests of a prefill
-// variant, per second.
+// variant, per second, and its pooled computed-token histogram (nil with
+// none).
 type promptSample struct {
 	cycle             int
 	computed, request float64
+	buckets           map[float64]float64
 }
 
 // shareWindow is a prefill variant's raw shares at its current pod count. A
@@ -142,6 +149,7 @@ type prefillRows struct {
 	pods                  int
 	sum, busiest          float64
 	computedRate, reqRate float64
+	rows                  []domain.ReplicaMetrics
 }
 
 // positive reports a reading above 0 that is finite: a zero is no reading of
@@ -168,6 +176,7 @@ func (t *ttftSamples) note(in domain.AnalyzerInput, cycle int) {
 		v := rm.VariantName
 		if p := pre[v]; p != nil {
 			p.pods++
+			p.rows = append(p.rows, rm)
 			if !rm.PrefillComputedTokenRateKnown || !positive(rm.PrefillComputedTokenRate) {
 				continue
 			}
@@ -208,7 +217,8 @@ func (t *ttftSamples) note(in domain.AnalyzerInput, cycle int) {
 		if p.computedRate > 0 {
 			allComputed += p.computedRate
 			allRequests += p.reqRate
-			t.prompts[v] = keepLast(t.prompts[v], promptSample{cycle: cycle, computed: p.computedRate, request: p.reqRate}, shapeCycles)
+			t.prompts[v] = keepLast(t.prompts[v], promptSample{cycle: cycle, computed: p.computedRate, request: p.reqRate,
+				buckets: whatif.PoolComputedBuckets(nil, p.rows)}, shapeCycles)
 		}
 	}
 	for v, d := range decode {
@@ -251,6 +261,19 @@ func promptOf(samples []promptSample) (tokens float64, from, to, cycles int) {
 	return computed / requests, samples[0].cycle, samples[len(samples)-1].cycle, len(samples)
 }
 
+// bucketsOf is a prefill variant's computed-token histogram over its samples:
+// summed, as promptOf sums their rates, so the histogram and the prompt cover
+// the same requests.
+func bucketsOf(samples []promptSample) map[float64]float64 {
+	pooled := map[float64]float64{}
+	for _, s := range samples {
+		for bound, rate := range s.buckets {
+			pooled[bound] += rate
+		}
+	}
+	return pooled
+}
+
 // fillTTFT sets what the state says of a TTFT question, from the samples
 // through the cycle in and from P1's estimates.
 func (r *replayer) fillTTFT(st *State, in domain.AnalyzerInput, t *ttftSamples) {
@@ -270,6 +293,7 @@ func (r *replayer) fillTTFT(st *State, in domain.AnalyzerInput, t *ttftSamples) 
 			ps.RawShare, ps.RawShareLeast, ps.RawShareFull = w.read()
 		}
 		ps.PromptTokens, ps.PromptFromCycle, ps.PromptToCycle, ps.PromptCycles = promptOf(t.prompts[v])
+		ps.ComputedBuckets = bucketsOf(t.prompts[v])
 		ps.Estimate, ps.EstimateRead = estimateAt(r.sat.PrefillEstimate, in.Namespace, in.ModelID, v, st.At)
 		st.Prefill = append(st.Prefill, ps)
 	}

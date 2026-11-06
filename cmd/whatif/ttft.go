@@ -439,9 +439,19 @@ func (f *answerFlags) prefillShape(pf *pricedFleet, ps *learnreplay.PrefillState
 	}
 	pf.in.PromptTokens = p.PromptTokens
 
-	p.PromptCV, p.PromptCVAssumed = whatif.AssumedPromptCV, true
-	pf.in.PromptCV, pf.in.PromptCVSource = whatif.AssumedPromptCV, shapeAssumed
-	pf.assume("prompt cv %s (no computed-prompt histogram)", num(whatif.AssumedPromptCV))
+	// Read at the measured prompt, whatever the prompt asked: a cv is a figure
+	// of the traffic the histogram counted.
+	spread := whatif.ReadPromptSpread(ps.ComputedBuckets, ps.PromptTokens)
+	p.PromptCV, p.PromptCVAssumed = spread.CV, spread.Assumed
+	pf.in.PromptCV, pf.in.PromptCVSource = spread.CV, shapeMeasured
+	switch {
+	case spread.Assumed:
+		pf.in.PromptCVSource = shapeAssumed
+		pf.assume("prompt cv %s (no computed-prompt histogram)", num(spread.CV))
+	case spread.Clamped:
+		pf.in.PromptCVSource = shapeClamped
+		pf.assume("prompt cv %s (the histogram reads past its last bound, or above it)", num(spread.CV))
+	}
 
 	if pv != nil && pv.state.DecodeTTFT.TransferSeconds > 0 && ps.PromptTokens > 0 {
 		p.TransferSecondsPerToken = pv.state.DecodeTTFT.TransferSeconds / ps.PromptTokens
