@@ -83,6 +83,7 @@
             "flags": [
               "LineNearGate",
               "AssumedShape",
+              "OutputSpreadUnread",
               "ExtrapolatedFill"
             ]
           }
@@ -107,7 +108,8 @@
             },
             "flags": [
               "LineNearGate",
-              "AssumedShape"
+              "AssumedShape",
+              "OutputSpreadUnread"
             ]
           }
         },
@@ -129,7 +131,8 @@
             },
             "flags": [
               "LineNearGate",
-              "AssumedShape"
+              "AssumedShape",
+              "OutputSpreadUnread"
             ]
           }
         }
@@ -218,7 +221,8 @@
               "RouterHopAssumed",
               "FlowControlInferredOff",
               "AssumedPoissonArrivals",
-              "AssumedShape"
+              "AssumedShape",
+              "OutputSpreadUnread"
             ],
             "parts": {
               "independent": 0.3434393200155779,

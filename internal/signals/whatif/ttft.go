@@ -125,9 +125,9 @@ const (
 // runs once per pod, as the admission chain runs once per slot.
 const maxPrefillReplicas = maxSlots
 
-// maxPromptCV bounds the prompt's coefficient of variation: past 10 the
+// MaxPromptCV bounds the prompt's coefficient of variation: past 10 the
 // gamma's shape is below 0.01 and the model's exponential tail says nothing.
-const maxPromptCV = 10
+const MaxPromptCV = 10
 
 // minPromptCV is the least prompt spread priced as a gamma; below it the
 // prompt is priced as constant. The gamma's shape 1/cv^2 is then above 1e8,
@@ -350,10 +350,10 @@ func (p Prefill) check() (prefillPlan, *Unanswerable) {
 		u = refuse(InvalidInput, fmt.Sprintf("f %g, want 1 <= f <= %d (the pods)", p.Imbalance, p.Replicas))
 	case !Finite(p.PromptTokens) || !(p.PromptTokens > 0):
 		u = refuse(NoTraffic, fmt.Sprintf("prompt %g tokens", p.PromptTokens))
-	case !(p.PromptCV >= 0 && p.PromptCV <= maxPromptCV):
+	case !(p.PromptCV >= 0 && p.PromptCV <= MaxPromptCV):
 		// The spread is assumed or read from a histogram; a value outside
 		// [0, 10] is the caller's mistake, not the traffic's.
-		u = refuse(InvalidInput, fmt.Sprintf("prompt cv %g, want 0 <= cv <= %d", p.PromptCV, maxPromptCV))
+		u = refuse(InvalidInput, fmt.Sprintf("prompt cv %g, want 0 <= cv <= %d", p.PromptCV, MaxPromptCV))
 	case !Finite(p.ArrivalCV2) || p.ArrivalCV2 < 0:
 		u = refuse(InvalidInput, fmt.Sprintf("Ca^2 %g, want a finite value of at least 0 (0 is Poisson)", p.ArrivalCV2))
 	case !Finite(p.TransferSecondsPerToken) || p.TransferSecondsPerToken < 0:

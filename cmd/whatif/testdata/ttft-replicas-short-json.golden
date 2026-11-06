@@ -39,12 +39,13 @@
           "hi": 0.8
         },
         "capacityTokens": 1162240,
-        "kvPerRequest": 10777.874399520615,
+        "kvPerRequest": 10777.874445030275,
         "shape": {
           "inputTokens": 10770.115567753704,
           "inputSource": "measured",
           "outputTokens": 15.517663533820823,
           "outputSource": "measured",
+          "outputDispersion": 1.0000058655298978,
           "prefixHitRate": 0,
           "fromCycle": 83,
           "toCycle": 102,

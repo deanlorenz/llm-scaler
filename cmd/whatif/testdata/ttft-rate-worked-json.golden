@@ -86,7 +86,8 @@
             },
             "flags": [
               "LineNearGate",
-              "AssumedShape"
+              "AssumedShape",
+              "OutputSpreadUnread"
             ]
           }
         }
@@ -157,6 +158,7 @@
               "FlowControlInferredOff",
               "BelowFittedBand",
               "AssumedShape",
+              "OutputSpreadUnread",
               "AssumedPoissonArrivals"
             ]
           }
@@ -191,6 +193,7 @@
               "FlowControlInferredOff",
               "BelowFittedBand",
               "AssumedShape",
+              "OutputSpreadUnread",
               "AssumedPoissonArrivals",
               "LineNearGate"
             ]

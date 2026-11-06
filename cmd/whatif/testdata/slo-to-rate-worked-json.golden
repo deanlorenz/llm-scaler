@@ -86,7 +86,8 @@
             },
             "flags": [
               "LineNearGate",
-              "AssumedShape"
+              "AssumedShape",
+              "OutputSpreadUnread"
             ]
           }
         }

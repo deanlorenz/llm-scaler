@@ -123,7 +123,11 @@ type wireTTFT struct {
 	PromptToCycle       int      `json:"promptToCycle,omitempty"`
 	PromptCV            float64  `json:"promptCV,omitempty"`
 	PromptCVSource      string   `json:"promptCVSource,omitempty"`
-	ArrivalsSource      string   `json:"arrivalsSource,omitempty"`
+	// PromptCVRead is the histogram's figure an --assume-prompt-cv stands in
+	// place of, and ArrivalCV2 Ca^2 from --arrival-cv2: absent with neither.
+	PromptCVRead   *float64 `json:"promptCVRead,omitempty"`
+	ArrivalCV2     float64  `json:"arrivalCV2,omitempty"`
+	ArrivalsSource string   `json:"arrivalsSource,omitempty"`
 	// TransferSecondsPerToken is T_xfer per prompt token, and TransferSource
 	// measured, omitted, or "decode engine" where that TTFT holds it.
 	TransferSecondsPerToken float64 `json:"transferSecondsPerToken,omitempty"`
@@ -177,14 +181,18 @@ type wireInputs struct {
 // measured (the request-rate-weighted mean of the variant's last cycles with
 // traffic, FromCycle to ToCycle) or assumed by a flag.
 type wireShape struct {
-	InputTokens   float64 `json:"inputTokens"`
-	InputSource   string  `json:"inputSource"`
-	OutputTokens  float64 `json:"outputTokens"`
-	OutputSource  string  `json:"outputSource"`
-	PrefixHitRate float64 `json:"prefixHitRate"`
-	FromCycle     int     `json:"fromCycle"`
-	ToCycle       int     `json:"toCycle"`
-	Cycles        int     `json:"cycles"`
+	InputTokens  float64 `json:"inputTokens"`
+	InputSource  string  `json:"inputSource"`
+	OutputTokens float64 `json:"outputTokens"`
+	OutputSource string  `json:"outputSource"`
+	// OutputDispersion is D = E[O^2]/E[O]^2 as read, the KV per request priced
+	// at ILeff + D*OL/2; absent with no output-length histogram, where it is
+	// flagged OutputSpreadUnread and priced at ILeff + OL/2.
+	OutputDispersion float64 `json:"outputDispersion,omitempty"`
+	PrefixHitRate    float64 `json:"prefixHitRate"`
+	FromCycle        int     `json:"fromCycle"`
+	ToCycle          int     `json:"toCycle"`
+	Cycles           int     `json:"cycles"`
 }
 
 // The sources a shape's length comes from.
@@ -443,7 +451,8 @@ func inputsOf(f *answerFlags, pv pricedVariant) *wireInputs {
 		CapacityTokens: pv.decode.CapacityTokens, KVPerRequest: pv.decode.KVPerRequest,
 		Shape: wireShape{InputTokens: pv.shape.AvgInputTokens, InputSource: shapeMeasured,
 			OutputTokens: pv.shape.AvgOutputTokens, OutputSource: shapeMeasured, PrefixHitRate: pv.shape.PrefixHitRate,
-			FromCycle: pv.state.Shape.FromCycle, ToCycle: pv.state.Shape.ToCycle, Cycles: pv.state.Shape.Cycles},
+			FromCycle: pv.state.Shape.FromCycle, ToCycle: pv.state.Shape.ToCycle, Cycles: pv.state.Shape.Cycles,
+			OutputDispersion: pv.state.Shape.OutputDispersion},
 		BatchCap: pv.perRank, BatchCapSource: pv.state.BatchCapSource,
 		Ranks: max(pv.state.Ranks, 1), Replicas: pv.decode.Replicas, ReplicasFrom: "recording",
 	}

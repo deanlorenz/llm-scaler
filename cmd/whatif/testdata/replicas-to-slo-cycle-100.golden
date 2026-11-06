@@ -2,5 +2,5 @@ knee            31.83 r/s   decode, batch cap binds at fill 0.612
 operating rate  27.05 r/s   0.85 x knee (scaleUpThreshold)
 mean TPOT       3.24 ms     [3.20 .. 3.31]   line pinned-B, observed fill up to 0.57
 shape           IL 1003 OL 500 (measured, cycles 81-100)
-flags: ExtrapolatedFill (fill 0.612, 0.046 above the readings)
+flags: OutputSpreadUnread; ExtrapolatedFill (fill 0.612, 0.046 above the readings)
 estimate from 20 readings (cycles 81-100) of a 226-cycle recording read to cycle 100, not a guarantee; see basis (-o json)

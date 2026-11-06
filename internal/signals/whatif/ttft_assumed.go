@@ -15,7 +15,7 @@ const (
 	// PromptCVStop is the most spread a caller passes, and where
 	// promptCVPeaks ends. It is a stop, not the value that prices the longest
 	// TTFT: at no load that is the peak, 2.22 at p90, and past 3 the p90 falls
-	// fast, to 1.96 times the mean by cv 4. It is not maxPromptCV, the model's
+	// fast, to 1.96 times the mean by cv 4. It is not MaxPromptCV, the model's
 	// own bound, past which the gamma says nothing and the call is refused.
 	PromptCVStop = 3.0
 	// ImbalanceFloor is the least f assumed on more than one pod. Not

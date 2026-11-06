@@ -1,0 +1,10 @@
+role     est. rate at SLO   bound by                                 basis
+decode   11.32 r/s          operating-point cap (TPOT alone: 12.03)  ols [11.2 .. 11.4]
+         shape IL 1000 OL 1000 (assumed)
+prefill  9.71 r/s           TTFT p95, decode admission               UNVALIDATED; V_P ASSUMED
+         inputs V_P 30000 ASSUMED; a 11.04 ms learned; f 1 (one pod); N_p 1 (--prefill); prompt 1000 tokens (assumed); decode by its line, term omitted, hop assumed
+         assumed V_P 30000 tok/s (--assume-vp); prompt 1000 tokens (--assume-input-tokens); prompt cv 1 (--assume-prompt-cv); decode term omitted (no fit, TooFewDecodeMinutes, and no quiet decode row): T_xfer + ITL stands for it; router hop 20 ms (no fit: NoRouterMean); --assume-router-hop supplies one; flow control off (no queue series); arrivals Ca^2 1.5 (--arrival-cv2); Poisson arrivals at decode admission (--arrival-cv2 does not reach it)
+fleet    9.71 r/s           TTFT p95, end to end                     UNVALIDATED; V_P ASSUMED
+flags: LineNearGate (22/200); AssumedShape (IL 1000, OL 1000); OutputSpreadUnread; UnvalidatedTTFT; AssumedVP; AssumedPromptSpread; TransferOmitted; DecodeTermOmitted; RouterHopAssumed; FlowControlInferredOff; HeldByDecodeAdmission; AssumedPoissonArrivals; AssumedArrivalCV2
+estimate from 15 readings (cycles 197-220) of a 226-cycle recording, not a guarantee; see basis (-o json)
+TTFT is UNVALIDATED until a fresh frozen run passes, and is not a bound: at the sent spread (cv 0.06) it read up to 34% under the router's percentile on the P2 recordings. V_P ASSUMED.

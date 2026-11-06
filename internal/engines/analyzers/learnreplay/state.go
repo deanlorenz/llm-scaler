@@ -16,6 +16,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
@@ -137,6 +138,11 @@ type VariantState struct {
 type MeasuredShape struct {
 	// InputTokens, OutputTokens and PrefixHitRate are the means.
 	InputTokens, OutputTokens, PrefixHitRate float64
+	// OutputDispersion is the spread of the output lengths, D =
+	// E[O^2]/E[O]^2, at least 1, over the cycles whose every row read the
+	// bound on E[O^2] (domain.SquaredMeanLowerBound); 0 with no such cycle:
+	// no reading, which is not D = 1.
+	OutputDispersion float64
 	// FromCycle and ToCycle are the first and the last cycle they were
 	// taken over, and Cycles how many of the cycles between had traffic;
 	// all 0 when no cycle up to the one asked had any.
@@ -148,9 +154,11 @@ type MeasuredShape struct {
 const shapeCycles = whatif.PromptWindowCycles
 
 // shapeSample is one cycle's shape of a variant, and its request rate.
+// squared is the rows' mean bound on E[O^2], 0 unless every row read one, so
+// that it and ol are one reading of the same rows.
 type shapeSample struct {
-	cycle            int
-	il, ol, hit, req float64
+	cycle                     int
+	il, ol, squared, hit, req float64
 }
 
 // StateAt replays recording through the analyzers (in Normal mode, whatever
@@ -309,7 +317,7 @@ func cyclesSpanned(readings []itl.Observation, cycleAt map[time.Time]int) (from,
 // shapeCycles cycles with traffic: a row serving requests, or generating
 // tokens, at the cycle.
 func noteShapes(shapes map[string][]shapeSample, rows []domain.ReplicaMetrics, cycle int) {
-	type acc struct{ n, il, ol, hit, req float64 }
+	type acc struct{ n, il, ol, squared, read, hit, req float64 }
 	byVariant := map[string]*acc{}
 	traffic := map[string]bool{}
 	for _, rm := range rows {
@@ -326,6 +334,10 @@ func noteShapes(shapes map[string][]shapeSample, rows []domain.ReplicaMetrics, c
 			a.il += rm.AvgInputTokens
 			a.ol += rm.AvgOutputTokens
 			a.hit += rm.PrefixCacheHitRate
+			if rm.AvgOutputTokensSquaredKnown && rm.AvgOutputTokensSquared > 0 {
+				a.squared += rm.AvgOutputTokensSquared
+				a.read++
+			}
 		}
 		if rm.RequestRateKnown && rm.RequestRate > 0 {
 			a.req += rm.RequestRate
@@ -336,7 +348,11 @@ func noteShapes(shapes map[string][]shapeSample, rows []domain.ReplicaMetrics, c
 			continue
 		}
 		s := shapes[v]
-		s = append(s, shapeSample{cycle: cycle, il: a.il / a.n, ol: a.ol / a.n, hit: a.hit / a.n, req: a.req})
+		sample := shapeSample{cycle: cycle, il: a.il / a.n, ol: a.ol / a.n, hit: a.hit / a.n, req: a.req}
+		if a.read == a.n {
+			sample.squared = a.squared / a.n
+		}
+		s = append(s, sample)
 		if len(s) > shapeCycles {
 			s = s[len(s)-shapeCycles:]
 		}
@@ -351,6 +367,14 @@ func noteShapes(shapes map[string][]shapeSample, rows []domain.ReplicaMetrics, c
 // as one at load, and taking cycles with traffic only means a recording
 // that ends idle is priced at the traffic it last served rather than at
 // none.
+//
+// The spread is taken over the cycles that read it, with their own weights
+// and their own mean, so a cycle with a row that read none (a rollout) costs
+// the window that cycle and not its reading. Across a change of shape the
+// window holds both, and their difference reads as spread: D reads high, and
+// the question asks for more replicas, the side the planner may err on.
+// Saturation prices D 1 there (resolvePricing); this mean is a mix of the two
+// shapes too.
 func shapeOf(samples []shapeSample) MeasuredShape {
 	if len(samples) == 0 {
 		return MeasuredShape{}
@@ -360,6 +384,7 @@ func shapeOf(samples []shapeSample) MeasuredShape {
 		total += s.req
 	}
 	var out MeasuredShape
+	var readWeight, readMean, readSquared float64
 	for _, s := range samples {
 		w := 1 / float64(len(samples))
 		if total > 0 {
@@ -368,6 +393,14 @@ func shapeOf(samples []shapeSample) MeasuredShape {
 		out.InputTokens += w * s.il
 		out.OutputTokens += w * s.ol
 		out.PrefixHitRate += w * s.hit
+		if s.squared > 0 {
+			readWeight += w
+			readMean += w * s.ol
+			readSquared += w * s.squared
+		}
+	}
+	if readWeight > 0 {
+		out.OutputDispersion = shape.Dispersion(readMean/readWeight, readSquared/readWeight)
 	}
 	out.FromCycle, out.ToCycle, out.Cycles = samples[0].cycle, samples[len(samples)-1].cycle, len(samples)
 	return out

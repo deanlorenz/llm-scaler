@@ -58,6 +58,8 @@ func TestGolden(t *testing.T) {
 			"--tpot", "4ms", "-o", "json"}, workedShape), 0},
 		{"replicas-to-slo-recorded-shape", []string{"replicas-to-slo", "--recording", olsSweep}, 0},
 		{"replicas-to-slo-cycle-100", []string{"replicas-to-slo", "--recording", olsSweep, "--cycle", "100"}, 0},
+		{"replicas-to-slo-output-spread", []string{"replicas-to-slo", "--recording", outputSpreadRun}, 0},
+		{"replicas-to-slo-output-spread-json", []string{"replicas-to-slo", "--recording", outputSpreadRun, "-o", "json"}, 0},
 		{"replicas-to-slo-no-histogram", slices.Concat([]string{"replicas-to-slo", "--recording", olsSweep,
 			"--tpot-percentile", "90"}, workedShape), 3},
 		{"slo-to-rate-below-floor", slices.Concat([]string{"slo-to-rate", "--recording", olsSweep,

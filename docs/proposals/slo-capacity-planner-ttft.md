@@ -398,7 +398,7 @@ that is itself wrong (the exponential tail, Poisson arrivals, an omitted
 | Wait tail at prompt cv below 1: Taylor's bound `min(ρ_w, C·e^(−γt))` | Under-promises, provably: by 8–18% at p90, 4–12% at p99 and 4–10% at p999 against a simulation (cv 0 and 0.5), and 1–17% against Erlang's exact M/D/1 wait. The exponential body it replaced read an M/D/1 p90 sojourn 10% short at `ρ` 0.2 |
 | Prompt cv above 3 | Either way, and not monotone: the gamma's p90 can fall as cv rises at very low load, since most of its mass sits below the mean. S1 passes no cv above 3, assumed or measured (it assumes 2); nothing here is tested above it |
 | Wait tail with bursty arrivals (`Ca²` ≠ 1): Kingman's `1/θ`, never above the work's own tail rate | Not checked against a simulation; burstiness lengthens the tail, and Kingman's decay is taken as its conservative side |
-| Poisson arrivals on bursty traffic | Over-promises |
+| Poisson arrivals on bursty traffic | Over-promises. The CLI's `--arrival-cv2` states `Ca²` for the prefill queue; decode admission stays Poisson |
 | Per-pod model above the flow-control onset | Either way; the pooled bound printed beside it over-promises |
 | Dispatch-gate delays (scores up to 200 ms stale, a 50 ms candidate cache) | Over-promises, slightly, near the onset |
 | One band, static ceiling | Over-promises for low bands, under-promises for the highest |

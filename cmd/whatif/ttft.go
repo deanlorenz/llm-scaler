@@ -50,6 +50,16 @@ const (
 	imbalanceNotSustained whatif.Flag = "ImbalanceNotSustained"
 )
 
+// The flags the CLI alone raises.
+const (
+	// assumedArrivalCV2 is a Ca^2 --arrival-cv2 supplied.
+	assumedArrivalCV2 whatif.Flag = "AssumedArrivalCV2"
+	// outputSpreadUnread is no output-length histogram: KVreq is ILeff + OL/2,
+	// D taken as 1, which over-promises on a real spread (issue #276). A
+	// decode flag, on any answer read from the line.
+	outputSpreadUnread whatif.Flag = "OutputSpreadUnread"
+)
+
 // The closing note's measured halves. The figures are the frozen P2 table's
 // (TestTTFTFrozen_TheNotesFigures, learnreplay).
 const (
@@ -83,6 +93,10 @@ func (f *answerFlags) checkTTFT() error {
 		return usagef("--input-bucket: per-bucket answers are not built (the planner's M1)")
 	case f.set["assume-vp"] && !(f.assumeVP > 0 && finite(f.assumeVP)):
 		return usagef("--assume-vp %g, want a finite throughput above 0, in prompt tokens per second", f.assumeVP)
+	case f.set["assume-prompt-cv"] && !(f.assumePromptCV >= 0 && f.assumePromptCV <= whatif.MaxPromptCV):
+		return usagef("--assume-prompt-cv %g, want a finite cv from 0 to %d", f.assumePromptCV, whatif.MaxPromptCV)
+	case f.set["arrival-cv2"] && !(f.arrivalCV2 > 0 && finite(f.arrivalCV2)):
+		return usagef("--arrival-cv2 %g, want a finite value above 0: P3 reads 0 as Poisson, not as evenly spaced arrivals", f.arrivalCV2)
 	case f.set["assume-router-hop"] && f.assumeRouterHop < 0:
 		return usagef("--assume-router-hop %s, want a duration of 0 or more", f.assumeRouterHop)
 	case f.prefill < 0:
@@ -97,7 +111,8 @@ func (f *answerFlags) checkTTFT() error {
 
 // ttftFlagged reports whether any flag asks about TTFT.
 func (f *answerFlags) ttftFlagged() bool {
-	return slices.ContainsFunc([]string{"ttft", "ttft-percentile", "assume-vp", "assume-router-hop", "prefill", "prefill-variant"},
+	return slices.ContainsFunc([]string{"ttft", "ttft-percentile", "assume-vp", "assume-prompt-cv", "arrival-cv2", "assume-router-hop",
+		"prefill", "prefill-variant"},
 		func(name string) bool { return f.set[name] })
 }
 
@@ -139,7 +154,7 @@ func (t *ttftQuestion) policyPercentile(st *learnreplay.State) {
 func (f *answerFlags) rateTTFT() (*ttftQuestion, error) {
 	if f.ttft == "" {
 		if f.ttftFlagged() {
-			return nil, usagef("--ttft-percentile, --assume-vp, --assume-router-hop, --prefill and --prefill-variant need a --ttft target on slo-to-rate")
+			return nil, usagef("--ttft-percentile, --assume-vp, --assume-prompt-cv, --arrival-cv2, --assume-router-hop, --prefill and --prefill-variant need a --ttft target on slo-to-rate")
 		}
 		return nil, nil
 	}
@@ -317,14 +332,32 @@ func (f *answerFlags) fleetFor(st *learnreplay.State, ps *learnreplay.PrefillSta
 	pf.promptAssumed = f.set["assume-input-tokens"]
 	pf.decodeSide()
 	pf.flowControl(st)
-	pf.assume("Poisson arrivals")
-	pf.in.ArrivalsSource = shapeAssumed
+	f.arrivals(pf)
 	if f.prefillVariant != "" && len(st.Prefill) > 1 {
 		pf.assume("the whole rate on prefill variant %s (--prefill-variant; the model has %d)", ps.Variant, len(st.Prefill))
 	}
 	pf.raiseFlags(ps)
 	pf.describe()
 	return pf
+}
+
+// arrivals is the arrival process. --arrival-cv2 reaches the prefill queue
+// alone: decode's admission is a birth-death chain, which has no Ca^2, so on a
+// decode line Poisson stands there and stays flagged.
+func (f *answerFlags) arrivals(pf *pricedFleet) {
+	pf.in.ArrivalsSource = shapeAssumed
+	if !f.set["arrival-cv2"] {
+		pf.assume("Poisson arrivals")
+		return
+	}
+	pf.fleet.Prefill.ArrivalCV2, pf.in.ArrivalCV2 = f.arrivalCV2, f.arrivalCV2
+	pf.flags = append(pf.flags, assumedArrivalCV2)
+	pf.assume("arrivals Ca^2 %s (--arrival-cv2)", num(f.arrivalCV2))
+	if pf.fleet.Decode != nil {
+		pf.assume("Poisson arrivals at decode admission (--arrival-cv2 does not reach it)")
+		return
+	}
+	pf.flags = slices.DeleteFunc(pf.flags, func(fl whatif.Flag) bool { return fl == assumedPoisson })
 }
 
 // raiseFlags adds S1's flags on the spread and the imbalance. The routing
@@ -451,11 +484,22 @@ func (f *answerFlags) prefillShape(pf *pricedFleet, ps *learnreplay.PrefillState
 	pf.in.PromptTokens = p.PromptTokens
 
 	// The window's, whatever the prompt asked: a cv is a figure of the traffic
-	// the histogram counted.
+	// the histogram counted. --assume-prompt-cv overrides it, as every
+	// --assume-* flag overrides the recording, with the read figure beside it.
 	spread := ps.PromptWindow.Spread()
 	p.PromptCV, p.PromptCVAssumed = spread.CV, spread.Assumed
 	pf.in.PromptCV, pf.in.PromptCVSource = spread.CV, shapeMeasured
 	switch {
+	case f.set["assume-prompt-cv"]:
+		p.PromptCV, p.PromptCVAssumed = f.assumePromptCV, true
+		pf.in.PromptCV, pf.in.PromptCVSource = f.assumePromptCV, shapeAssumed
+		if spread.Assumed {
+			pf.assume("prompt cv %s (--assume-prompt-cv)", num(f.assumePromptCV))
+			break
+		}
+		read := spread.CV
+		pf.in.PromptCVRead = &read
+		pf.assume("prompt cv %s (--assume-prompt-cv, read %s)", num(f.assumePromptCV), num(read))
 	case spread.Assumed:
 		pf.in.PromptCVSource = shapeAssumed
 		pf.assume("prompt cv %s (no computed-prompt histogram)", num(spread.CV))
@@ -650,10 +694,15 @@ func (pf *pricedFleet) verdict() string {
 }
 
 // footerNote is the fleets' closing note. The direction turns on the spread:
-// a measured cv (the collector's Q1) has only the sent spread's row to go by.
+// the frozen table's assumed row was read at whatif.AssumedPromptCV, so a
+// measured cv (the collector's Q1), or one --assume-prompt-cv states at any
+// other figure, has only the sent spread's row to go by.
 func footerNote(fleets []*pricedFleet) string {
 	note := ttftNoteOpen + fmt.Sprintf(ttftNoteAssumed, num(whatif.AssumedPromptCV))
-	if slices.ContainsFunc(fleets, func(pf *pricedFleet) bool { return pf.refused == nil && !pf.fleet.Prefill.PromptCVAssumed }) {
+	if slices.ContainsFunc(fleets, func(pf *pricedFleet) bool {
+		p := pf.fleet.Prefill
+		return pf.refused == nil && (!p.PromptCVAssumed || p.PromptCV != whatif.AssumedPromptCV)
+	}) {
 		note = ttftNoteOpen + ttftNoteMeasured
 	}
 	if slices.ContainsFunc(fleets, func(pf *pricedFleet) bool { return pf.assumedVP }) {

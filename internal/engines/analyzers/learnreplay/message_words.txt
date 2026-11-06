@@ -2441,6 +2441,7 @@ slo-itl-reads-the-finite-pod-mean
 slo-itl-reads-the-settle-tracker
 slo-itl-restart-under-its-name-settles
 slo-itl-waits-after-controller-restart
+slo-kv-per-request-output-dispersion
 slo-model
 slo-transient
 slo-ttft-decode-term
