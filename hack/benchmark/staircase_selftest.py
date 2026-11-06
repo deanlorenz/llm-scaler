@@ -28,7 +28,7 @@ spec_load = importlib.util.spec_from_file_location("staircase_load", os.path.joi
 load = importlib.util.module_from_spec(spec_load)
 spec_load.loader.exec_module(load)
 
-EXPECTED = 96
+EXPECTED = 100
 checks = fails = 0
 
 
@@ -235,6 +235,26 @@ with tempfile.TemporaryDirectory() as run:
     near("step 2 achieved is over that window", two["achieved"], 120 / 150, 1e-9)
     near("step 2 reads its own level's rows", two["due"], 120)
     ok("step 2 failures count as infinitely slow", two["client_ttft_p95"] == math.inf and two["failed"] == 12, two["failed"])
+
+with tempfile.TemporaryDirectory() as run:
+    ROW = dict(level=1, rate=1.0, achieved=1.0, ca2_sent=1.0, ca2_asked=1, window_s=420, truncated=False, stopped_by="",
+               failed=0, due=420, lag_p99=0.01, client_ttft_p90=0.1, client_ttft_p95=0.1, client_tpot_mean=0.01,
+               client_tpot_p90=0.01, client_tpot_p95=0.01, fc_saturation={}, fc_queue={}, completion_rate=1.0)
+    for name in ("B-off-r1", "B-off-r2"):
+        os.makedirs(os.path.join(run, "phases", name))
+        with open(os.path.join(run, "phases", name, "analysis.jsonl"), "w", encoding="utf8") as f:
+            f.write(json.dumps(ROW) + "\n")
+    open(os.path.join(run, "phases", "B-off-r1", "done"), "w", encoding="utf8").close()
+    FINISHED, CRASHED = analyze.phases_of(run)
+    ok("a phase with no done file crashed", CRASHED == ["B-off-r2"] and FINISHED["B", "off"] == {1: "B-off-r1"}, CRASHED)
+    BUCKET = dict(name="B", prompt=8000, output=200, ca2=1, prefill=2, decode=2, vp=288288.0, imbalance=1.19, decodeKnee=44.0, knee=44.0,
+                  operatingRate=37.0, meanTPOT=0.02, onsets=dict(Prefill=54.6), curve=[], flags=["RouterHopAssumed"], assumed=["router hop"],
+                  targets=[dict(percentile=90, seconds=0.2, predictedOff=37.0, predictedOn=37.0)])
+    TEXT = io.StringIO()
+    GOT = analyze.report(run, dict(buckets=[BUCKET]), dict(promptCV=0.0577, repeats=2, buckets=[dict(name="B", fc=["off"], gate=True)]), None, TEXT)
+    ok("its repeat is missing, so no pass", "repeat 2 missing" in GOT["B", "off", "ttft", 90], GOT)
+    ok("the report names it", "B-off-r2" in TEXT.getvalue())
+    ok("the report carries the frozen flags", "RouterHopAssumed" in TEXT.getvalue())
 
 print("%d checks, %d failed" % (checks, fails))
 if checks != EXPECTED:

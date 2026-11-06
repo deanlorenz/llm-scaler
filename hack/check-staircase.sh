@@ -22,7 +22,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 B="$ROOT/hack/benchmark"
 PY="$(command -v python3 || command -v python)" || { echo "FAIL: python3 not found"; exit 1; }
-EXPECTED_CHECKS=65
+EXPECTED_CHECKS=66
 
 WORK="$(mktemp -d)"
 STUB="$WORK/bin"
@@ -297,7 +297,7 @@ expect "the private copy ran" '[ -s "$RUN/bin/staircase.sh" ] && grep -q "run st
 if base_env bash "$B/staircase.sh" freeze > /dev/null 2>&1; then bad "a second freeze must refuse"; else ok "a second freeze refuses"; fi
 if base_env bash "$B/staircase.sh" run img > /dev/null 2>&1; then bad "a used directory must refuse"; else ok "a used directory refuses"; fi
 if base_env bash "$B/staircase.sh" analyze > "$WORK/analyze.out" 2>&1 && [ -s "$RUN/report.md" ]; then ok "analyze reads the run"; else bad "analyze reads the run"; cat "$WORK/analyze.out"; fi
-echo '{}' >> "$RUN/spec.json"
+"$TOOLS/sed" -i 's/0\.0577/0.0578/' "$RUN/spec.json"
 if base_env bash "$B/staircase.sh" analyze > /dev/null 2>&1; then bad "a moved band must refuse the report"; else ok "a moved band refuses the report"; fi
 
 echo "ownership..."
@@ -311,10 +311,13 @@ if base_env NS_EXISTS=1 bash "$B/staircase.sh" run img > /dev/null 2>&1; then ba
 expect "and nothing was created or torn down" '! grep -q "create namespace" "$LOG" && ! tore_down'
 
 fresh dflt
+# The id matches, so the namespace's name alone must refuse.
+mkdir -p "$RUN"; echo id > "$RUN/run-id"
 for ns in default kube-system; do
     if base_env BENCHMARK_NAMESPACE=$ns bash "$B/staircase.sh" teardown > /dev/null 2>&1; then bad "$ns must refuse teardown"; else ok "$ns refuses teardown"; fi
 done
 expect "and nothing was deleted" '! grep -q " delete " "$LOG"'
+if base_env BENCHMARK_NAMESPACE=default STAIRCASE_FREEZE_WAIT=1 bash "$B/staircase.sh" run img > /dev/null 2>&1; then bad "default must refuse a run"; else ok "default refuses a run"; fi
 
 fresh other
 mkdir -p "$RUN"; echo mine > "$RUN/run-id"
