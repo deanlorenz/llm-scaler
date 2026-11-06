@@ -304,6 +304,13 @@ func TestNoteShapesWeightsRowsByRequestRate(t *testing.T) {
 	mixed := map[string][]shapeSample{}
 	noteShapes(mixed, []domain.ReplicaMetrics{row("a", 2, 100, 1000, 0, true), row("b", 0, 1000, 1000, 0, false)}, 1)
 	near("OL beside a row with no rate", shapeOf(mixed["d"]).OutputTokens, 100)
+
+	// Nor does such a row cost the cycle its reading.
+	spread := map[string][]shapeSample{}
+	idle := row("b", 0, 1000, 1000, 0, false)
+	idle.AvgOutputTokensSquaredKnown = false
+	noteShapes(spread, []domain.ReplicaMetrics{row("a", 2, 100, 1000, 0, true), idle}, 1)
+	near("D beside an unrated, unread row", shapeOf(spread["d"]).OutputDispersion, 1)
 }
 
 // A cycle's bound is its rows' only when every row read one, so that the mean
