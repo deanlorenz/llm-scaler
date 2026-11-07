@@ -11,10 +11,8 @@
 reviewers:
   - ev-shindin
   - deanlorenz
-  - biranofer
 
 # List of usernames who may use /approve
 approvers:
   - ev-shindin
   - deanlorenz
-  - biranofer
