@@ -178,6 +178,19 @@ func TestRollout_AFlappingNewPodMovesNothing(t *testing.T) {
 	}
 }
 
+// A second rollout on top of the first is no flap: a newer revision Ready beside
+// the others moves the key on.
+func TestRollout_ASecondRolloutMovesTheKeyOn(t *testing.T) {
+	r := newRollRig(t)
+	early := rollStart.Add(-time.Hour)
+	r.cycle(append(rollRows("old", 5, early, oldA, oldB), rollRows("new", 2, rollStart, newA, newB)...), true)
+	third := rollRows("third", 2, rollStart.Add(time.Minute), newA, newB)
+	_, s := r.cycle(append(rollRows("new", 2, rollStart, newA, newB), third...), true)
+	if !s.Moved || len(s.Rows) != 2 || s.Rows[0].Revision != "third" {
+		t.Fatalf("sight %+v", s)
+	}
+}
+
 // With three new pods the window fills, and past the dwell the fit is theirs
 // alone: the new engine's B, not a blend.
 func TestRollout_TheFullFitIsTheNewEngines(t *testing.T) {
