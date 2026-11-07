@@ -2441,6 +2441,7 @@ slo-itl-idle-needs-evidence
 slo-itl-keeps-the-settle-through-a-missing-row
 slo-itl-ols
 slo-itl-one-sided-at-cap
+slo-itl-own-settle-reads-a-long-gap-as-first-seen
 slo-itl-pinned
 slo-itl-reads-the-finite-pod-mean
 slo-itl-reads-the-settle-tracker

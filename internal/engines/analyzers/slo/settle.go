@@ -1,6 +1,7 @@
 package slo
 
 import (
+	"strings"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
@@ -23,6 +24,15 @@ import (
 // settle starts where the settle tracker says (itl.Settle); off, as before,
 // the line's own trace of each replica.
 const SwitchITLReadsSettle = "slo-itl-reads-the-settle-tracker"
+
+// SwitchITLLongGapFirstSeen is the replay switch for a long gap on the
+// analyzer's own tracker (issue #459): on, a model last analyzed more than
+// the state timeout ago is first-seen, whether or not EvictStale ran
+// meanwhile, and wherever in the cycle it ran (observeOwnSettle); off, as
+// before, only a model EvictStale evicted is, and one it did not reads the
+// gap as an absence (settle.Rejoined). Read only with SwitchITLReadsSettle
+// on, and only by an analyzer with no engine view.
+const SwitchITLLongGapFirstSeen = "slo-itl-own-settle-reads-a-long-gap-as-first-seen"
 
 // SwitchITLWaitsAfterRestart is the replay switch for the line's wait after
 // a controller restart: on, a replica already serving on the line's first
@@ -91,6 +101,25 @@ func (a *Analyzer) settleView() settle.View {
 
 // observeOwnSettle observes input's rows into the analyzer's own tracker at
 // now, when the engine gave it none.
+//
+// A model the own tracker does not hold -- never seen, or evicted by
+// evictOwnSettleLocked -- and one last observed more than the state timeout
+// ago, not yet evicted, are both first-seen: what the tracker held of the
+// model is forgotten, its rows are observed backdated, and every line key of
+// the model forgets its replicas' settle traces (itl.Tracker.ForgetTraces,
+// absent variants included), so nothing settles. The eviction runs only from
+// EvictStale, so before this a gap past the timeout read as an absence
+// (settle.Rejoined), and every replica settled, unless EvictStale had run
+// first; and run between two models' Analyze calls, it settled the model
+// analyzed before it and not the one after. Reading a stale model as an
+// evicted one makes the result depend only on the model's own last sight,
+// as the throughput analyzer's (learner PR 4b-2). SwitchITLLongGapFirstSeen,
+// read with SwitchITLReadsSettle: either off, as before, only a model the
+// tracker does not hold is backdated, and the line's own traces are kept.
+//
+// Everything runs under a.mu (the trackers' own locks nest under it, as in
+// evictStale), so two Analyze calls for one model cannot interleave the
+// stamp, the forget and the observation.
 func (a *Analyzer) observeOwnSettle(input domain.AnalyzerInput, now time.Time) {
 	if a.settle != nil {
 		return
@@ -101,10 +130,19 @@ func (a *Analyzer) observeOwnSettle(input domain.AnalyzerInput, now time.Time) {
 	}
 	model := utils.GetNamespacedKey(input.Namespace, input.ModelID)
 	a.mu.Lock()
-	_, seen := a.ownSettled[model]
+	defer a.mu.Unlock()
+	last, seen := a.ownSettled[model]
+	first := !seen
+	if a.itlReadsSettle && a.itlLongGapFirstSeen && seen && now.Sub(last) > a.stateTimeout {
+		first = true
+		// The key shape of windowKey; the trailing separator keeps "m" from
+		// matching "m2".
+		prefix := input.Namespace + "|" + input.ModelID + "|"
+		a.lines.ForgetTraces(func(key string) bool { return strings.HasPrefix(key, prefix) })
+		a.ownSettle.Forget(model)
+	}
 	a.ownSettled[model] = now
-	a.mu.Unlock()
-	settlerow.ObserveOwn(a.ownSettle, model, settlerow.Of(input.ReplicaMetrics, roles), !seen, ownSettleBackdate, now)
+	settlerow.ObserveOwn(a.ownSettle, model, settlerow.Of(input.ReplicaMetrics, roles), first, ownSettleBackdate, now)
 }
 
 // evictOwnSettleLocked forgets what the analyzer's own tracker holds of a

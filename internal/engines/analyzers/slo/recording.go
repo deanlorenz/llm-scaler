@@ -131,6 +131,10 @@ func (a *Analyzer) switchFields() map[string]*bool {
 		SwitchITLRestartUnderName:             &a.itlRestartUnderName,
 		SwitchITLIdleOnEvidence:               &a.itlIdleOnEvidence,
 
+		// Issue #459: a long gap on the analyzer's own tracker is
+		// first-seen, whenever EvictStale ran (settle.go).
+		SwitchITLLongGapFirstSeen: &a.itlLongGapFirstSeen,
+
 		// Issue #431: the forget-learned-state annotation reaches the line
 		// (forget.go).
 		SwitchITLForgetReachesTheLine: &a.itlForgetReachesLine,

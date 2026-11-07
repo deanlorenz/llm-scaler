@@ -108,7 +108,13 @@ The engine holds the analyzer as `sloAnalyzer`, an interface
 - `evictStaleLearnedState`: `EvictStale` forgets what was not analyzed or
   present for `StateTimeout`, which `NewEngine` sets from the saturation
   analyzer's variant timeout (`LEARNED_STATE_VARIANT_TIMEOUT`). A cycle with no
-  model does not reach it;
+  model does not reach it. With no engine settle view, the analyzer's own
+  tracker does not wait for it: `observeOwnSettle` reads a model last analyzed
+  more than `StateTimeout` ago as first-seen, backdated, with its line keys'
+  replica traces dropped, whether `EvictStale` ran first, between two models,
+  or not at all (issue #459). Replay switch
+  `slo-itl-own-settle-reads-a-long-gap-as-first-seen`; off, a model
+  `EvictStale` did not evict reads the gap as an absence and settles;
 - `metrics.SweepSLO` every cycle, and `metrics.DeleteSLOModel` in
   `pruneAnalyzerSeries` and `evictAllAnalyzerSeries`.
 
