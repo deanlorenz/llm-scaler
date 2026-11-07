@@ -31,7 +31,7 @@ var _ = Describe("CheckLine", func() {
 		return out
 	}
 	check := func(rs ...[]LineRow) LineCheck {
-		var all []LineRow
+		all := make([]LineRow, 0, 8)
 		for _, r := range rs {
 			all = append(all, r...)
 		}
@@ -131,7 +131,7 @@ var _ = Describe("CheckLine", func() {
 		Expect(far.OtherShape).To(BeTrue())
 		Expect(far.Mismatch()).To(BeFalse())
 		Expect(far.RowKVPerRequest).To(BeNumerically("~", kvReq*1.21, 1e-6))
-		Expect(check(at(kvReq * 0.7)).OtherShape).To(BeTrue(), "either way")
+		Expect(check(at(kvReq*0.7)).OtherShape).To(BeTrue(), "either way")
 	})
 
 	// The analyzers' floor: below 0.30 a percentage is quantisation.
@@ -174,21 +174,21 @@ var _ = Describe("EngineTPOTRatio", func() {
 
 	It("answers, flagged, where the buckets resolve the percentile", func() {
 		r, flags, refused := EngineTPOTRatio([]TPOTWindow{window(0.012)}, 0.9)
-		Expect(refused).To(BeNil())
+		Expect(refused).ToNot(HaveOccurred())
 		Expect(r.Value).To(BeNumerically("~", 1.2, 1e-9))
 		Expect(flags).To(ConsistOf(EngineTPOTHistogram))
 	})
 
 	It("answers, coarse and flagged, up to the line", func() {
 		r, flags, refused := EngineTPOTRatio([]TPOTWindow{window(0.020)}, 0.9)
-		Expect(refused).To(BeNil())
+		Expect(refused).ToNot(HaveOccurred())
 		Expect(r.Value).To(BeNumerically("~", 2, 1e-9))
 		Expect(flags).To(ConsistOf(CoarseTPOTBucket, EngineTPOTHistogram))
 	})
 
 	It("refuses past it, keeping both flags", func() {
 		r, _, refused := EngineTPOTRatio([]TPOTWindow{window(0.0201)}, 0.9)
-		Expect(refused).NotTo(BeNil())
+		Expect(refused).To(HaveOccurred())
 		Expect(refused.Reason).To(Equal(TPOTBucketTooWide))
 		Expect(refused.Flags).To(ConsistOf(CoarseTPOTBucket, EngineTPOTHistogram))
 		Expect(r.Value).To(Equal(0.0), "a zero ratio prices nothing")
@@ -202,15 +202,15 @@ var _ = Describe("EngineTPOTRatio", func() {
 		}
 		ws[0] = window(0.5)
 		_, _, refused := EngineTPOTRatio(ws, 0.9)
-		Expect(refused).To(BeNil())
+		Expect(refused).ToNot(HaveOccurred())
 		ws[1], ws[2] = window(0.5), window(0.5)
 		_, _, refused = EngineTPOTRatio(ws, 0.9)
-		Expect(refused).NotTo(BeNil())
+		Expect(refused).To(HaveOccurred())
 	})
 
 	It("passes the histogram's own refusals on, flagged", func() {
 		_, _, refused := EngineTPOTRatio([]TPOTWindow{{Sum: 1, Count: 10, Buckets: []HistogramBucket{{UpperEdge: 0.01, Count: 1}, {UpperEdge: math.Inf(1), Count: 10}}}}, 0.9)
-		Expect(refused).NotTo(BeNil())
+		Expect(refused).To(HaveOccurred())
 		Expect(refused.Reason).To(Equal(TPOTQuantileUnbounded))
 		Expect(refused.Flags).To(ConsistOf(EngineTPOTHistogram))
 	})

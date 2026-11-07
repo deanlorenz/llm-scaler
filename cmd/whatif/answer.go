@@ -490,7 +490,7 @@ func (f *answerFlags) tpotRatioFor(st *learnreplay.State, q float64) (whatif.TPO
 	}
 	er, eflags, erefused := whatif.EngineTPOTRatio(st.EngineTPOTWindows, q)
 	switch {
-	case erefused == nil && !(coarse && slices.Contains(eflags, whatif.CoarseTPOTBucket)):
+	case erefused == nil && (!coarse || !slices.Contains(eflags, whatif.CoarseTPOTBucket)):
 		f.engineTPOT = true
 		return er, eflags, nil
 	case coarse, erefused == nil, erefused.Reason == whatif.NoTPOTHistogram:
