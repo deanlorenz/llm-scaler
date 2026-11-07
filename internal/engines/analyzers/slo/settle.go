@@ -34,6 +34,17 @@ const SwitchITLReadsSettle = "slo-itl-reads-the-settle-tracker"
 // on, and only by an analyzer with no engine view.
 const SwitchITLLongGapFirstSeen = "slo-itl-own-settle-reads-a-long-gap-as-first-seen"
 
+// SwitchITLOwnSettleBackdates is the replay switch for the backdate on the
+// analyzer's own tracker (issue #511): on, a model's first observation is
+// one, at the cycle, of replicas Joined ownSettleBackdate earlier
+// (settlerow.ObserveOwnSince), so the prefill share and decode term read
+// them as settled on that cycle; off, as before, the rows are observed at
+// the backdate and again at the cycle (settlerow.ObserveOwn), the gap
+// between the two is past the tracker's absence tolerance, and every
+// replica reads settle.Rejoined at the cycle. Read only by an analyzer with
+// no engine view.
+const SwitchITLOwnSettleBackdates = "slo-itl-own-settle-backdates-the-first-sighting"
+
 // SwitchITLWaitsAfterRestart is the replay switch for the line's wait after
 // a controller restart: on, a replica already serving on the line's first
 // cycle waits its settle too, so the line does not refit for
@@ -83,11 +94,13 @@ func (a *Analyzer) WithOptimizationInterval(d time.Duration) *Analyzer {
 }
 
 // ownSettleBackdate is how far before its first Analyze of a model the
-// analyzer's own tracker first observes the model's rows: the line's settle,
-// so a replica on the first cycle has settled (settlerow.ObserveOwn). The
-// saturation analyzer backdates by k2's JoinedReplicaWindow instead, the
-// wait its own tracker serves first; for the ITL line neither matters, since
-// a line with no engine tracker never waits after a restart.
+// analyzer's own tracker takes the model's replicas as seen: the line's
+// settle, so a replica on the first cycle has settled, Joined that long ago
+// (settlerow.ObserveOwnSince: one observation, since the backdate is longer
+// than the tracker's absence tolerance, issue #511). The saturation analyzer
+// backdates by k2's JoinedReplicaWindow instead, the wait its own tracker
+// serves first; for the ITL line neither matters, since a line with no
+// engine tracker never waits after a restart.
 const ownSettleBackdate = itl.DefaultSteadyFor
 
 // settleView is the tracker the line reads: the engine's when it was given
@@ -145,7 +158,11 @@ func (a *Analyzer) observeOwnSettle(input domain.AnalyzerInput, now time.Time) {
 		a.ownSettle.Forget(model)
 	}
 	a.ownSettled[model] = now
-	settlerow.ObserveOwn(a.ownSettle, model, settlerow.Of(input.ReplicaMetrics, roles), first, ownSettleBackdate, now)
+	observe := settlerow.ObserveOwn
+	if a.itlOwnBackdate {
+		observe = settlerow.ObserveOwnSince
+	}
+	observe(a.ownSettle, model, settlerow.Of(input.ReplicaMetrics, roles), first, ownSettleBackdate, now)
 }
 
 // evictOwnSettleLocked forgets what the analyzer's own tracker holds of a

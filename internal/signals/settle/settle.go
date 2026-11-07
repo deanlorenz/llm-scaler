@@ -371,6 +371,33 @@ func (t *Tracker) replicaOf(name string, key Key) *replica {
 // (Rejoined). One absent for longer than the forget horizon (forgetAfter:
 // TraceHorizon, or the tolerance if longer) is forgotten.
 func (t *Tracker) Observe(name string, rows []Row, now time.Time) {
+	t.observe(name, rows, now, now)
+}
+
+// ObserveSince is Observe, except that a replica the tracker first sees in
+// rows -- one it does not hold, whose row no restored sighting claims -- is
+// taken as seen since since, not since now: its sighting and its settle
+// (Joined, or Lent for a bridge) begin at since, and so does the first
+// sight of its Ready time and its lend -- but never before the row's own
+// Ready time, nor, for a bridge, its lend time (firstStart): a Pod Ready 10 s
+// ago begins 10 s ago. Only the rows read at now are in its trace and its
+// idle run: nothing was read at since, so the trace holds one sample and an
+// idle run starts at one row. A replica the tracker already holds is
+// observed as by Observe. A since after now is now.
+//
+// It stands for a tracker that has watched the model since since, however
+// much longer that is than the absence tolerance: observing the same rows
+// at since and again at now would read the gap between the two as an
+// absence, and every replica would settle again at now (Rejoined).
+func (t *Tracker) ObserveSince(name string, rows []Row, since, now time.Time) {
+	if since.After(now) {
+		since = now
+	}
+	t.observe(name, rows, since, now)
+}
+
+// observe is Observe, a replica first seen begun at since (firstStart).
+func (t *Tracker) observe(name string, rows []Row, since, now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	m := t.models[name]
@@ -387,7 +414,7 @@ func (t *Tracker) Observe(name string, rows []Row, now time.Time) {
 			r = &replica{}
 			m.replicas[row.Key] = r
 			if !t.installRestored(r, name, row) {
-				t.start(r, row, firstReason(row, Joined), now)
+				t.start(r, row, firstReason(row, Joined), firstStart(row, since, now))
 			}
 		case !now.After(r.LastSeen):
 			continue
@@ -435,6 +462,25 @@ func (t *Tracker) Hold(name string, now time.Time) {
 		}
 	}
 	m.last = now
+}
+
+// firstStart is when a replica first seen in row, observed at now as seen
+// since since, begins: since, or the row's Ready time if later, or for a
+// bridge its lend time if later still, never after now. A tracker that had
+// watched the model from since would have first seen the Pod Ready, or
+// lent, no earlier than that. With since at now it is now.
+func firstStart(row Row, since, now time.Time) time.Time {
+	at := since
+	if row.ReadySince.After(at) {
+		at = row.ReadySince
+	}
+	if row.Bridge && row.LentSince.After(at) {
+		at = row.LentSince
+	}
+	if at.After(now) {
+		return now
+	}
+	return at
 }
 
 // firstReason is why a replica first seen (or seen again) starts to settle:

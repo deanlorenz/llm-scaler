@@ -93,10 +93,25 @@ const SwitchITLIdleOnEvidence = "throughput-itl-idle-needs-evidence"
 // as in 4b-1, any finite AvgITL above zero is a reading.
 const SwitchITLReadsFinitePodMean = "throughput-itl-reads-the-finite-pod-mean"
 
+// SwitchITLOwnSettleBackdates is the replay switch for the backdate on the
+// analyzer's own tracker (issue #511). On, a model's first observation is
+// one, at the cycle, of replicas Joined ownSettleBackdate earlier
+// (settlerow.ObserveOwnSince). Off, as before, the rows are observed at the
+// backdate and again at the cycle (settlerow.ObserveOwn), and below a 48 s
+// interval the gap between the two is past the tracker's absence
+// tolerance: every replica reads settle.Rejoined at the cycle. On, the
+// sighting holds only the row read at the cycle, so at an interval of 48 s
+// or more, where the tolerance covered the gap and off kept both rows, the
+// trace and an idle run start at one row, not two. Read only by an analyzer
+// with no engine view.
+const SwitchITLOwnSettleBackdates = "throughput-itl-own-settle-backdates-the-first-sighting"
+
 // ownSettleBackdate is how far before its first Analyze of a model the
-// analyzer's own tracker first observes the model's rows
-// (settlerow.ObserveOwn), as the slo analyzer's. For the ITL line it does
-// not matter: a line with no engine view never waits after a restart.
+// analyzer's own tracker takes the model's replicas as seen, Joined that
+// long ago (settlerow.ObserveOwnSince: one observation, since the backdate
+// is longer than the tracker's absence tolerance below a 48 s interval,
+// issue #511), as the slo analyzer's. For the ITL line it does not matter:
+// a line with no engine view never waits after a restart.
 const ownSettleBackdate = itl.DefaultSteadyFor
 
 // ownSettleTimeout is how long the analyzer's own tracker keeps a model it
@@ -154,7 +169,11 @@ func (a *ThroughputAnalyzer) observeOwnSettle(input domain.AnalyzerInput, now ti
 		a.ownSettle.Forget(model)
 	}
 	a.ownSettled[model] = now
-	settlerow.ObserveOwn(a.ownSettle, model, settlerow.Of(input.ReplicaMetrics, roles), first, ownSettleBackdate, now)
+	observe := settlerow.ObserveOwn
+	if a.itlOwnBackdate {
+		observe = settlerow.ObserveOwnSince
+	}
+	observe(a.ownSettle, model, settlerow.Of(input.ReplicaMetrics, roles), first, ownSettleBackdate, now)
 }
 
 // evictOwnSettleLocked forgets what the analyzer's own tracker holds of a
