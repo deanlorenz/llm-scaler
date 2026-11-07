@@ -118,25 +118,43 @@ func gpuPausePod(namespace, generateName, app, resourceName string, gpus int) *c
 }
 
 // TerminatingPodsOnNodes counts the pods still terminating on the nodes
-// labelled key=product. The scheduler counts their GPUs as used until they
-// are gone, so a fill taken while any remains leaves GPUs that come free
-// later.
-func TerminatingPodsOnNodes(ctx context.Context, k8sClient *kubernetes.Clientset, key, product string) (int, error) {
+// labelled key=product, by namespace; empty when there are none. The
+// scheduler counts their GPUs as used until they are gone, so a fill taken
+// while any remains leaves GPUs that come free later.
+//
+// A pod in a namespace being deleted counts too, before it has a deletion
+// timestamp of its own: an earlier spec's cleanup deletes its namespace and
+// returns at once, and the namespace controller reaches the pods only some
+// seconds later. Counted by their own timestamp alone, they read as running
+// in that gap, the fill leaves their GPUs to them, and they come free after.
+// A finished pod there holds no GPU (FreeGPUsOnNode) and does not count.
+func TerminatingPodsOnNodes(ctx context.Context, k8sClient kubernetes.Interface, key, product string) (map[string]int, error) {
 	nodes, err := k8sClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: key + "=" + product})
 	if err != nil {
-		return 0, fmt.Errorf("list %s nodes: %w", product, err)
+		return nil, fmt.Errorf("list %s nodes: %w", product, err)
 	}
-	n := 0
+	namespaces, err := k8sClient.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list namespaces: %w", err)
+	}
+	leaving := map[string]bool{}
+	for i := range namespaces.Items {
+		ns := &namespaces.Items[i]
+		leaving[ns.Name] = ns.DeletionTimestamp != nil || ns.Status.Phase == corev1.NamespaceTerminating
+	}
+	out := map[string]int{}
 	for i := range nodes.Items {
 		pods, err := k8sClient.CoreV1().Pods("").List(ctx, metav1.ListOptions{FieldSelector: "spec.nodeName=" + nodes.Items[i].Name})
 		if err != nil {
-			return 0, fmt.Errorf("list pods on %s: %w", nodes.Items[i].Name, err)
+			return nil, fmt.Errorf("list pods on %s: %w", nodes.Items[i].Name, err)
 		}
 		for j := range pods.Items {
-			if pods.Items[j].DeletionTimestamp != nil {
-				n++
+			p := &pods.Items[j]
+			finished := p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed
+			if p.DeletionTimestamp != nil || (leaving[p.Namespace] && !finished) {
+				out[p.Namespace]++
 			}
 		}
 	}
-	return n, nil
+	return out, nil
 }
