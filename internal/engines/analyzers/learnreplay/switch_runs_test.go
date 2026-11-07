@@ -155,14 +155,21 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// throughput-sweep recordings, the only ones that run the throughput
 	// analyzer on rows whose output histogram spreads: the variant's
 	// per-replica supply falls (KVreq rises), and the composite's release
-	// bound and decode frames move with it.
+	// bound and decode frames move with it. Measured alone against all off,
+	// 8 outputs: throughput-sweep's variant-capacities (1 of 193 rows,
+	// PerReplicaCapacity -2.14%) and composite-release (1 of 27, a decode
+	// frame's demand +2.18%); throughput-sweep-restart's variant-capacities
+	// (17 of 649), composite-release (5 of 14, ReleaseBound -1.52% first) and
+	// four composite outputs (9 rows each, a few parts in 10 million). With
+	// this PR's other switches on, as committed, it moves four more of
+	// throughput-sweep (composite-results, composite-roles,
+	// composite-variants, warm-pool-pressure): an interaction, on the cycles
+	// those switches already moved.
 	throughput.SwitchKVPerRequestOutputDispersion: {
 		"throughput-sweep-restart/composite-release.csv", "throughput-sweep-restart/composite-results.csv",
 		"throughput-sweep-restart/composite-roles.csv", "throughput-sweep-restart/composite-variants.csv",
 		"throughput-sweep-restart/variant-capacities.csv", "throughput-sweep-restart/warm-pool-pressure.csv",
-		"throughput-sweep/composite-release.csv", "throughput-sweep/composite-results.csv",
-		"throughput-sweep/composite-roles.csv", "throughput-sweep/composite-variants.csv",
-		"throughput-sweep/variant-capacities.csv", "throughput-sweep/warm-pool-pressure.csv",
+		"throughput-sweep/composite-release.csv", "throughput-sweep/variant-capacities.csv",
 	},
 
 	// Issue #459: on the slo analyzer's own settle tracker, a model last
