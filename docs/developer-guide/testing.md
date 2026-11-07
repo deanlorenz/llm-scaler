@@ -1709,6 +1709,92 @@ turns it into a passing case. A PR that changes a closed-loop behaviour runs
 the probe (`go test ./internal/engines/analyzers/saturation/ -run
 TestClosedLoopProbe -v`) and pastes the fleets it logs.
 
+## The TTFT staircase
+
+The staircase scores the what-if TTFT prediction against a real fleet: it freezes a
+prediction from a warm-up, then climbs a ladder of request rates until the client's
+TTFT runs away. The method is in
+[the proposal](../proposals/slo-capacity-planner-ttft.md#ground-truth-and-the-staircase),
+and what the next run freezes in
+[the plan](../plans/analyzers/ttft-staircase-repeat.md).
+
+It holds 4 to 6 GPUs for days on a shared cluster. Read the plan's cost table first.
+
+**Prerequisites.** `kubectl` pointed at the cluster, `jq`, `yq`, Python 3, a fresh
+namespace name, and Prometheus reachable from inside the cluster.
+
+**Run the smoke first**, in its own namespace and directory, once per tree:
+
+```bash
+make benchmark-staircase-smoke IMG=<your build, by digest>
+cat $STAIRCASE_RUN/smoke.txt
+```
+
+It takes about 35 minutes and about 1.5 GPU-hours, at most 3 GPUs: one bucket, two steps
+on a 1+1 fleet, then 1+2 and a deliberate abort. It exits 0 only if the namespace label,
+the lease, the Job's rights, the fleet change, flow control, the saved load and the
+teardown all held. It says nothing of the prediction.
+
+**To test the backstop itself**, run `make benchmark-staircase-lapse` in another fresh
+namespace and directory. It stands up a 1+1 fleet on a 300 s lease, kills the runner with
+`-9`, and waits for the deadline Job to free the workloads on its own, then tears down
+whatever is left. It takes about 40 minutes and about 1 GPU-hour on 2 GPUs. `smoke.txt`
+holds the result, and it exits 0 only if the Job did it.
+
+**The run:**
+
+```bash
+export BENCHMARK_NAMESPACE=<a namespace that does not exist yet>
+export STAIRCASE_RUN=$PWD/staircase-run        # absolute; a run refuses a used directory
+export BENCHMARK_PROMETHEUS_URL=http://<prometheus>:9090
+# Optional: a node label the engines must select
+export STAIRCASE_ACCELERATOR_KEY=<label key> STAIRCASE_ACCELERATOR_VALUE=<label value>
+
+make benchmark-staircase-run IMG=<your build, by digest>     # in a shell that outlives you
+# When the timeline says "waiting for the freeze", from another shell:
+make benchmark-staircase-freeze
+# After the run:
+make benchmark-staircase-redo                               # re-prices bursty buckets at the Ca2 sent
+make benchmark-staircase-analyze                            # writes $STAIRCASE_RUN/report.md
+```
+
+Read what the freeze prints: its last lines are what the prediction assumes. A refused
+freeze aborts the run. After repeat 1 of the gate buckets the run scores them itself,
+and a fail stops it and frees the GPUs.
+
+`make benchmark-staircase-status` shows progress and what holds GPUs.
+`make benchmark-staircase-abort` stops a run, as a TERM does: at once, or within 55 s if
+a read of the API is hung (`STAIRCASE_KUBE_TIMEOUT` + 10 s). Then
+`make benchmark-staircase-teardown` frees everything from any state. It refuses a
+namespace that does not carry this run's id, and fails unless the workloads are
+confirmed gone; the deadline Job then stays. Confirm with
+`kubectl get pods -n $BENCHMARK_NAMESPACE`.
+
+**To predict without a cluster**, from any warm-up recording:
+
+```bash
+make benchmark-staircase-predict RECORDING=<learner recording>
+```
+
+It prints the frozen file. The same recording and spec give the same bytes. `whatif
+freeze` exits 3 when a bucket refuses, with the refusal in the file.
+
+**If the runner dies**, even by `kill -9`, the capture loop stops renewing the lease and
+exits. A Job in the namespace then deletes the workloads when the lease lapses, up to
+40 minutes after the last renewal, or at a 4-day hard cap (`STAIRCASE_HARD_CAP`). If the
+Job loses the API, 30 minutes of failed reads count as a lapse, and it keeps trying to
+delete for 6 hours. A run does not start without a Job that has read its lease. The
+check is `kubectl get deploy -n $BENCHMARK_NAMESPACE`.
+
+**Reading the report.** The client's rate decides the mark, at the operating point.
+The router's column is a cross-check, because its buckets are wide where the targets
+sit. "How each phase ended" names the rule that stopped each phase: `client-p90` is
+the frozen rule, and `max-inflight` is the safety cap, whose step reads as a bound.
+
+`make lint-deploy-scripts` runs `hack/check-staircase.sh`, which takes the exit paths it
+lists against a stub kubectl and checks the arithmetic against hand-worked figures. It
+proves nothing about a real cluster.
+
 ## End-to-End Tests
 
 One suite in `test/e2e/` runs on Kind with emulated GPUs, or on

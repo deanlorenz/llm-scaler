@@ -62,9 +62,15 @@ type DecodeTTFTState struct {
 	// pair is never split). A cycle with no reading holds an empty slot, so a
 	// figure ages out when the rows stop carrying one. Zero when unread.
 	EngineTTFT whatif.DecodeTTFT
-	// TransferSeconds is the mean KV transfer time over the rows that read
-	// one, over the latest shapeCycles cycles with a reading; 0 with none.
+	// TransferSeconds is prefill.TransferReading's Figure, the one S1 prices
+	// (slo.SwitchTTFTQuietTransfer): the fleet's quiet cycles inside
+	// prefill.HeldDecodeAge of the cycle, else every row's over the same age; 0
+	// with none. The CLI has no switch.
 	TransferSeconds float64
+	// AllRowsTransferSeconds is every row's figure, quiet or not, and TransferHeld
+	// says the latest cycle was not quiet and TransferSeconds comes from earlier.
+	AllRowsTransferSeconds float64
+	TransferHeld           bool
 	// Term is decode's part with a line, as S1 would have learned it over the
 	// cycles through this one. It reads the rows with no settle tracker, so a
 	// pod still warming up is admitted; the prompt-drift gate keeps most of it
@@ -106,13 +112,13 @@ type ttftSamples struct {
 	prompts    map[string]*whatif.PromptWindow
 	shares     map[string]*shareWindow
 	engineTTFT map[string][]whatif.DecodeTTFT
-	transfers  map[string][]float64
+	transfers  map[string]*prefill.TransferWindow
 	terms      map[string]*prefill.DecodeTermWindow
 }
 
 func newTTFTSamples() *ttftSamples {
 	return &ttftSamples{prompts: map[string]*whatif.PromptWindow{}, shares: map[string]*shareWindow{},
-		engineTTFT: map[string][]whatif.DecodeTTFT{}, transfers: map[string][]float64{},
+		engineTTFT: map[string][]whatif.DecodeTTFT{}, transfers: map[string]*prefill.TransferWindow{},
 		terms: map[string]*prefill.DecodeTermWindow{}}
 }
 
@@ -138,8 +144,6 @@ func rolesOf(in domain.AnalyzerInput) map[string]string {
 type decodeRows struct {
 	ttftWeighted, ttftWeight, ttftPlain float64
 	ttftRows                            int
-	transfer                            float64
-	transferRows                        int
 }
 
 // prefillRows is one prefill variant's readings in one cycle.
@@ -196,10 +200,6 @@ func (t *ttftSamples) note(in domain.AnalyzerInput, cycle int, at time.Time) {
 				d.ttftWeight += rm.RequestRate
 			}
 		}
-		if rm.AvgKVTransferTimeKnown && positive(rm.AvgKVTransferTime) {
-			d.transfer += rm.AvgKVTransferTime
-			d.transferRows++
-		}
 	}
 	var allComputed, allRequests float64
 	for v, p := range pre {
@@ -220,9 +220,6 @@ func (t *ttftSamples) note(in domain.AnalyzerInput, cycle int, at time.Time) {
 		t.prompts[v].Note(rowsOfVariant(in.ReplicaMetrics, v), cycle, at)
 	}
 	for v, d := range decode {
-		if d.transferRows > 0 {
-			t.transfers[v] = keepLast(t.transfers[v], d.transfer/float64(d.transferRows), shapeCycles)
-		}
 		var slot whatif.DecodeTTFT
 		if d.ttftRows > 0 && allComputed > 0 {
 			slot = whatif.DecodeTTFT{Seconds: d.ttftPlain / float64(d.ttftRows), PromptTokens: allComputed / allRequests}
@@ -262,6 +259,13 @@ func (t *ttftSamples) noteTerm(in domain.AnalyzerInput, now time.Time, args func
 			}
 		}
 		w.Under(accelerator, args(v))
+		x := t.transfers[v]
+		if x == nil {
+			x = &prefill.TransferWindow{}
+			t.transfers[v] = x
+		}
+		x.Under(accelerator, args(v))
+		x.Observe(now, rowsOfVariant(in.ReplicaMetrics, v))
 		w.Observe(prefill.DecodeTermCycle{Now: now, Prefill: pre, Decode: rowsOfVariant(in.ReplicaMetrics, v),
 			PromptTokens: prompt, Router: in.RouterLatency,
 			RouterHeld: in.SchedulerQueue != nil && in.SchedulerQueue.QueueSize > 0})
@@ -320,12 +324,10 @@ func (r *replayer) fillTTFT(st *State, in domain.AnalyzerInput, t *ttftSamples) 
 			est = w.Estimate()
 		}
 		vs.DecodeTTFT.Term = whatif.TermFromEstimate(est)
-		if xs := t.transfers[vs.Variant]; len(xs) > 0 {
-			sum := 0.0
-			for _, x := range xs {
-				sum += x
-			}
-			vs.DecodeTTFT.TransferSeconds = sum / float64(len(xs))
+		if x := t.transfers[vs.Variant]; x != nil {
+			r := x.Reading()
+			vs.DecodeTTFT.TransferSeconds, vs.DecodeTTFT.AllRowsTransferSeconds = r.Figure(), r.AllRows
+			vs.DecodeTTFT.TransferHeld = r.Held
 		}
 	}
 	st.FlowControlSeries = in.FlowControlSeries()

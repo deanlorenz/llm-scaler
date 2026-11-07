@@ -387,6 +387,7 @@ TooFewImbalanceMinutes
 TooFewLowLoadMinutes
 TooFewPromptClusters
 TooManySlots
+TransferHeld
 TransferOmitted
 TriggeredScaleUp
 UP
@@ -2462,6 +2463,7 @@ slo-ttft-decode-term
 slo-ttft-measured-spread
 slo-ttft-measured-transfer
 slo-ttft-price
+slo-ttft-quiet-transfer
 slo-ttft-variant
 slo-variant
 slo.Analyze

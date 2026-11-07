@@ -1404,6 +1404,7 @@ model reads all of them `0`, including the two marked "on every answer":
 | `VPShapeMoved` | The mean prompt is more than 1.2 times away from the one `V_P` was learned at, with no curve to rescale by. |
 | `VPScaledToPrompt` | `V_P` was rescaled to a longer prompt. It read 1.5% high on the one measured point. |
 | `TransferOmitted` | No decode pod read a KV transfer time: left out, so TTFT reads low. A pod with no NIXL connector, or an SGLang pod, has none. |
+| `TransferHeld` | The fleet is busy, so the KV transfer time is its last quiet figure, at most 5 minutes old. Past that the busy figure stands, and TTFT reads high. |
 | `DecodeEngineMeasured` | No decode line: decode's part is the decode engine's measured mean TTFT, held at the rate it was measured at. |
 | `DecodeTermOmitted` | A decode line, but no fit of the decode engine's TTFT and no quiet row to read it from: the older, lower sum stands, so TTFT reads low. The `slo-ttft-variant` log's `decodeTermRefused` says why. |
 | `DecodeStepSlopeAssumed` | A decode line and no fit. The usual reason is load that has not moved enough to learn how decode's TTFT follows step time; `decodeTermRefused` in the log says which. A quiet row's figure is held, and rises at an assumed slope of 10. |
