@@ -503,6 +503,7 @@ agree
 agreeCycles
 agreed
 agreeing
+agrees
 aim
 alignment
 aligns
@@ -1678,6 +1679,7 @@ mu-sample-written
 mu-swap-freeze
 mu-unknown-age-resolves-safe
 mu-unread-replica-at-target
+mu-yield-capped
 mu-yield-capped-at-measurement
 mu-yield-served
 mu-yield-sibling
@@ -2378,9 +2380,11 @@ series
 seriesPresent
 serve
 served
+served-bound
 served-siblings
 servedBound
 server
+serves
 service
 serviceable
 serving
@@ -2774,6 +2778,8 @@ unmark
 unmet
 unparseable
 unread
+unreadAt
+unreadReplicas
 unreadable
 unresolved
 unservable

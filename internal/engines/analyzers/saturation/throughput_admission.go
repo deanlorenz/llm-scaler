@@ -123,11 +123,12 @@ import (
 // low reading cannot survive once the replica recovers, or a sibling shows
 // it was one replica's. With no line there is no derived figure to give way
 // to, and the measurement stands -- unless a minority of the fleet wrote it
-// (SwitchMuMinorityFigureExpires): then, stale for MeasuredLowHoldFor, it is
-// released and the floor prices from no mu. The reason is the hold's own: an
-// over-ordered fleet never saturates to correct a low figure, and a right one
-// costs one saturated episode per hold to write back (minorityFigureExpired).
-// A figure the whole fleet wrote stands.
+// and it sits under what the fleet's Ready replicas serve
+// (SwitchMuMinorityFigureExpires): then, stale for MeasuredLowHoldFor, it
+// gives way to that served bound, never to no mu. The reason is the hold's
+// own: an over-ordered fleet never saturates to correct a low figure
+// (minorityFigureExpired). A figure the whole fleet wrote stands, and so does
+// one at or over the bound.
 //
 // Nor does a measurement outrank what the variant's Ready replicas serve
 // with a full cache, at least one of them unqueued: under SiblingMuTolerance
@@ -138,8 +139,8 @@ import (
 // the bound nor MeasuredLowHoldFor released it. Since #495 the yield is
 // capped at the measurement (SwitchMuYieldCappedAtMeasurement), so it no
 // longer prices: the siblings reach mu through the weighed sample
-// (mu_slow_pod.go), and that slow replica's figure is released by the
-// minority rule instead.
+// (mu_slow_pod.go), and a slow replica's figure under what the fleet serves
+// gives way to it by the minority rule instead.
 //
 // The yield is latched: once a stale measurement has given way it stays given
 // way until the two figures come back within MeasuredDerivedReturnRatio, or
@@ -451,9 +452,8 @@ func (a *SaturationAnalyzer) siblingYield(key string, reading throughputReading,
 	if c == nil || !(reading.rate < tol*c.sibling) {
 		return 0, false
 	}
-	// The path ran: the yield opened, whether the cap then refuses it or not.
-	a.paths.add(pathYieldSibling, 1)
 	if a.yieldCapped(reading, c.sibling) {
+		a.paths.add(pathYieldCapped, 1)
 		return 0, false
 	}
 	return c.sibling, true
@@ -523,6 +523,10 @@ type muChoice struct {
 	// figure no line can replace expire (minorityFigureExpired). Unset for
 	// a window restored or brought back with no choice on record.
 	minority bool
+	// released is set while the minority's figure has given way to the
+	// fleet's served bound (minorityFigureExpired), so the release logs once
+	// per run of released cycles, not per replica per cycle.
+	released bool
 	// low is, per replica, its current run of saturated readings refused as
 	// under MinMeasuredOfDerived of the derived figure.
 	low map[string]lowRun

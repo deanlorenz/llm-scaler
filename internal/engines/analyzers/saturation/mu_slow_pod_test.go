@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/internal/learnertest"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
@@ -15,7 +16,7 @@ import (
 // The two rules that bound one slow pod (mu_slow_pod.go): the unread
 // replica's credit (SwitchMuUnreadAtTarget) and the minority's figure
 // expiring (SwitchMuMinorityFigureExpires). The closed-loop probe holds them
-// together (TestClosedLoopProbe_ASlowReplicaInsideTheServedBoundStaysUnderTheBoundAndEndsAtNeed);
+// together (TestClosedLoopProbe_ASlowReplicaInsideTheServedBoundStaysUnderTheBound);
 // these hold each edge alone, each run on and off.
 
 // slowPodRows is n replicas of variant v at 1000 in, 1000 out: the first
@@ -120,30 +121,69 @@ func TestMuSlowPod_TheWritersAreAMinorityOfTheReadAndUnqueued(t *testing.T) {
 	}
 }
 
-// A minority's figure with no line expires once nothing has read saturated
-// in agreement with it for lowHoldFor, not a cycle before; and never with a
-// line (the hold already releases it to the derived figure), with the
-// fleet's figure, with no choice on record (a restore: the safe side), or
-// with the switch off.
+// A minority's figure with no line gives way to the fleet's served bound
+// once nothing has read saturated in agreement with it for lowHoldFor, not a
+// cycle before; and never with a line (the hold already releases it to the
+// derived figure), at or over the bound (a steering router's minority read
+// what every replica does), with the fleet's figure, with no choice on
+// record (a restore: the safe side), for a borrowed reading, or with the
+// switch off. It logs on the first released cycle only.
 func TestMuSlowPod_AMinorityFigureExpiresOnlyPastTheHold(t *testing.T) {
 	tn := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
 	hold := tn.MuChoice.LowHoldFor.Duration()
 	at := propStart
 	reading := throughputReading{rate: 0.55, sampledAt: at, writtenAt: at}
-	expired := func(on, minority, choice, derivedOK bool, now time.Time) bool {
-		a := NewSaturationAnalyzer(capacity.NewStore())
-		require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchMuMinorityFigureExpires: on}))
-		if choice {
-			a.throughputMuChoice[propMuKey] = &muChoice{minority: minority, saturatedAt: at}
-		}
-		return a.minorityFigureExpired(propMuKey, reading, derivedOK, tn, now)
+	// The fleet: two unqueued replicas at half their cache serving 0.6, so
+	// at the 0.85 target the bound is 0.706, and one queued at 0.55.
+	fleet := servedRates{target: floorTarget, pods: map[string]servedPod{
+		"a": {rate: 0.6}, "b": {rate: 0.6}, "c": {rate: 0.55, queued: true},
+	}}
+	bound := (2*0.6/floorTarget + 0.55) / 3
+	type state struct {
+		on, minority, choice, derivedOK bool
+		reading                         throughputReading
+		served                          servedRates
 	}
-	require.False(t, expired(true, true, true, false, at.Add(hold-propCycle)), "inside the hold")
-	require.True(t, expired(true, true, true, false, at.Add(hold)), "past the hold")
-	require.False(t, expired(true, true, true, true, at.Add(2*hold)), "a line prices it")
-	require.False(t, expired(true, false, true, false, at.Add(2*hold)), "the fleet wrote it")
-	require.False(t, expired(true, true, false, false, at.Add(2*hold)), "no choice on record")
-	require.False(t, expired(false, true, true, false, at.Add(2*hold)), "the switch off")
+	base := state{on: true, minority: true, choice: true, reading: reading, served: fleet}
+	expired := func(s state, now time.Time) minorityRelease {
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchMuMinorityFigureExpires: s.on}))
+		if s.choice {
+			a.throughputMuChoice[propMuKey] = &muChoice{minority: s.minority, saturatedAt: at}
+		}
+		return a.minorityFigureExpired(propMuKey, s.reading, s.served, s.derivedOK, tn, now)
+	}
+	with := func(edit func(*state)) state { s := base; edit(&s); return s }
+	late := at.Add(2 * hold)
+
+	require.False(t, expired(base, at.Add(hold-propCycle)).released, "inside the hold")
+	rel := expired(base, at.Add(hold))
+	require.True(t, rel.released, "past the hold")
+	require.InDelta(t, bound, rel.bound, 1e-12, "released to the fleet's served bound, not to no mu")
+	require.True(t, rel.first, "the first released cycle logs")
+	require.False(t, expired(with(func(s *state) { s.derivedOK = true }), late).released, "a line prices it")
+	require.False(t, expired(with(func(s *state) { s.minority = false }), late).released, "the fleet wrote it")
+	require.False(t, expired(with(func(s *state) { s.choice = false }), late).released, "no choice on record")
+	require.False(t, expired(with(func(s *state) { s.on = false }), late).released, "the switch off")
+	borrowed := reading
+	borrowed.borrowed = true
+	require.False(t, expired(with(func(s *state) { s.reading = borrowed }), late).released, "a borrowed reading is no window of the key's")
+	high := reading
+	high.rate = bound
+	require.False(t, expired(with(func(s *state) { s.reading = high }), late).released, "at the bound the figure is kept")
+
+	// Logged once per run of released cycles, per key.
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	a.throughputMuChoice[propMuKey] = &muChoice{minority: true, saturatedAt: at}
+	firsts := 0
+	for i := range 3 {
+		for range 4 { // four replicas of the key on one cycle
+			if r := a.minorityFigureExpired(propMuKey, reading, fleet, false, tn, late.Add(time.Duration(i)*propCycle)); r.first {
+				firsts++
+			}
+		}
+	}
+	require.Equal(t, 1, firsts, "one line for the whole run, not one per replica per cycle")
 }
 
 // slowPodEpisode runs a fleet of four through Analyze: readers queued at
@@ -258,4 +298,95 @@ func TestMuSlowPod_TheYieldNeverPricesAboveTheMeasurement(t *testing.T) {
 	require.Equal(t, servedBucket, bucket(map[string]bool{SwitchMuWeighsFleet: false, SwitchMuYieldCappedAtMeasurement: false}),
 		"premise: uncapped, p0 yields to its siblings")
 	require.NotEqual(t, servedBucket, bucket(nil), "all on, p0 priced its siblings")
+}
+
+// The credit's target is the one the floor charges on mu: the saturation
+// analyzer's own scaleUpThreshold (config.AnalyzerThresholds), not the
+// policy-wide one. A policy at 0.7 with the analyzer overridden to 0.95:
+// one replica queued at 0.4 beside three unqueued at half their cache
+// serving 0.6 reads (0.4 + 3 x 0.6 / 0.95) / 4 = 0.574. Negative control:
+// credited at the policy-wide 0.7, as first built, it read
+// (0.4 + 3 x 0.6 / 0.7) / 4 = 0.743, 29 % over, priced over what the floor
+// then takes back off at 0.95.
+func TestMuSlowPod_TheCreditUsesTheSaturationAnalyzersTarget(t *testing.T) {
+	rig := slowPodRig(t, nil)
+	up := 0.95
+	rig.policy = func(p *config.ScalingPolicy) {
+		p.ScaleUpThreshold = 0.7
+		p.Analyzers = []config.AnalyzerScoreConfig{{Name: domain.SaturationAnalyzerName, ScaleUpThreshold: &up}}
+	}
+	for range 13 {
+		_, err := rig.analyze(slowPodRows(4, 1, 0.4, 0.6, 0.5), aggStates(4), 2.2, propCycle)
+		require.NoError(t, err)
+	}
+	got := rig.measuredMu()
+	want, global := (0.4+3*0.6/up)/4, (0.4+3*0.6/0.7)/4
+	t.Logf("mu %.4f; at the analyzer's 0.95 %.4f, at the policy's 0.7 %.4f", got, want, global)
+	require.InDelta(t, want, got, 1e-3*want, "the credit's target is the saturation analyzer's")
+}
+
+// The weighing's hold (muChoice.unread): the unread replicas count at the
+// lower of two consecutive samples' rates at most, held while the readers sit
+// under the tolerance of them. One queued replica at 0.4 beside three
+// unqueued at half their cache serving 0.6, then one minute's drain burst at
+// 0.8, then the three falling to 0.55, 0.5 and 0.45 as a growing fleet would
+// share the load. The burst lifts its own sample and no other, and the
+// falling minutes hold the 0.6 the three showed. Read fresh (h := mean in
+// weighUnreadReplicas) the falling minutes fall with them, which orders more,
+// which lowers them again: the 0.3 probe peaked at 28 that way, against 24.
+func TestMuSlowPod_TheWeighingHoldsAFallingFleetAndCarriesNoBurst(t *testing.T) {
+	rig := slowPodRig(t, nil)
+	served := []float64{0.6, 0.6, 0.6, 0.6, 0.8, 0.6, 0.55, 0.5, 0.45}
+	for _, s := range served {
+		for range 4 { // a minute, one sample
+			_, err := rig.analyze(slowPodRows(4, 1, 0.4, s, 0.5), aggStates(4), 0.4+3*s, propCycle)
+			require.NoError(t, err)
+		}
+	}
+	var samples []float64
+	rig.a.mu.Lock()
+	for _, ra := range rig.a.saturatedThroughput {
+		samples = ra.Snapshot().Values
+	}
+	rig.a.mu.Unlock()
+	t.Logf("samples %.4f", samples)
+	require.GreaterOrEqual(t, len(samples), 5, "premise: the window holds the burst and the falling minutes")
+	held := (0.4 + 3*0.6/floorTarget) / 4
+	over := 0
+	for _, v := range samples {
+		if v > held*(1+1e-9) {
+			over++
+		}
+	}
+	require.Equal(t, 1, over, "the burst lifts its own sample only")
+	for _, v := range samples[len(samples)-3:] {
+		require.InDelta(t, held, v, 1e-9, "a falling fleet's samples hold what it showed")
+	}
+}
+
+// How the weighing moves demand through the floor (analyzer-learner.md, "One
+// slow pod, as built"), pinned on the start-seed-restart-2 golden's cycle at
+// 21:22:34, the replay's own numbers: occupancy's demand 8193 tokens, of
+// which 48 resident, 2.177 req/s arriving, and the floor's term at mu 0.3506
+// with the weighing on and 0.3657 off. The floor's tokens rise as mu falls
+// (53.2 against 51.1), but the trust blend reads lambda x P / mu against the
+// resident KV, which a lower mu raises, so more of the queue's residency
+// charge is swapped for the floor's drain price: 699 against 1527.
+// localQueueBacklog is not the term: the capped backlog is 55.99 requests
+// either way, and in replicas the cap is min(q / (mu x T), 1) per replica,
+// which never falls as mu does.
+func TestMuSlowPod_TheFloorTrustIsHowALowerMuLowersDemand(t *testing.T) {
+	tn := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
+	const measured, resident, lambda = 8193.0, 48.0, 2.1772658136774585
+	at := func(mu, perReplica, replicas float64) float64 {
+		tokens := replicas * perReplica
+		return tn.flooredDemand(measured, resident, tokens, lambda*perReplica/mu, true)
+	}
+	on := at(0.3506359494741492, 6.0000310445465095, 8.87084602889296)
+	off := at(0.3657028708413113, 6.011312673169893, 8.505368067863964)
+	t.Logf("floored demand %.2f with the weighing, %.2f without", on, off)
+	require.InDelta(t, 699.28948785588, on, 0.01)
+	require.InDelta(t, 1527.275814274085, off, 0.01)
+	// Without the swap, the same terms floor at occupancy's demand either way.
+	require.Equal(t, measured, tn.flooredDemand(measured, resident, 53.2, lambda*6/0.35, false))
 }

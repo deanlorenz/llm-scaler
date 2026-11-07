@@ -906,7 +906,7 @@ finding above is in exactly one state:
 | Router queue without engine metrics | the missing-values case passes, and no row edit reproduces the pre-fix reading |
 | Demand falls when λ lags a step | the trajectory passes; no pre-fix floor is reproduced |
 | No floor under flow control (#144) | a ledger row for k2; no case drives mu or the floor under flow control |
-| "For good" self-sealing low mu | fixed on #495, but no property class runs a closed loop, so none catches it. The probe holds it: `TestClosedLoopProbe_ASlowReplicaInsideTheServedBoundStaysUnderTheBoundAndEndsAtNeed` passes, and with its two switches off it is over-ordered for good again |
+| "For good" self-sealing low mu | fixed on #495, but no property class runs a closed loop, so none catches it. The probe holds it: `TestClosedLoopProbe_ASlowReplicaInsideTheServedBoundStaysUnderTheBound` passes, and with the unread replica's credit off it is over-ordered for good again |
 | Share swing and cancel (#272 F1/F2 and the d3 reviews) | the share ledger (#14, #15) is not recorded or replayed. Out of scope for PR 0 |
 | Alert debounce and sustain (#283 M2/M3) | not a learner |
 | Shape dependence of the ITL line (#275) | no generator models it |
@@ -1177,7 +1177,7 @@ restores, exact repeats and unknown ages. Two rules apply to all:
 | --- | --- | --- |
 | k2 | too high | none. The window mean rises on admitted readings only. A too-low k2 is **permanent** on a serving variant: touched on every read, never evicted, and its episode resets only on a write, which needs the saturation a low k2 prevents. The only exit is `llm-d.ai/forget-learned-state`; the runbook says so |
 | borrowed k2 | too high | the upward relaxation over 6 h of serving time |
-| measured mu | too high | the stale yield to a higher derived figure after 30 min (5 min toward a lower one). The restart that drops the latch (see [the mu choice](#the-mu-choice); restored to the safe side since PR 3). An unknown age (above; safe side since PR 3). An exact repeat: since PR 3 it refreshes freshness only under the derived figure, where losing it would let a repeating low rate yield to the higher figure, and not over it, where staleness yields to the lower one. Backed by new evidence, so allowed: the **immediate** yield when a Ready replica serves more than 2x it. The sibling yield was on this list; since #495 it is capped at the measurement (`mu-yield-capped-at-measurement`), so it no longer moves mu up: what the siblings serve reaches mu through the sample instead. Since #495, with no line, a figure a minority of the fleet wrote is released after `lowHoldFor` with no saturated reading agreeing with it (`mu-minority-figure-expires`). The reason is the low hold's: an over-ordered fleet never saturates to correct a low figure, and a right one costs one saturated episode per hold to write back. A figure the whole fleet wrote, or one whose writers are unknown (a restore), stands. And an unread replica under the KV line counts at what it serves over the scale-up target (`mu-unread-replica-at-target`): at most 1 / target over what it served unqueued, so the floor orders the fleet in which it serves that again, and no more ([one slow pod, as built](#one-slow-pod-as-built-495)) |
+| measured mu | too high | the stale yield to a higher derived figure after 30 min (5 min toward a lower one). The restart that drops the latch (see [the mu choice](#the-mu-choice); restored to the safe side since PR 3). An unknown age (above; safe side since PR 3). An exact repeat: since PR 3 it refreshes freshness only under the derived figure, where losing it would let a repeating low rate yield to the higher figure, and not over it, where staleness yields to the lower one. Backed by new evidence, so allowed: the **immediate** yield when a Ready replica serves more than 2x it. The sibling yield was on this list; since #495 it is capped at the measurement (`mu-yield-capped-at-measurement`), so it no longer moves mu up: what the siblings serve reaches mu through the sample instead. Since #495, with no line, a figure a minority of the fleet wrote, under what the fleet's Ready replicas serve, gives way to that served bound after `lowHoldFor` with no saturated reading agreeing with it (`mu-minority-figure-expires`). The reason is the low hold's: an over-ordered fleet never saturates to correct a low figure. The bound is a lower bound, so the move stops at what the replicas showed they sustain, never at no mu. A figure at or over the bound, the whole fleet's, a borrowed one, or one whose writers are unknown (a restore), stands. And an unread replica under the KV line counts at what it serves over the scale-up target (`mu-unread-replica-at-target`): at most 1 / target over what it served unqueued, so the floor orders the fleet in which it serves that again, and no more ([one slow pod, as built](#one-slow-pod-as-built-495)) |
 | ITL line and derived mu | ITL(kPrice) too low, that is, derived mu too high (with B pinned low, A comes out too high and the prediction is still low) | the 6 ms default B or a stashed B. With B pinned below the true intercept, the pinned A absorbs the error and the prediction at kPrice is low by (B_true − B_pin)(1 − kPrice / k̄): **risky whenever the fleet runs above its pricing point**, the under-provisioned fleet that most needs a correct line |
 | prefill bound | too high | its window max only rises, survives the episode reset through `RaiseLast`, and never ages while read. Because `RaiseLast` carries the max past every reset, it is a running max over the bound's life: about 1.5σ above the mean after 10 readings, about 3.2σ after a day at one a minute. Unreviewed |
 | start time | **both** | too low under-orders a fleet that is behind (λ > mu · ready). Too high, in `internal/signals/floor/floor.go`: `DrainHorizon` under-prices the backlog whenever S exceeds 60 s, `startingCredit` credits a stuck pod for up to 2S, and a fleet with spare projects more drain and orders less. Share pacing errs the other way: too low moves GPUs for bursts that end first. PR 5 bounds both sides |
@@ -3841,6 +3841,21 @@ sample, and samples counting their unread replicas: priced mu down 3.6 % to
 priced at its measured 8.08 where it had yielded to its siblings' 12.12). The
 last two move none, and `heldBy` names their tests.
 
+How a lower mu moves demand, measured on those goldens. The floor's tokens
+rise as mu falls, and `ttft-staircase-b-off`'s decode demand is up on four
+cycles (to +7.7 %). It is down on four others (to -4.2 %), and
+`start-seed-restart-2`'s total demand falls on 14 cycles (21:22:34: 1527 to
+699, -54 %) with occupancy's per-variant demand unchanged. That is the floor's
+trust blend (`flooredDemand`): it trusts the floor's drain price over the
+queue's residency charge by lambda x P / mu against the resident KV, and a
+lower mu raises that ratio, so more of the residency charge is swapped out.
+The queue cap (`localQueueBacklog`) is not the term: the capped backlog is the
+same either way (55.99 requests at 21:22:34), and in replicas the cap is
+min(q / (mu x T), 1) per replica, which never falls as mu does.
+`TestMuSlowPod_TheFloorTrustIsHowALowerMuLowersDemand` pins the cycle. Whether
+a lower mu should lower the demand charged for a measured queue through the
+trust blend is a question for the floor, not this change; it is filed apart.
+
 - **The sample weighs the fleet (`mu-sample-weighs-the-fleet`).** No served
   rate refuses a reading. While the readers sit under `siblingMuTolerance` of
   what the unqueued replicas they did not read serve, those count in the sample
@@ -3855,39 +3870,62 @@ last two move none, and `heldBy` names their tests.
   cycle at 5.18 against a measured 3.39: both on the side that breaks the SLO.
   The cap was the user's decision on review.
 - **The unread replica's credit (`mu-unread-replica-at-target`).** An unread
-  replica under the KV line counts at served / `scaleUpThreshold`. Its rate is
+  replica under the KV line counts at served / the saturation analyzer's
+  `scaleUpThreshold` (`config.AnalyzerThresholds`, a per-analyzer override
+  where set, the target the floor charges). Its rate is
   what it was offered, and the floor charges the target on mu again: counted at
   what it serves, a lower bound alone cannot clear the probe (siblings showed
   0.674, so 12.8 / 0.667 / 0.85 = 23 against a bound of 21.7). The error is at
   most 1 / target over what it served unqueued, and it corrects itself: a
   replica priced too high queues and is read.
-- **A minority's figure expires (`mu-minority-figure-expires`).** With no line,
-  a figure whose newest sample was read by fewer than half of the readers and
-  unqueued replicas is released after `lowHoldFor` with no saturated reading
-  agreeing with it; the floor then prices from no mu. 3.4 has the reason. A
-  fleet that saturated together keeps its figure, and so does a restored window
-  (no writers on record: the safe side). The trade: the over-spend ends inside
-  `lowHoldFor`, for at worst one saturated episode per hold on a fleet whose
-  minority figure was right.
+- **A minority's figure gives way to the fleet's served bound
+  (`mu-minority-figure-expires`).** With no line, a figure whose newest sample
+  was read by fewer than half of the readers and unqueued replicas, and that
+  sits under what the Ready replicas serve weighed as a sample weighs them
+  (queued at their rate, unqueued at the credit), gives way to that bound after
+  `lowHoldFor` with no saturated reading agreeing with it. Never to no mu: a
+  served rate does not overstate what a replica sustains, so the release only
+  lifts mu to what the fleet showed. 3.4 has the reason. A fleet that saturated
+  together keeps its figure, and so does a restored window (no writers on
+  record: the safe side), a borrowed reading, and a figure at or over the
+  bound: a minority that a steering router saturated first read what every
+  replica does, and the fleet at a lower load serves less than that. It logs
+  once per key, on the transition. Review decided both the bound and the gate.
 
 Measured on the closed-loop probe (sixteen replicas at 12.8 req/s, one slow for
-its first 10 min; 60 min, since the release lands after 10 + 30 min plus the
-5 min stabilization), need 18, bound 21.7:
+its first 10 min; 60 min, past `lowHoldFor` after the recovery and the 5 min
+stabilization), need 18, bound 21.7:
 
 | case | all on | credit off | expiry off | both off | before #495 |
 | --- | --- | --- | --- | --- | --- |
-| slow pod at 0.55 | 21 from 1.75 min, 20 from 16.25, 18 from 47; peak 21 | peak 29, 18 from 43.5 | ends at 20 | 28 for good | 28 for good |
-| slow pod at 0.3 | 24 at peak, 20 from 21.5, 18 from 52 | peak 27, 18 from 50 | ends at 20 | 23 for good | 18 from 27, peak 19 |
+| slow pod at 0.55 | 21 from 1.75 min, 20 from 16.25 to the end; peak 21 | 28 for good, peak 29 | as all on | 28 for good | 28 for good |
+| slow pod at 0.3 | 24 at peak, 20 from 21.5 to the end | 23 for good, peak 27 | as all on | 23 for good | 18 from 27, peak 19 |
 
+- **The minority rule does not act on the probe.** Both cases settle at 20, a
+  fixed point: each of the twenty serves 0.64, which over the target is the
+  figure on record, so the figure sits at the fleet's served bound and is kept.
+  As first built, releasing to no mu without the gate, it brought both to 18;
+  released to the bound, a fleet at 20 is priced at 20. It still releases a
+  figure under the bound (`TestMuSlowPod_OneReplicasFigureExpiresAfterTheHold`).
+  With the credit off it no longer rescues the original defect: the 0.55 figure
+  sits over what 28 replicas serve (0.538), so it is kept.
+- **A steering router.** Eighteen replicas, four of them sent twice the share,
+  12 req/s, a lull at 2 req/s from 10 to 45 min, then 12 again
+  (`TestClosedLoopProbe_ASteeringRouterKeepsARightMinorityFigure`): the four
+  queue and read 1, the right figure, and the rule keeps it (released on no
+  cycle); the fleet meets the return at need (17, final 19, never under need).
+  As first built it released that figure on 45 cycles, and the fleet moved the
+  same way: the first queued reading at the return writes it back within a
+  cycle, and the simulator's floor never binds above occupancy without a queue.
 - **The cost of the fix.** At 0.3 the old served bound refused the slow pod and
   the fleet peaked at 19. Now it counts by its weight, and while the pod is
-  slow the fleet peaks at 24, over the bound, before it ends at need. That is
-  the estimand at work on a lower bound: siblings unqueued show less than their
-  limit.
-- **Open.** The simulator splits load equally, so the slow pod's own queue
-  under a router that steers is not measured, and nor is a right minority
-  figure dropped, since the floor never binds above occupancy there. Not
-  measured on a cluster.
+  slow the fleet peaks at 24, over the bound, and settles at 20, inside it.
+  That is the estimand at work on a lower bound: siblings unqueued show less
+  than their limit. The weighing's hold is what keeps the peak at 24: read
+  fresh it peaked at 28 and ended at 23.
+- **Open.** Not measured on a cluster, and the simulator cannot price a right
+  minority figure released: its floor never binds above occupancy without a
+  queue.
 
 ## 8. Risks and limits
 

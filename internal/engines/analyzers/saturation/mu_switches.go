@@ -69,7 +69,8 @@ const SwitchMuUnreadAtTarget = "mu-unread-replica-at-target"
 
 // SwitchMuMinorityFigureExpires is the replay switch for a measured mu no
 // line can replace, written by a minority of the fleet
-// (minorityFigureExpired; analyzer-learner.md, 3.4). On, it is released after
-// MuChoice.LowHoldFor with no saturated reading in agreement with it. Off, as
-// before, with no line the measurement stood for good.
+// (minorityFigureExpired; analyzer-learner.md, 3.4). On, a figure under the
+// fleet's served bound gives way to that bound after MuChoice.LowHoldFor with
+// no saturated reading in agreement with it. Off, as before, with no line the
+// measurement stood for good.
 const SwitchMuMinorityFigureExpires = "mu-minority-figure-expires"

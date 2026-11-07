@@ -146,7 +146,16 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	//     whose readers sat under the tolerance of the unread replicas count
 	//     them (start-seed-restart-2: a sample of 0.304 against 0.351, so the
 	//     priced mu falls 5.7 % on 14 cycles; ttft-staircase-b-off: 15.06
-	//     against 15.62 on 12 rows, decode demand up 7.7 % on 8).
+	//     against 15.62 on 12 rows). Demand moves through the floor: its
+	//     tokens rise as mu falls, so b-off's decode demand is up on 4
+	//     cycles (to +7.7 %), but its trust blend (flooredDemand) reads
+	//     lambda x P / mu against the resident KV, which a lower mu raises,
+	//     and swaps out more of the queues' residency charge, so demand is
+	//     down on 4 others (to -4.2 %) and start-seed-restart-2's total
+	//     falls on 14 cycles (21:22:34: 1527 to 699) with occupancy's
+	//     per-variant demand unchanged. The queue cap (localQueueBacklog)
+	//     is not the term; TestMuSlowPod_TheFloorTrustIsHowALowerMuLowersDemand
+	//     pins it.
 	//   - SwitchMuYieldCappedAtMeasurement: a sibling yield never prices
 	//     above the measurement (mu-paths: variant-02 at 09:01 priced at its
 	//     measured 8.08 where it yielded to its siblings' 12.12, on 44 rows).
@@ -788,12 +797,11 @@ var heldBy = map[string][]heldTest{
 	},
 	saturation.SwitchMuUnreadAtTarget: {
 		{"../saturation", "TestMuSlowPod_TheCreditReachesTheSample"},
-		{"../saturation", "TestClosedLoopProbe_ASlowReplicaInsideTheServedBoundStaysUnderTheBoundAndEndsAtNeed"},
+		{"../saturation", "TestClosedLoopProbe_ASlowReplicaInsideTheServedBoundStaysUnderTheBound"},
 	},
 	saturation.SwitchMuMinorityFigureExpires: {
 		{"../saturation", "TestMuSlowPod_AMinorityFigureExpiresOnlyPastTheHold"},
 		{"../saturation", "TestMuSlowPod_OneReplicasFigureExpiresAfterTheHold"},
-		{"../saturation", "TestClosedLoopProbe_ASlowReplicaInsideTheServedBoundStaysUnderTheBoundAndEndsAtNeed"},
 	},
 	// #276 on the slo line: it runs the switch on and off through Analyze and
 	// asserts both (the replica's rate halved at D 2 on, as it was off).
