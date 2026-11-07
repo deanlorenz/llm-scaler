@@ -145,8 +145,9 @@ length. With equal lengths it contributes its mean, `O/2`; with lengths that
 vary, a long request stays resident longer and the average resident request
 holds `D x O/2`. `D` is 1 when any generating replica lacks the histogram,
 while a shape change is outstanding (on every path), and with the replay
-switch `kv-per-request-output-dispersion` off. The throughput and slo
-analyzers still price `ILeff + O/2` (#433).
+switch `kv-per-request-output-dispersion` off. The slo analyzer prices `D` too,
+behind `slo-kv-per-request-output-dispersion`, with no shape-change hold. The
+throughput analyzer still prices `ILeff + O/2` (#433).
 
 A hit saves KV only when another running request holds the block too, so the
 derived mu does not assume `ILeff` for memory where it can measure it (issue

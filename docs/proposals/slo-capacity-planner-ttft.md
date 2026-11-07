@@ -397,8 +397,8 @@ that is itself wrong (the exponential tail, Poisson arrivals, an omitted
 | Wait tail at prompt cv above 1: `ρ_w·e^(−γt)`, `γ` the Cramér-Lundberg root ([as built](#the-model-as-built)) | Under-promises against a Lindley simulation (cv 2 and 3, `ρ` 0.3 and 0.6): by 3–28% at p90, 4–16% at p99 and 3–12% at p999; not a proven bound. Kingman's `1/θ` alone over-promised by up to 10% here |
 | Wait tail at prompt cv below 1: Taylor's bound `min(ρ_w, C·e^(−γt))` | Under-promises, provably: by 8–18% at p90, 4–12% at p99 and 4–10% at p999 against a simulation (cv 0 and 0.5), and 1–17% against Erlang's exact M/D/1 wait. The exponential body it replaced read an M/D/1 p90 sojourn 10% short at `ρ` 0.2 |
 | Prompt cv above 3 | Either way, and not monotone: the gamma's p90 can fall as cv rises at very low load, since most of its mass sits below the mean. S1 passes no cv above 3, assumed or measured (it assumes 2); nothing here is tested above it |
-| Wait tail with bursty arrivals (`Ca²` ≠ 1): Kingman's `1/θ`, never above the work's own tail rate | Not checked against a simulation; burstiness lengthens the tail, and Kingman's decay is taken as its conservative side |
-| Poisson arrivals on bursty traffic | Over-promises |
+| Wait tail with bursty arrivals (`Ca²` ≠ 1): the Poisson tail stretched in time by `(Ca² + Cs²)/(1 + Cs²)`, never decaying faster than the work's own tail rate | Not checked against a simulation of a bursty queue. It is continuous at `Ca²` 1, never falls as `Ca²` rises (`TestProperty_TTFTNeverFallsWithCa2`), and tends to Kingman's `1/θ` in heavy traffic; below that it is an interpolation. Kingman's `1/θ` alone is no conservative side: above `cv` 1 it decays faster than Poisson's root, so `Ca²` just over 1 priced better than Poisson (5.53 against 5.26 r/s on the worked fleet at 300 ms p95, `cv` 2) |
+| Poisson arrivals on bursty traffic | Over-promises. The CLI's `--arrival-cv2` states `Ca²` for the prefill queue; decode admission stays Poisson |
 | Per-pod model above the flow-control onset | Either way; the pooled bound printed beside it over-promises |
 | Dispatch-gate delays (scores up to 200 ms stale, a 50 ms candidate cache) | Over-promises, slightly, near the onset |
 | One band, static ceiling | Over-promises for low bands, under-promises for the highest |
@@ -512,8 +512,9 @@ roles' rates.
     ρ_w   = f·λ·E[I]/(N_p·V_P)
     θ     = (E[I]/V_P)·(Ca² + Cs²) / (2(1 − ρ_w))          Cs² = cv²
     γ     : λ_w·(M_S(γ) − 1) = γ        (Cramér-Lundberg root; M_S the work's MGF)
-    P(W_engine > t) = ρ_w·e^(−rt),  r = min(1/θ, γ)          Poisson arrivals, cv ≥ 1
-                    = min(ρ_w, C·e^(−γt)),  C = 1 − γ·cv²·E[S]  Poisson arrivals, cv < 1 (Taylor's bound)
+    s     = (Ca² + Cs²)/(1 + Cs²)                            1 at Poisson arrivals
+    P(W_engine > t) = ρ_w·e^(−rt/s),  r = min(1/θ₁, γ)       cv ≥ 1, θ₁ the θ at Ca² 1
+                    = min(ρ_w, C·e^(−γt/s)),  C = 1 − γ·cv²·E[S]  cv < 1 (Taylor's bound at s = 1)
                     = ρ_w·e^(−rt),  r = min(1/θ, 1/(cv²·E[S]))  bursty arrivals (Kingman)
     own   = a + I·(1/V_P + κ/BW),   I ~ Gamma(mean E[I], cv); constant below cv 1e-4
     block 1 = W_engine + own        (convolved exactly, closed form via the incomplete gamma)
@@ -1436,6 +1437,15 @@ at p95 at the operating rate, and the client measured 1.14 to 1.80 and 1.13 to 2
 So C's pass says nothing of the model at any other `Ca²`, and the two errors would
 not cancel at the same place at `Ca²` near 2. That step was not run, so C's pass is
 not evidence that the model prices bursts.
+
+These predictions are the frozen run's, and stay: they were priced at Kingman's
+`1/θ`. The bursty tail has since become the Poisson tail stretched by
+`(Ca² + Cs²)/(1 + Cs²)`, so a fresh freeze prices bucket C differently. On the old
+sum, at 17.6 r/s, 159.7 becomes 197.2 ms at p90 and 214.0 becomes 233.8 ms at p95.
+The gap closes toward the knee: 424.7 becomes 444.6 ms at p90 at 38.7 r/s. At
+41.3 r/s the p95 falls, 1087 to 1058 ms, because at `cv` under 1 the stretched root
+decays a little faster than Kingman there. Means do not move. Buckets A and B are
+Poisson, and move by nothing (`TestLadder_BeforeAndAfterTheTerm`).
 
 ### S2's gate and the flow-control series
 

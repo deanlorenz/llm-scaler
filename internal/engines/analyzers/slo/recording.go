@@ -99,8 +99,8 @@ func (a *Analyzer) SlopeHoldFor() time.Duration { return a.slopeHoldFor }
 // SwitchITLKeepsSettleThroughMissingRow, SwitchITLReadsFinitePodMean,
 // SwitchITLRestartUnderName, SwitchITLIdleOnEvidence and
 // SwitchITLForgetReachesTheLine, SwitchITLOneSidedAtCap, SwitchTTFTPrice,
-// SwitchTTFTMeasuredSpread and SwitchTTFTMeasuredTransfer; a
-// name it does not know is an error, and sets nothing. Never called on a production
+// SwitchTTFTMeasuredSpread, SwitchTTFTMeasuredTransfer and
+// SwitchKVPerRequestOutputDispersion; a name it does not know is an error, and sets nothing. Never called on a production
 // path; a test holds that.
 func (a *Analyzer) SetSwitchesForReplay(switches map[string]bool) error {
 	rest := maps.Clone(switches)
@@ -149,6 +149,10 @@ func (a *Analyzer) switchFields() map[string]*bool {
 		SwitchTTFTMeasuredTransfer: &a.ttftMeasuredTransfer,
 		// The decode term of a TTFT on a decode line (ttft.go).
 		SwitchTTFTDecodeTerm: &a.ttftDecodeTerm,
+
+		// Issue #276: the spread of output lengths in the KV per request
+		// (output_dispersion.go).
+		SwitchKVPerRequestOutputDispersion: &a.kvOutputDispersion,
 	}
 }
 
