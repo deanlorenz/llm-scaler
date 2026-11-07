@@ -812,7 +812,7 @@ func (e *Engine) publishActivation(
 	// publishes at least one replica (the only caller passes 1), so a changed
 	// decision is always a scale-up.
 	if changed {
-		e.recorder.Eventf(&va, corev1.EventTypeNormal, constants.K8SEventScaledUp, string(domain.DecisionReasonScaleFromZero)+reasonDetails)
+		e.recorder.Eventf(wvav1alpha1.EventTarget(&va), corev1.EventTypeNormal, constants.K8SEventScaledUp, string(domain.DecisionReasonScaleFromZero)+reasonDetails)
 	}
 	va.Status.Actuation.Applied = true
 
