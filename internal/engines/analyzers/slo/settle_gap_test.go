@@ -16,6 +16,8 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 )
 
 // Issue #459: the analyzer alone, with no engine tracker, across a gap
@@ -50,13 +52,21 @@ var gapModels = []string{"m1", "m2"}
 // out as its replica's settle, as Analyze's slo-variant log states it.
 func runGap(t *testing.T, switches map[string]bool, evict gapEviction, gapAt int) map[string][]int {
 	t.Helper()
+	return runGapOf(t, switches, evict, gapAt, gapLength, func(int) []domain.ReplicaMetrics { return settleFleet() })
+}
+
+// runGapOf is runGap with the clock jumping gap before cycle gapAt, on top
+// of the cycle's own settleCycle, and cycle i's rows from rows.
+func runGapOf(t *testing.T, switches map[string]bool, evict gapEviction, gapAt int, gap time.Duration,
+	rows func(i int) []domain.ReplicaMetrics) map[string][]int {
+	t.Helper()
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 	a := newGapAnalyzer(t, switches, &now)
-	analyze := func(model string) int64 { return analyzeSettling(t, a, model, settleFleet()) }
 	out := map[string][]int{}
 	for i := range gapAt + settleCycles + 4 {
+		analyze := func(model string) int64 { return analyzeSettling(t, a, model, rows(i)) }
 		if i == gapAt {
-			now = now.Add(gapLength)
+			now = now.Add(gap)
 		}
 		if evict == evictFirst {
 			a.EvictStale(now)
@@ -182,4 +192,119 @@ func TestSettle_AfterALongGapWithTheSwitchOffEvictionOrderStillMatters(t *testin
 	never := runGap(t, off, evictNever, gapAt)
 	assert.Equal(t, settled, never["m1"], "never evicted: m1 did not settle")
 	assert.Equal(t, settled, never["m2"], "never evicted: m2 did not settle")
+}
+
+// A gap is past the state timeout only when longer than it, as EvictStale
+// reads one: a gap of exactly the timeout is read as before, an absence
+// past the tracker's tolerance (settle.Rejoined), and the replicas settle;
+// a nanosecond more and the model is first-seen. The gap between the two
+// Analyze calls is the jump and the cycle's own settleCycle. Never
+// evicted, so only observeOwnSettle judges the gap.
+func TestSettle_AGapOfExactlyTheStateTimeoutIsNoLongGap(t *testing.T) {
+	gapAt := settleCycles + 2
+	fleet := func(int) []domain.ReplicaMetrics { return settleFleet() }
+	exact := runGapOf(t, nil, evictNever, gapAt, gapStateTimeout-settleCycle, fleet)
+	past := runGapOf(t, nil, evictNever, gapAt, gapStateTimeout-settleCycle+time.Nanosecond, fleet)
+	assert.Equal(t, span(gapAt, settleCycles), exact["m1"], "a gap of exactly the timeout was read as a long gap")
+	assert.Empty(t, past["m1"], "a gap a nanosecond past the timeout was not first-seen")
+}
+
+// With the move off (SwitchITLReadsSettle) the line reads its own trace of
+// each replica, and the long-gap switch does nothing: the trace is kept
+// across the gap. A replica idle on the two cycles before the gap, whose
+// load comes back after it, waits steadyFor (the own trace's idle rule)
+// with the long-gap switch on or off. Forgetting the traces on the long gap
+// would lose the idle run, and nothing would settle.
+func TestSettle_AfterALongGapWithTheMoveOffTheOwnTraceIsKept(t *testing.T) {
+	gapAt := settleCycles + 2
+	rows := func(i int) []domain.ReplicaMetrics {
+		f := settleFleet()
+		if i == gapAt-2 || i == gapAt-1 {
+			settleIdle(&f[2])
+		}
+		return f
+	}
+	moveOff := runGapOf(t, map[string]bool{SwitchITLReadsSettle: false}, evictNever, gapAt, gapLength, rows)
+	bothOff := runGapOf(t, map[string]bool{SwitchITLReadsSettle: false, SwitchITLLongGapFirstSeen: false},
+		evictNever, gapAt, gapLength, rows)
+	t.Logf("settling cycles, move off: %v; both off: %v", moveOff, bothOff)
+	assert.Equal(t, span(gapAt, settleCycles), bothOff["m1"], "premise: the idle run survives the gap on the own trace")
+	assert.Equal(t, bothOff, moveOff, "with the move off, the long-gap switch changed the line")
+}
+
+// After a long gap the own tracker holds of the model what it holds when
+// EvictStale forgot the model first, replica by replica, and none that left
+// during the gap. Two timeouts: the default's hour, and one shorter than the
+// tracker's own forget horizon (settle.TraceHorizon), under which a gap
+// past the timeout is not long enough for the tracker to drop a replica that
+// left by itself. Holds the forget (without it, under the short timeout, a
+// replica that left stays held) and the backdate (without it the replicas
+// read settle.Joined; with it, as after an eviction, the backdated sighting
+// is ownSettleBackdate before the cycle's, past the tracker's absence
+// tolerance, so they read settle.Rejoined at the cycle: the line takes
+// neither as a settle, since its keys' traces start at that cycle too).
+func TestSettle_AfterALongGapTheOwnTrackerHoldsWhatAnEvictionLeaves(t *testing.T) {
+	model := utils.GetNamespacedKey("ns", "m")
+	gone := settle.Key{Pod: "agg-c", Variant: "agg"}
+	run := func(timeout, gap time.Duration, evict bool) map[string]settle.Replica {
+		now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+		a := newGapAnalyzer(t, nil, &now).WithStateTimeout(timeout)
+		for range 3 {
+			analyzeSettling(t, a, "m", settleFleet())
+			now = now.Add(settleCycle)
+		}
+		now = now.Add(gap)
+		if evict {
+			a.EvictStale(now)
+		}
+		analyzeSettling(t, a, "m", settleFleet()[:2])
+		_, held := a.ownSettle.Replica(model, gone)
+		assert.False(t, held, "timeout %v, evicted first %v: a replica that left during the gap is still held", timeout, evict)
+		out := map[string]settle.Replica{}
+		for _, pod := range []string{"agg-a", "agg-b"} {
+			r, ok := a.ownSettle.Replica(model, settle.Key{Pod: pod, Variant: "agg"})
+			require.True(t, ok, "timeout %v, evicted first %v: %s is not held", timeout, evict, pod)
+			out[pod] = r
+		}
+		return out
+	}
+	for _, c := range []struct{ timeout, gap time.Duration }{
+		{gapStateTimeout, gapLength},
+		{2 * time.Minute, 3 * time.Minute},
+	} {
+		if c.timeout < settle.TraceHorizon {
+			require.Less(t, c.gap, settle.TraceHorizon, "premise: the tracker alone keeps a replica that left")
+		}
+		assert.Equal(t, run(c.timeout, c.gap, true), run(c.timeout, c.gap, false),
+			"timeout %v: the stale model's own tracker differs from an evicted one's", c.timeout)
+	}
+}
+
+// With the engine's settle view the analyzer keeps no tracker of its own,
+// and the long-gap switch does nothing: the engine's tracker reads the gap
+// as an absence (settle.Rejoined), and the replicas settle, on or off.
+func TestSettle_WithAnEngineViewTheLongGapSwitchDoesNothing(t *testing.T) {
+	gapAt := settleCycles + 2
+	run := func(switches map[string]bool) []int {
+		now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+		tr := settle.NewTracker()
+		tr.SetInterval(settleCycle)
+		a := newGapAnalyzer(t, switches, &now).WithSettleView(tr)
+		var out []int
+		for i := range gapAt + settleCycles + 4 {
+			if i == gapAt {
+				now = now.Add(gapLength)
+			}
+			tr.Observe(utils.GetNamespacedKey("ns", "m"), settlerow.Of(settleFleet(), map[string]string{"agg": domain.RoleBoth}), now)
+			if analyzeSettling(t, a, "m", settleFleet()) > 0 {
+				out = append(out, i)
+			}
+			now = now.Add(settleCycle)
+		}
+		return out
+	}
+	on := run(nil)
+	t.Logf("settling cycles: %v", on)
+	require.Contains(t, on, gapAt, "premise: the engine's tracker settles the replicas after the gap")
+	assert.Equal(t, on, run(map[string]bool{SwitchITLLongGapFirstSeen: false}), "with an engine view, the switch changed the line")
 }
