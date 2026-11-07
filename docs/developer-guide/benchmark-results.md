@@ -1,8 +1,8 @@
 # Benchmark results
 
 > **These are historical baselines.** Every run below was measured on
-> llm-d's workload-variant-autoscaler v0.6.0, from before this project began.
-> Its saturation engine is the one called v1 in these tables; the steady-state
+> llm-d's workload-variant-autoscaler v0.6.0 and v0.7.0, from before this
+> project began. Its saturation engine is the one called v1 in these tables; the steady-state
 > engine replaced it here, so these numbers are the record a new analyzer is
 > compared against, not a description of what the scaling manager does today.
 > The `_TBD_` cells were never filled.
@@ -53,7 +53,7 @@ Summary of those runs with configuration details.
 | Scale-up policy | 10 Pods / 150s |
 | Scale-down stabilization | 240s |
 | Scale-down policy | 10 Pods / 150s |
-| Metric source | External (`wva_desired_replicas`) |
+| Metric source | External: the other project's desired-replicas metric |
 
 ## EPP+KEDA Saturation Configuration
 
