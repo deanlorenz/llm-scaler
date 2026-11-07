@@ -218,6 +218,22 @@ func TestKVOutputDispersion_NoHistogramPricesAsBefore(t *testing.T) {
 	assert.InDelta(t, 3, fleetOutputDispersion([]domain.ReplicaMetrics{known, prefill}, roles), 1e-12)
 }
 
+// A bound of +Inf or NaN is no reading (fleet.SquaredBoundRead): a fleet
+// with one is read as no spread. Admitted, +Inf passed the bound check while
+// the mean of E[O^2] dropped the row and the mean of E[O] kept it, so D read
+// from mismatched rows: a 5-token row beside a 50-token one at D 3 read E[O]
+// 27.5 against the other row's E[O^2] 7500, D 9.9.
+func TestKVOutputDispersion_ABoundThatIsNoNumberIsNoReading(t *testing.T) {
+	known := withSpread(makeReplicaMetrics("pod-1", "variant-a", 5000, 100_000, 0, 100, 50), 3)
+	for _, v := range []float64{math.Inf(1), math.NaN()} {
+		bad := known
+		bad.PodName, bad.AvgOutputTokens, bad.AvgOutputTokensSquared = "pod-2", 5, v
+		assert.InDelta(t, 1, fleetOutputDispersion([]domain.ReplicaMetrics{known, bad}, nil), 1e-12, "bound %v", v)
+		_, _, ok := fleetOutputMoments([]domain.ReplicaMetrics{known, bad}, nil)
+		assert.False(t, ok, "bound %v", v)
+	}
+}
+
 // The fleet's spread is weighted by request rate, as its mean is, so the two
 // divide into one fleet's D: a replica at 100 tokens with D 1 serving three
 // times the requests of one at 300 with D 2 is E[O] = 150, E[O^2] =

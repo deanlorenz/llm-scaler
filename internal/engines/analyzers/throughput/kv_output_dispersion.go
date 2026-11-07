@@ -1,12 +1,8 @@
 package throughput
 
 import (
-	"math"
-	"slices"
-
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/fleet"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
 
 // The KV a resident request holds, with output lengths that vary (issue #433,
@@ -21,16 +17,16 @@ import (
 // replicas where saturation, on the same variant, now prices the spread.
 //
 // Here KVreq sets how many sequences a fill holds, in the supply at k_sat, the
-// local demand at k* (computeLocalDemand) and the GPS check, so a larger D
-// lowers all three by the same factor.
+// local demand at k* (computeLocalDemand) and the GPS check. The model-level
+// demand (arrival rate x OL) does not read it, so a larger D lowers the supply
+// against an unchanged demand, and orders more replicas.
 //
-// D is read as saturation reads it: from each replica's lower bound on E[O^2]
-// (domain.SquaredMeanLowerBound), request-weighted over the replicas the
-// variant's shape averages (averageShapeMetrics), and only when every one of
-// them read the bound; otherwise 1, no spread. Unlike saturation it is not
-// held at 1 across a change of shape: across one the [5m] histogram holds both
-// shapes and reads high, and here a higher D only lowers the supply, so the
-// side it errs on is more replicas.
+// D is read as saturation and slo read it (fleet.OutputDispersion): from each
+// replica's lower bound on E[O^2] (domain.SquaredMeanLowerBound),
+// request-weighted over the replicas the variant's shape averages
+// (averageShapeMetrics), and only when every one of them read the bound;
+// otherwise 1, no spread. Unlike saturation it is not held at 1 across a
+// change of shape.
 
 // SwitchKVPerRequestOutputDispersion is the replay switch for the spread of
 // output lengths in the KV per request on the throughput analyzer (issue
@@ -40,19 +36,9 @@ const SwitchKVPerRequestOutputDispersion = "throughput-kv-per-request-output-dis
 
 // variantOutputDispersion is the spread of a variant's output lengths, D =
 // E[O^2]/E[O]^2, over the replicas averageShapeMetrics averages and with its
-// weights, so the two are one reading of one variant. 1 unless every one of
-// them read a positive, finite bound on E[O^2].
+// weights, so the two are one reading of one variant: 1 unless every one of
+// them read a positive, finite bound on E[O^2] (fleet.OutputDispersion).
 func variantOutputDispersion(rows []domain.ReplicaMetrics) float64 {
-	counted := shapeEligible
-	// A NaN bound fails the > 0 below; +Inf is refused by name.
-	if !slices.ContainsFunc(rows, counted) ||
-		slices.ContainsFunc(rows, func(m domain.ReplicaMetrics) bool {
-			return counted(m) && !(m.AvgOutputTokensSquaredKnown && m.AvgOutputTokensSquared > 0 &&
-				!math.IsInf(m.AvgOutputTokensSquared, 0))
-		}) {
-		return 1
-	}
-	mean := fleet.Mean(rows, func(m domain.ReplicaMetrics) float64 { return m.AvgOutputTokens }, counted)
-	squared := fleet.Mean(rows, func(m domain.ReplicaMetrics) float64 { return m.AvgOutputTokensSquared }, counted)
-	return shape.Dispersion(mean, squared)
+	d, _ := fleet.OutputDispersion(rows, shapeEligible)
+	return d
 }
