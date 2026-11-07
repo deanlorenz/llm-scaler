@@ -58,7 +58,8 @@ type Fleet struct {
 	Lambda func(elapsed time.Duration) float64
 	// Weight, when set, is a replica's share of the arrivals relative to
 	// the other Ready replicas' at an elapsed time: a router that steers.
-	// Nil splits them equally.
+	// Nil splits them equally, and so do weights that sum to zero or less,
+	// or to no number, on a cycle.
 	Weight  func(i int, elapsed time.Duration) float64
 	Horizon time.Duration
 	// Need is the fleet a truthful analyzer orders at arrival rate lambda.
@@ -181,6 +182,9 @@ func (f Fleet) Run(step Step) Result {
 		}
 		for _, i := range ready {
 			weights += weight(i)
+		}
+		if !(weights > 0) || math.IsInf(weights, 1) {
+			weight, weights = func(int) float64 { return 1 }, float64(len(ready))
 		}
 		for _, i := range ready {
 			p, mu := pods[i], trueMu(i, elapsed)

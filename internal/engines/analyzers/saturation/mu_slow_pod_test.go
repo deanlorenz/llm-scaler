@@ -184,51 +184,112 @@ func TestMuSlowPod_AMinorityFigureExpiresOnlyPastTheHold(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, firsts, "one line for the whole run, not one per replica per cycle")
+
+	// A run that ends on any path, the hold not met or an early return,
+	// logs again when the next run starts: release, not released, release
+	// gives two first lines, whichever path ended the first run.
+	ends := map[string]func() minorityRelease{
+		"the hold not met": func() minorityRelease {
+			return a.minorityFigureExpired(propMuKey, reading, fleet, false, tn, at)
+		},
+		"a line": func() minorityRelease {
+			return a.minorityFigureExpired(propMuKey, reading, fleet, true, tn, late)
+		},
+		"a borrowed reading": func() minorityRelease {
+			return a.minorityFigureExpired(propMuKey, borrowed, fleet, false, tn, late)
+		},
+		"the fleet's figure": func() minorityRelease {
+			a.throughputMuChoice[propMuKey].minority = false
+			r := a.minorityFigureExpired(propMuKey, reading, fleet, false, tn, late)
+			a.throughputMuChoice[propMuKey].minority = true
+			return r
+		},
+	}
+	for name, end := range ends {
+		a = NewSaturationAnalyzer(capacity.NewStore())
+		a.throughputMuChoice[propMuKey] = &muChoice{minority: true, saturatedAt: at}
+		r1 := a.minorityFigureExpired(propMuKey, reading, fleet, false, tn, late)
+		require.False(t, end().released, "%s: premise: not released", name)
+		r2 := a.minorityFigureExpired(propMuKey, reading, fleet, false, tn, late)
+		require.True(t, r1.first && r2.first, "%s: release, not released, release logs twice", name)
+	}
+}
+
+// slowPodPriced is what Analyze priced one replica's saturated throughput
+// at, and the bucket it named, from its replica-capacity-decision line.
+type slowPodPriced struct {
+	rate   float64
+	bucket string
 }
 
 // slowPodEpisode runs a fleet of four through Analyze: readers queued at
 // 0.55 beside the rest unqueued at 0.6 for 3 min, then all four unqueued at
 // 0.4 of their cache serving 0.6 for 40 min, and returns when the minority's
 // figure first expired, from the end of the saturated part (negative when it
-// never did), and the mu on record at the end.
-func slowPodEpisode(t *testing.T, readers int, switches map[string]bool) (time.Duration, float64) {
+// never did), the mu on record at the end, and what the last cycle priced
+// each replica at.
+func slowPodEpisode(t *testing.T, readers int, switches map[string]bool) (time.Duration, float64, []slowPodPriced) {
 	t.Helper()
 	rig := slowPodRig(t, switches)
 	for range 12 {
 		_, err := rig.analyze(slowPodRows(4, readers, 0.55, 0.6, 0.5), aggStates(4), 2.4, propCycle)
 		require.NoError(t, err)
 	}
+	ctx, logs := observedCtx(t)
+	rig.ctx = ctx
 	quietFrom := rig.clock
 	first := time.Duration(-1)
 	for rig.clock.Sub(quietFrom) < 40*time.Minute {
 		elapsed := rig.clock.Sub(quietFrom)
+		logs.TakeAll()
 		_, err := rig.analyze(slowPodRows(4, 0, 0, 0.6, 0.4), aggStates(4), 2.4, propCycle)
 		require.NoError(t, err)
 		if first < 0 && muCount(rig.a, muReasonMinorityExpired) > 0 {
 			first = elapsed
 		}
 	}
-	return first, rig.measuredMu()
+	entries := logs.FilterMessage("replica-capacity-decision").All()
+	priced := make([]slowPodPriced, 0, len(entries))
+	for _, e := range entries {
+		f := e.ContextMap()
+		rate, _ := f["saturatedThroughput"].(float64)
+		bucket, _ := f["saturatedThroughputBucket"].(string)
+		priced = append(priced, slowPodPriced{rate: rate, bucket: bucket})
+	}
+	return first, rig.measuredMu(), priced
 }
 
 // One replica of four wrote the figure: it expires 30 min (lowHoldFor) after
 // its last saturated reading, and with the switch off it never does.
 func TestMuSlowPod_OneReplicasFigureExpiresAfterTheHold(t *testing.T) {
 	hold := tuningDefault.WithDefaults().MuChoice.LowHoldFor.Duration()
-	first, mu := slowPodEpisode(t, 1, nil)
-	t.Logf("one reader: expired %s after the fleet stopped queueing; mu on record %.3f", first, mu)
+	first, mu, priced := slowPodEpisode(t, 1, nil)
+	t.Logf("one reader: expired %s after the fleet stopped queueing; mu on record %.3f; priced %v", first, mu, priced)
 	require.Positive(t, mu, "premise: the slow replica wrote a figure")
 	require.GreaterOrEqual(t, first, hold-propCycle, "not before the hold")
 	require.Less(t, first, hold+time.Minute, "within a minute of it")
+	// What Analyze priced, not the window: every replica at the quiet
+	// fleet's served bound, four unqueued at 0.6 under the KV line, credited
+	// over the target, and named as such.
+	bound := 0.6 / floorTarget
+	require.Len(t, priced, 4)
+	for _, p := range priced {
+		require.InDelta(t, bound, p.rate, 1e-9, "released to the fleet's served bound")
+		require.Equal(t, servedBoundBucket, p.bucket)
+	}
+	require.Greater(t, bound, mu, "premise: the figure on record sits under the bound")
 
-	off, _ := slowPodEpisode(t, 1, map[string]bool{SwitchMuMinorityFigureExpires: false})
+	off, _, kept := slowPodEpisode(t, 1, map[string]bool{SwitchMuMinorityFigureExpires: false})
 	require.Negative(t, off, "with the switch off a minority's figure stands")
+	for _, p := range kept {
+		require.InDelta(t, mu, p.rate, 1e-9, "with the switch off the figure on record prices")
+	}
 }
 
 // A fleet that saturated together keeps its figure: every replica read it,
 // so it is no minority's, and stands however long nothing queues.
 func TestMuSlowPod_AFleetThatSaturatedTogetherKeepsItsFigure(t *testing.T) {
-	first, mu := slowPodEpisode(t, 4, nil)
+	first, mu, _ := slowPodEpisode(t, 4, nil)
 	t.Logf("four readers: first expiry %s; mu on record %.3f", first, mu)
 	require.Positive(t, mu, "premise: the fleet wrote a figure")
 	require.Negative(t, first, "the fleet's own figure never expires")

@@ -35,9 +35,9 @@ import "time"
 //     bound after MuChoice.LowHoldFor without a saturated reading that agrees
 //     with it (minorityFigureExpired).
 //
-// What is still open: the simulator splits load equally, so the slow pod's
-// own queue under a router that steers is not measured. See the proposal's
-// "One slow pod, as built".
+// What is still open: the closed-loop simulator cannot price a right
+// minority figure released, since its floor never binds above occupancy
+// without a queue. See the proposal's "One slow pod, as built".
 
 // servedPod is one Ready own replica's served rate this cycle, whether it is
 // queued past the threshold, which makes that rate a reading of its limit,
@@ -204,15 +204,23 @@ type minorityRelease struct {
 // unknown resolves to the safe side, the lower figure. A borrowed reading is
 // no window of this key's, and is never released.
 func (a *SaturationAnalyzer) minorityFigureExpired(key string, reading throughputReading, served servedRates,
-	derivedOK bool, t tuning, now time.Time) minorityRelease {
-	if !a.muMinorityExpires || derivedOK || !(reading.rate > 0) || reading.borrowed {
-		return minorityRelease{}
-	}
+	derivedOK bool, t tuning, now time.Time) (out minorityRelease) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	c := a.throughputMuChoice[key]
+	// Every path records the run's state: one that does not release ends
+	// the run, so the next release logs again.
+	defer func() {
+		if c != nil {
+			out.first = out.released && !c.released
+			c.released = out.released
+		}
+	}()
+	if !a.muMinorityExpires || derivedOK || !(reading.rate > 0) || reading.borrowed {
+		return out
+	}
 	if c == nil || !c.minority {
-		return minorityRelease{}
+		return out
 	}
 	fresh := reading.sampledAt
 	if !c.saturatedAt.IsZero() {
@@ -220,12 +228,9 @@ func (a *SaturationAnalyzer) minorityFigureExpired(key string, reading throughpu
 	}
 	bound := served.fleetBound()
 	if !a.lowHeldOut(fresh, reading, t, now) || !(reading.rate < bound) {
-		c.released = false
-		return minorityRelease{}
+		return out
 	}
-	first := !c.released
-	c.released = true
-	return minorityRelease{released: true, bound: bound, first: first}
+	return minorityRelease{released: true, bound: bound}
 }
 
 // yieldCapped reports whether a sibling yield to rate is refused by the cap
