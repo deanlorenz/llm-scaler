@@ -574,6 +574,7 @@ averages
 avgITLObs
 avgInputTokens
 avgOutputTokens
+awaiting-in-flight
 awaiting-return
 b
 back
@@ -1148,6 +1149,7 @@ given
 gives
 giving
 global
+go
 goes
 going
 gone
@@ -1583,6 +1585,7 @@ maxNumSeqs
 maxRatio
 maxReplicas
 maxRoles
+maxWait
 max_model_len
 max_num_active_seqs
 max_num_batched_tokens
@@ -2852,6 +2855,7 @@ vpSamples
 vpSource
 wait
 waitBeforeReverseMove
+waited
 waiting
 waits
 wake
