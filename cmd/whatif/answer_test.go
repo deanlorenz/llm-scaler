@@ -58,6 +58,8 @@ func TestGolden(t *testing.T) {
 			"--tpot", "4ms", "-o", "json"}, workedShape), 0},
 		{"replicas-to-slo-recorded-shape", []string{"replicas-to-slo", "--recording", olsSweep}, 0},
 		{"replicas-to-slo-cycle-100", []string{"replicas-to-slo", "--recording", olsSweep, "--cycle", "100"}, 0},
+		{"replicas-to-slo-output-spread", []string{"replicas-to-slo", "--recording", outputSpreadRun}, 0},
+		{"replicas-to-slo-output-spread-json", []string{"replicas-to-slo", "--recording", outputSpreadRun, "-o", "json"}, 0},
 		{"replicas-to-slo-no-histogram", slices.Concat([]string{"replicas-to-slo", "--recording", olsSweep,
 			"--tpot-percentile", "90"}, workedShape), 3},
 		{"slo-to-rate-below-floor", slices.Concat([]string{"slo-to-rate", "--recording", olsSweep,
@@ -479,19 +481,19 @@ func TestJSONSchemaIsDocumented(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := strings.ReplaceAll(string(page), "\r\n", "\n")
-	const open = "<!-- whatif-json-schema-v1: begin -->\n```\n"
-	const closing = "```\n<!-- whatif-json-schema-v1: end -->"
+	const open = "<!-- whatif-json-schema-v2: begin -->\n```\n"
+	const closing = "```\n<!-- whatif-json-schema-v2: end -->"
 	start := strings.Index(text, open)
 	end := strings.Index(text, closing)
 	if start < 0 || end < start {
 		t.Fatal("the proposal has no JSON schema reference between its markers")
 	}
-	want, err := os.ReadFile(filepath.Join("testdata", "schema-v1.txt"))
+	want, err := os.ReadFile(filepath.Join("testdata", "schema-v2.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, w := text[start+len(open):end], strings.ReplaceAll(string(want), "\r\n", "\n"); got != w {
-		t.Errorf("the proposal's JSON reference differs from testdata/schema-v1.txt\npage:\n%s\nfile:\n%s", got, w)
+		t.Errorf("the proposal's JSON reference differs from testdata/schema-v2.txt\npage:\n%s\nfile:\n%s", got, w)
 	}
 }
 

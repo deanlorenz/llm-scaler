@@ -386,6 +386,7 @@ func (a *Analyzer) priceTTFTVariants(logger logr.Logger, input domain.AnalyzerIn
 			transferHeld: a.ttftMeasuredTransfer && a.ttftQuietTransfer && transfer.Held,
 			decodeTTFT:   measured, term: term, legacyDecodeSum: !a.ttftDecodeTerm, flow: flow, mismatch: mismatch,
 		}
+		in.outputSpreadUnread = a.outputSpreadUnread(fleet)
 		p := gateOrPrice(&in, fresh, arrival, target)
 		out = append(out, metrics.SLOTTFTReading{
 			Variant: v, Statistic: statistic, Predicted: p.published(), PerReplica: p.perReplica,

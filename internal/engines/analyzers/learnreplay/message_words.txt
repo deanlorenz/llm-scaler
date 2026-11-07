@@ -259,6 +259,7 @@ OLS
 OnePod
 Optimization
 Optimizer
+OutputSpreadUnread
 P/D
 P0-store
 P1
@@ -2448,6 +2449,7 @@ slo-itl-reads-the-settle-tracker
 slo-itl-restart-under-its-name-settles
 slo-itl-tier-hysteresis
 slo-itl-waits-after-controller-restart
+slo-kv-per-request-output-dispersion
 slo-model
 slo-transient
 slo-ttft-decode-term

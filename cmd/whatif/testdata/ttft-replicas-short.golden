@@ -1,5 +1,5 @@
 decode          refused: NoLine (no ITL line learned by cycle 105)
-shape           IL 10770 OL 16 (measured, cycles 83-102)
+shape           IL 10770 OL 16 (measured, cycles 83-102), output spread D 1.000 (measured)
 prefill knee    8.14 r/s    N_p 1 x V_P 130000 / (f 1 x 15975 tokens); UNVALIDATED; V_P ASSUMED
 TTFT p90        4752.9 ms                    end to end; UNVALIDATED; V_P ASSUMED
                 (floor 454.3 ms, pooled 4608.9 ms, worst pod utilization 0.850)

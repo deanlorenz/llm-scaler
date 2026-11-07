@@ -144,6 +144,12 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// holds it (heldBy).
 	slo.SwitchTTFTQuietTransfer: nil,
 
+	// #276 on the slo line: KVreq with the spread of output lengths. It moves
+	// no golden: of those that list slo, only the four staircases read the
+	// output histogram, at D 1.000. Its unit test holds it (heldBy); the CLI,
+	// which has no switch, moves its own goldens.
+	slo.SwitchKVPerRequestOutputDispersion: nil,
+
 	saturation.SwitchPrefillCapacityObserve: nil,
 
 	// #495: mu on learn's list of learners
@@ -718,6 +724,11 @@ func withSeams(more, rows map[string][]string) map[string][]string {
 var heldBy = map[string][]heldTest{
 	// Runs the switch on and off and asserts both.
 	slo.SwitchTTFTQuietTransfer: {{"../slo", "TestTTFT_TheQuietTransferSwitch"}, {"../slo", "TestTTFT_TheHeldTransferAgesOut"}},
+	// #276 on the slo line: it runs the switch on and off through Analyze and
+	// asserts both (the replica's rate halved at D 2 on, as it was off).
+	slo.SwitchKVPerRequestOutputDispersion: {
+		{"../slo", "TestKVOutputDispersion_TheSwitch"},
+	},
 	// The decode term: the first prices one fleet on and off and asserts both
 	// (the term and its flags on, the old sum unflagged off); the second runs
 	// the switch through Analyze (a window kept on, none off). The third has

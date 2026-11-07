@@ -1398,6 +1398,7 @@ model reads all of them `0`, including the two marked "on every answer":
 | `AssumedPoissonArrivals` | On every answer: Poisson arrivals are assumed, which over-promises on bursty traffic. |
 | `AssumedImbalance` | The imbalance `f` was not learned at this pod count: assumed, at least 1.5. |
 | `ImbalanceNotSustained` | One pod read 80% of the work or more, but not over the whole window: priced at that high `f`, not `routing-bound`. |
+| `OutputSpreadUnread` | A decode line was priced with no output-length histogram: the KV a request holds takes no spread of output lengths, which over-promises by 7 to 44% on a real spread. |
 | `VPLowerBound` | `V_P` is a lower bound. |
 | `VPAboveSlopeBound` | `V_P` is above what the low-load fit allows: one of the two is wrong. |
 | `VPShapeMoved` | The mean prompt is more than 1.2 times away from the one `V_P` was learned at, with no curve to rescale by. |

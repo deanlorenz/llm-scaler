@@ -92,7 +92,7 @@ Refusals, flags, the standalone mode and exit codes are in the
 | ITL line | `ITL(k) = A·k + B`, inter-token latency against fill `k`, fitted per variant (`internal/signals/itl`) |
 | Tier | Where a line came from: `ols` (full fit), `pinned-B` (slope fitted, intercept held from the last full fit, or 6 ms if none), `held` (last slope kept), `borrowed` (another variant's line) |
 | Line check | The token rate the line predicts at a replica's fill against its reported `generation_tokens` rate (`itl.GPSErrorPct`, 15%; the analyzers call it the GPS check) |
-| `KVreq` | KV tokens one in-flight request holds on average: `ILeff + OL/2`, `ILeff = IL·(1 − hit)` |
+| `KVreq` | KV tokens one in-flight request holds on average: `ILeff + D·OL/2`, `ILeff = IL·(1 − hit)`, `D` the spread of output lengths, 1 with no reading |
 | `V_P` | A prefill pod's prompt-token throughput while it has work |
 | `a` | The fixed latency one request pays on a prefill pod |
 | Batch cap | Most sequences an engine runs: flags, else the `llm-d.ai/max-num-seqs` annotation, else learned (#422, #429) |
@@ -113,9 +113,16 @@ closed form (Little's law, residence `OL·ITL(k)`):
 
 valid while the denominator is positive and `n` is under the cap.
 
-Corrections: TPOT per accepted token under speculative decoding (`ITLPerToken`,
-#274, PR #430); `KVreq = ILeff + D·OL/2` with the output spread
-`D = E[O²]/E[O]²` (#276, unmerged); `KVreq` assumes prompt and output length are
+Corrections: `KVreq = ILeff + D·OL/2` with the output spread
+`D = E[O²]/E[O]²` (#276), read from the output-length histogram, in the saturation
+analyzer, the slo analyzer (switch `slo-kv-per-request-output-dispersion`) and
+[the CLI](#recording-mode-as-built-d3). TPOT per accepted token under speculative
+decoding (#274, PR #430) is applied once, where the saturation analyzer fits its
+line (`domain.ReplicaMetrics.ITLPerToken`). `cmd/whatif` applies nothing of its
+own: it prices that line, so it inherits the correction. That rests on reading the
+code: no committed recording speculates. The slo analyzer still reads step time
+([where decode is most wrong](#where-decode-is-most-wrong)).
+`KVreq` assumes prompt and output length are
 uncorrelated (the exact footprint is `E[IL·OL]/E[OL] + E[OL²]/(2·E[OL])`), so a
 positive correlation makes the rate read high; and `whatif.ReachableFill` clamps `k`
 to the batch-cap fill `batchCap·KVreq/C`.
@@ -254,8 +261,11 @@ transfer and `ITL(band.lo)` alone exceed `T`, `TargetBelowFloor`.
 **Two headroom conventions.** The tool applies 0.85 in rate; saturation applies
 it in fill (`whatif.PricingK` = `KvCacheThreshold × ScaleUpThreshold`, 0.68). The rate is
 concave in fill, so a saturation-driven fleet runs hotter: `λ_rep(0.68)` is
-12.99 r/s in the worked example, against 11.32. `--headroom-space fill` gives
-the saturation convention.
+12.99 r/s in the worked example, against 11.32. The tool prints the rate
+convention only, the lower of the two here. **`--headroom-space fill`, proposed
+here, is cut.** The headroom is a fraction of a knee in `whatif.SLOAtReplicas`,
+`whatif.RateForTPOT`, the bands and the fleet row. A fill has no meaning for prefill,
+so a fleet's operating point would mix two spaces.
 
 ### Token buckets and the current mix
 
@@ -380,7 +390,7 @@ TTFT's rows are on [its page](slo-capacity-planner-ttft.md#where-it-is-most-wron
 | Limit | Direction | Issue |
 | --- | --- | --- |
 | Decode assumed balanced across `N_d` | Over-promises | — |
-| Output-length spread ignored (`D` = 1) | Over-promises by 7-44% | #276 |
+| Output-length spread with no histogram (`D` read as 1; the CLI flags `OutputSpreadUnread`) | Over-promises by 7-44%. Where a histogram is read `D` is a lower bound, so it can still over-promise, by less | #276 |
 | Prefix-cache hits still occupy KV | Over-promises, up to about 4x under multi-turn reuse | #277 |
 | Positive prompt/output correlation | Over-promises | — |
 | ITL depends on shape on aggregated pods | Either way; about 40% of ITL at 1000/500. The saturation analyzer prices it ([aggregated ITL by shape](aggregated-itl-shape.md)); the slo analyzer does not yet | #275 |
@@ -680,6 +690,16 @@ came later: [TTFT, as built](#ttft-as-built).
   priced at the traffic it last served. `--assume-input-tokens` and
   `--assume-output-tokens` state a length instead, flagged `AssumedShape`;
   the worked example states IL = OL = 1000.
+- **Output spread.** `KVreq` is `ILeff + D·OL/2`, as the analyzers price it. `D`
+  is read over the same 20 cycles, from the cycles whose every row read the
+  histogram's bound on `E[O²]`, and an assumed length keeps it: a spread is a
+  figure of the traffic. Rows are weighted by request rate, as the analyzers
+  weight them. With no reading `KVreq` is `ILeff + OL/2`, flagged
+  `OutputSpreadUnread` and named in words. A larger `D` only lowers a rate and raises a TPOT
+  (`TestOutputSpread_OnlyAsksForMoreReplicas`). Across a change of shape `D` reads
+  high, where saturation holds it at 1: that side asks for more replicas. Measured
+  on `throughput-sweep`, `D` 1.304 moves the knee from 31.78 to 30.88 r/s, and the
+  batch-cap fill from 0.635 to 0.680.
 - **Bands.** Each resample is refitted by the tracker's own choice of fit
   (`itl.Refit`): the full fit only on steady readings that are ready, else
   pinned-B on the readings the pinned fit reads, else the held slope. An
@@ -791,7 +811,7 @@ whatif replicas-to-slo|slo-to-rate --prometheus URL --namespace NS
 - **The JSON** names the window in `source.window` (`prometheus`, the URL's
   scheme and host alone, `from`, `to`, `stepSeconds` and `roles`), and
   `source.recording` is empty. The field is new and optional, absent in
-  recording mode, so `schemaVersion` stays `1`.
+  recording mode, so it took no new `schemaVersion`.
 
 ### TTFT, as built
 
@@ -807,6 +827,8 @@ TTFT: the decode answers are as they were.
 | `--ttft 200ms@p95` | `slo-to-rate`: the end-to-end target, a mean (`200ms`) or a percentile. Without `--tpot`, only TTFT is asked |
 | `--ttft-percentile 90` | `replicas-to-slo`: the percentile. Default: the policy's `slo.ttft`, else 90. On `slo-to-rate`, beside a plain `--ttft` |
 | `--assume-vp 30000` | `V_P`, prompt tokens per second, in place of the learned one, as every `--assume-*` flag overrides the recording. Neither rescaled nor margined |
+| `--assume-prompt-cv 1` | The prompt's `cv`, 0 to 3, in place of the measured one or the default 2, flagged `AssumedPromptSpread`, with any measured figure beside it (`promptCVRead` in the JSON). At 0 the JSON's `promptCV` is absent and `promptCVSource` says `assumed` |
+| `--arrival-cv2 4` | `Ca²` at the prefill queue, above 0, in place of Poisson's 1, flagged `AssumedArrivalCV2`. 0 is refused: P3 reads it as Poisson. Decode's admission chain has no `Ca²`, so on a decode line it stays Poisson, and `AssumedPoissonArrivals` stays. The closing note then quotes no P2 row: those were read at Poisson. Assumed, and not validated: the one bursty bucket says nothing of the model at any other `Ca²` ([the staircase](slo-capacity-planner-ttft.md#ground-truth-and-the-staircase)) |
 | `--assume-router-hop 8ms` | The hop between the router and the engines, in place of the learned or default one, flagged `RouterHopAssumed` |
 | `--prefill N` | Prefill pods to price; 0 takes the serving pods at the cycle |
 | `--prefill-variant V` | The prefill variant to price, when the model has several: the CLI prices one fleet, and a usage error says so otherwise. It gets the whole rate, named as assumed |
@@ -819,8 +841,8 @@ TTFT: the decode answers are as they were.
 | `a` | P1's estimate at the cycle | `NoFixedLatency`. There is no `--assume-a`, and S1 has no assumption for it |
 | `f` | P1's own at the pod count, `--prefill N` included: a reading of that count, so unflagged, where S1 clamps at any other count | One pod: none, exactly 1. Otherwise `min(N_p, max(1.5, f))`, `f` the learned figure at the recorded count or the raw share, flagged `AssumedImbalance` (S1, decision 1). The raw share is the largest over the last 5 cycles that read one, at the current pod count: a pod with no rate counts as one that computed nothing, and an idle tail forgets nothing, as in S1. It reads serving rows, not S1's settled ones: a pod warming up reads low, which raises the share, the permitted side |
 | Prompt | `--assume-input-tokens`, else computed tokens over requests on the prefill rows, over the last 20 cycles with traffic | The decode variant's `IL·(1 − hit)`, named. Neither is `NoTraffic` |
-| `cv` | The computed-token histogram (Q1), pooled over the prompt's cycles and pods, through the window S1 keeps too (`whatif.PromptWindow`). Held at 3 and named `clamped` past the histogram's last bound. A recording made before Q1 has none | 2, flagged `AssumedPromptSpread` (S1) |
-| Arrivals | None | Poisson, flagged `AssumedPoissonArrivals`, the S1 flag, kept in `cmd/whatif` because P3 has none |
+| `cv` | The computed-token histogram (Q1), pooled over the prompt's cycles and pods, through the window S1 keeps too (`whatif.PromptWindow`). Held at 3 and named `clamped` past the histogram's last bound. A recording made before Q1 has none. `--assume-prompt-cv` overrides all of it | 2, flagged `AssumedPromptSpread` (S1) |
+| Arrivals | `--arrival-cv2`, on the prefill queue | Poisson, flagged `AssumedPoissonArrivals`, the S1 flag, kept in `cmd/whatif` because P3 has none |
 | `T_xfer` | Decode rows' `AvgKVTransferTime` over the measured prompt | Left out, flagged `TransferOmitted` |
 | Decode term | With a decode line: `D` and `R` as the recording's cycles teach them ([the decode term](slo-capacity-planner-ttft.md#as-built-the-decode-term)), in place of `T_xfer` and `ITL` | `D`: a quiet row's figure held at slope 10, flagged `DecodeStepSlopeAssumed`, or the old sum, flagged `DecodeTermOmitted`. `R`: 20 ms, or `--assume-router-hop`, flagged `RouterHopAssumed`. Each is named on the `assumed` row with why no fit stands, and in `ttft` in the JSON with the term as priced |
 | Decode side | The decode variant's line, if `whatif.KneeRate` prices it | The decode engine's `AvgTTFT`, readings above 0 only: the largest of the last 5 cycles, with that cycle's prompt, flagged `DecodeEngineMeasured`. A cycle with no reading holds an empty slot, so the figure ages out of an idle tail. Else left out, flagged `DecodeSideOmitted` and `DecodeTTFTUnmeasured` |
@@ -867,7 +889,9 @@ assumed         V_P 30000 tok/s (--assume-vp); prompt 1000 tokens (--assume-inpu
 That is the worked example with the CLI's `cv` of 2 and an assumed 20 ms hop, so
 373 ms where the page, at `cv` 1 on the old sum, has 160 ms; `a` is P1's 11.04 ms.
 Question 1 at 200 ms p95 reads 0.25 r/s where the page has 11.10, and the assumed
-row says the assumed term moved it from 1.19.
+row says the assumed term moved it from 1.19. `--assume-prompt-cv 1`, the page's
+`cv`, reads 10.80, and `--arrival-cv2 4` on top of it 4.80
+(`TestInputs_TheWorkedExampleAtTheStatedInputs`).
 `TestTTFT_TheWorkedExampleFromTheRecording` puts `cv` 1 and the old sum back on
 the fleet the CLI read, and gets the page's figures within 1 ms, 1.6 ms lower as
 the page says. `TestTTFT_HandComputedAtCV2` holds a figure at `cv` 2 through the command
@@ -905,8 +929,10 @@ state (`TestTTFT_VPOrder`), not on a recording.
 prefill role, with each input and its source; `results.ttft`, with `parts`
 beside the value; `basis.prefillOnlyRate`; and `inputs.rateSource` on the decode
 role. A TTFT rate's `basis.floor` and `basis.kneeRate` are the TTFT's. Every key
-is new and absent with no TTFT asked, so `schemaVersion` stays `1`, as for
-`source.window`.
+is new and absent with no TTFT asked, so it took no new `schemaVersion`, as for
+`source.window`. `ttft.promptCVRead` and `ttft.arrivalCV2` are absent unless their
+flags ask. `inputs.shape.outputDispersion` appears on a recording that reads a
+spread, with no flag asking, so `schemaVersion` is `2`.
 
 **Replay.** `learnreplay.State` gains `Prefill`, `FlowControlSeries` and each
 variant's `DecodeTTFT` (`state_ttft.go`). They are read from the cycles' rows and
@@ -921,7 +947,7 @@ four results only `meanTPOT` is kept here):
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "question": "replicas-to-slo",
   "source": {
     "recording": "../../internal/engines/analyzers/learnreplay/testdata/goldens/ols-sweep/recording.jsonl.gz",
@@ -1008,7 +1034,8 @@ four results only `meanTPOT` is kept here):
             },
             "flags": [
               "LineNearGate",
-              "AssumedShape"
+              "AssumedShape",
+              "OutputSpreadUnread"
             ]
           }
         }
@@ -1028,7 +1055,7 @@ four results only `meanTPOT` is kept here):
 | `bands` | How the bands were drawn: block bootstrap, `blockCycles`, `resamples`, `seed`, the percentiles. Absent on an error object. |
 | `roles[]` | One per decode variant priced: `inputs` (what it was priced from) and `results`. |
 | `inputs.line` | The ITL line (`a` in seconds per unit of fill, `b` in seconds), its `tier`, the `readings` it was fitted from, their `observedFill` range and `fromCycle`-`toCycle`, and of the bootstrap's `resamples` how many (`tierChanges`) landed at another tier. |
-| `inputs.shape` | Lengths in tokens, each with its source, `measured` (over `fromCycle`-`toCycle`) or `assumed`. |
+| `inputs.shape` | Lengths in tokens, each with its source, `measured` (over `fromCycle`-`toCycle`) or `assumed`, and `outputDispersion`, `D` as read: absent with no reading, flagged `OutputSpreadUnread`. |
 | `results` | `knee`, `operatingRate`, `meanTPOT`, `percentileTPOT` for question 2; `rate` for question 1. A question not asked has no key. |
 | a result | Exactly one of `answer` and `refused`. |
 | `answer` | `value` in `unit`: `r/s` (requests per second over the fleet) for a rate, `s` for a TPOT. `band`, when present, is in the same unit. `basis` is what it rests on (`fill`, `kneeRate` in r/s, `floor` in s, `uncapped` in r/s, `boundBy`, `tier`; a field that does not apply is 0). `flags` is always an array. |
@@ -1043,10 +1070,10 @@ To read a figure, for example the mean TPOT in milliseconds:
 whatif replicas-to-slo --recording run.jsonl.gz -o json | jq '.roles[0].results.meanTPOT.answer.value * 1000'
 ```
 
-Every key path, with its JSON type, for `schemaVersion` 1 (the `cmd/whatif`
+Every key path, with its JSON type, for `schemaVersion` 2 (the `cmd/whatif`
 tests hold the wire types to this list):
 
-<!-- whatif-json-schema-v1: begin -->
+<!-- whatif-json-schema-v2: begin -->
 ```
 bands object
 bands.blockCycles number
@@ -1094,6 +1121,7 @@ roles[].inputs.shape.cycles number
 roles[].inputs.shape.fromCycle number
 roles[].inputs.shape.inputSource string
 roles[].inputs.shape.inputTokens number
+roles[].inputs.shape.outputDispersion number
 roles[].inputs.shape.outputSource string
 roles[].inputs.shape.outputTokens number
 roles[].inputs.shape.prefixHitRate number
@@ -1268,6 +1296,7 @@ roles[].results.ttft.refused.flags[] string
 roles[].results.ttft.refused.reason string
 roles[].role string
 roles[].ttft object
+roles[].ttft.arrivalCV2 number
 roles[].ttft.arrivalsSource string
 roles[].ttft.assumed array
 roles[].ttft.assumed[] string
@@ -1289,6 +1318,7 @@ roles[].ttft.imbalance number
 roles[].ttft.imbalanceSource string
 roles[].ttft.percentile number
 roles[].ttft.promptCV number
+roles[].ttft.promptCVRead number
 roles[].ttft.promptCVSource string
 roles[].ttft.promptFromCycle number
 roles[].ttft.promptSource string
@@ -1330,7 +1360,7 @@ source.window.roles string
 source.window.stepSeconds number
 source.window.to string
 ```
-<!-- whatif-json-schema-v1: end -->
+<!-- whatif-json-schema-v2: end -->
 
 ## See also
 

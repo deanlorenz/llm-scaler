@@ -52,6 +52,11 @@ func TestTTFTGolden(t *testing.T) {
 		{"ttft-replicas-worked-json", slices.Concat(workedTTFT("replicas-to-slo", "--ttft-percentile", "90"), []string{"-o", "json"}), 0},
 		{"ttft-rate-worked", workedTTFT("slo-to-rate", "--tpot", "4ms", "--ttft", "200ms@p95"), 0},
 		{"ttft-rate-worked-json", slices.Concat(workedTTFT("slo-to-rate", "--tpot", "4ms", "--ttft", "200ms@p95"), []string{"-o", "json"}), 0},
+		// The fleet's assumed inputs stated: the worked fleet, at cv 1.
+		{"ttft-rate-stated-inputs", workedTTFT("slo-to-rate", "--tpot", "4ms", "--ttft", "200ms@p95",
+			"--assume-prompt-cv", "1", "--arrival-cv2", "1.5"), 0},
+		{"ttft-replicas-stated-inputs-json", slices.Concat(workedTTFT("replicas-to-slo", "--ttft-percentile", "90",
+			"--assume-prompt-cv", "1", "--arrival-cv2", "1.5"), []string{"-o", "json"}), 0},
 		// Run 4: a learned, V_P assumed, no decode line, so the decode
 		// engine's TTFT in its place. Decode's TPOT refuses, and so exit 3.
 		{"ttft-replicas-short", []string{"replicas-to-slo", "--recording", shortRun, "--assume-vp", "130000"}, 3},
@@ -118,7 +123,7 @@ func TestTTFT_SaysUnvalidatedAndAssumedInTextAndJSON(t *testing.T) {
 func TestTTFT_TheNoteFollowsTheSpread(t *testing.T) {
 	assumed := func(vp bool) *pricedFleet {
 		pf := &pricedFleet{assumedVP: vp}
-		pf.fleet.Prefill.PromptCVAssumed = true
+		pf.fleet.Prefill.PromptCV, pf.fleet.Prefill.PromptCVAssumed = whatif.AssumedPromptCV, true
 		return pf
 	}
 	want := "TTFT is UNVALIDATED until a fresh frozen run passes, and is not a bound: at the assumed prompt cv 2 it read " +
@@ -319,6 +324,18 @@ func learnedState() *learnreplay.State {
 		Variant: "pre", Pods: 1, EstimateRead: true, PromptTokens: 2000, PromptFromCycle: 21, PromptToCycle: 40,
 		Estimate: prefill.Estimate{VP: 100000, VPSource: prefill.SourceBusyMinutes, VPPromptTokens: 2000, A: 0.01},
 	}}}
+}
+
+// measuredWindow is a prompt window that reads a spread: five minutes of 2000
+// tokens on buckets 5000 and +Inf.
+func measuredWindow() *whatif.PromptWindow {
+	w := &whatif.PromptWindow{}
+	for i := range whatif.PromptWindowMinCycles {
+		w.Note([]domain.ReplicaMetrics{{Ready: true, PrefillComputedTokenRate: 2000, PrefillComputedTokenRateKnown: true,
+			RequestRate: 1, RequestRateKnown: true, ComputedTokensBuckets: []domain.LengthBucket{
+				{UpperBound: 5000, Rate: 2}, {UpperBound: math.Inf(1), Rate: 2}}}}, i, time.Unix(int64(60*i), 0))
+	}
+	return w
 }
 
 // fleetOf reads the fleet with flags set by name, as check would mark them.
@@ -932,7 +949,7 @@ func TestTTFT_TheLabelIsWhatWasAsked(t *testing.T) {
 // Every TTFT flag asks about TTFT on question 2.
 func TestTTFT_EachFlagAsks(t *testing.T) {
 	for _, flag := range [][]string{{"--ttft-percentile", "90"}, {"--assume-vp", "30000"}, {"--prefill", "1"},
-		{"--prefill-variant", "variant-02"}} {
+		{"--prefill-variant", "variant-02"}, {"--assume-prompt-cv", "1"}, {"--arrival-cv2", "2"}} {
 		text, _ := runCmd(t, slices.Concat([]string{"replicas-to-slo", "--recording", shortRun}, flag)...)
 		assert.Contains(t, text, "TTFT p90", "%v", flag)
 		assert.Contains(t, text, "UNVALIDATED", "%v", flag)

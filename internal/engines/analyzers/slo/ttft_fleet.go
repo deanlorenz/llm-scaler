@@ -53,6 +53,9 @@ const (
 // ttftInputs is one prefill variant's figures of the cycle: everything
 // ttftFleet prices from, so it is a pure function of the pod count.
 type ttftInputs struct {
+	// outputSpreadUnread is a fleet whose KV per request read no spread
+	// (Analyzer.outputSpreadUnread).
+	outputSpreadUnread bool
 	// est is P1's estimate, base what the model takes of it
 	// (whatif.PrefillFromEstimate).
 	est  prefill.Estimate
@@ -174,6 +177,9 @@ func ttftFleet(in ttftInputs, pods int) (whatif.TTFTFleet, []whatif.Flag) {
 	}
 	if _, transient := in.routing(); transient && pods == in.pods {
 		flags = append(flags, ImbalanceNotSustained)
+	}
+	if in.outputSpreadUnread && in.decode != nil {
+		flags = append(flags, whatif.OutputSpreadUnread)
 	}
 	return fl, flags
 }

@@ -460,21 +460,23 @@ func TestSpecialFunctionsRefuseWithNaN(t *testing.T) {
 	}
 }
 
-// Away from Poisson arrivals the wait decays at Kingman's 1/theta, but never
-// faster than one request's work does, 1/(cv^2 E[S]); and the bounded (shifted) body
-// is only for Poisson arrivals.
-func TestKingmanTailNeverOutrunsTheWork(t *testing.T) {
-	// cv 0.7 with Ca^2 0.1 is the cap binding below cv 1: Kingman's scale
-	// E[S](0.1 + 0.49)/1.8 = 0.33 E[S] is under the work's 0.49 E[S].
-	for _, c := range []struct{ cv, ca2, rho float64 }{{3, 1.5, 0.1}, {3, 0.5, 0.3}, {2, 2, 0.2}, {0.5, 2, 0.5}, {0.7, 0.1, 0.1}} {
+// Away from Poisson arrivals the wait is the Poisson tail stretched by Kingman's
+// ratio, but never decays faster than one request's work does, 1/(cv^2 E[S]);
+// and the bounded (shifted) body keeps its form, so nothing jumps at Ca^2 1. At
+// cv 1 the root is 1/theta, so the stretch is Kingman's own figure.
+func TestBurstyTailIsPoissonStretched(t *testing.T) {
+	for _, c := range []struct{ cv, ca2, rho float64 }{{3, 1.5, 0.1}, {3, 0.5, 0.3}, {2, 2, 0.2}, {0.5, 2, 0.5}, {0.7, 0.1, 0.1}, {1, 2, 0.4}} {
 		fl := prefillOnly(c.cv)
-		fl.Prefill.ArrivalCV2 = c.ca2
 		es := fl.Prefill.PromptTokens / fl.Prefill.VP
+		poisson := mustTTFT(t, ttftAt(t, fl, c.rho/es, 0.99))
+		fl.Prefill.ArrivalCV2 = c.ca2
 		v := mustTTFT(t, ttftAt(t, fl, c.rho/es, 0.99))
-		kingman := es * (c.ca2 + c.cv*c.cv) / (2 * (1 - c.rho))
-		relNear(t, "wait scale", v.WaitScale, max(kingman, c.cv*c.cv*es), 1e-12)
-		if v.WaitOffset != 0 {
-			t.Errorf("cv %g Ca^2 %g: a Lundberg offset %g away from Poisson arrivals", c.cv, c.ca2, v.WaitOffset)
+		s := (c.ca2 + c.cv*c.cv) / (1 + c.cv*c.cv)
+		scale := max(s*poisson.WaitScale, c.cv*c.cv*es)
+		relNear(t, "wait scale", v.WaitScale, scale, 1e-12)
+		relNear(t, "offset", v.WaitOffset, poisson.WaitOffset*scale/poisson.WaitScale, 1e-12)
+		if c.cv == 1 {
+			relNear(t, "Kingman at cv 1", v.WaitScale, es*(c.ca2+1)/(2*(1-c.rho)), 1e-9)
 		}
 	}
 }
