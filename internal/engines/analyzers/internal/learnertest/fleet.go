@@ -73,6 +73,11 @@ type Fleet struct {
 	// is no cap. An analyzer whose order feeds itself (each joiner it starts
 	// lowers its figure) runs into it rather than without end.
 	MaxReplicas int
+	// Starting, when set, is called on each cycle before the step with how
+	// long each replica still starting has been since its order, as the
+	// collector reports a not-Ready Pod's age (PendingAges): an analyzer
+	// that reads its starting replicas is shown them.
+	Starting func(ages []time.Duration)
 }
 
 // Replica is one Ready replica on a cycle, as the step sees it.
@@ -197,6 +202,15 @@ func (f Fleet) Run(step Step) Result {
 			}
 			replicas = append(replicas, Replica{Index: i, Name: p.name, ReadyAt: p.readyAt, Mu: mu,
 				Offered: offered, Served: served, Backlog: p.backlog, Saturated: saturated})
+		}
+		if f.Starting != nil {
+			var ages []time.Duration
+			for _, p := range pods {
+				if p.readyAt.After(now) {
+					ages = append(ages, now.Sub(p.readyAt.Add(-startTime)))
+				}
+			}
+			f.Starting(ages)
 		}
 		ordered := step(now, elapsed, lambda, replicas)
 		if ordered <= Hold {
