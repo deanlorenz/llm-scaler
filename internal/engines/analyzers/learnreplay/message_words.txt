@@ -136,6 +136,7 @@ E1-const
 EPP
 EffectiveMaxBatchedTokens
 EngineParams
+EngineTPOTHistogram
 ErrImagePull
 Error
 Events
@@ -370,6 +371,7 @@ T2-failed
 T2-held
 T2-pinned
 TPOT
+TPOTBucketTooWide
 TPOTQuantileUnbounded
 TTFT
 Target

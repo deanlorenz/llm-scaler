@@ -91,11 +91,7 @@ func sloToRate(ctx context.Context, args []string, out, warn io.Writer) error {
 		if asksTPOT {
 			res := withRatioRefusal(whatif.RateForTPOT(pv.decode, query), ratioRefused)
 			res = pv.band(res, func(d whatif.Decode) whatif.Result { return whatif.RateForTPOT(d, query) })
-			if ans, ok := res.(whatif.Answer); ok {
-				ans.Flags = append(ans.Flags, ratioFlags...)
-				res = ans
-			}
-			a.result = pv.qualify(res)
+			a.result = pv.qualify(onRatio(res, target.Ratio, ratioFlags))
 			results = append(results, a.result)
 		}
 		if ttft != nil {
@@ -128,7 +124,7 @@ func sloToRate(ctx context.Context, args []string, out, warn io.Writer) error {
 			h := query.Headroom
 			in.Headroom = &h
 			if asksTPOT {
-				in.TPOT = tpotInputs(st, target.Seconds, target.Percentile, target.Ratio)
+				in.TPOT = f.tpotInputs(st, target.Seconds, target.Percentile, target.Ratio)
 				w.Roles = append(w.Roles, wireRole{Role: "decode", Variant: a.pv.state.Variant, Inputs: in,
 					Results: wireResults{Rate: toWire(a.result, unitRate)}})
 			}
@@ -159,9 +155,13 @@ func (a *rateAnswer) priceTTFT(t ttftQuestion, headroom float64) {
 	price := func(fl whatif.TTFTFleet) whatif.Result {
 		return whatif.RateForTTFT(fl, whatif.TTFTTarget{Seconds: t.seconds, Percentile: t.q})
 	}
-	a.ttft = a.fleet.priced(price)
+	corners := a.fleet.corners(price)
+	a.ttft = withSpan(a.fleet.priced(price), corners)
 	a.fleet.noteAssumedTerm(a.ttft, price)
-	a.fleetRate = fleetRate(t, headroom, a.result, a.ttft)
+	for i, c := range corners {
+		corners[i] = fleetRate(t, headroom, a.result, c)
+	}
+	a.fleetRate = withSpan(fleetRate(t, headroom, a.result, a.ttft), corners)
 }
 
 // wireTTFT is the answer's prefill and fleet roles, none with no TTFT asked.
@@ -233,6 +233,7 @@ func writeRateText(out io.Writer, st *learnreplay.State, variants []pricedVarian
 			fmt.Fprintf(&b, "%-9s%s\n", role, refusedText(r))
 		}
 		fmt.Fprintf(&b, "%-9sshape %s\n", "", a.pv.shapeText())
+		checkRow(&b, "%-9sline check %s\n", "", a.pv)
 		if a.fleet != nil {
 			writeRateRows(&b, layout, a.fleet, len(fleets), *ttft, a.ttft, a.fleetRate)
 			flagsLine(&b, a.pv, a.result, a.ttft, a.fleetRate)

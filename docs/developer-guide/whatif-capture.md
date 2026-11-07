@@ -65,8 +65,8 @@ inside the analyzers).
 The answer commands price a P/D fleet's TTFT when a TTFT flag is given:
 
 ```
-whatif replicas-to-slo --recording run.jsonl --ttft-percentile 90 [--assume-vp TOKENS] [--prefill N]
-whatif slo-to-rate     --recording run.jsonl --tpot 4ms --ttft 200ms@p95 [--assume-vp TOKENS] [--prefill N]
+whatif replicas-to-slo --recording run.jsonl --ttft-percentile 90 [--assume-vp TOKENS] [--assume-a D] [--prefill N]
+whatif slo-to-rate     --recording run.jsonl --tpot 4ms --ttft 200ms@p95 [--assume-vp TOKENS] [--assume-a D] [--prefill N]
 ```
 
 `--prometheus` takes the same flags, and gives the same answer.
@@ -77,7 +77,8 @@ whatif slo-to-rate     --recording run.jsonl --tpot 4ms --ttft 200ms@p95 [--assu
   percentile on the P2 recordings; at the spread the load generator sent
   (`cv` 0.06) up to 34% under it. Do not size from it yet.
 - **Read the `assumed` row first.** It names each input the recording did not
-  give. `V_P ASSUMED` means `--assume-vp` supplied `V_P`.
+  give. `V_P ASSUMED` means `--assume-vp` supplied `V_P`, and `a ASSUMED` that
+  `--assume-a` supplied `a`.
 - **An assumed term can decide the answer.** The `assumed` row says so when one
   alone refuses a target, or moves the answer by 25%. `--assume-router-hop 8ms`
   supplies the hop between the router and the engines.
@@ -88,8 +89,12 @@ whatif slo-to-rate     --recording run.jsonl --tpot 4ms --ttft 200ms@p95 [--assu
 - **A decode row can rest on `V_P` too.** Where the prefill knee is the lower,
   it sets the operating rate, and the rate and TPOT rows say so and carry the
   verdict.
-- **`NoFixedLatency` has no flag.** The window needs low-load minutes at more
-  than one prompt length, for `a` to be learned.
+- **`NoFixedLatency` is a fleet of one prompt length.** `a` is learned from
+  low-load minutes at more than one length. Give `--assume-a 11ms` for a flagged
+  answer: the learned figure, if any, prints beside it.
+- **Read the band as a sweep.** The knee, each TTFT and each TTFT rate print the
+  figure at `V_P` and `f` 15% either way. It is not a confidence interval. A
+  `Saturated` in it means the rate has no 15% to spare.
 - **`Saturated` means the rate is at or above the knee.** It is a refusal, exit
   `3`, not a figure.
 - **Aggregated fleets and per-bucket answers are refused:** the planner's M1.
@@ -97,6 +102,23 @@ whatif slo-to-rate     --recording run.jsonl --tpot 4ms --ttft 200ms@p95 [--assu
 Exit codes are `0`, `3` for a refusal, `2` for a usage error and `1` for an
 internal one. The inputs, the rows and the JSON are in
 [TTFT, as built](../proposals/slo-capacity-planner.md#ttft-as-built).
+
+## Reading the line check
+
+Every answer on an ITL line prints a `line check` row: the token rate the line
+predicts against the rate the recording's decode rows reported, off a ramp.
+
+- **`MISMATCH`** is a median error above 15%, flagged `LineMismatch` on every
+  answer on that line. Do not size from it: the line or the shape is wrong, and
+  the check cannot say which.
+- **`at another shape`** is a verdict on rows whose KV a request is more than 20%
+  from the one priced. Both figures print. It says nothing of the traffic you asked
+  about.
+- **`not run`** is under 5 rows to compare. The row counts where the others went:
+  on a ramp, above the band, or older than 30 minutes. Rows below fill 0.30 are not
+  counted. It is not a pass.
+
+[The rules and the figures on the goldens](../proposals/slo-capacity-planner.md#the-line-check-as-built).
 
 ## Load on Prometheus
 

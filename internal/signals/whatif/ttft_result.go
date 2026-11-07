@@ -229,6 +229,9 @@ type TTFT struct {
 	// decode side.
 	Tier  string
 	Flags []Flag
+	// Sensitivity is the figure's span over V_P and f either way, set by the
+	// caller that swept them (SensitivityFleets); nil when none did.
+	Sensitivity *Sensitivity
 }
 
 func (TTFT) result() {}
