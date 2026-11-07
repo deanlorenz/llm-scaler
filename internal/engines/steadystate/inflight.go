@@ -51,13 +51,23 @@ func (e *Engine) admitInFlight(requests []allocation.ModelScalingRequest, decisi
 	adms := e.inFlightAdmissions(requests, decisions, planned, scaleTargets, now)
 	allocation.DefaultInFlight.Commit(e.inFlightMark, adms, now)
 	e.inFlightMark = nil
-	// The first fitted cycle after a restart ends the restored holds it does
-	// not admit: they count no pods, and their variant is gone or not asking.
-	named := make(map[string]bool, len(adms))
-	for _, a := range adms {
-		named[a.Key] = true
+	// A restored hold this cycle does not admit ends when its variant is gone
+	// or the cycle decided it without admitting it (not asking, passive,
+	// planned by the share). One of a variant the cycle enumerated and did
+	// not decide -- a model skipped, its metrics missing -- keeps its hold
+	// until a cycle admits it or it expires: one skipped cycle does not cost
+	// an Unschedulable replica its hole.
+	keep := make(map[string]bool, len(adms)+len(e.cycleVariants))
+	for k := range e.cycleVariants {
+		keep[k] = true
 	}
-	allocation.DefaultInFlight.DropRestoredExcept(named)
+	for i := range decisions {
+		delete(keep, utils.GetNamespacedKey(decisions[i].Namespace, decisions[i].VariantName))
+	}
+	for _, a := range adms {
+		keep[a.Key] = true
+	}
+	allocation.DefaultInFlight.DropRestoredExcept(keep)
 }
 
 // admitPassInFlight admits the pass's placements to the in-flight ledger
@@ -81,8 +91,9 @@ func (e *Engine) admitPassInFlight(requests []allocation.ModelScalingRequest, de
 // node yet -- so a pod of it at Kueue's gate after a preemption holds no
 // hole a growing peer could use. The first cycle after a restart, a variant
 // none of whose replicas is unplaced starts its entry all the same: the
-// ledger is not persisted, and its Pending pods' nodes stay held
-// (allocation.InFlightAdmission.ExistingOnly).
+// persisted ledger may not carry it, and its Pending pods' nodes stay held
+// (allocation.InFlightAdmission.ExistingOnly). Each admission names the
+// variant's scale target, persisted so a restart counts its pods.
 func (e *Engine) inFlightAdmissions(requests []allocation.ModelScalingRequest, decisions []domain.VariantDecision,
 	planned map[string]bool, scaleTargets map[string]scaletarget.ScaleTargetAccessor, now time.Time) []allocation.InFlightAdmission {
 	var out []allocation.InFlightAdmission
@@ -138,8 +149,8 @@ func (e *Engine) inFlightAdmissions(requests []allocation.ModelScalingRequest, d
 			}
 		}
 		out = append(out, allocation.InFlightAdmission{Key: key, Shape: shape, Want: d.TargetReplicas,
-			PlacedNow: placedNow, Placed: placed, TTL: ttl, ExistingOnly: d.TargetReplicas <= st.CurrentReplicas,
-			Unplaced: st.UnplacedReplicas > 0})
+			PlacedNow: placedNow, Placed: placed, Target: allocation.ScaleTargetRefOf(scaleTargets[key]), TTL: ttl,
+			ExistingOnly: d.TargetReplicas <= st.CurrentReplicas, Unplaced: st.UnplacedReplicas > 0})
 	}
 	return out
 }

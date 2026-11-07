@@ -330,7 +330,11 @@ the scaling manager asks for must also fit a node:
   in the `wva-controller-status` ConfigMap (`inFlightLedger`) and read back
   on start, each with its original end time. This also covers a replica
   whose pod is Unschedulable, and a LeaderWorkerSet group still waiting for
-  its workers.
+  its workers. A restored hold counts its workload's pods as soon as it is
+  read back, so it ends when they land. A model the controller skips after
+  the restart (for example, because its metrics are missing) keeps its holds
+  until a cycle decides it or the holds run out. The holds of a model that
+  was deleted while the controller was down are dropped.
 - A scale-from-zero wake is checked the same way. Within one decision tick a
   wake also takes its GPUs and its hole from the wakes after it.
 - A node the utilization share freed for a receiver whose pod is still
@@ -389,15 +393,14 @@ Limits:
   does. A domain counts as free for a new group only when every group there
   is a donor group the share is taking, each judged as its own group: a
   node shared by a donor's pod and another model's group is not freed.
-- After a restart, a held replica counts its pods again only from the first
-  steady-state cycle. That cycle ends every restored hold it does not decide
-  (a model deleted while the controller was down, or no longer asking). A
-  model that cycle skips, for example because its metrics are missing, loses
-  its restored hold too, Unschedulable replica included.
-  Until then, a hold whose pods landed in the meantime still holds its hole.
-  A restored hold lasts at most three borrowing `placementTimeout`s (at
-  least 5 minutes), whatever the saved value says. A wake decided in the
-  moment before the controller has read the holds back does not see them.
+- A restored hold lasts at most three borrowing `placementTimeout`s (at
+  least 5 minutes), whatever the saved value says. Holds saved by an earlier
+  release do not name their workload, so they count their pods only from
+  the first steady-state cycle that decides their model.
+- For up to a minute after a start, wakes that are fitted to nodes wait
+  until the controller has read the holds back. This normally takes
+  milliseconds. If the holds cannot be read within that minute, wakes go
+  ahead without them, and the controller logs a warning.
 - A wake funded by claiming a share transfer, or checked against a remembered
   snapshot because every limiter was unreadable, is not fitted to nodes and
   holds no hole.

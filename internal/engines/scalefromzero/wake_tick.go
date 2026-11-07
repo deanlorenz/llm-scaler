@@ -96,6 +96,9 @@ func (e *Engine) decideWake(ctx context.Context, group modelGroup, candidates []
 	defer e.wakeMu.Unlock()
 	if place.snapshotTakenAt.IsZero() && place.constraints != nil {
 		place.constraints = allocation.WithholdPromised(place.constraints, e.tickWakes)
+		if e.awaitInFlightRestore(ctx, place.constraints, time.Now()) {
+			return place, nil, OutcomeAwaitingInFlight
+		}
 		place.nodes = e.tickNodeViewFor(ctx, place.constraints)
 	}
 	place.reclaimable = e.reclaimableLeft(group.namespace, place.reclaimable)
@@ -144,7 +147,7 @@ func (e *Engine) admitInFlight(namespace string, selected []Candidate, flavorOf 
 			ttl = placementTimeout
 		}
 		allocation.DefaultInFlight.Commit(nil, []allocation.InFlightAdmission{{Key: key, Shape: shape, Want: 1,
-			Placed: placed, TTL: ttl}}, now)
+			Placed: placed, Target: allocation.ScaleTargetRefOf(c.target), TTL: ttl}}, now)
 	}
 }
 
@@ -176,6 +179,41 @@ func (e *Engine) debitTick(namespace string, demand map[string]int) {
 	for acc, gpus := range demand {
 		e.tickWakes[namespace][acc] += gpus
 	}
+}
+
+// inFlightRestoreWait bounds how long wakes wait for the in-flight holds to be
+// read back after a start (awaitInFlightRestore). The steady-state engine
+// reads them before its first cycle, within milliseconds of this engine's
+// first tick; a read that fails is tried again each cycle (every 15 seconds
+// by default). A ledger that cannot be read for this long is given up on
+// for wakes: a parked model kept from waking costs more than the holes the
+// holds would keep, which expire within minutes anyway.
+const inFlightRestoreWait = time.Minute
+
+// awaitInFlightRestore reports whether a wake fitted to nodes under
+// constraints must wait for the in-flight holds a restart carries
+// (allocation.InFlightLedger.RestorePending): the node view built now would
+// not hold them, and the wake could take the hole of a replica ordered
+// before the restart -- Unschedulable, or a LeaderWorkerSet group waiting
+// for its workers. A wake not fitted to nodes reads no hold and does not
+// wait. Past inFlightRestoreWait from the first wait, wakes go without the
+// holds, logged once. Caller holds wakeMu.
+func (e *Engine) awaitInFlightRestore(ctx context.Context, constraints []*allocation.ResourceConstraints, now time.Time) bool {
+	if e.inFlightGaveUp || !allocation.PhysicalBounds(constraints) || !allocation.DefaultInFlight.RestorePending() {
+		return false
+	}
+	if e.inFlightWait.IsZero() {
+		e.inFlightWait = now
+		log.FromContext(ctx).Info("Scale-from-zero: wakes wait for the in-flight node holds to be read back after the start",
+			"maxWait", inFlightRestoreWait.String())
+	}
+	if now.Sub(e.inFlightWait) < inFlightRestoreWait {
+		return true
+	}
+	e.inFlightGaveUp = true
+	log.FromContext(ctx).Info("Warning: the in-flight node holds were not read back in time; wakes go without them",
+		"waited", inFlightRestoreWait.String())
+	return false
 }
 
 // tickNodeViewFor is the tick's node view when the physical limiter bounds a

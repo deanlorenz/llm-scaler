@@ -830,6 +830,12 @@ func main() {
 	// engines and the warm pool, so they cannot disagree about a model.
 	passiveResolver := &passive.Resolver{Config: cfg, Registry: registry.Default}
 
+	// The two engine loops below start together. The saturation engine reads
+	// the persisted in-flight holds back before its first cycle; until it has,
+	// a scale-from-zero wake fitted to nodes waits, so it cannot take the hole
+	// of a replica ordered before the restart. Set here, before either starts.
+	allocation.DefaultInFlight.ExpectRestore()
+
 	// Register optimization engine loops with the manager. Only start when leader.
 	err = mgr.Add(optimizeLoopRunnable(func(ctx context.Context) (optimizeLooper, error) {
 		sourceRegistry := source.NewSourceRegistry()

@@ -151,6 +151,10 @@ type Engine struct {
 	// admitInFlight needs once the decisions are final. Set by decideV2.
 	cycleFitted  bool
 	cyclePlanned map[string]bool
+	// cycleVariants is every variant this cycle enumerated, keyed
+	// namespace/name, decided or skipped (optimizeV2): a restored in-flight
+	// hold of a variant it skipped is kept (admitInFlight).
+	cycleVariants map[string]bool
 	// Passive resolves which models the controller only observes
 	// (docs/reference/scaling-policy.md, "passive"). Nil is every model
 	// active. cyclePassive (keyed namespace/modelID) and cyclePassiveVariants
@@ -1558,8 +1562,12 @@ func (e *Engine) optimizeV2(
 	// gone, so their lastGoodAnalysis entries are evicted here. Keyed identically
 	// to updateLivenessAndSetLive (utils.GetNamespacedKey(namespace, modelID)).
 	activeKeys := make(map[string]bool, len(modelGroups))
+	e.cycleVariants = map[string]bool{}
 	for _, modelVAs := range modelGroups {
 		activeKeys[utils.GetNamespacedKey(modelVAs[0].Namespace, modelVAs[0].Spec.ModelID)] = true
+		for i := range modelVAs {
+			e.cycleVariants[utils.GetNamespacedKey(modelVAs[i].Namespace, modelVAs[i].Name)] = true
+		}
 	}
 	e.pruneLastGoodAnalysis(activeKeys)
 	e.pruneAnalyzerSeries(activeKeys)
