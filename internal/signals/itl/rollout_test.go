@@ -109,13 +109,16 @@ func TestRollout_AFitNeverSpansTwoEngines(t *testing.T) {
 			if r.tr.Readings("k").OLSLatched {
 				t.Fatal("the latch stands on old pods' readings")
 			}
-			for i := 0; r.tr.WindowLen("k") < DefaultMinSamples-newPods; i++ {
+			for i := 0; i < DefaultMinSamples && r.tr.WindowLen("k") < DefaultMinSamples-newPods; i++ {
 				if got, _ = r.cycle(mixed(), true); !got.SlopeHeld {
 					t.Fatalf("cycle %d: not held at %d readings", i, r.tr.WindowLen("k"))
 				}
 				if b, _ := r.tr.Baseline("k"); b != oldB && (b < oldB-1e-9 || b > oldB+1e-9) {
 					t.Fatalf("cycle %d: B moved to %v on too few readings", i, b)
 				}
+			}
+			if got := r.tr.WindowLen("k"); got < DefaultMinSamples-newPods {
+				t.Fatalf("the new pods' readings did not reach the window: %d", got)
 			}
 			for _, rm := range r.tr.Readings("k").All {
 				if rm.ITLSec > newA*rm.K+newB+1e-9 || rm.ITLSec < newA*rm.K+newB-1e-9 {

@@ -210,6 +210,51 @@ func TestRollout_AStalledRolloutDoesNotSilenceTheLine(t *testing.T) {
 	}
 }
 
+// A line resting on its held slope, the window aged out under light load, goes
+// on through a rollout that changes the arguments: the slope is the old
+// engine's, and the old engine serves.
+func TestRollout_AHeldSlopeOutlivesNewArgumentsWithNoNewPod(t *testing.T) {
+	store := capacity.NewStore()
+	fileRecord(store, rollParams(64), false)
+	r := newLineRun(t, NewThroughputAnalyzer().WithSlopeHoldFor(7*24*time.Hour).WithCapacityStore(store))
+	warm(t, r, 8, spreadFleet("rev-1"))
+	r.cycle += int(itl.DefaultObservationMaxAge/(15*time.Second)) * 2
+	light := spreadFleet("rev-1")
+	for i := range light {
+		light[i].KvCacheUsage, light[i].KvUsageInstant = 0.001, 0.001
+	}
+	r.step(light)
+	got, _, _ := lineRead(r.a)
+	require.True(t, got.SlopeHeld, "premise: the line rests on its slope")
+	fileRecord(store, rollParams(128), true)
+	r.step(light)
+	got, _, _ = lineRead(r.a)
+	require.True(t, got.SlopeHeld, "the hold refused the slope under the new arguments")
+}
+
+// The summary line says when the line is held on the old pods, and when it no
+// longer is, though the line stays live throughout.
+func TestRollout_TheSummarySaysTheHold(t *testing.T) {
+	ctx, buf := logContext()
+	store := capacity.NewStore()
+	fileRecord(store, rollParams(64), false)
+	r := newLineRun(t, NewThroughputAnalyzer().WithCapacityStore(store))
+	r.ctx = ctx
+	warm(t, r, 8, spreadFleet("rev-1"))
+	before := len(lineLogs(buf.String()))
+	fileRecord(store, rollParams(64), true)
+	r.step(spreadFleet("rev-1"))
+	r.step(spreadFleet("rev-1"))
+	logs := lineLogs(buf.String())
+	require.Len(t, logs, before+1, "%s", buf)
+	require.Contains(t, logs[before], `"rolloutHeld": true`)
+	fileRecord(store, rollParams(64), false)
+	r.step(spreadFleet("rev-1"))
+	logs = lineLogs(buf.String())
+	require.Len(t, logs, before+2, "%s", buf)
+	require.Contains(t, logs[before+1], `"rolloutHeld": false`)
+}
+
 // A held line stands under the arguments it was learned under, and the forget
 // waits. A new pod ends the hold, and the forget is filed then.
 func TestRollout_TheForgetWaitsForANewPod(t *testing.T) {

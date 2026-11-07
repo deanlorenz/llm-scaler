@@ -190,6 +190,26 @@ func TestRollout_PastTheHoldTheCompositeReadsNoNeed(t *testing.T) {
 	assert.False(t, allocation.ResolveSO([]allocation.NamedAnalyzerResult{nr}, nil, "agg").OK)
 }
 
+// A line resting on its held slope, the window aged out under light load, goes
+// on through a rollout that changes the arguments: the slope is the old
+// engine's, and the old engine serves.
+func TestRollout_AHeldSlopeOutlivesNewArgumentsWithNoNewPod(t *testing.T) {
+	r := newRolloutRig(t, nil)
+	r.a.WithSlopeHoldFor(7 * 24 * time.Hour)
+	early := r.now.Add(-time.Hour)
+	for range 8 {
+		r.cycle(aged(revised(settleFleet(), "rev-1"), early))
+	}
+	r.now = r.now.Add(2 * itl.DefaultObservationMaxAge)
+	light := aged(revised([]domain.ReplicaMetrics{row("agg", "agg-a", 0.001)}, "rev-1"), early)
+	require.Zero(t, r.cycle(light), "premise: the window aged out")
+	require.NotEqual(t, domain.ReasonNoData, r.last.VariantCapacities[0].Reason, "premise: the slope prices")
+	r.seqs = 128
+	r.file(true)
+	r.cycle(light)
+	assert.NotEqual(t, domain.ReasonNoData, r.last.VariantCapacities[0].Reason, "the hold refused the slope under the new arguments")
+}
+
 // A held line's change of arguments waits for a new pod, and is filed then.
 func TestRollout_TheForgetWaitsForANewPod(t *testing.T) {
 	_, r := stall(t, time.Hour, stallCase{argsChange: true}, 8)
