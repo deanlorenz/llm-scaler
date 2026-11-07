@@ -53,7 +53,7 @@ trap 'exit 143' INT TERM HUP
 ) > /dev/null 2>&1 &
 disown
 
-for tool in bash sh env python3 jq yq timeout sleep date touch cat grep sed awk tr cut head tail wc ls cp mv rm mkdir seq \
+for tool in bash sh env setsid python3 jq yq timeout sleep date touch cat grep sed awk tr cut head tail wc ls cp mv rm mkdir seq \
     sha256sum gzip dirname basename mktemp tee sort; do
     found="$(command -v "$tool")" || { echo "FAIL: $tool not found"; exit 1; }
     ln -s "$found" "$TOOLS/$tool"
