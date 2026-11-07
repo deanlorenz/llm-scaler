@@ -1678,7 +1678,7 @@ mu-sample-written
 mu-swap-freeze
 mu-unknown-age-resolves-safe
 mu-unread-replica-at-target
-mu-yield-reads-the-fleet
+mu-yield-capped-at-measurement
 mu-yield-served
 mu-yield-sibling
 mu-yield-stale

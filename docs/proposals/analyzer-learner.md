@@ -3827,7 +3827,7 @@ run on a cluster.
 
 #### One slow pod, as built (#495)
 
-Built on main 2f02cdbbe. Mu's estimand is the fleet's mean (2.6), but a sample
+Built on main 2f02cdbbe, merged with main 1879d7207. Mu's estimand is the fleet's mean (2.6), but a sample
 reads only the replicas that queued, so what it meant depended on who queued.
 Without the slow pod it read high: {1, 1, 1, 0.341} priced 1.000 against a mean
 of 0.835, because half the served max refused the slow reading. With only the
@@ -3837,9 +3837,9 @@ from the constructor (`D/mu_slow_pod.go`). The first two move goldens, named
 in `replaySwitches`: the weighing ten outputs of `mu-paths`,
 `start-seed-restart-2` and `ttft-staircase-b-off` (a refused reading now a
 sample, and samples counting their unread replicas: priced mu down 3.6 % to
-5.7 % on those cycles), the yield `mu-paths` and `ttft-three-pods`
-variant capacities (a measurement yielding to replicas that served more than
-it). The last two move none, and `heldBy` names their tests.
+5.7 % on those cycles), the cap `mu-paths` variant capacities (variant-02
+priced at its measured 8.08 where it had yielded to its siblings' 12.12). The
+last two move none, and `heldBy` names their tests.
 
 - **The sample weighs the fleet (`mu-sample-weighs-the-fleet`).** No served
   rate refuses a reading. While the readers sit under `siblingMuTolerance` of

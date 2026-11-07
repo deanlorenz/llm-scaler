@@ -23,8 +23,10 @@ const PathMuSampleWritten = "mu-sample-written"
 // because a Ready replica served more than maxRatio times it.
 const PathMuYieldServed = "mu-yield-served"
 
-// PathMuYieldSibling counts cycles a measured mu gave way to what its full
-// siblings serve (siblingYield).
+// PathMuYieldSibling counts cycles the sibling yield opened: a measured mu
+// under the tolerance of what its full siblings serve (siblingYield). Since
+// #495 the cap refuses each one (SwitchMuYieldCappedAtMeasurement), so it
+// counts the cap deciding; off, each priced the siblings.
 const PathMuYieldSibling = "mu-yield-sibling"
 
 // PathMuYieldStale counts cycles a stale measured mu gave way to the derived

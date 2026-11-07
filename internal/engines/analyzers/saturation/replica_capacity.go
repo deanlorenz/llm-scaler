@@ -464,7 +464,6 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		// entirely and only ever reached a log line as a confusing number.
 		throughputSamples = MinDerivedThroughputSamples
 	} else if rate, ok := a.siblingYield(throughputKey, reading, served, tune); ok {
-		a.paths.add(pathYieldSibling, 1)
 		a.noteMuCount(namespace, modelID, rm.VariantName, muReasonYieldSiblings)
 		// A measurement under what the variant's Ready, full replicas serve
 		// is one slow replica's, not the variant's (siblingYield).

@@ -147,11 +147,9 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	//     them (start-seed-restart-2: a sample of 0.304 against 0.351, so the
 	//     priced mu falls 5.7 % on 14 cycles; ttft-staircase-b-off: 15.06
 	//     against 15.62 on 12 rows, decode demand up 7.7 % on 8).
-	//   - SwitchMuYieldCappedAtMeasurement: a measurement under the tolerance of the
-	//     Ready replicas' figure yields to it (mu-paths: variant-02 at 09:01
-	//     priced 8.08 against 12.12 on 44 rows; ttft-three-pods: variant-02
-	//     priced 5.18 against a measured 3.39 on one cycle, the replicas
-	//     serving more than the measurement).
+	//   - SwitchMuYieldCappedAtMeasurement: a sibling yield never prices
+	//     above the measurement (mu-paths: variant-02 at 09:01 priced at its
+	//     measured 8.08 where it yielded to its siblings' 12.12, on 44 rows).
 	//   - SwitchMuUnreadAtTarget and SwitchMuMinorityFigureExpires move
 	//     nothing: no recording has an unread replica under the KV line
 	//     beside readers under the tolerance of it, nor a minority's figure
@@ -165,7 +163,7 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 		"ttft-staircase-b-off/results.csv", "ttft-staircase-b-off/variant-capacities.csv",
 	},
 	saturation.SwitchMuYieldCappedAtMeasurement: {
-		"mu-paths/variant-capacities.csv", "ttft-three-pods/variant-capacities.csv",
+		"mu-paths/variant-capacities.csv",
 	},
 	saturation.SwitchMuUnreadAtTarget:        nil,
 	saturation.SwitchMuMinorityFigureExpires: nil,
@@ -1244,7 +1242,6 @@ var switchBase = withDigests(staircaseBase, map[string]string{
 	"start-seed-restart-2/variant-capacities.csv": "adaec2e4376b0aa6b6b769a71cf3b01d1085dbe72b90ab3718e6bb0a345d33d0",
 	"ttft-staircase-b-off/composite-roles.csv":    "24e843f4e3662d587f5b0f6e7d7411562399800eab0a37387b0281c4c8e7bf36",
 	"ttft-staircase-b-off/variant-capacities.csv": "686fe4129bda89bb1edd369d15400443b36897fce34047acecda2059d80bd027",
-	"ttft-three-pods/variant-capacities.csv":      "7d68c9e1678b68410d5bf6a0915a37203e12ef265a14a0d742c5bb4dff78cf0a",
 
 	// The start-seed goldens have no base commit: each digest is the output
 	// replayed with every switch of replaySwitches off, at 59772fce2.

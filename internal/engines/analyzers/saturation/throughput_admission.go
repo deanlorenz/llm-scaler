@@ -451,6 +451,8 @@ func (a *SaturationAnalyzer) siblingYield(key string, reading throughputReading,
 	if c == nil || !(reading.rate < tol*c.sibling) {
 		return 0, false
 	}
+	// The path ran: the yield opened, whether the cap then refuses it or not.
+	a.paths.add(pathYieldSibling, 1)
 	if a.yieldCapped(reading, c.sibling) {
 		return 0, false
 	}
