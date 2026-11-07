@@ -159,12 +159,15 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// 8 outputs: throughput-sweep's variant-capacities (1 of 193 rows,
 	// PerReplicaCapacity -2.14%) and composite-release (1 of 27, a decode
 	// frame's demand +2.18%); throughput-sweep-restart's variant-capacities
-	// (17 of 649), composite-release (5 of 14, ReleaseBound -1.52% first) and
-	// four composite outputs (9 rows each, a few parts in 10 million). With
-	// this PR's other switches on, as committed, it moves four more of
-	// throughput-sweep (composite-results, composite-roles,
-	// composite-variants, warm-pool-pressure): an interaction, on the cycles
-	// those switches already moved.
+	// (10 of 649), composite-release (1 of 14, ReleaseBound -1.52%) and
+	// four composite outputs (9 rows each, a few parts in 10 million). The
+	// spread is held at 1 for the shape-change window after the restart
+	// recording's shape change (22:16:50 to 22:22:36), so those 13 cycles
+	// price as before. With this PR's other switches on, as committed, it
+	// moves four more of throughput-sweep (composite-results,
+	// composite-roles, composite-variants, warm-pool-pressure) in their last
+	// bits only (TotalDemand 82477.83086446974 -> ...977): float
+	// reassociation on the cycles those switches already moved.
 	throughput.SwitchKVPerRequestOutputDispersion: {
 		"throughput-sweep-restart/composite-release.csv", "throughput-sweep-restart/composite-results.csv",
 		"throughput-sweep-restart/composite-roles.csv", "throughput-sweep-restart/composite-variants.csv",

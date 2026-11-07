@@ -563,11 +563,20 @@ analyzers price it since #276): a long request stays resident longer, so the ave
 resident request holds more than `OL/2` of generated KV. `E[O²]` is each replica's lower
 bound from `vllm:request_generation_tokens_bucket`
 (`domain.ReplicaMetrics.AvgOutputTokensSquared`), request-weighted over the rows the
-variant's shape averages (`variantOutputDispersion`, `kv_output_dispersion.go`). `D` is 1
-unless every one of them read a positive, finite bound, and with the replay switch
-`throughput-kv-per-request-output-dispersion` off. It is not held at 1 across a shape
-change. The same `KVreq` prices the local demand and the GPS check, so a larger `D`
-lowers supply, local demand and the predicted token rate by one factor.
+variant's shape averages (`variantOutputDispersion`, read through `fleet.OutputDispersion`
+as the saturation and slo analyzers read it). `D` is 1 unless every one of them read a
+positive, finite bound, and with the replay switch
+`throughput-kv-per-request-output-dispersion` off.
+
+`D` is held at 1 for the policy's shape-change window after the variant's shape tracker
+declares a change (`shapeChangeHoldSeconds`, 5 minutes without one,
+`DefaultShapeChangeSpreadHold`), as the saturation analyzer holds it: the `[5m]` histogram
+then holds both shapes, and their difference would read as a spread of one workload's
+lengths, a `D` too high and a supply too low on every shape swap.
+
+The same `KVreq` prices the local demand and the GPS check, so a larger `D` lowers supply,
+local demand and the predicted token rate by one factor. The model-level demand, arrival
+rate times `OL`, does not read `D`: against it a larger `D` orders more replicas.
 
 Per-variant totals: `totalSupply = Σ μ_dec_sat`, `perReplicaSupply = totalSupply / n`, where
 `n` is the count of KV-capable replicas (`nKV`) — replicas actually reporting KV metrics, not

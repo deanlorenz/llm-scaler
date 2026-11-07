@@ -3,6 +3,7 @@ package throughput
 import (
 	"math"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -116,4 +117,62 @@ func TestKVOutputDispersion_TheShapesWeights(t *testing.T) {
 	_, ol, _ := averageShapeMetrics(rows)
 	require.InDelta(t, 190, ol, 1e-9)
 	require.InDelta(t, 109000.0/(190*190), variantOutputDispersion(rows), 1e-9)
+}
+
+// A shape change holds the spread at 1 for the policy's shape-change window
+// (DefaultShapeChangeSpreadHold with none): the [5m] histogram then holds
+// both shapes. The fleet moves from 256 to 512 tokens out at D 2; every
+// cycle priced inside the window reads 1024 + 512/2 = 1280, and the first one
+// past it 1024 + 2 x 512/2 = 1536.
+func TestKVOutputDispersion_AShapeChangeHoldsTheSpread(t *testing.T) {
+	a := NewThroughputAnalyzer()
+	r := newLineRun(t, a)
+	rowsAt := func(ol float64) []domain.ReplicaMetrics {
+		rows := steadyFleet()
+		for i := range rows {
+			rows[i].AvgOutputTokens = ol
+			spreadOf(2)(&rows[i])
+		}
+		return rows
+	}
+	for range 12 {
+		r.step(rowsAt(256))
+	}
+	changedAt := r.now()
+	held := 0
+	for r.now().Sub(changedAt) < DefaultShapeChangeSpreadHold {
+		at := r.now()
+		vc, has := r.step(rowsAt(512))
+		if !has {
+			continue
+		}
+		held++
+		require.InDelta(t, 1280, pricedKVreq(t, a, vc), 1e-6, "priced the spread %s after the change", at.Sub(changedAt))
+	}
+	require.Positive(t, held, "no cycle priced inside the window: the case tests nothing")
+	vc, has := r.step(rowsAt(512))
+	require.True(t, has)
+	require.InDelta(t, 1536, pricedKVreq(t, a, vc), 1e-6, "the spread past the window")
+}
+
+// The window is the policy's when it sets one.
+func TestKVOutputDispersion_TheHoldIsThePolicysWindow(t *testing.T) {
+	require.Equal(t, DefaultShapeChangeSpreadHold, spreadHoldOf(nil))
+	require.Equal(t, 90*time.Second, spreadHoldOf(holdPolicy(90)))
+	state := &variantState{}
+	now := lineStart
+	require.False(t, spreadHeld(state, time.Minute, now), "no change yet")
+	state.shapeChangedAt = now.Add(-59 * time.Second)
+	require.True(t, spreadHeld(state, time.Minute, now))
+	state.shapeChangedAt = now.Add(-time.Minute)
+	require.False(t, spreadHeld(state, time.Minute, now))
+}
+
+// holdPolicy is a config that states a shape-change window of seconds.
+type holdPolicy int
+
+func (holdPolicy) GetAnalyzerName() string { return AnalyzerName }
+
+func (h holdPolicy) ShapeChangeWindow(time.Duration) time.Duration {
+	return time.Duration(h) * time.Second
 }

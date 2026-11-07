@@ -147,8 +147,8 @@ holds `D x O/2`. `D` is 1 when any generating replica lacks the histogram,
 while a shape change is outstanding (on every path), and with the replay
 switch `kv-per-request-output-dispersion` off. The slo analyzer prices `D` too,
 behind `slo-kv-per-request-output-dispersion`, and the throughput analyzer,
-behind `throughput-kv-per-request-output-dispersion` (#433), both with no
-shape-change hold.
+behind `throughput-kv-per-request-output-dispersion` (#433), with the same
+shape-change hold; the slo analyzer has none.
 
 A hit saves KV only when another running request holds the block too, so the
 derived mu does not assume `ILeff` for memory where it can measure it (issue
