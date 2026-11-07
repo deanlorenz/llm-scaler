@@ -2335,7 +2335,7 @@ benchmark-deploy-wva: ## Install WVA from deploy/ into BENCHMARK_NAMESPACE (name
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-deploy-wva BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
-	@# A scenario that still installs WVA itself (llm-d-benchmark's own ones do) would leave
+	@# A scenario that installs its own autoscaler (llm-d-benchmark's own ones do) would leave
 	@# two controllers optimizing the same namespace and writing the same replica
 	@# counts. Refuse rather than produce a benchmark of the two of them fighting.
 	@existing=$$(kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get deploy -n $(BENCHMARK_NAMESPACE) \
