@@ -32,7 +32,7 @@ What each threshold controls:
 
 ## ScalingPolicy Schema (Phase 1)
 
-Phase 1 of the [ScalingPolicy proposal](https://github.com/llm-d/llm-d-workload-variant-autoscaler/pull/1245)
+Phase 1 of the ScalingPolicy design
 adds a plugin envelope to each entry of this ConfigMap. It is additive: no CRD,
 no migration, no new install step. Flat entries keep working; adopt it per entry
 if you want.

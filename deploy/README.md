@@ -48,4 +48,4 @@ is the one command that changes that, and it is an admin's to run.
 > `wva-external-scaler.<controller-namespace>.svc.cluster.local:9090` on a plaintext one
 > ([external scaler mutual TLS](../docs/reference/configuration.md#external-scaler-mutual-tls)). Instructions to
 > apply a `VariantAutoscaling` CRD, or to point an HPA or Prometheus Adapter at a
-> `wva_` metric, describe upstream WVA and do not apply here.
+> `wva_` metric, come from another autoscaler and do not apply here.

@@ -118,7 +118,7 @@ Summary of the scaling manager benchmark runs with configuration details.
 
 **Model:** Qwen/Qwen3-32B
 **Workload:** 4000 prompt tokens, 1000 output tokens, 20 RPS, 600s duration
-**Setup:** HPA Saturation V1 (KV cache target=700m, queue depth target=2, min=1, max=10 replicas, scaleUp=180s, scaleDown=300s) ([#1220](https://github.com/llm-d/llm-d-workload-variant-autoscaler/pull/1220))
+**Setup:** HPA Saturation V1 (KV cache target=700m, queue depth target=2, min=1, max=10 replicas, scaleUp=180s, scaleDown=300s)
 
 | Metric | Run 1 | Run 2 | Run 3 | Avg |
 |--------|-------|-------|-------|-----|
@@ -137,7 +137,7 @@ Summary of the scaling manager benchmark runs with configuration details.
 **llm-d Release:** main (includes v0.7.0 the scaling manager)
 **Model:** Qwen/Qwen3-32B
 **Workload:** 4000 prompt tokens, 1000 output tokens, 20 RPS, 600s duration
-**Setup:** the scaling manager disabled, HPA deleted, 2 constant replicas ([#1139](https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1139))
+**Setup:** the scaling manager disabled, HPA deleted, 2 constant replicas
 
 | Metric | Run 1 | Run 2 | Run 3 | Avg |
 |--------|-------|-------|-------|-----|
@@ -248,7 +248,7 @@ Summary of the scaling manager benchmark runs with configuration details.
 
 **Model:** Qwen/Qwen3-32B
 **Workload:** 1000 prompt tokens, 4000 output tokens, 20 RPS, 600s duration
-**Setup:** HPA Saturation V1 (KV cache target=700m, queue depth target=2, min=1, max=10 replicas, scaleUp=180s, scaleDown=300s) ([#1220](https://github.com/llm-d/llm-d-workload-variant-autoscaler/pull/1220))
+**Setup:** HPA Saturation V1 (KV cache target=700m, queue depth target=2, min=1, max=10 replicas, scaleUp=180s, scaleDown=300s)
 
 | Metric | Run 1 | Run 2 | Run 3 | Avg |
 |--------|-------|-------|-------|-----|
@@ -267,7 +267,7 @@ Summary of the scaling manager benchmark runs with configuration details.
 **llm-d Release:** main (includes v0.7.0 the scaling manager)
 **Model:** Qwen/Qwen3-32B
 **Workload:** 1000 prompt tokens, 4000 output tokens, 20 RPS, 600s duration
-**Setup:** the scaling manager disabled, HPA deleted, 2 constant replicas ([#1139](https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1139))
+**Setup:** the scaling manager disabled, HPA deleted, 2 constant replicas
 
 | Metric | Run 1 | Run 2 | Run 3 | Avg |
 |--------|-------|-------|-------|-----|
@@ -451,7 +451,7 @@ Summary of the scaling manager benchmark runs with configuration details.
 
 **Model:** Qwen/Qwen3-32B
 **Workload:** 1000 prompt tokens, 1000 output tokens, 20 RPS, 600s duration
-**Setup:** HPA Saturation V1 (KV cache target=700m, queue depth target=2, min=1, max=10 replicas, scaleUp=180s, scaleDown=300s) ([#1220](https://github.com/llm-d/llm-d-workload-variant-autoscaler/pull/1220))
+**Setup:** HPA Saturation V1 (KV cache target=700m, queue depth target=2, min=1, max=10 replicas, scaleUp=180s, scaleDown=300s)
 
 | Metric | Run 1 | Run 2 | Run 3 | Avg |
 |--------|-------|-------|-------|-----|
@@ -470,7 +470,7 @@ Summary of the scaling manager benchmark runs with configuration details.
 **llm-d Release:** main (includes v0.7.0 the scaling manager)
 **Model:** Qwen/Qwen3-32B
 **Workload:** 1000 prompt tokens, 1000 output tokens, 20 RPS, 600s duration
-**Setup:** the scaling manager disabled, HPA deleted, 2 constant replicas ([#1139](https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1139))
+**Setup:** the scaling manager disabled, HPA deleted, 2 constant replicas
 
 | Metric | Run 1 | Run 2 | Run 3 | Avg |
 |--------|-------|-------|-------|-----|

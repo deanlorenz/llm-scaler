@@ -461,5 +461,4 @@ WVA's cross-model cost/quota/fair-share needs the full managed set, which holds 
 - KEDA Prometheus scaler (alternative delivery): https://keda.sh/docs/latest/scalers/prometheus/
 - Kubernetes Server-Side Apply (field managers): https://kubernetes.io/docs/reference/using-api/server-side-apply/
 - HPA algorithm / behavior (stabilization, policies): https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/
-- WVA analyzer-metric-interface proposal (D/P contract, config-driven PromQL analyzers): https://github.com/llm-d/llm-d-workload-variant-autoscaler/pull/1444 (merged) · follow-up issue #1455
 - Current policy struct being simplified: `internal/config/saturation_scaling.go` (`SaturationScalingConfig`)
