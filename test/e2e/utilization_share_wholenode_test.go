@@ -347,9 +347,9 @@ func layOutPacked(e *wholeNodeEnv, msG, modelG, msS1, modelS1, msS2, modelS2 str
 		Expect(k8sClient.CoreV1().Pods(e.fillerNS).Delete(ctx, p, metav1.DeleteOptions{GracePeriodSeconds: new(int64)})).To(Succeed())
 	}
 	Eventually(func(g Gomega) {
-		n, err := fixtures.TerminatingPodsOnNodes(ctx, k8sClient, e.key, e.product)
+		leaving, err := fixtures.TerminatingPodsOnNodes(ctx, k8sClient, e.key, e.product)
 		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(n).To(BeZero())
+		g.Expect(leaving).To(BeEmpty(), "pods still terminating on the product's nodes, by namespace: %v", leaving)
 	}, 2*time.Minute, 2*time.Second).Should(Succeed())
 	e.scale(depS1, 5)
 	e.scale(depS2, 5)

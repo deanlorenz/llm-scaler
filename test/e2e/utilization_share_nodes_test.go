@@ -137,9 +137,9 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 		// taken while one remains leaves GPUs that come free later -- and
 		// B's pod would then fit free GPUs, which is not this spec's case.
 		Eventually(func(g Gomega) {
-			n, err := fixtures.TerminatingPodsOnNodes(ctx, k8sClient, key, product)
+			leaving, err := fixtures.TerminatingPodsOnNodes(ctx, k8sClient, key, product)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(n).To(BeZero(), "%d pods still terminating", n)
+			g.Expect(leaving).To(BeEmpty(), "pods still terminating on the product's nodes, by namespace: %v", leaving)
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("Taking every other free GPU on the product's nodes with pause pods outside WVA")
@@ -198,8 +198,9 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 		// A GPU come free since the fill -- an earlier spec's pod gone late --
 		// lets the planner open B's hole with one A pod and pay the rest of
 		// the quota with an unplanned one: a set this spec does not wait for.
-		Expect(freeProductGPUs(key, product, gpuResName)).To(BeEmpty(),
-			"GPUs came free on the product's nodes after the fill: the nodes are not full")
+		free, err := freeProductGPUs(key, product, gpuResName)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(free).To(BeEmpty(), "GPUs came free on the product's nodes after the fill, by node: the nodes are not full")
 
 		By("Lowering A's floor to 1, so it has replicas to give")
 		Expect(fixtures.EnsureScaledObject(ctx, crClient, ns, soA, depA, depA, 1, 4, cfg.MonitoringNS,
@@ -229,13 +230,22 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 					setID = id
 				}
 			}
+			if setID != "" {
+				return
+			}
 			// The members counted are only the planned ones; the started
 			// lines say what else began, and a free GPU is why a set would
-			// plan fewer than two (the premise check above).
+			// plan fewer than two (the premise check above). Read only on a
+			// miss, and a failed read is said, not fatal to the wait.
+			freeRead := "unread"
+			if free, err := freeProductGPUs(key, product, gpuResName); err != nil {
+				freeRead += ": " + err.Error()
+			} else {
+				freeRead = fmt.Sprint(free)
+			}
 			g.Expect(setID).NotTo(BeEmpty(),
-				"no planned set of two A pods funding B has started: planned members by set %v\ntransfers started:\n%s\nfree GPUs on the product's nodes now: %v",
-				members, describeShare(withMsg(shareLines(logs, ns), "transfer started"), 20),
-				freeProductGPUs(key, product, gpuResName))
+				"no planned set of two A pods funding B has started: planned members by set %v\ntransfers started:\n%s\nfree GPUs on the product's nodes now: %s",
+				members, describeShare(withMsg(shareLines(logs, ns), "transfer started"), 20), freeRead)
 		}, 12*time.Minute, 5*time.Second).Should(Succeed())
 		GinkgoWriter.Printf("planned donor set: %s\n", setID)
 
@@ -254,17 +264,20 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 // freeProductGPUs is the GPUs free now on each node labelled key=product,
 // as the scheduler accounts them: the nodes with none are left out, so an
 // empty map is full nodes.
-func freeProductGPUs(key, product, resourceName string) map[string]int {
-	GinkgoHelper()
+func freeProductGPUs(key, product, resourceName string) (map[string]int, error) {
 	nodes, err := k8sClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: key + "=" + product})
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		return nil, fmt.Errorf("list %s nodes: %w", product, err)
+	}
 	out := map[string]int{}
 	for i := range nodes.Items {
 		free, err := fixtures.FreeGPUsOnNode(ctx, k8sClient, &nodes.Items[i], resourceName)
-		Expect(err).NotTo(HaveOccurred())
+		if err != nil {
+			return nil, err
+		}
 		if free > 0 {
 			out[nodes.Items[i].Name] = free
 		}
 	}
-	return out
+	return out, nil
 }
