@@ -2,6 +2,8 @@
 #
 # staircase.sh -- the TTFT staircase, end to end, on a fixed P/D fleet.
 #
+#   staircase.sh smoke <image> a short run, 3 GPUs at most: everything a real API server
+#                              has to accept, then a deliberate abort and a teardown check
 #   staircase.sh run <image>   stand up, warm up, wait for the freeze, run every phase
 #   staircase.sh freeze        the prediction and the ladder, from the warm-up's recording
 #   staircase.sh analyze       one analysis.jsonl per phase, then report.md
@@ -24,11 +26,12 @@
 #     renewal stops at once: the GPUs go at the last renewal plus STAIRCASE_LEASE.
 #   - One EXIT trap tears down on every exit path that can run one. It runs from a
 #     private copy of this directory, so an edit under a long run changes nothing.
-#   - TERM and abort land within KUBE_TIMEOUT + 10 s, 55 s by default: every kubectl is
-#     under timeout(1), and each long one runs in the background so a signal need not
-#     wait for it (guarded).
-#   - teardown deletes only what this run owns (owned), and returns non-zero unless the
-#     workloads are confirmed gone. The Job stays until they are.
+#   - TERM and abort land within one kubectl read: KUBE_TIMEOUT + 10 s, 55 s by default,
+#     and at once when no read is hung. Every kubectl is under timeout(1); each long one,
+#     the gate's scoring and every wait run guarded, so a signal need not wait for them.
+#   - teardown deletes only what this run owns (owned, which tells a mismatch from a
+#     failed read and retries the read), and returns non-zero unless the workloads are
+#     confirmed gone. The Job stays until they are.
 #   - A saved capture is replaced only by a larger one (keep_larger), and the load is
 #     copied out on every poll and again before its pod is deleted.
 #   - No step runs unless the ladder and the frozen prediction match the hashes taken
@@ -41,7 +44,7 @@ set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${STAIRCASE_ROOT:-$(cd "$HERE/../.." && pwd)}"
-PY="$(command -v python3 || command -v python)" || { echo "python3 not found" >&2; exit 1; }
+PY="${STAIRCASE_PY:-$(command -v python3 || command -v python)}" || { echo "python3 not found" >&2; exit 1; }
 
 NS="${BENCHMARK_NAMESPACE:-}"
 R="${STAIRCASE_RUN:-}"
@@ -54,6 +57,9 @@ SCENARIO="${BENCHMARK_SPEC:-guides/pd-disaggregation}"
 WHATIF="${STAIRCASE_WHATIF:-$ROOT/bin/whatif}"
 # The longest held-out prompt, its spread and the answer must fit.
 MAX_MODEL_LEN="${STAIRCASE_MAX_MODEL_LEN:-40960}"
+# The fleet a standup makes. The smoke run asks for the smallest.
+START_P="${STAIRCASE_START_PREFILL:-2}"
+START_D="${STAIRCASE_START_DECODE:-2}"
 # Seconds: the hard cap on a whole run, the lease a renewal extends, how often it is
 # renewed, how stale a heartbeat stops renewal, the wait for a freeze, a fleet change,
 # a poll, a tick of a guarded wait, one kubectl.
@@ -100,6 +106,7 @@ guarded() {
     local rc
     "$@" &
     CHILD=$!
+    # Reads abort before the first tick, too: a command started after an abort stops.
     while kill -0 "$CHILD" 2>/dev/null; do
         beat
         if aborted; then kill "$CHILD" 2>/dev/null; break; fi
@@ -110,6 +117,9 @@ guarded() {
     CHILD=
     return "$rc"
 }
+
+# nap <seconds> : a sleep a signal or an abort need not wait out.
+nap() { guarded sleep "$1"; }
 
 # keep_larger <new> <saved> : a capture may never shrink the stored copy. A dead pod's
 # NotFound once overwrote 400 lines of failure context.
@@ -141,16 +151,27 @@ claim() {
         || t "namespace label failed: the lease alone marks ownership"
 }
 
-# owned : whether this run's id is on the namespace. A read that fails is not a yes.
+# owned : 0 when this run's id is on the namespace, by the lease or the label; 1 when
+# both were read and neither holds it; 2 when they could not be read. A failed read is
+# not a mismatch: at exit it would cancel the teardown, so it is retried.
 owned() {
-    local id got
+    local id out i read
     id="${STAIRCASE_RUN_ID:-$(cat "$R/run-id" 2>/dev/null)}"
     [ -n "$id" ] || return 1
-    got=$(kube get configmap staircase-lease -o json 2>/dev/null | jq -r '.data.run // empty')
-    [ "$got" = "$id" ] && return 0
-    got=$(timeout -k 5 $((KUBE_TIMEOUT + 5)) kubectl --request-timeout="${KUBE_TIMEOUT}s" get namespace "$NS" -o json 2>/dev/null \
-        | jq -r --arg l "$RUN_LABEL" '.metadata.labels[$l] // empty')
-    [ "$got" = "$id" ]
+    for i in $(seq 1 "${STAIRCASE_OWNED_TRIES:-6}"); do
+        read=0
+        if out=$(kube get configmap staircase-lease --ignore-not-found -o json 2>/dev/null); then
+            read=$((read + 1))
+            [ "$(echo "$out" | jq -r '.data.run // empty' 2>/dev/null)" = "$id" ] && return 0
+        fi
+        if out=$(timeout -k 5 $((KUBE_TIMEOUT + 5)) kubectl --request-timeout="${KUBE_TIMEOUT}s" get namespace "$NS" --ignore-not-found -o json 2>/dev/null); then
+            read=$((read + 1))
+            [ "$(echo "$out" | jq -r --arg l "$RUN_LABEL" '.metadata.labels[$l] // empty' 2>/dev/null)" = "$id" ] && return 0
+        fi
+        [ "$read" = 2 ] && return 1
+        sleep "${STAIRCASE_OWNED_POLL:-5}"
+    done
+    return 2
 }
 
 arm_deadline() {
@@ -180,7 +201,7 @@ renew_lease() {
 # --- standup ---------------------------------------------------------------------------
 # standup_make : exec, so that kill reaches timeout, which passes the TERM on to make.
 standup_make() {
-    local set="prefill.replicas=2,decode.replicas=2,model.maxModelLen=$MAX_MODEL_LEN"
+    local set="prefill.replicas=$START_P,decode.replicas=$START_D,model.maxModelLen=$MAX_MODEL_LEN"
     if [ -n "${STAIRCASE_ACCELERATOR_KEY:-}" ]; then
         set="$set,decode.acceleratorType.labelKey=$STAIRCASE_ACCELERATOR_KEY,decode.acceleratorType.labelValue=${STAIRCASE_ACCELERATOR_VALUE:-}"
         set="$set,prefill.acceleratorType.labelKey=$STAIRCASE_ACCELERATOR_KEY,prefill.acceleratorType.labelValue=${STAIRCASE_ACCELERATOR_VALUE:-}"
@@ -188,9 +209,9 @@ standup_make() {
     cd "$ROOT" || exit 1
     LLMDBENCH_SET="$set" exec timeout --signal=TERM -k 30 2700 make --no-print-directory benchmark-standup \
         BENCHMARK_NAMESPACE="$NS" BENCHMARK_SPEC="$SCENARIO" MODEL_ID="$MODEL" IMG="$1" \
-        BENCHMARK_PROMETHEUS_URL="$PROM" BENCHMARK_DECODE_REPLICAS=2 \
+        BENCHMARK_PROMETHEUS_URL="$PROM" BENCHMARK_DECODE_REPLICAS="$START_D" \
         BENCHMARK_DECODE_CPU="${STAIRCASE_DECODE_CPU:-8}" BENCHMARK_DECODE_MEMORY="${STAIRCASE_DECODE_MEMORY:-32Gi}" \
-        BENCHMARK_KEDA_MIN_REPLICAS=2 BENCHMARK_KEDA_MAX_REPLICAS=2
+        BENCHMARK_KEDA_MIN_REPLICAS="$START_D" BENCHMARK_KEDA_MAX_REPLICAS="$START_D"
 }
 
 # prepare : read the names, keep the originals, list slo, flow control off.
@@ -248,13 +269,15 @@ pin_fleet() {
         beat
         aborted && { t "abort during pin_fleet"; return 1; }
         a=$(kube get deploy "$DEC" -o jsonpath='{.status.readyReplicas}')
+        aborted && { t "abort during pin_fleet"; return 1; }
         b=$(kube get deploy "$PRE" -o jsonpath='{.status.readyReplicas}')
+        aborted && { t "abort during pin_fleet"; return 1; }
         if [ "${a:-0}" = "$nd" ] && [ "${b:-0}" = "$np" ]; then t "fleet prefill=$b decode=$a"; return 0; fi
         for p in $(running_pods "^($DEC|$PRE)-"); do
             kube logs "$p" -c vllm --tail=300 2>/dev/null | grep -m1 -E "$ENGERR" | sed "s#^#$p: #" >> "$R/engine-errors.txt"
         done
         [ -s "$R/engine-errors.txt" ] && { t "engine error: $(head -3 "$R/engine-errors.txt" | tr '\n' ' ')"; return 1; }
-        sleep "$POLL"
+        nap "$POLL"
     done
     t "fleet not Ready in ${READY_WAIT}s: prefill=${b:-0} decode=${a:-0}"
     return 1
@@ -273,7 +296,7 @@ flow_control() {
     fi
     kube rollout restart "deploy/$EPPD" >/dev/null || { t "EPP restart failed"; return 1; }
     gstream 330 rollout status "deploy/$EPPD" --timeout=300s >/dev/null || { t "EPP rollout failed"; return 1; }
-    sleep "${STAIRCASE_SETTLE:-20}"
+    nap "${STAIRCASE_SETTLE:-20}"
     t "flow control $1"
 }
 
@@ -283,22 +306,26 @@ recorder_on() {
         --patch-file "$ROOT/config/components/learner-recorder/learner-recorder-deployment.yaml" >/dev/null \
         || { t "recorder patch failed"; return 1; }
     gstream 330 rollout status deployment/wva-controller-manager --timeout=300s >/dev/null || { t "recorder rollout failed"; return 1; }
-    controller_pod > "$R/pod1.txt" || return 1
-    sleep "${STAIRCASE_SETTLE:-20}"
+    controller_pod || return 1
+    echo "$CTL" > "$R/pod1.txt"
+    nap "${STAIRCASE_SETTLE:-20}"
     gstream 120 exec "$(cat "$R/pod1.txt")" -c recordings -- sh -c "head -1 $RECORDINGS/learnrec-*.jsonl" > "$R/start-line.json" 2>&1
     [ "$(jq -r .Kind "$R/start-line.json" 2>/dev/null)" = start ] || { t "no recording start line: $(head -c 200 "$R/start-line.json")"; return 1; }
     t "recorder on, commit $(jq -r .Data.Commit "$R/start-line.json")"
 }
 
-# controller_pod : the one Running controller, waiting out a rollout, capped.
+# controller_pod : set CTL to the one Running controller, waiting out a rollout, capped.
+# Not in a subshell: that would hold a signal for the whole wait.
 controller_pod() {
-    local end p
+    local end
     end=$(($(date +%s) + 180))
     while :; do
-        p=$(kube get pod -l control-plane=controller-manager -o json | jq -r '[.items[] | select(.metadata.deletionTimestamp == null) | select(.status.phase=="Running")] | .[].metadata.name')
-        [ "$(echo "$p" | grep -c .)" = 1 ] && { echo "$p"; return 0; }
-        [ "$(date +%s)" -ge "$end" ] && { t "controller pods after 180 s: '$p'"; return 1; }
-        sleep "$POLL"
+        beat
+        aborted && return 1
+        CTL=$(kube get pod -l control-plane=controller-manager -o json | jq -r '[.items[] | select(.metadata.deletionTimestamp == null) | select(.status.phase=="Running")] | .[].metadata.name')
+        [ "$(echo "$CTL" | grep -c .)" = 1 ] && return 0
+        [ "$(date +%s)" -ge "$end" ] && { t "controller pods after 180 s: '$CTL'"; return 1; }
+        nap "$POLL"
     done
 }
 
@@ -400,8 +427,12 @@ capture_loop() {
 # snapshot_load <dir> <pod> : log and per-request CSVs to local files, never shrinking.
 snapshot_load() {
     kube logs "$2" > "$1/log.tmp" 2>/dev/null; keep_larger "$1/log.tmp" "$1/sweep.log"
-    kstream 120 exec "$2" -- sh -c 'cat /out/w*.csv 2>/dev/null | gzip -1' > "$1/req.tmp" 2>/dev/null
-    keep_larger "$1/req.tmp" "$1/requests.csv.gz"
+    # A copy cut short is a broken archive, however long: it replaces nothing.
+    if gstream 120 exec "$2" -- sh -c 'cat /out/w*.csv 2>/dev/null | gzip -1' > "$1/req.tmp" 2>/dev/null; then
+        keep_larger "$1/req.tmp" "$1/requests.csv.gz"
+    else
+        rm -f "$1/req.tmp"
+    fi
 }
 
 # load <dir> <pod> <open|closed> <cap seconds> <driver args...> : one load pod to SWEEP
@@ -427,7 +458,7 @@ load() {
         beat
         aborted && break
         kube logs "$p" 2>/dev/null | grep -q ' LEVEL 1 ' && break
-        sleep "$POLL"
+        nap "$POLL"
     done
     if ! kube logs "$p" 2>/dev/null | grep -q ' LEVEL 1 '; then
         kube delete pod "$p" --ignore-not-found --grace-period=1 >/dev/null 2>&1
@@ -436,13 +467,15 @@ load() {
     end=$(($(date +%s) + cap))
     while [ "$(date +%s)" -lt "$end" ]; do
         beat
+        # On abort the pod stays: teardown saves it, then deletes it (rescue_load).
+        if aborted; then t "$p: abort"; return 1; fi
         snapshot_load "$d" "$p"
+        if aborted; then t "$p: abort"; return 1; fi
         if grep -q 'SWEEP DONE' "$d/sweep.log" 2>/dev/null; then rc=0; break; fi
         ph=$(kube get pod "$p" -o jsonpath='{.status.phase}' 2>/dev/null)
         case "$ph" in Succeeded|Failed) t "$p phase $ph"; break ;; esac
         if [ -s "$R/engine-errors.txt" ]; then t "$p: engine errors"; break; fi
-        if aborted; then t "$p: abort"; break; fi
-        sleep "$POLL"
+        nap "$POLL"
     done
     snapshot_load "$d" "$p"
     kube delete pod "$p" --ignore-not-found --grace-period=1 --timeout=40s >/dev/null 2>&1
@@ -480,7 +513,7 @@ warmup() {
         fi
         copy_recordings "$pod" "$R/recordings-warmup"
     done
-    sleep "${STAIRCASE_SETTLE:-20}"
+    nap "${STAIRCASE_SETTLE:-20}"
     copy_recordings "$pod" "$R/recordings-warmup"
     prom_range "$from" "$(date +%s)" "$d/prom.jsonl"
     t "warmup done: $(ls -l "$R/recordings-warmup" | awk 'NR>1 {print $NF"="$5}' | tr '\n' ' ')"
@@ -535,15 +568,16 @@ phase() {
     flow_control "$fc" || return 1
     kube rollout restart deployment/wva-controller-manager >/dev/null
     gstream 330 rollout status deployment/wva-controller-manager --timeout=300s >/dev/null || { t "controller rollout failed"; return 1; }
-    pod=$(controller_pod) || return 1
+    controller_pod || return 1
+    pod=$CTL
     echo "$pod" > "$R/pod1.txt"
-    sleep "${STAIRCASE_SETTLE:-20}"
+    nap "${STAIRCASE_SETTLE:-20}"
     from=$(date +%s); echo "$from" > "$d/start.txt"
     hold=$(schedule_seconds "$sched")
     load "$d" "lg-$(echo "$n" | tr 'A-Z' 'a-z')" open $((hold + 1500)) --schedule "$sched" --seed "$seed" --procs 6 --runaway "$run" \
         --max-inflight "$(jq -r .maxInflight "$R/spec.json")" --discard "$(jq -r .discardSeconds "$R/spec.json")"
     rc=$?
-    sleep "${STAIRCASE_SETTLE:-20}"
+    nap "${STAIRCASE_SETTLE:-20}"
     to=$(date +%s); echo "$to" > "$d/end.txt"
     copy_recordings "$pod" "$d/rec"
     prom_range "$from" "$to" "$d/prom.jsonl"
@@ -552,21 +586,24 @@ phase() {
     return "$rc"
 }
 
-# analyze_steps : one analysis.jsonl per phase with requests.
+# analyze_steps : one analysis.jsonl per phase with requests. RUNNER=guarded in the run's
+# own loop, which a signal or an abort must be able to interrupt.
 analyze_steps() {
     local p
     for p in "$R"/phases/*/; do
         p=$(basename "$p")
+        [ -n "${RUNNER:-}" ] && aborted && return 1
         [ -s "$R/phases/$p/requests.csv.gz" ] || { echo "$p: no requests"; continue; }
-        "$PY" "$HERE/staircase_analyze.py" steps "$R" "$p" --discard "$(jq -r .discardSeconds "$R/spec.json")" || echo "$p: no steps to judge"
+        ${RUNNER:-} "$PY" "$HERE/staircase_analyze.py" steps "$R" "$p" --discard "$(jq -r .discardSeconds "$R/spec.json")" || echo "$p: no steps to judge"
     done
 }
 
 # gate_check <repeat> : score the gate buckets' repeat in the loop. A fail, or a phase
 # that did not finish, stops the run: repeats cannot undo it, and it frees the GPUs.
 gate_check() {
-    analyze_steps > "$R/gate-r$1.steps" 2>&1
-    "$PY" "$HERE/staircase_analyze.py" gate "$R" "$R/frozen.json" "$R/spec.json" --repeat "$1" > "$R/gate-r$1.out" 2>&1
+    RUNNER=guarded analyze_steps > "$R/gate-r$1.steps" 2>&1
+    aborted && return 1
+    guarded "$PY" "$HERE/staircase_analyze.py" gate "$R" "$R/frozen.json" "$R/spec.json" --repeat "$1" > "$R/gate-r$1.out" 2>&1
     local rc=$?
     t "gate, repeat $1: rc=$rc: $(tail -1 "$R/gate-r$1.out" | cut -c1-200)"
     return "$rc"
@@ -588,8 +625,65 @@ finish() {
         local trc=$?
         t "teardown rc=$trc: $(tail -2 "$R/teardown.out" | tr '\n' ' ' | cut -c1-240)"
         [ "$trc" = 0 ] || rc=1
+        [ -n "${STAIRCASE_SMOKE:-}" ] && { smoke_verdict "$trc"; rc=$?; }
     fi
     exit "$rc"
+}
+
+# --- the smoke run ----------------------------------------------------------------------
+# What only a real API server can answer, on 3 GPUs at most: the namespace label and the
+# lease, the Job's rights, a fleet change, flow control both ways, the load pod and its
+# captures, a deliberate abort, and a teardown that confirms. Each line of smoke.txt says
+# what was seen. It proves none of the arithmetic, and no prediction.
+smoke_check() { echo "$1 $2" >> "$R/smoke.txt"; t "smoke: $1 $2"; }
+
+# smoke_read <name> <want> <got> : one comparison, the value in the line.
+smoke_read() {
+    if [ "$2" = "$3" ]; then smoke_check ok "$1: $3"; else smoke_check FAIL "$1: read '$3', want '$2'"; fi
+}
+
+smoke_body() {
+    local id until after kind verb landed hold=$((2 * ${STAIRCASE_SMOKE_STEP:-90}))
+    id=$(cat "$R/run-id")
+    smoke_read "lease holds the run id" "$id" "$(kube get configmap staircase-lease -o json 2>/dev/null | jq -r '.data.run // empty')"
+    smoke_read "namespace label holds the run id" "$id" "$(timeout -k 5 $((KUBE_TIMEOUT + 5)) kubectl --request-timeout="${KUBE_TIMEOUT}s" get namespace "$NS" -o json 2>/dev/null | jq -r --arg l "$RUN_LABEL" '.metadata.labels[$l] // empty')"
+    smoke_read "deadline Job is active" 1 "$(kube get job staircase-deadline -o jsonpath='{.status.active}' 2>/dev/null)"
+    for kind in deployments.apps statefulsets.apps daemonsets.apps scaledobjects.keda.sh; do
+        for verb in deletecollection list; do
+            smoke_read "the Job may $verb $kind" yes "$(kube auth can-i "$verb" "$kind" --as="system:serviceaccount:$NS:staircase-deadline" 2>/dev/null)"
+        done
+    done
+    until=$(kube get configmap staircase-lease -o json 2>/dev/null | jq -r '.data.until // 0')
+    renew_lease
+    after=$(kube get configmap staircase-lease -o json 2>/dev/null | jq -r '.data.until // 0')
+    if [ "$after" -gt "$until" ]; then smoke_check ok "the lease moved from $until to $after"; else smoke_check FAIL "the lease did not move: $until"; fi
+
+    local step=${STAIRCASE_SMOKE_STEP:-90}
+    if load "$R/smoke/first" lg-smoke-a open $((hold + 300)) --schedule "$step:2:500:20:1,$step:4:500:20:1" --seed 1 --procs 1 --discard 30 --max-inflight 500; then
+        smoke_check ok "two steps ran on the fleet 1+1"
+    else
+        smoke_check FAIL "the first load did not finish"; return 1
+    fi
+    [ -s "$R/smoke/first/requests.csv.gz" ] && smoke_check ok "requests saved: $(wc -c < "$R/smoke/first/requests.csv.gz") bytes" \
+        || smoke_check FAIL "no requests saved"
+    if flow_control on; then smoke_check ok "flow control on"; else smoke_check FAIL "flow control on"; return 1; fi
+    if pin_fleet 1 2; then smoke_check ok "the fleet moved to 1+2"; else smoke_check FAIL "the fleet did not move to 1+2"; return 1; fi
+
+    # The deliberate abort, inside a load, as it would come.
+    (sleep "${STAIRCASE_SMOKE_ABORT:-60}"; date +%s > "$R/smoke-abort-at"; touch "$R/abort") &
+    load "$R/smoke/second" lg-smoke-b open 900 --schedule 600:2:500:20:1 --seed 2 --procs 1 --discard 30 --max-inflight 500
+    landed=$(($(date +%s) - $(cat "$R/smoke-abort-at" 2>/dev/null || date +%s)))
+    if [ -e "$R/abort" ]; then smoke_check ok "abort landed in ${landed}s"; else smoke_check FAIL "the load ended without the abort"; fi
+    return 1
+}
+
+# smoke_verdict <teardown rc> : after the teardown, what only then can be read.
+smoke_verdict() {
+    if [ "$1" = 0 ]; then smoke_check ok "teardown confirmed"; else smoke_check FAIL "teardown not confirmed: rc=$1"; fi
+    if [ -s "$R/smoke/second/requests.csv.gz" ]; then smoke_check ok "the aborted load was saved"; else smoke_check FAIL "the aborted load was lost"; fi
+    if [ "$(kube get pods -o json 2>/dev/null | jq '.items | length')" = 0 ]; then smoke_check ok "no pod left"; else smoke_check FAIL "pods left: see final-pods.txt"; fi
+    if grep -q '^FAIL' "$R/smoke.txt"; then echo "smoke: FAILED: $R/smoke.txt"; return 1; fi
+    echo "smoke: passed: $R/smoke.txt"
 }
 
 cmd_run() {
@@ -618,7 +712,7 @@ cmd_run() {
     arm_deadline || { t "no deadline: refusing to hold GPUs without one"; exit 1; }
     guarded standup_make "$1" > "$R/standup.log" 2>&1 || { t "standup failed"; exit 1; }
     prepare || exit 1
-    pin_fleet 2 2 || exit 1
+    pin_fleet "$START_P" "$START_D" || exit 1
     flow_control off || exit 1
     kube create configmap staircase-loadgen --from-file=staircase_load.py="$HERE/staircase_load.py" \
         --from-file=closed_loop_sweep.py="$HERE/closed_loop_sweep.py" >/dev/null || { t "loadgen configmap failed"; exit 1; }
@@ -626,6 +720,7 @@ cmd_run() {
     witness
     capture_loop "$$" > "$R/capture.out" 2>&1 &
     CAP=$!
+    [ -n "${STAIRCASE_SMOKE:-}" ] && { smoke_body; exit 1; }
     warmup || exit 1
     t "waiting for the freeze (capped at ${FREEZE_WAIT}s)"
     local end=$(($(date +%s) + FREEZE_WAIT))
@@ -688,8 +783,14 @@ left() {
 cmd_teardown() {
     need
     TEARDOWN=1
-    owned || die "refusing teardown: namespace $NS does not carry this run's id (see $R/run-id, or set STAIRCASE_RUN_ID)"
-    local p i n kind
+    local p i n kind own=0
+    owned || own=$?
+    case "$own" in
+        0) ;;
+        1) die "refusing teardown: namespace $NS does not carry this run's id (see $R/run-id, or set STAIRCASE_RUN_ID)" ;;
+        *) echo "TEARDOWN NOT DONE: could not read who owns $NS. Nothing was deleted. The deadline Job stands; run this again." >&2
+           exit 1 ;;
+    esac
     rescue_load
     kube delete pod -l app=loadgen --ignore-not-found --grace-period=5 --timeout=40s 2>&1
     for p in $(kube get pod -l control-plane=controller-manager -o json 2>/dev/null | jq -r '.items[].metadata.name'); do
@@ -770,6 +871,11 @@ if [ "${STAIRCASE_LIB:-}" = 1 ]; then return 0; fi
 
 case "${1:-}" in
     run) shift; cmd_run "$@" ;;
+    smoke)
+        shift
+        export STAIRCASE_SMOKE=1 STAIRCASE_START_PREFILL=1 STAIRCASE_START_DECODE=1
+        cmd_run "$@"
+        ;;
     freeze) cmd_freeze ;;
     analyze) cmd_analyze ;;
     redo) cmd_redo ;;

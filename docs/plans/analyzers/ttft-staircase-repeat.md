@@ -15,6 +15,9 @@ Everything this plan freezes is in
 
 ## The run in one page
 
+0. `make benchmark-staircase-smoke` in a namespace of its own: about 1.5 GPU-hours. The
+   label, the lease, the fleet change and the Job's rights have never met a real API
+   server, and this is what they meet first. Do not start the run until it passes.
 1. Stand up a fresh namespace with `slo` listed from the first cycle.
 2. Warm up with a prompt sweep.
 3. `make benchmark-staircase-freeze`: the prediction, the ladder and their hashes.
@@ -53,9 +56,10 @@ note goes in a new dated section and edits nothing above it.
 | Seeds | From 3001, a new one per phase. None of M2's 201 to 206 | |
 | Repeats | 3, and the statistic is the median. A verdict stands only if every repeat agrees | Page |
 
-With M2's warm-up, as a check of the rule only, A's p90 floor is 52.2 ms and its
-target 85.8 ms, 1.64 times the floor, so the 1.2 does not bind. Those floors price the
-assumed 20 ms hop, since M2's recording holds no router mean.
+M2's warm-up cannot check the margin: it ends saturated, so past the transfer's age its
+floors are the saturated ones, 68.1 ms on A and 414 ms on B. The rates and hours below do not read the
+floor. A floor there also prices the assumed 20 ms hop, since M2's recording holds no
+router mean.
 
 ## The warm-up
 
@@ -67,6 +71,7 @@ no recording held `V_P`, `a`, `slo` and a decode line on one cycle.
 | `line` | Closed loop, seven levels of 7 minutes, 1000 and 8000 prompts | The ITL line, `D`, and `R` (a router window needs a steady 5 minutes, and M2's 5-minute levels gave one) |
 | `sweep` | Poisson light load at 1000, 2000, 4000, 6000 and 8000 | `a` and its curve. M2 swept to 16000; here that length is held out, so 6000 takes its place |
 | `busy` | Closed loop, 8000 prompts, 8 tokens, 11 minutes | `V_P`, which P1 reads over its last 30 minutes |
+| `rest` | Poisson light load at 8000, 6 minutes | The transfer: the figure a freeze reads ages out in 5 minutes, and M2's warm-up ended saturated |
 
 - **Order.** `line`, `sweep`, `busy`, where M2 ran `sweep`, `line`, `busy`. This puts
   `a` next to `V_P`; M2 held both on only 44 of 317 cycles. That the new order holds
@@ -126,6 +131,10 @@ the report says whether it did.
 | Decode's TTFT rises with step time at about 7 steps | Slope of the decode engine's TTFT on the client's TPOT, per bucket | 5.5 to 9 | 6.36 to 7.79, read by the report's code on all six phases |
 | The hop grows with the prompt | Fit of the hop, ms per 1000 prompt tokens, over the bucket lengths | 0.5 to 1.5 | 1.02 |
 | Bursts cost less than `Ca²` prices | Client p90, C over B, median over the steps | 1.0 to 2.1 | 1.33 off and on; the model says 2.40 |
+
+The gate buckets' `Ca²` and a void step are read strictly at the gate: a crossing on a
+void step is no reading, so it stops the run as `no valid crossing`, like a fail. At
+the end, the report gives it as a bound.
 
 A slope out of band means the term's form is wrong, not its coefficient. A hop flat in
 the prompt, on `H-16k` above all, means the hop is the wrong name for it. A burst ratio

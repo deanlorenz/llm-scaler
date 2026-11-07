@@ -349,12 +349,15 @@ def judge(predicted, per_repeat, missing=()):
         return text, "n/a", "no mark, repeat %s missing" % ",".join(str(n) for n in missing)
     values = [(v[0] + v[1]) / 2 if k == "bound" else v for k, v in per_repeat if v is not None]
     centre = lib.median(values) if values else None
+    bound = any("a bound" in v for v in verdicts)
     if any(fail(v) for v in verdicts):
-        verdict = "FAIL"
+        verdict = "FAIL, a bound" if bound else "FAIL"
+    elif lib.NO_VALID_CROSSING in verdicts:
+        verdict = lib.NO_VALID_CROSSING
     elif all(v.startswith("in the mark") for v in verdicts):
-        verdict = "in the mark"
+        verdict = "in the mark, a bound" if bound else "in the mark"
     else:
-        verdict = "no mark"
+        verdict = "no mark, a bound" if bound else "no mark"
     if len(per_repeat) == 1:
         kind, value = per_repeat[0]
         return lib.show(kind, value), lib.mark(predicted, kind, value)[0], lib.mark(predicted, kind, value)[1]
@@ -589,7 +592,9 @@ def gate(run, frozen, spec, repeat, out):
     """Score one repeat of the gate buckets: 0 to go on, 1 to stop. Written beside the report."""
     with open(os.path.join(run, "gate-r%d.md" % repeat), "w", encoding="utf8") as f:
         verdicts = report(run, frozen, spec, None, f, repeats=[repeat], only_gate=True)
-    bad = {k: v for k, v in verdicts.items() if k[2] == "ttft" and (fail(v) or "missing" in v)}
+    # A void step can pass no gate: a crossing on one is a bound, not a reading.
+    bad = {k: v if fail(v) or "missing" in v else lib.NO_VALID_CROSSING for k, v in verdicts.items()
+           if k[2] == "ttft" and (fail(v) or "missing" in v or "a bound" in v or v == lib.NO_VALID_CROSSING)}
     if not verdicts:
         print("gate repeat %d: no gate bucket to score" % repeat, file=out)
         return 1

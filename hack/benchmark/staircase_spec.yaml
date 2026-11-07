@@ -27,10 +27,12 @@ seedBase: 3000
 phaseOverheadSeconds: 240
 # The warm-up, as the run's fleet: seconds, then the load.
 warmup:
-  order: [line, sweep, busy]
+  order: [line, sweep, busy, rest]
   line: {driver: closed, schedule: "420:30:1000:1000,420:100:1000:1000,420:200:1000:1000,420:400:1000:1000,420:60:8000:200,420:120:8000:200,420:200:8000:200"}
   sweep: {driver: open, schedule: "360:14:1000:32:1,360:10:2000:32:1,360:6:4000:32:1,360:4:6000:32:1,360:3:8000:32:1", seed: 11}
   busy: {driver: closed, schedule: "660:96:8000:8"}
+  # Quiet at the end: the transfer a freeze reads ages out in 5 minutes.
+  rest: {driver: open, schedule: "360:3:8000:32:1", seed: 12}
 # fc lists the flow-control states a bucket runs in. gate: true buckets are the ones
 # the page names for a flag; the rest are held out of everything the model learned.
 buckets:

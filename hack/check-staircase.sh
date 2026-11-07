@@ -22,7 +22,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 B="$ROOT/hack/benchmark"
 PY="$(command -v python3 || command -v python)" || { echo "FAIL: python3 not found"; exit 1; }
-EXPECTED_CHECKS=66
+EXPECTED_CHECKS=84
 
 WORK="$(mktemp -d)"
 STUB="$WORK/bin"
@@ -164,16 +164,30 @@ case "${HANG:-}" in
     cp) case "$args" in *" cp "*) exec sleep 300 ;; esac ;;
     exec) case "$args" in *" exec "*) exec sleep 300 ;; esac ;;
     get) case "$args" in *" get scaledobject "*) exec sleep 300 ;; esac ;;
+    gzip) case "$args" in *" exec "*gzip*) exec sleep 300 ;; esac ;;
+    ready) case "$args" in *" get deploy m-"*jsonpath*) exec sleep 300 ;; esac ;;
 esac
+if [ -n "${OWN_FAIL:-}" ]; then
+    case "$args" in
+        *" get configmap staircase-lease "*|*" get namespace "*" -o json "*)
+            n=$(cat "$STATE/own-reads" 2>/dev/null || echo 0); echo $((n + 1)) > "$STATE/own-reads"
+            [ "$n" -lt "$OWN_FAIL" ] && exit 1 ;;
+    esac
+fi
 pd='featureGates:\n- flowControl\nplugins:\n- type: a\nflowControl:\n  maxBytes: 1\nschedulingProfiles:\n- name: b\n'
 [ -e "$STATE/fc-off" ] && pd='plugins:\n- type: a\nschedulingProfiles:\n- name: b\n'
 case "$args" in
     *" create namespace "*) touch "$STATE/ns" ;;
-    *" label namespace "*) [ -z "${LABEL_FAIL:-}" ] ;  exit ;;
-    *" get namespace "*" -o json "*) printf '{"metadata":{"labels":{"llm-scaling-manager/staircase-run":"%s"}}}\n' "${LABEL_RUN:-}" ;;
+    *" label namespace "*) [ -z "${LABEL_FAIL:-}" ] || exit 1; echo "${*: -1}" | sed 's/.*=//' > "$STATE/label" ;;
+    *" get namespace "*" -o json "*) printf '{"metadata":{"labels":{"llm-scaling-manager/staircase-run":"%s"}}}\n' "${LABEL_RUN-$(cat "$STATE/label" 2>/dev/null)}" ;;
     *" get namespace "*) [ -n "${NS_EXISTS:-}" ]; exit ;;
     *" get configmap staircase-lease "*)
-        printf '{"data":{"run":"%s"}}\n' "${LEASE_RUN-$(cat "$RUN/run-id" 2>/dev/null)}" ;;
+        n=$(grep -c 'patch cm staircase-lease' "$LOG")
+        printf '{"data":{"run":"%s","until":"%s"}}\n' "${LEASE_RUN-$(cat "$RUN/run-id" 2>/dev/null)}" "$n" ;;
+    *" auth can-i "*) echo "${CAN_I:-yes}" ;;
+    *" patch scaledobject "*)
+        case "$args" in *so-d*) w=d ;; *) w=p ;; esac
+        echo "$args" | sed 's/.*minReplicaCount\\*":\([0-9]*\).*/\1/' > "$STATE/so-$w" ;;
     *" logs job/staircase-deadline "*) [ -n "${ARM_FAIL:-}" ] || echo "t deadline at x" ;;
     *" get job staircase-deadline "*) [ -n "${JOB_DEAD:-}" ] || echo 1 ;;
     *" get deploy -o name "*) printf 'deployment.apps/m-decode\ndeployment.apps/m-prefill\ndeployment.apps/m-epp\n' ;;
@@ -186,14 +200,19 @@ case "$args" in
         printf '{"spec":{"template":{"spec":{"containers":[{"name":"vllm","env":[{"name":"VLLM_MAX_MODEL_LEN","value":"40960"}]}]}}}}\n' ;;
     *" get scaledobject -o json "*) printf '{"items":[{"metadata":{"name":"so-d"},"spec":{"scaleTargetRef":{"name":"m-decode"}}},{"metadata":{"name":"so-p"},"spec":{"scaleTargetRef":{"name":"m-prefill"}}}]}\n' ;;
     *" get deploy m-"*"jsonpath="*)
-        if [ -n "${NEVER_READY:-}" ]; then echo 1
-        elif [ -n "${READY_THEN_NOT:-}" ] && [ -e "$RUN/ladder.ready" ]; then echo 1
-        else echo 2; fi ;;
+        case "$args" in *m-decode*) f="$STATE/so-d" ;; *) f="$STATE/so-p" ;; esac
+        if [ -n "${NEVER_READY:-}" ]; then echo 0
+        elif [ -n "${READY_THEN_NOT:-}" ] && [ -e "$RUN/ladder.ready" ]; then echo 0
+        elif [ -n "${NEVER_MOVE:-}" ] && grep -q 'flow control on' "$RUN/timeline.txt"; then echo 1
+        else cat "$f" 2>/dev/null || echo 2; fi ;;
     *" get pod -l control-plane=controller-manager -o json "*)
         printf '{"items":[{"metadata":{"name":"ctl"},"status":{"phase":"Running"}}]}\n' ;;
     *" get pod -l app=loadgen -o json "*)
         if [ -n "${LOAD_ALIVE:-}" ]; then printf '{"items":[{"metadata":{"name":"lg-b-off-r1"}}]}\n'; else printf '{"items":[]}\n'; fi ;;
-    *" get pods -o json "*|*" get deploy -o json "*|*" get statefulset -o json "*|*" get daemonset -o json "*)
+    *" get pods -o json "*)
+        if [ -e "$STATE/tearing" ] && [ -n "${GET_FAIL:-}" ]; then exit 1; fi
+        printf '{"items":[]}\n' ;;
+    *" get deploy -o json "*|*" get statefulset -o json "*|*" get daemonset -o json "*)
         if [ -e "$STATE/tearing" ]; then
             [ -n "${GET_FAIL:-}" ] && exit 1
             case "$args" in *" get deploy "*) [ -n "${LEFT:-}" ] && { printf '{"items":[{"metadata":{"name":"m-decode"}}]}\n'; exit 0; } ;; esac
@@ -207,7 +226,9 @@ case "$args" in
     *" exec ctl "*) printf '{"Kind":"start","Data":{"Commit":"abc"}}\n' ;;
     *" cp "*) d="${*: -1}"; mkdir -p "$d"; echo recording-bytes > "$d/learnrec-1.jsonl" ;;
     *" exec "*"gzip"*)
+        if [ -n "${SNAP_PARTIAL:-}" ]; then head -c 5000 /dev/zero; exit 1; fi
         if [ -n "${SLOW:-}" ]; then cat "$WORK/req-slow.gz"; else cat "$WORK/req-good.gz"; fi ;;
+    *" logs lg-smoke-b "*) printf '2026-11-06T02:00:00Z LEVEL 1 rate=2 in=1 out=1 ca2=1 hold=600s\n' ;;
     *" logs lg-"*|*" logs w-"*)
         if [ -n "${LOAD_STUCK:-}" ]; then exit 0; fi
         printf '2026-11-06T02:00:00Z LEVEL 1 rate=1 in=1 out=1 ca2=1 hold=600s\n'
@@ -235,7 +256,7 @@ env_line() {
     exec_env=("$TOOLS/env" PATH="$RUN_PATH" WORK="$WORK" BENCHMARK_NAMESPACE=stair-ns STAIRCASE_RUN="$RUN" BENCHMARK_PROMETHEUS_URL=http://p:9090
         STAIRCASE_SPEC="$WORK/spec.yaml" STAIRCASE_ROOT="$WORK" STAIRCASE_WHATIF="$STUB/whatif" FROZEN_FIXTURE="$WORK/frozen.json"
         STAIRCASE_POLL=0.2 STAIRCASE_TICK=0.1 STAIRCASE_SETTLE=0 STAIRCASE_ARM_POLL=0 STAIRCASE_TEARDOWN_POLL=0 STAIRCASE_TEARDOWN_TRIES=3
-        STAIRCASE_LEASE_EVERY=1 STAIRCASE_FREEZE_WAIT=40 STAIRCASE_READY_WAIT=2)
+        STAIRCASE_LEASE_EVERY=1 STAIRCASE_FREEZE_WAIT=40 STAIRCASE_READY_WAIT=2 STAIRCASE_OWNED_POLL=0)
 }
 
 # base_env <VAR=value...> <command...> : run it to its end under the stubs.
@@ -325,6 +346,16 @@ if base_env LEASE_RUN=theirs bash "$B/staircase.sh" teardown > /dev/null 2>&1; t
 expect "and nothing was deleted" '! grep -q " delete " "$LOG"'
 if base_env LEASE_RUN= LABEL_RUN=mine bash "$B/staircase.sh" teardown > /dev/null 2>&1; then ok "the namespace label alone marks it"; else bad "the namespace label alone marks it"; fi
 
+fresh blip
+mkdir -p "$RUN"; echo id > "$RUN/run-id"
+if base_env OWN_FAIL=2 bash "$B/staircase.sh" teardown > "$RUN.out" 2>&1; then ok "a failed read of the owner is retried"; else bad "a failed read of the owner is retried"; cat "$RUN.out"; fi
+expect "and the teardown runs" 'tore_down'
+
+fresh unread
+mkdir -p "$RUN"; echo id > "$RUN/run-id"
+if base_env OWN_FAIL=99 bash "$B/staircase.sh" teardown > "$RUN.out" 2>&1; then bad "an unreadable owner must not pass"; else ok "an unreadable owner does not pass"; fi
+expect "says it could not read, not that the id is wrong, and deletes nothing" 'grep -q "could not read who owns" "$RUN.out" && ! grep -q "does not carry" "$RUN.out" && ! grep -q " delete " "$LOG"'
+
 fresh noid
 mkdir -p "$RUN"
 if base_env LEASE_RUN= bash "$B/staircase.sh" teardown > /dev/null 2>&1; then bad "a directory with no id must refuse"; else ok "a directory with no id refuses"; fi
@@ -373,6 +404,41 @@ fresh hangget
 start HANG=get STAIRCASE_KUBE_TIMEOUT=2
 begin=$(date +%s); wait_run; took=$(($(date +%s) - begin))
 expect "a hung read of the fleet stops the run, bounded by the kube timeout: ${took}s" '[ "$rc" != 0 ] && [ "$rc" != 99 ] && [ "$took" -lt 30 ] && grep -q "ScaledObjects unreadable" "$RUN/timeline.txt" && tore_down'
+
+fresh hangsnap
+start HANG=gzip
+if wait_for 'gzip' "$LOG"; then
+    begin=$(date +%s); kill -TERM "$pid"; wait_run; took=$(($(date +%s) - begin))
+    expect "TERM with snapshot_load hung lands: ${took}s" '[ "$took" -lt 15 ] && grep -q "exit rc=143" "$RUN/timeline.txt"'
+else bad "TERM with snapshot_load hung"; fi
+
+fresh abortsnap
+start HANG=gzip
+if wait_for 'gzip' "$LOG"; then
+    begin=$(date +%s); touch "$RUN/abort"; wait_run; took=$(($(date +%s) - begin))
+    expect "abort with snapshot_load hung lands: ${took}s" '[ "$took" -lt 15 ] && tore_down'
+else bad "abort with snapshot_load hung"; fi
+
+fresh hangready
+start HANG=ready STAIRCASE_KUBE_TIMEOUT=2 STAIRCASE_READY_WAIT=60
+if wait_for 'get deploy m-decode -o jsonpath' "$LOG"; then
+    begin=$(date +%s); touch "$RUN/abort"; wait_run; took=$(($(date +%s) - begin))
+    expect "abort with the readiness reads hung lands within one read: ${took}s" '[ "$took" -lt 12 ] && tore_down'
+else bad "abort with the readiness reads hung"; fi
+
+fresh gatehang
+cat > "$STUB/slowpy" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in *" gate "*) touch "$STATE/in-gate"; exec sleep 300 ;; esac
+exec python3 "$@"
+STUB
+chmod +x "$STUB/slowpy"
+start STAIRCASE_PY="$STUB/slowpy"
+wait_for 'waiting for the freeze' "$RUN/timeline.txt"
+base_env bash "$B/staircase.sh" freeze > /dev/null 2>&1
+for i in $(seq 1 100); do [ -e "$STATE/in-gate" ] && break; sleep 0.2; done
+begin=$(date +%s); kill -TERM "$pid"; wait_run; took=$(($(date +%s) - begin))
+expect "TERM during the gate's scoring lands: ${took}s" '[ -e "$STATE/in-gate" ] && [ "$took" -lt 15 ] && tore_down'
 
 fresh abortpin
 start NEVER_READY=1 STAIRCASE_READY_WAIT=60
@@ -518,9 +584,21 @@ echo "captures..."
 fresh snapshots
 start LOAD_RUNS=1 STAIRCASE_FREEZE_WAIT=60
 if wait_for 'gzip' "$LOG"; then
-    expect "the requests are on disk while the load runs" 'wait_for . "$RUN/warmup/sweep/sweep.log" && [ -s "$RUN/warmup/sweep/requests.csv.gz" ]'
+    wait_for . "$RUN/warmup/sweep/requests.csv.gz"
+    expect "the requests are on disk while the load runs" '[ -s "$RUN/warmup/sweep/requests.csv.gz" ] && kill -0 "$pid" 2>/dev/null'
     kill -TERM "$pid"; wait_run
 else bad "snapshot on a poll"; fi
+fresh partial
+mkdir -p "$RUN"
+echo "a good archive" > "$RUN/requests.csv.gz"
+(
+    export PATH="$RUN_PATH" STAIRCASE_LIB=1 BENCHMARK_NAMESPACE=stair-ns STAIRCASE_RUN="$RUN" SNAP_PARTIAL=1 STAIRCASE_TICK=0.1
+    # shellcheck source=/dev/null
+    . "$B/staircase.sh"
+    CHILD=
+    snapshot_load "$R" lg-x
+)
+expect "a copy cut short replaces nothing, however long" '[ "$(cat "$RUN/requests.csv.gz")" = "a good archive" ]'
 (
     export STAIRCASE_LIB=1
     # shellcheck source=/dev/null
@@ -535,6 +613,34 @@ else bad "snapshot on a poll"; fi
     [ "$(cat saved)" = "a longer capture than before" ]
 )
 expect "a capture never shrinks the saved copy, and grows it" '[ $? = 0 ]'
+
+echo "the smoke run..."
+start_smoke() {
+    env_line
+    setsid "${exec_env[@]}" STAIRCASE_SMOKE_STEP=31 STAIRCASE_SMOKE_ABORT=1 "$@" bash "$B/staircase.sh" smoke img > "$RUN.out" 2>&1 &
+    pid=$!
+    PIDS="$PIDS $pid"
+}
+fresh smoke
+start_smoke; wait_run
+expect "a smoke run passes, aborted on purpose" '[ "$rc" = 0 ] && grep -q "smoke: passed" "$RUN.out"'
+expect "it starts at 1+1 and moves to 1+2" 'grep -q "benchmark-standup.*BENCHMARK_DECODE_REPLICAS=1 " "$LOG" && grep -q "so-d --type merge -p {\"spec\":{\"minReplicaCount\":2" "$LOG"'
+expect "and no warm-up, freeze or ladder" '[ ! -e "$RUN/ladder.ready" ] && ! grep -q "warmup" "$RUN/timeline.txt"'
+expect "it reads the label, the lease and the Job rights, and each line says" '[ "$(grep -c "^ok" "$RUN/smoke.txt")" -ge 16 ] && ! grep -q "^FAIL" "$RUN/smoke.txt"'
+expect "the abort landed and the teardown confirmed" 'grep -q "abort landed" "$RUN/smoke.txt" && grep -q "teardown confirmed" "$RUN/smoke.txt" && tore_down'
+expect "the aborted load was saved before its pod went" 'grep -q "aborted load was saved" "$RUN/smoke.txt"'
+
+fresh smokebad
+start_smoke LEASE_RUN=theirs; wait_run
+expect "a smoke run with a check that fails fails" '[ "$rc" != 0 ] && grep -q "^FAIL" "$RUN/smoke.txt"'
+
+fresh smokerbac
+start_smoke CAN_I=no; wait_run
+expect "a Job without its rights fails the smoke" '[ "$rc" != 0 ] && grep -q "^FAIL the Job may deletecollection" "$RUN/smoke.txt"'
+
+fresh smokepin
+start_smoke NEVER_MOVE=1; wait_run
+expect "a fleet that will not move fails the smoke, and tears down" '[ "$rc" != 0 ] && grep -q "^FAIL the fleet did not move" "$RUN/smoke.txt" && tore_down'
 
 echo "this check..."
 reap_sessions() {

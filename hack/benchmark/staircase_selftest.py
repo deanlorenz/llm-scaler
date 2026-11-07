@@ -15,6 +15,7 @@ import os
 import random
 import sys
 import tempfile
+import urllib.error
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -28,7 +29,7 @@ spec_load = importlib.util.spec_from_file_location("staircase_load", os.path.joi
 load = importlib.util.module_from_spec(spec_load)
 spec_load.loader.exec_module(load)
 
-EXPECTED = 100
+EXPECTED = 115
 checks = fails = 0
 
 
@@ -115,6 +116,19 @@ ok("a crossing on a noisy step is a bound", lib.measured(NOISY, "client_ttft_p90
 ok("NaN reads no data", lib.measured([step(10, math.nan)], "client_ttft_p90", 1)[0] == "no data")
 ok("no row reads no data", lib.measured([], "client_ttft_p90", 1)[0] == "no data")
 
+ALLVOID = [step(10, 0.1, 1, noise_flag=True), step(20, 0.2, 2, noise_flag=True), step(30, 0.4, 3, noise_flag=True)]
+ok("every step void has no crossing", lib.measured(ALLVOID, "client_ttft_p90", 0.3) == ("void", None))
+FIRSTVOID = [step(10, 0.5, 1, noise_flag=True), step(20, 0.6, 2)]
+ok("a void first step over target is void, not a fail", lib.measured(FIRSTVOID, "client_ttft_p90", 0.3) == ("void", None))
+TOPVOID = [step(10, 0.1, 1), step(20, 0.2, 2, noise_flag=True)]
+ok("at least reads the top valid step", lib.measured(TOPVOID, "client_ttft_p90", 1.0) == ("at least", 10))
+CUT = dict(rate=10, achieved=10, window_s=150, truncated=True, stopped_by=lib.RULE_INFLIGHT)
+ok("a cut step is void", lib.invalid(CUT) and "max-inflight" in lib.validity(CUT)[0])
+ok("a cap on its step is void even uncut", lib.invalid(dict(CUT, truncated=False)))
+ok("the p90 rule at a step's end voids nothing", not lib.invalid(dict(CUT, truncated=False, stopped_by=lib.RULE_P90)))
+CUTRUNG = [step(10, 0.1, 1), step(20, 0.2, 2), dict(step(30, 0.4, 3), truncated=True, stopped_by=lib.RULE_INFLIGHT)]
+ok("a crossing on a cut step is a bound", lib.measured(CUTRUNG, "client_ttft_p90", 0.3) == ("bound", (20, 30)))
+
 # --- the mark ---------------------------------------------------------------------------
 ok("in the mark", lib.mark(10, "=", 10)[1] == "in the mark")
 ok("edge at 1.10 passes", lib.mark(11, "=", 10)[1] == "in the mark")
@@ -127,6 +141,10 @@ ok("a bound inside", lib.mark(40, "bound", (38.7, 41.3))[1] == "in the mark, a b
 ok("a bound straddling", lib.mark(44, "bound", (38.7, 41.3))[1] == "no mark, a bound")
 ok("a bound outside", lib.mark(60, "bound", (38.7, 41.3))[1] == "FAIL, a bound")
 ok("every repeat must pass", analyze.judge(10, [("=", 10), ("=", 5)])[2] == "FAIL")
+ok("no valid crossing has its verdict", lib.mark(10, "void", None)[1] == lib.NO_VALID_CROSSING)
+ok("judge keeps the bound", analyze.judge(10, [("bound", (9.5, 10.5)), ("bound", (9.5, 10.5)), ("=", 10)])[2] == "in the mark, a bound")
+ok("judge keeps no valid crossing", analyze.judge(10, [("void", None), ("=", 10)])[2] == lib.NO_VALID_CROSSING)
+ok("judge keeps a fail over all of it", analyze.judge(10, [("void", None), ("=", 5)])[2].startswith("FAIL"))
 ok("a repeat with no figure, no mark", analyze.judge(10, [("=", 10), ("at least", 8)])[2] == "no mark")
 near("median of the repeats", float(analyze.judge(10, [("=", 8), ("=", 10), ("=", 12)])[1]), 1.0)
 
@@ -256,6 +274,21 @@ with tempfile.TemporaryDirectory() as run:
     ok("the report names it", "B-off-r2" in TEXT.getvalue())
     ok("the report carries the frozen flags", "RouterHopAssumed" in TEXT.getvalue())
 
+    open(os.path.join(run, "phases", "B-off-r2", "done"), "w", encoding="utf8").close()
+    GATE_SPEC = dict(promptCV=0.0577, repeats=1, buckets=[dict(name="B", fc=["off"], gate=True)])
+    FROZEN_ONE = dict(buckets=[BUCKET])
+    ok("a good step passes the gate", analyze.gate(run, FROZEN_ONE, GATE_SPEC, 1, io.StringIO()) == 0)
+    with open(os.path.join(run, "phases", "B-off-r1", "analysis.jsonl"), "w", encoding="utf8") as f:
+        f.write(json.dumps(dict(ROW, lag_p99=1.0)) + "\n")
+    GATE_OUT = io.StringIO()
+    ok("an all-void bucket stops the gate", analyze.gate(run, FROZEN_ONE, GATE_SPEC, 1, GATE_OUT) == 1)
+    ok("and says why", lib.NO_VALID_CROSSING in GATE_OUT.getvalue(), GATE_OUT.getvalue())
+    # In the mark as a bound, 37 over 35 to 40: only the void step can stop it.
+    TWO = [dict(ROW, rate=35.0, achieved=35.0), dict(ROW, level=2, rate=40.0, achieved=40.0, client_ttft_p90=0.5, lag_p99=1.0)]
+    with open(os.path.join(run, "phases", "B-off-r1", "analysis.jsonl"), "w", encoding="utf8") as f:
+        f.writelines(json.dumps(r) + "\n" for r in TWO)
+    ok("a crossing on a void step stops the gate", analyze.gate(run, FROZEN_ONE, GATE_SPEC, 1, io.StringIO()) == 1)
+
 print("%d checks, %d failed" % (checks, fails))
 if checks != EXPECTED:
     print("FAIL: ran %d checks, expected %d" % (checks, EXPECTED))
@@ -335,18 +368,37 @@ for bad, fn in ((PD.replace("- flowControl", "- other"), config.drop_flow_contro
     except SystemExit:
         pass
 
-if not deadline.expired(10, 10, 99) or not deadline.expired(99, 200, 99) or deadline.expired(9, 10, 99):
-    extra.append(("deadline", ""))
-
-
 def raises():
     raise OSError("down")
 
 
-if deadline.next_lease(raises, 42) != 42:
-    extra.append(("a failed read must keep the lease", ""))
-if deadline.next_lease(lambda: 43, 42) != 43:
-    extra.append(("the lease moves", ""))
+W = deadline.Watch(1000, 10 ** 9)
+if W.armed or W.until != 1000 + deadline.GRACE:
+    extra.append(("a new Job starts from the grace, never the hard cap", W.until))
+if W.look(1001, raises) or W.armed:
+    extra.append(("a failed read does not arm", ""))
+W.until = 10 ** 8  # the bound alone, not the grace
+W.look(1500, raises)
+if W.failing != 1001:
+    extra.append(("the bound runs from the first failure", W.failing))
+if W.lapsed(1001 + deadline.READ_BOUND - 1):
+    extra.append(("reads failing inside the bound keep the lease", ""))
+if not W.lapsed(1001 + deadline.READ_BOUND):
+    extra.append(("reads failing past the bound are a lapse, armed or not", ""))
+if not W.look(1002, lambda: 5000) or not W.armed or W.look(1003, lambda: 5000):
+    extra.append(("armed by the first read that works, once", ""))
+if W.failing is not None or W.lapsed(4999) or not W.lapsed(5000):
+    extra.append(("a read that works clears the failure, and the lease stands", W.failing))
+W.look(6000, lambda: 9000)
+W.look(6001, raises)
+if W.until != 9000:
+    extra.append(("a failed read keeps the last lease", W.until))
+if not deadline.Watch(0, 50).lapsed(50):
+    extra.append(("the hard cap binds the grace", ""))
+CAPPED = deadline.Watch(0, 100)
+CAPPED.look(1, lambda: 10 ** 6)
+if not CAPPED.lapsed(100):
+    extra.append(("a lease past the cap does not extend it", ""))
 hit = []
 
 
@@ -357,8 +409,34 @@ def one_fails(path):
     return "ok"
 
 
-if deadline.delete_all("n", one_fails) != 1 or len(hit) != 3:
+if deadline.delete_all("n", one_fails) != 1 or len(hit) != len(deadline.PATHS):
     extra.append(("a failed delete must not stop the rest", hit))
+
+
+def absent(path):
+    if "leaderworkersets" in path:
+        raise urllib.error.HTTPError(path, 404, "not found", {}, None)
+    return "ok"
+
+
+if deadline.delete_all("n", absent) != 0:
+    extra.append(("a kind the API does not have passes", ""))
+tries = []
+
+
+def second_try(path):
+    tries.append(path)
+    if len(tries) <= len(deadline.PATHS):
+        raise OSError("no")
+    return "ok"
+
+
+CLOCK = [0.0]
+if deadline.free("n", second_try, lambda: CLOCK[0], lambda s_: CLOCK.__setitem__(0, CLOCK[0] + s_)) != 0 or len(tries) != 2 * len(deadline.PATHS):
+    extra.append(("free retries until it works", len(tries)))
+CLOCK[0] = 0.0
+if deadline.free("n", one_fails, lambda: CLOCK[0], lambda s_: CLOCK.__setitem__(0, CLOCK[0] + s_)) != 1 or CLOCK[0] < deadline.DELETE_BOUND:
+    extra.append(("free gives up at its bound, not before", CLOCK))
 
 for name, got in extra:
     print("FAIL: %s %r" % (name, got))

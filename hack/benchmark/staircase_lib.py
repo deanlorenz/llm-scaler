@@ -24,6 +24,8 @@ HOLD_TOLERANCE = 0.03
 MAX_LAG_P99 = 0.1
 MAX_FAILED_SHARE = 0.01
 CA2_BAND = (0.75, 1.25)
+# The verdict of a reading no valid step can place.
+NO_VALID_CROSSING = "no valid crossing"
 # The stop rules a phase can end on.
 RULE_P90 = "client-p90"
 RULE_INFLIGHT = "max-inflight"
@@ -167,6 +169,8 @@ def validity(row):
         why.append("under the noise floor")
     if row.get("lag_p99", 0) > MAX_LAG_P99:
         why.append("send lag p99 %.3f s" % row["lag_p99"])
+    if row.get("truncated") or row.get("stopped_by") == RULE_INFLIGHT:
+        why.append("cut short by %s" % (row.get("stopped_by") or "a stop"))
     if row.get("failed", 0) > MAX_FAILED_SHARE * max(row.get("due", 0), 1):
         why.append("failed %d of %d" % (row["failed"], row["due"]))
     if row.get("replica_change"):
@@ -190,18 +194,22 @@ def measured(rows, key, target, x="rate", bounds=True):
     """Where the reading meets target along the ladder: (kind, value).
 
     kind is "=" (value interpolated), "below" (the first step misses), "at least"
-    (the top step run still meets it), "bound" (value a (low, high): the crossing
-    lands on an invalid step) or "no data". An infinite step ends the climb at the
-    step before it.
+    (the top valid step still meets it), "bound" (value a (low, high): the crossing
+    lands on an invalid step), "void" (no valid step says where the crossing is:
+    every step is void, or the first one is and misses) or "no data". An infinite
+    step ends the climb at the step before it.
     """
+    if bounds and rows and all(invalid(r) for r in rows):
+        return "void", None
     prev = row_before = None
+    top = None
     for row in rows:
         value = row.get(key)
         if value is None or (isinstance(value, float) and math.isnan(value)):
             return "no data", None
         if value > target:
             if prev is None:
-                return "below", row[x]
+                return ("void", None) if bounds and invalid(row) else ("below", row[x])
             x0, y0 = prev
             if bounds and (invalid(row) or invalid(row_before)):
                 return "bound", (x0, row[x])
@@ -209,9 +217,11 @@ def measured(rows, key, target, x="rate", bounds=True):
                 return "=", x0
             return "=", x0 + (target - y0) / (value - y0) * (row[x] - x0)
         prev, row_before = (row[x], value), row
-    if prev is None:
+        if not (bounds and invalid(row)):
+            top = row[x]
+    if top is None:
         return "no data", None
-    return "at least", prev[0]
+    return "at least", top
 
 
 def mark(predicted, kind, value):
@@ -223,6 +233,8 @@ def mark(predicted, kind, value):
         if hi < MARK_LOW or lo > MARK_HIGH:
             return "%.2f to %.2f" % (lo, hi), "FAIL, a bound"
         return "%.2f to %.2f" % (lo, hi), "no mark, a bound"
+    if kind == "void":
+        return "n/a", NO_VALID_CROSSING
     if kind == "below":
         return "> %.2f" % (predicted / value), "FAIL, over-promises"
     if kind == "at least":
@@ -239,6 +251,8 @@ def mark(predicted, kind, value):
 
 def show(kind, value):
     """A measured() result as text."""
+    if kind == "void":
+        return "no valid step"
     if value is None:
         return "n/a"
     if kind == "bound":

@@ -15,7 +15,7 @@ rules:
   resourceNames: ["staircase-lease"]
   verbs: ["get"]
 - apiGroups: ["apps"]
-  resources: ["deployments"]
+  resources: ["deployments", "statefulsets", "daemonsets"]
   verbs: ["list", "delete", "deletecollection"]
 - apiGroups: ["leaderworkerset.x-k8s.io"]
   resources: ["leaderworkersets"]
@@ -44,7 +44,9 @@ metadata:
   name: staircase-deadline
   namespace: __NS__
 spec:
-  backoffLimit: 3
+  # This Job is what frees the GPUs if the runner is dead: it must not give up. Its
+  # own retries are bounded (DELETE_BOUND), and a run's teardown deletes it.
+  backoffLimit: 1000
   template:
     spec:
       serviceAccountName: staircase-deadline

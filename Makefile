@@ -2982,6 +2982,10 @@ STAIRCASE_SPEC ?= $(CURDIR)/hack/benchmark/staircase_spec.yaml
 STAIRCASE := BENCHMARK_NAMESPACE=$(BENCHMARK_NAMESPACE) STAIRCASE_RUN=$(STAIRCASE_RUN) STAIRCASE_SPEC=$(STAIRCASE_SPEC) \
 	BENCHMARK_PROMETHEUS_URL=$(BENCHMARK_PROMETHEUS_URL) bash $(CURDIR)/hack/benchmark/staircase.sh
 
+.PHONY: benchmark-staircase-smoke
+benchmark-staircase-smoke: ## TTFT staircase: before the big run, a short one on 3 GPUs at most: label, lease, Job rights, two fleets, a deliberate abort, a teardown check (about 1.5 GPU-hours)
+	@$(STAIRCASE) smoke $(IMG)
+
 .PHONY: benchmark-staircase-run
 benchmark-staircase-run: ## TTFT staircase: stand up, warm up, wait for the freeze, run every phase, tear down on every exit (BENCHMARK_NAMESPACE=<fresh ns> STAIRCASE_RUN=<abs dir> IMG=<build>)
 	@$(STAIRCASE) run $(IMG)

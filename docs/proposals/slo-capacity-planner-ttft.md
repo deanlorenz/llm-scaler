@@ -1538,12 +1538,24 @@ cut short, step 7 of B off and C off, used to be read over a window past the sto
 M2's warm-up `whatif freeze` gives the knees, onsets, `R_q` and mean TPOT of the frozen
 file. Its targets differ, as they should: the frozen file predates the decode term.
 
-**A saturated transfer no longer floors the price.** S1 and the CLI read `T_xfer` from
-decode rows with an empty queue (`slo.SwitchTTFTQuietTransfer`), and hold that figure
-through a busy stretch. Every row stands in only until a quiet one is read, or after a
-restart, when nothing is held. Before this, M2's warm-up, which ends saturated, read
-0.34 s at 8000 tokens, which floored the priced figure at 414 ms through
-`DecodeTermFloored`. The frozen file stores both figures. It moves no golden.
+**A saturated transfer floors the price only once it is the truth.** S1 and the CLI
+read `T_xfer` through one window (`prefill.TransferWindow`, `slo.SwitchTTFTQuietTransfer`),
+the same 20-cycle mean in both. A cycle is quiet when every row with a reading has an
+empty queue, so one quiet pod beside busy ones says nothing. What S1 does at each edge:
+
+| The fleet | `T_xfer` priced | Flag |
+| --- | --- | --- |
+| Quiet this cycle | The mean of the quiet cycles of the last 5 minutes | |
+| Busy, or no reading, for up to 5 minutes (`HeldDecodeAge`) | The same, held | `TransferHeld` |
+| Busy past 5 minutes | Every row's mean: the #494 floor rises again | |
+| No reading past 5 minutes | None | `TransferOmitted` |
+| Accelerator or engine arguments changed | The window starts over | |
+
+Before this, M2's warm-up, which ends saturated, read 0.34 s at 8000 tokens, which
+floored the priced figure at 414 ms through `DecodeTermFloored`, and it still does on
+that recording: 11 saturated minutes is past the age. So the next warm-up ends on a
+quiet stage. The frozen file stores the priced figure and every row's. It moves no
+golden.
 
 **Where a freeze departs from the CLI.** Each is recorded in the file: the prompt's
 spread, the arrivals and the flow-control state are the spec's, and the prefix hit
