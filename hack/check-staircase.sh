@@ -22,7 +22,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 B="$ROOT/hack/benchmark"
 PY="$(command -v python3 || command -v python)" || { echo "FAIL: python3 not found"; exit 1; }
-EXPECTED_CHECKS=84
+EXPECTED_CHECKS=90
 
 WORK="$(mktemp -d)"
 STUB="$WORK/bin"
@@ -183,12 +183,15 @@ case "$args" in
     *" get namespace "*) [ -n "${NS_EXISTS:-}" ]; exit ;;
     *" get configmap staircase-lease "*)
         n=$(grep -c 'patch cm staircase-lease' "$LOG")
+        [ -n "${LAPSE_HOLD:-}" ] && n=$(date +%s)
         printf '{"data":{"run":"%s","until":"%s"}}\n' "${LEASE_RUN-$(cat "$RUN/run-id" 2>/dev/null)}" "$n" ;;
     *" auth can-i "*) echo "${CAN_I:-yes}" ;;
     *" patch scaledobject "*)
         case "$args" in *so-d*) w=d ;; *) w=p ;; esac
         echo "$args" | sed 's/.*minReplicaCount\\*":\([0-9]*\).*/\1/' > "$STATE/so-$w" ;;
-    *" logs job/staircase-deadline "*) [ -n "${ARM_FAIL:-}" ] || echo "t deadline at x" ;;
+    *" logs job/staircase-deadline "*)
+        [ -n "${ARM_FAIL:-}" ] || echo "t deadline at x"
+        [ -e "$STATE/freed" ] && echo "t deadline reached: lease 1 hard 2" ;;
     *" get job staircase-deadline "*) [ -n "${JOB_DEAD:-}" ] || echo 1 ;;
     *" get deploy -o name "*) printf 'deployment.apps/m-decode\ndeployment.apps/m-prefill\ndeployment.apps/m-epp\n' ;;
     *" get cm -o json "*) printf '{"items":[{"metadata":{"name":"eppcm"},"data":{"pd-config.yaml":"x"}}]}\n' ;;
@@ -211,6 +214,16 @@ case "$args" in
         if [ -n "${LOAD_ALIVE:-}" ]; then printf '{"items":[{"metadata":{"name":"lg-b-off-r1"}}]}\n'; else printf '{"items":[]}\n'; fi ;;
     *" get pods -o json "*)
         if [ -e "$STATE/tearing" ] && [ -n "${GET_FAIL:-}" ]; then exit 1; fi
+        printf '{"items":[]}\n' ;;
+    *" get deploy -o json "*)
+        # The lapse case: workloads until the Job has freed them, which the check says.
+        if [ -n "${LAPSE_HOLD:-}" ] && [ ! -e "$STATE/freed" ] && [ ! -e "$STATE/tearing" ]; then
+            printf '{"items":[{"metadata":{"name":"m-decode"}}]}\n'; exit 0
+        fi
+        if [ -e "$STATE/tearing" ]; then
+            [ -n "${GET_FAIL:-}" ] && exit 1
+            [ -n "${LEFT:-}" ] && { printf '{"items":[{"metadata":{"name":"m-decode"}}]}\n'; exit 0; }
+        fi
         printf '{"items":[]}\n' ;;
     *" get deploy -o json "*|*" get statefulset -o json "*|*" get daemonset -o json "*)
         if [ -e "$STATE/tearing" ]; then
@@ -613,6 +626,25 @@ expect "a copy cut short replaces nothing, however long" '[ "$(cat "$RUN/request
     [ "$(cat saved)" = "a longer capture than before" ]
 )
 expect "a capture never shrinks the saved copy, and grows it" '[ $? = 0 ]'
+(
+    export STAIRCASE_LIB=1
+    # shellcheck source=/dev/null
+    . "$B/staircase.sh"
+    cd "$WORK" || exit 1
+    rm -f first-saved
+    echo "a first copy" > candidate
+    said=$(keep_larger candidate first-saved 2>&1)
+    [ -z "$said" ] && [ "$(cat first-saved)" = "a first copy" ]
+)
+expect "the first save of a file saves it, and says nothing" '[ $? = 0 ]'
+(
+    export STAIRCASE_LIB=1
+    # shellcheck source=/dev/null
+    . "$B/staircase.sh"
+    cd "$WORK" || exit 1
+    [ -z "$(keep_larger no-such-candidate first-saved 2>&1)" ]
+)
+expect "a capture that never came replaces nothing, and says nothing" '[ $? = 0 ] && [ -s "$WORK/first-saved" ]'
 
 echo "the smoke run..."
 start_smoke() {
@@ -641,6 +673,28 @@ expect "a Job without its rights fails the smoke" '[ "$rc" != 0 ] && grep -q "^F
 fresh smokepin
 start_smoke NEVER_MOVE=1; wait_run
 expect "a fleet that will not move fails the smoke, and tears down" '[ "$rc" != 0 ] && grep -q "^FAIL the fleet did not move" "$RUN/smoke.txt" && tore_down'
+
+echo "the lapse run..."
+start_lapse() {
+    env_line
+    setsid "${exec_env[@]}" LAPSE_HOLD=1 STAIRCASE_LAPSE_LEASE=1 STAIRCASE_LAPSE_WAIT=30 "$@" bash "$B/staircase.sh" lapse img > "$RUN.out" 2>&1 &
+    pid=$!
+    PIDS="$PIDS $pid"
+}
+fresh lapse
+start_lapse
+if wait_for 'runner killed' "$RUN/smoke.txt"; then
+    runner_gone=$(grep -c 'exit rc=' "$RUN/timeline.txt")
+    touch "$STATE/freed"
+    wait_run
+    expect "the runner dies with no exit path of its own" '[ "$runner_gone" = 0 ]'
+    expect "the Job frees the workloads, and the run says so" '[ "$rc" = 0 ] && grep -q "the Job freed them" "$RUN/smoke.txt" && grep -q "deadline was reached" "$RUN/smoke.txt"'
+    expect "and it still confirms a teardown" 'tore_down && grep -q "lapse: passed" "$RUN.out"'
+else bad "the lapse run"; bad "no lapse case"; bad "no lapse case"; fi
+
+fresh lapsefail
+start_lapse STAIRCASE_LAPSE_WAIT=1; wait_run
+expect "a Job that frees nothing fails the lapse, and it still tears down" '[ "$rc" != 0 ] && grep -q "^FAIL still holding" "$RUN/smoke.txt" && tore_down'
 
 echo "this check..."
 reap_sessions() {

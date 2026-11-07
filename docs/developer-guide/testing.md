@@ -1712,6 +1712,12 @@ on a 1+1 fleet, then 1+2 and a deliberate abort. It exits 0 only if the namespac
 the lease, the Job's rights, the fleet change, flow control, the saved load and the
 teardown all held. It says nothing of the prediction.
 
+**To test the backstop itself**, run `make benchmark-staircase-lapse` in another fresh
+namespace and directory. It stands up a 1+1 fleet on a 300 s lease, kills the runner with
+`-9`, and waits for the deadline Job to free the workloads on its own, then tears down
+whatever is left. It takes about 40 minutes and about 1 GPU-hour on 2 GPUs. `smoke.txt`
+holds the result, and it exits 0 only if the Job did it.
+
 **The run:**
 
 ```bash

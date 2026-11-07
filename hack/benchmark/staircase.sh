@@ -4,6 +4,8 @@
 #
 #   staircase.sh smoke <image> a short run, 3 GPUs at most: everything a real API server
 #                              has to accept, then a deliberate abort and a teardown check
+#   staircase.sh lapse <image> a short run whose runner is killed with -9, 2 GPUs: the
+#                              deadline Job must delete the workloads on its own
 #   staircase.sh run <image>   stand up, warm up, wait for the freeze, run every phase
 #   staircase.sh freeze        the prediction and the ladder, from the warm-up's recording
 #   staircase.sh analyze       one analysis.jsonl per phase, then report.md
@@ -124,9 +126,12 @@ nap() { guarded sleep "$1"; }
 # keep_larger <new> <saved> : a capture may never shrink the stored copy. A dead pod's
 # NotFound once overwrote 400 lines of failure context.
 keep_larger() {
-    local new old
-    new=$(wc -c < "$1" 2>/dev/null || echo 0)
-    old=$(wc -c < "$2" 2>/dev/null || echo 0)
+    local new old=0
+    [ -e "$1" ] || return 0
+    new=$(wc -c < "$1")
+    # Test first: a redirect that fails reports before any 2>/dev/null after it applies,
+    # and the first save of a file always finds none.
+    [ -e "$2" ] && old=$(wc -c < "$2")
     if [ "$new" -gt "$old" ]; then mv "$1" "$2"; else rm -f "$1"; fi
 }
 
@@ -721,6 +726,18 @@ cmd_run() {
     capture_loop "$$" > "$R/capture.out" 2>&1 &
     CAP=$!
     [ -n "${STAIRCASE_SMOKE:-}" ] && { smoke_body; exit 1; }
+    if [ -n "${STAIRCASE_LAPSE:-}" ]; then
+        # Beat until killed. A runner nobody kills stops here, and tears down.
+        touch "$R/lapse-ready"
+        local stop=$(($(date +%s) + ${STAIRCASE_LAPSE_CAP:-3600}))
+        while [ "$(date +%s)" -lt "$stop" ]; do
+            beat
+            aborted && exit 1
+            nap "$POLL"
+        done
+        t "lapse: nobody killed the runner"
+        exit 1
+    fi
     warmup || exit 1
     t "waiting for the freeze (capped at ${FREEZE_WAIT}s)"
     local end=$(($(date +%s) + FREEZE_WAIT))
@@ -825,6 +842,85 @@ cmd_teardown() {
     echo "confirmed: no workload left in $NS"
 }
 
+# holding : deployments, statefulsets, daemonsets and LeaderWorkerSets left, plus pods
+# that ask for a GPU: what the Job must free. A bare helper pod is not in its remit.
+# Fails on a read that fails.
+holding() {
+    local kind n total=0 out
+    for kind in deploy statefulset daemonset; do
+        out=$(kube get "$kind" -o json 2>/dev/null) || return 1
+        n=$(echo "$out" | jq '.items | length') || return 1
+        total=$((total + n))
+    done
+    if [ -n "$(kube api-resources --api-group=leaderworkerset.x-k8s.io -o name 2>/dev/null)" ]; then
+        out=$(kube get leaderworkersets -o json 2>/dev/null) || return 1
+        n=$(echo "$out" | jq '.items | length') || return 1
+        total=$((total + n))
+    fi
+    out=$(kube get pods -o json 2>/dev/null) || return 1
+    n=$(echo "$out" | jq '[.items[] | select(any(.spec.containers[]?; .resources.limits["nvidia.com/gpu"] != null))] | length') || return 1
+    echo $((total + n))
+}
+
+# lapse_end : whatever happened, nothing outlives this: the runner, and then a teardown.
+lapse_end() {
+    local rc=$?
+    trap - EXIT
+    trap ':' INT TERM HUP
+    [ -n "${RUNNER_PID:-}" ] && kill -KILL "$RUNNER_PID" 2>/dev/null
+    touch "$R/STOP"
+    timeout -k 30 2400 bash "$HERE/staircase.sh" teardown > "$R/teardown.out" 2>&1
+    local trc=$?
+    if [ "$trc" = 0 ]; then smoke_check ok "teardown confirmed"; else smoke_check FAIL "teardown not confirmed: rc=$trc"; rc=1; fi
+    if grep -q '^FAIL' "$R/smoke.txt" 2>/dev/null; then rc=1; fi
+    [ "$rc" = 0 ] && echo "lapse: passed: $R/smoke.txt" || echo "lapse: FAILED: $R/smoke.txt"
+    exit "$rc"
+}
+
+# lapse : the backstop itself, on 2 GPUs. A runner on a short lease, killed with -9, and
+# then nobody but the deadline Job: it must delete the workloads on its own.
+cmd_lapse() {
+    need
+    [ $# = 1 ] || die "usage: staircase.sh lapse <image>"
+    local i end begin n lease
+    mkdir -p "$R" || die "cannot write $R"
+    [ -e "$R/timeline.txt" ] && die "$R/timeline.txt exists: a run has used this directory"
+    export STAIRCASE_LAPSE=1 STAIRCASE_START_PREFILL=1 STAIRCASE_START_DECODE=1
+    export STAIRCASE_LEASE="${STAIRCASE_LAPSE_LEASE:-300}" STAIRCASE_LEASE_EVERY="${STAIRCASE_LEASE_EVERY:-60}"
+    RUNNER_PID=
+    trap lapse_end EXIT
+    trap 'exit 143' INT TERM HUP
+    setsid bash "$HERE/staircase.sh" run "$1" > "$R.lapse-runner.out" 2>&1 &
+    RUNNER_PID=$!
+    end=$(($(date +%s) + ${STAIRCASE_LAPSE_START:-3600}))
+    until [ -e "$R/lapse-ready" ]; do
+        kill -0 "$RUNNER_PID" 2>/dev/null || { smoke_check FAIL "the runner died before the fleet was up"; exit 1; }
+        [ "$(date +%s)" -ge "$end" ] && { smoke_check FAIL "no fleet in time"; exit 1; }
+        sleep "$TICK"
+    done
+    # The claim's first lease is long: wait for a renewal to shorten it.
+    for i in $(seq 1 120); do
+        lease=$(kube get configmap staircase-lease -o json 2>/dev/null | jq -r '.data.until // 0')
+        [ "${lease:-0}" -gt 0 ] && [ "$lease" -le $(($(date +%s) + STAIRCASE_LEASE + 5)) ] && break
+        sleep "$TICK"
+    done
+    n=$(holding) || n=unread
+    if [ "$n" = 0 ] || [ "$n" = unread ]; then smoke_check FAIL "nothing to free before the kill: $n"; exit 1; fi
+    kill -KILL "$RUNNER_PID"
+    RUNNER_PID=
+    begin=$(date +%s)
+    smoke_check ok "runner killed, $n workloads held, lease until $lease"
+    end=$((begin + STAIRCASE_LEASE + ${STAIRCASE_LAPSE_WAIT:-600}))
+    n=unread
+    while [ "$(date +%s)" -lt "$end" ]; do
+        if n=$(holding); then [ "$n" = 0 ] && break; else n=unread; fi
+        sleep "$POLL"
+    done
+    kube logs job/staircase-deadline > "$R/deadline.log" 2>/dev/null
+    if [ "$n" = 0 ]; then smoke_check ok "the Job freed them in $(($(date +%s) - begin))s"; else smoke_check FAIL "still holding $n after $(($(date +%s) - begin))s"; fi
+    if grep -q 'deadline reached' "$R/deadline.log"; then smoke_check ok "the Job's log says the deadline was reached"; else smoke_check FAIL "the Job's log says no deadline"; fi
+}
+
 cmd_status() {
     need
     tail -12 "$R/timeline.txt" 2>/dev/null | cut -c1-200
@@ -871,6 +967,7 @@ if [ "${STAIRCASE_LIB:-}" = 1 ]; then return 0; fi
 
 case "${1:-}" in
     run) shift; cmd_run "$@" ;;
+    lapse) shift; cmd_lapse "$@" ;;
     smoke)
         shift
         export STAIRCASE_SMOKE=1 STAIRCASE_START_PREFILL=1 STAIRCASE_START_DECODE=1

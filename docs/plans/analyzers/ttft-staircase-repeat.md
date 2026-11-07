@@ -15,9 +15,9 @@ Everything this plan freezes is in
 
 ## The run in one page
 
-0. `make benchmark-staircase-smoke` in a namespace of its own: about 1.5 GPU-hours. The
-   label, the lease, the fleet change and the Job's rights have never met a real API
-   server, and this is what they meet first. Do not start the run until it passes.
+0. `make benchmark-staircase-smoke` in a namespace of its own: done, see below. Then
+   `make benchmark-staircase-lapse`, about 1 GPU-hour, which has not been run. Repeat
+   either if `staircase.sh` changes.
 1. Stand up a fresh namespace with `slo` listed from the first cycle.
 2. Warm up with a prompt sweep.
 3. `make benchmark-staircase-freeze`: the prediction, the ladder and their hashes.
@@ -30,6 +30,31 @@ Everything this plan freezes is in
 
 Nothing in the spec, the ladder or the targets changes after step 2 starts. A later
 note goes in a new dated section and edits nothing above it.
+
+## What the smoke proved
+
+The smoke passed 20 of 20 checks on a real API server, at commit 88a631e96, in 26
+minutes, on 3 GPUs at most.
+
+**Proved there:** the lease and the namespace label hold the run's id; the deadline Job
+is active and has its rights by `auth can-i`; the lease moves on renewal; the load runs
+and its requests are saved; flow control turns on; the fleet moves from 1+1 to 1+2; an
+abort inside a load lands in 1 s; the aborted load is saved; the teardown confirms; no
+pod is left.
+
+**Not proved:**
+
+- **The deadline Job's actual lapse and delete.** A run's own teardown removes the Job,
+  so it never fires. `make benchmark-staircase-lapse` tests this: a 1+1 fleet on a
+  300 s lease, the runner killed with -9, and nobody but the Job. About 40 minutes and 1
+  GPU-hour, on 2 GPUs. It has not been run, and has run only against stubs.
+- **A stalled rollout**, which is exercised only by a stub.
+- **The `rest` stage's quiet transfer.** Only a warm-up can show it. If a freeze prints a
+  transfer near the every-row figure, the floor is the saturated one: stop and look.
+
+One message from the smoke was not a fault: `keep_larger` printed `No such file or
+directory` on the first save of each file. That was a redirect on a file that did not
+exist yet, not a missing directory; every save went through.
 
 ## Decided by the user
 

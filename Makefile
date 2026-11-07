@@ -2986,6 +2986,10 @@ STAIRCASE := BENCHMARK_NAMESPACE=$(BENCHMARK_NAMESPACE) STAIRCASE_RUN=$(STAIRCAS
 benchmark-staircase-smoke: ## TTFT staircase: before the big run, a short one on 3 GPUs at most: label, lease, Job rights, two fleets, a deliberate abort, a teardown check (about 1.5 GPU-hours)
 	@$(STAIRCASE) smoke $(IMG)
 
+.PHONY: benchmark-staircase-lapse
+benchmark-staircase-lapse: ## TTFT staircase: the deadline Job on its own: a 1+1 fleet, the runner killed with -9, the workloads freed with nobody there (about 1 GPU-hour)
+	@$(STAIRCASE) lapse $(IMG)
+
 .PHONY: benchmark-staircase-run
 benchmark-staircase-run: ## TTFT staircase: stand up, warm up, wait for the freeze, run every phase, tear down on every exit (BENCHMARK_NAMESPACE=<fresh ns> STAIRCASE_RUN=<abs dir> IMG=<build>)
 	@$(STAIRCASE) run $(IMG)
