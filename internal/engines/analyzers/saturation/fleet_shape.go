@@ -128,30 +128,24 @@ func fleetOutputLength(replicas []domain.ReplicaMetrics, rolesByVariant map[stri
 // requests are all one length, and the mix of the two is neither fleet's
 // spread.
 func fleetOutputDispersion(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string) float64 {
-	mean, squared, ok := fleetOutputMoments(replicas, rolesByVariant)
-	if !ok {
-		return 1
-	}
-	return shape.Dispersion(mean, squared)
+	d, _ := fleet.OutputDispersion(replicas, outputCounted(rolesByVariant))
+	return d
 }
 
 // fleetOutputMoments is the fleet's E[O] and its bound on E[O^2], both
 // request-weighted over the same generating replicas (fleetOutputDispersion
-// says which), and whether every one of them read the bound.
+// says which), and whether every one of them read the bound
+// (fleet.OutputMoments; a bound of +Inf is no reading).
 func fleetOutputMoments(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string) (mean, squared float64, ok bool) {
-	counted := func(rm domain.ReplicaMetrics) bool {
+	return fleet.OutputMoments(replicas, outputCounted(rolesByVariant))
+}
+
+// outputCounted selects the replicas the fleet's spread is read over: the
+// generating replicas with an output length, as fleetOutputLength averages.
+func outputCounted(rolesByVariant map[string]string) func(domain.ReplicaMetrics) bool {
+	return func(rm domain.ReplicaMetrics) bool {
 		return rm.AvgOutputTokens > 0 && generatesOutput(rm, rolesByVariant)
 	}
-	if !slices.ContainsFunc(replicas, counted) ||
-		slices.ContainsFunc(replicas, func(rm domain.ReplicaMetrics) bool {
-			return counted(rm) && !(rm.AvgOutputTokensSquaredKnown && rm.AvgOutputTokensSquared > 0)
-		}) {
-		return 0, 0, false
-	}
-	mean = fleetOutputLength(replicas, rolesByVariant)
-	squared = fleet.Mean(replicas,
-		func(rm domain.ReplicaMetrics) float64 { return rm.AvgOutputTokensSquared }, counted)
-	return mean, squared, mean > 0 && squared > 0
 }
 
 // modelOutputFactor is the factor the zero-replica estimate multiplies the

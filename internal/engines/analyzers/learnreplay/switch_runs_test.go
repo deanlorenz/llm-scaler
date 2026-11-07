@@ -188,6 +188,31 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// which has no switch, moves its own goldens.
 	slo.SwitchKVPerRequestOutputDispersion: nil,
 
+	// #433, #276 on the throughput analyzer: KVreq with the spread of output
+	// lengths, in its supply, local demand and GPS check. It moves the two
+	// throughput-sweep recordings, the only ones that run the throughput
+	// analyzer on rows whose output histogram spreads: the variant's
+	// per-replica supply falls (KVreq rises), and the composite's release
+	// bound and decode frames move with it. Measured alone against all off,
+	// 8 outputs: throughput-sweep's variant-capacities (1 of 193 rows,
+	// PerReplicaCapacity -2.14%) and composite-release (1 of 27, a decode
+	// frame's demand +2.18%); throughput-sweep-restart's variant-capacities
+	// (10 of 649), composite-release (1 of 14, ReleaseBound -1.52%) and
+	// four composite outputs (9 rows each, a few parts in 10 million). The
+	// spread is held at 1 for the shape-change window after the restart
+	// recording's shape change (22:16:50 to 22:22:36), so those 13 cycles
+	// price as before. With this PR's other switches on, as committed, it
+	// moves four more of throughput-sweep (composite-results,
+	// composite-roles, composite-variants, warm-pool-pressure) in their last
+	// bits only (TotalDemand 82477.83086446974 -> ...977): float
+	// reassociation on the cycles those switches already moved.
+	throughput.SwitchKVPerRequestOutputDispersion: {
+		"throughput-sweep-restart/composite-release.csv", "throughput-sweep-restart/composite-results.csv",
+		"throughput-sweep-restart/composite-roles.csv", "throughput-sweep-restart/composite-variants.csv",
+		"throughput-sweep-restart/variant-capacities.csv", "throughput-sweep-restart/warm-pool-pressure.csv",
+		"throughput-sweep/composite-release.csv", "throughput-sweep/variant-capacities.csv",
+	},
+
 	// Issue #459: on the slo analyzer's own settle tracker, a model last
 	// analyzed more than the state timeout ago is first-seen whether or not
 	// EvictStale ran first. It moves no golden: a replay calls EvictStale at

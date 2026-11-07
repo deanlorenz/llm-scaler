@@ -128,8 +128,11 @@ before, which in that case is the old over-statement, not a new one. The log
 carries the factor as computed. `derived-mu` logs `D` as `outputDispersion`, `k2-decision`
 likewise, and `zero-replica-capacity-estimate` the factor as
 `modelOutputFactor`. The slo analyzer prices `D` too, behind
-`slo-kv-per-request-output-dispersion`, with no shape-change hold. The
-throughput analyzer still prices `ILeff + OL/2` (#433).
+`slo-kv-per-request-output-dispersion`, and the throughput analyzer, behind
+`throughput-kv-per-request-output-dispersion` (#433). The slo analyzer has no
+shape-change hold; the throughput analyzer holds `D` at 1 for the same window after its
+variant's shape changes. All three read `D` through `fleet.OutputDispersion`, which
+refuses a bound of +Inf or NaN.
 
 ### Prefix-cache hits stay resident
 
