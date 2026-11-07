@@ -1302,6 +1302,7 @@ itl-aggregated-shape-moved
 itl-aggregated-shape-term
 itl-aggregated-sizes
 itl-aggregated-spec-unknown
+itl-baseline-stamped
 itl-fit
 itl-fit-declined
 itl-gps-mismatch
@@ -1344,6 +1345,7 @@ itlWindows
 itlWithheldLogged
 itlZero
 itl_non_positive
+itlbaselineat|
 itlshape|
 itlslope|
 itlstash|

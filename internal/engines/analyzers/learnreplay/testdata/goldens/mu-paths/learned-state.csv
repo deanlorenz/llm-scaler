@@ -143,6 +143,9 @@ saturation.ExportLearnedState,2026-03-02T09:03:00Z,Config,ns-01/variant-04,"""8b
 saturation.ExportLearnedState,2026-03-02T09:03:00Z,ITLBaseline,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,0.006000000000000024
 saturation.ExportLearnedState,2026-03-02T09:03:00Z,ITLBaseline,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,0.006000000000000024
 saturation.ExportLearnedState,2026-03-02T09:03:00Z,ITLBaseline,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,0.006000000000000024
+saturation.ExportLearnedState,2026-03-02T09:03:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:03:00Z"""
+saturation.ExportLearnedState,2026-03-02T09:03:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:03:00Z"""
+saturation.ExportLearnedState,2026-03-02T09:03:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:03:00Z"""
 saturation.ExportLearnedState,2026-03-02T09:03:00Z,ITLLines,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999955,""B"":0.006000000000000024,""FromVariant"":""ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:03:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:03:00Z,ITLLines,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999955,""B"":0.006000000000000024,""FromVariant"":""ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:03:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:03:00Z,ITLLines,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999955,""B"":0.006000000000000024,""FromVariant"":""ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:03:00Z""}"
@@ -201,6 +204,9 @@ saturation.ExportLearnedState,2026-03-02T09:04:00Z,Config,ns-01/variant-04,"""8b
 saturation.ExportLearnedState,2026-03-02T09:04:00Z,ITLBaseline,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,0.006000000000000023
 saturation.ExportLearnedState,2026-03-02T09:04:00Z,ITLBaseline,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,0.006000000000000023
 saturation.ExportLearnedState,2026-03-02T09:04:00Z,ITLBaseline,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,0.006000000000000023
+saturation.ExportLearnedState,2026-03-02T09:04:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:04:00Z"""
+saturation.ExportLearnedState,2026-03-02T09:04:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:04:00Z"""
+saturation.ExportLearnedState,2026-03-02T09:04:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:04:00Z"""
 saturation.ExportLearnedState,2026-03-02T09:04:00Z,ITLLines,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999973,""B"":0.006000000000000023,""FromVariant"":""ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:04:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:04:00Z,ITLLines,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999973,""B"":0.006000000000000023,""FromVariant"":""ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:04:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:04:00Z,ITLLines,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999973,""B"":0.006000000000000023,""FromVariant"":""ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:04:00Z""}"
@@ -259,6 +265,9 @@ saturation.ExportLearnedState,2026-03-02T09:05:00Z,Config,ns-01/variant-04,"""8b
 saturation.ExportLearnedState,2026-03-02T09:05:00Z,ITLBaseline,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,0.006000000000000074
 saturation.ExportLearnedState,2026-03-02T09:05:00Z,ITLBaseline,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,0.006000000000000074
 saturation.ExportLearnedState,2026-03-02T09:05:00Z,ITLBaseline,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,0.006000000000000074
+saturation.ExportLearnedState,2026-03-02T09:05:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:05:00Z"""
+saturation.ExportLearnedState,2026-03-02T09:05:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:05:00Z"""
+saturation.ExportLearnedState,2026-03-02T09:05:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:05:00Z"""
 saturation.ExportLearnedState,2026-03-02T09:05:00Z,ITLLines,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999858,""B"":0.006000000000000074,""FromVariant"":""ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:05:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:05:00Z,ITLLines,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999858,""B"":0.006000000000000074,""FromVariant"":""ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:05:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:05:00Z,ITLLines,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999858,""B"":0.006000000000000074,""FromVariant"":""ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:05:00Z""}"
@@ -317,6 +326,9 @@ saturation.ExportLearnedState,2026-03-02T09:06:00Z,Config,ns-01/variant-04,"""8b
 saturation.ExportLearnedState,2026-03-02T09:06:00Z,ITLBaseline,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,0.006000000000000098
 saturation.ExportLearnedState,2026-03-02T09:06:00Z,ITLBaseline,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,0.006000000000000098
 saturation.ExportLearnedState,2026-03-02T09:06:00Z,ITLBaseline,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,0.00600000000000012
+saturation.ExportLearnedState,2026-03-02T09:06:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:06:00Z"""
+saturation.ExportLearnedState,2026-03-02T09:06:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:06:00Z"""
+saturation.ExportLearnedState,2026-03-02T09:06:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:06:00Z"""
 saturation.ExportLearnedState,2026-03-02T09:06:00Z,ITLLines,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999803,""B"":0.006000000000000098,""FromVariant"":""ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:06:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:06:00Z,ITLLines,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999803,""B"":0.006000000000000098,""FromVariant"":""ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:06:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:06:00Z,ITLLines,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999758,""B"":0.00600000000000012,""FromVariant"":""ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:06:00Z""}"
@@ -375,6 +387,9 @@ saturation.ExportLearnedState,2026-03-02T09:07:00Z,Config,ns-01/variant-04,"""8b
 saturation.ExportLearnedState,2026-03-02T09:07:00Z,ITLBaseline,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,0.006000000000000114
 saturation.ExportLearnedState,2026-03-02T09:07:00Z,ITLBaseline,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,0.006000000000000114
 saturation.ExportLearnedState,2026-03-02T09:07:00Z,ITLBaseline,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,0.006000000000000153
+saturation.ExportLearnedState,2026-03-02T09:07:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:07:00Z"""
+saturation.ExportLearnedState,2026-03-02T09:07:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:07:00Z"""
+saturation.ExportLearnedState,2026-03-02T09:07:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:07:00Z"""
 saturation.ExportLearnedState,2026-03-02T09:07:00Z,ITLLines,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999764,""B"":0.006000000000000114,""FromVariant"":""ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:07:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:07:00Z,ITLLines,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999764,""B"":0.006000000000000114,""FromVariant"":""ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:07:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:07:00Z,ITLLines,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999688,""B"":0.006000000000000153,""FromVariant"":""ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:07:00Z""}"
@@ -433,6 +448,9 @@ saturation.ExportLearnedState,2026-03-02T09:08:00Z,Config,ns-01/variant-04,"""8b
 saturation.ExportLearnedState,2026-03-02T09:08:00Z,ITLBaseline,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,0.006000000000000114
 saturation.ExportLearnedState,2026-03-02T09:08:00Z,ITLBaseline,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,0.006000000000000114
 saturation.ExportLearnedState,2026-03-02T09:08:00Z,ITLBaseline,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,0.006000000000000174
+saturation.ExportLearnedState,2026-03-02T09:08:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:08:00Z"""
+saturation.ExportLearnedState,2026-03-02T09:08:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:08:00Z"""
+saturation.ExportLearnedState,2026-03-02T09:08:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:08:00Z"""
 saturation.ExportLearnedState,2026-03-02T09:08:00Z,ITLLines,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999764,""B"":0.006000000000000114,""FromVariant"":""ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:08:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:08:00Z,ITLLines,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999764,""B"":0.006000000000000114,""FromVariant"":""ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:08:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:08:00Z,ITLLines,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.01999999999999965,""B"":0.006000000000000174,""FromVariant"":""ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:08:00Z""}"
@@ -491,6 +509,9 @@ saturation.ExportLearnedState,2026-03-02T09:09:00Z,Config,ns-01/variant-04,"""8b
 saturation.ExportLearnedState,2026-03-02T09:09:00Z,ITLBaseline,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,0.006000000000000114
 saturation.ExportLearnedState,2026-03-02T09:09:00Z,ITLBaseline,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,0.006000000000000114
 saturation.ExportLearnedState,2026-03-02T09:09:00Z,ITLBaseline,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,0.006000000000000135
+saturation.ExportLearnedState,2026-03-02T09:09:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:09:00Z"""
+saturation.ExportLearnedState,2026-03-02T09:09:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:09:00Z"""
+saturation.ExportLearnedState,2026-03-02T09:09:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:09:00Z"""
 saturation.ExportLearnedState,2026-03-02T09:09:00Z,ITLLines,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999764,""B"":0.006000000000000114,""FromVariant"":""ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:09:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:09:00Z,ITLLines,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999764,""B"":0.006000000000000114,""FromVariant"":""ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:09:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:09:00Z,ITLLines,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.01999999999999973,""B"":0.006000000000000135,""FromVariant"":""ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:09:00Z""}"
@@ -549,6 +570,9 @@ saturation.ExportLearnedState,2026-03-02T09:10:00Z,Config,ns-01/variant-04,"""8b
 saturation.ExportLearnedState,2026-03-02T09:10:00Z,ITLBaseline,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,0.006000000000000114
 saturation.ExportLearnedState,2026-03-02T09:10:00Z,ITLBaseline,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,0.006000000000000114
 saturation.ExportLearnedState,2026-03-02T09:10:00Z,ITLBaseline,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,0.006000000000000202
+saturation.ExportLearnedState,2026-03-02T09:10:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:10:00Z"""
+saturation.ExportLearnedState,2026-03-02T09:10:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:10:00Z"""
+saturation.ExportLearnedState,2026-03-02T09:10:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:10:00Z"""
 saturation.ExportLearnedState,2026-03-02T09:10:00Z,ITLLines,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999764,""B"":0.006000000000000114,""FromVariant"":""ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:10:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:10:00Z,ITLLines,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999764,""B"":0.006000000000000114,""FromVariant"":""ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:10:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:10:00Z,ITLLines,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999588,""B"":0.006000000000000202,""FromVariant"":""ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:10:00Z""}"
@@ -607,6 +631,9 @@ saturation.ExportLearnedState,2026-03-02T09:11:00Z,Config,ns-01/variant-04,"""8b
 saturation.ExportLearnedState,2026-03-02T09:11:00Z,ITLBaseline,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,0.006000000000000114
 saturation.ExportLearnedState,2026-03-02T09:11:00Z,ITLBaseline,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,0.006000000000000114
 saturation.ExportLearnedState,2026-03-02T09:11:00Z,ITLBaseline,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,0.006000000000000202
+saturation.ExportLearnedState,2026-03-02T09:11:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:11:00Z"""
+saturation.ExportLearnedState,2026-03-02T09:11:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:11:00Z"""
+saturation.ExportLearnedState,2026-03-02T09:11:00Z,ITLBaselineAdmittedAt,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"""2026-03-02T09:11:00Z"""
 saturation.ExportLearnedState,2026-03-02T09:11:00Z,ITLLines,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999764,""B"":0.006000000000000114,""FromVariant"":""ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:11:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:11:00Z,ITLLines,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999764,""B"":0.006000000000000114,""FromVariant"":""ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:11:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:11:00Z,ITLLines,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999588,""B"":0.006000000000000202,""FromVariant"":""ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1"",""LearnedAt"":""2026-03-02T09:11:00Z""}"

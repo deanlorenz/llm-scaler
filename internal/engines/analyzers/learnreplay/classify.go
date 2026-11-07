@@ -243,7 +243,7 @@ var keyRules = map[string]rule{
 	"NamespaceQuotas{}": {classResource, "resource"},
 
 	"Accelerators": {class: classComposite}, "Args": {class: classComposite}, "Config": {class: classComposite},
-	"Forgotten": {class: classComposite}, "ITLBaseline": {class: classComposite},
+	"Forgotten": {class: classComposite}, "ITLBaseline": {class: classComposite}, "ITLBaselineAdmittedAt": {class: classComposite},
 	"ITLBaselineStash": {class: classComposite}, "ITLLines": {class: classComposite},
 	"ITLLineShapes":    {class: classComposite},
 	"ITLLinesPerToken": {class: classComposite}, "ITLPerToken": {class: classComposite},

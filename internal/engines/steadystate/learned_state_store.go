@@ -466,6 +466,11 @@ func learnedStateDigest(s saturation.LearnedState) string {
 	for k, b := range s.ITLBaseline {
 		s.ITLBaseline[k] = sig3(b)
 	}
+	// A baseline's stamp moves on every full fit, as a slope's fit time
+	// does, and is left out the same way: after a crash the restored stamp
+	// can be up to one refresh early, which makes the baseline older, never
+	// younger.
+	s.ITLBaselineAdmittedAt = nil
 	// A slope is refitted, and restamped, every cycle a variant fits one. As
 	// for a line, its fit time is left out of the digest and its A rounded,
 	// so a refit that moves neither is written with the refresh: after a
@@ -672,6 +677,7 @@ func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 		out = append(out, learnedStateEntry{at: seen, key: "seen|" + k, drop: func() {
 			delete(s.VariantSeenAt, k)
 			delete(s.ITLBaseline, k)
+			delete(s.ITLBaselineAdmittedAt, k)
 			delete(s.ITLSlopes, k)
 			delete(s.StartSeconds, k)
 			delete(s.StartSamples, k)
@@ -697,6 +703,14 @@ func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 	for k := range s.ITLSlopes {
 		if s.VariantSeenAt[k].IsZero() {
 			out = append(out, learnedStateEntry{spare: true, key: "itlslope|" + k, drop: func() { delete(s.ITLSlopes, k) }})
+		}
+	}
+	// A baseline's stamp goes with the baseline, and the baseline with its
+	// variant's liveness; a stamp left with no baseline, or whose variant left
+	// none, goes first, as a spent bound does.
+	for k := range s.ITLBaselineAdmittedAt {
+		if _, b := s.ITLBaseline[k]; !b || s.VariantSeenAt[k].IsZero() {
+			out = append(out, learnedStateEntry{spare: true, key: "itlbaselineat|" + k, drop: func() { delete(s.ITLBaselineAdmittedAt, k) }})
 		}
 	}
 	// A line's unit mark and its shape (issue #275) go with the line; a mark

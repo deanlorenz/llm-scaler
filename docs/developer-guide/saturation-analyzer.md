@@ -930,6 +930,26 @@ learner on the shared rules too: a `learn.Report` per variant that fits a line
 `ITLWriteBand` (5 %) or the tier changes, and `learn.ITL` on `learn.Learners`,
 so the forget-learned-state annotation reaches it by name.
 
+The report's `LastAdmitted` is the newest reading the window holds, the fit
+time of a held slope, or, for a key with neither, when its intercept B was
+last admitted (`itl.Tracker.Report`). That stamp is the newest reading of the
+full fit that set B (`Tracker.baselineAt`), not the cycle it ran, so a refit
+from the readings the steady window carries does not make B younger. The
+snapshot carries it beside B as `itlBaselineAdmittedAt`
+(`LearnedState.ITLBaselineAdmittedAt`), and a restore installs it with B
+(`RestoreBaselineAt`): a B restored alone reports when it was fitted, not 0.
+`RecordLearnerReports` publishes a report only when it names a `PricingKey`, so
+the series shows the stamp only for a key that prices a line: a full fit from
+the steady window's carried readings past an empty main window.
+It goes wherever B goes: the sweep, a forget, `dropVariant`, the size trim (with
+the variant's `seen` entry; a stamp left with no B is spare). A B with no
+stamp is of unknown age and reports 0: one from a document written before the
+field, one put back from `itlBaselineStash` (`SetBaseline`), or one whose stamp
+was ahead of now past `maxClockSkew`. The learned-state store's digest leaves
+the stamp out, as it does a slope's fit time. Replay switch
+`itl-baseline-stamped` (`SwitchITLBaselineStamped`): off, nothing is exported
+or installed.
+
 The last `A` also holds when the window itself runs short: fewer than
 `DefaultMinSamples` readings left after `DefaultObservationMaxAge`. A replica
 below `analyzerTuning.itlBand.minObservableK` offers no reading, so a fleet that learned its line at

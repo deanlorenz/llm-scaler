@@ -47,8 +47,11 @@ func (r Reading) Reasons() map[learn.Reason]int64 {
 // count as "offered", the readings admitted. The key priced the variant when
 // the reading holds a line. A line resting on a held slope is as old as its
 // fit once the window has aged out, or holds nothing since a restart; one
-// fitted above the band, as its newest reading there. Only a line with none of
-// them has no stamp.
+// fitted above the band, as its newest reading there. A key with none of them
+// that holds an intercept is as old as the intercept: the newest reading of the
+// full fit that set it, or the stamp a snapshot carried with it
+// (RestoreBaselineAt). Only a key with none of these, or an intercept of
+// unknown age, has no stamp.
 func (t *Tracker) Report(rep learn.Report, key string, r Reading) learn.Report {
 	rep.Counts, rep.Samples, rep.Writes = r.Reasons(), r.Held, int64(r.Offered)
 	if r.Tier != "" {
@@ -61,6 +64,8 @@ func (t *Tracker) Report(rep learn.Report, key string, r Reading) learn.Report {
 		rep.LastAdmitted = t.Newest(key)
 	case r.SlopeHeld:
 		rep.LastAdmitted = r.SlopeFittedAt
+	case r.BaselineStored:
+		rep.LastAdmitted = t.BaselineAdmittedAt(key)
 	}
 	return rep
 }
