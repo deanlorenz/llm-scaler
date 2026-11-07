@@ -2,6 +2,7 @@ package itl
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -55,13 +56,36 @@ func TestReading_NoFitListsNoPods(t *testing.T) {
 	assert.Zero(t, omitted)
 }
 
+// The above-band fallback's line names its pods too: the readings above the
+// band it was fitted from, three replicas over four cycles.
+func TestReading_AnAboveBandFitListsItsPods(t *testing.T) {
+	start := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	tr := NewTracker()
+	var r Reading
+	for c := range 4 {
+		r = tr.Observe("k", "v", aboveRows(0.90, start), Admission{AboveBandFallback: true}, start.Add(time.Duration(c)*15*time.Second))
+	}
+	require.True(t, r.AboveBandFit, "premise: every replica above the band, the fallback's line")
+	assert.Equal(t, 12, r.FitRows)
+	require.Len(t, r.FitPods, 3)
+	for i, p := range r.FitPods {
+		assert.Equal(t, fmt.Sprintf("pod-%d", i), p.Pod)
+		assert.Equal(t, 4, p.Rows)
+		assert.InDelta(t, 0.90, p.K, 1e-12)
+		assert.InDelta(t, 0.05*0.90+0.010, p.ITLSec, 1e-12, "the mean of four readings")
+	}
+}
+
 // The bound holds, ties go by pod name, and a bound under zero lists none.
+// The reading's own FitPods are left in their order.
 func TestReading_WritePodsBoundAndTies(t *testing.T) {
 	var r Reading
 	for i := range 20 {
 		r.FitPods = append(r.FitPods, FitPod{Pod: fmt.Sprintf("p%02d", 19-i), Rows: 1, ITLSec: 0.02})
 	}
+	before := slices.Clone(r.FitPods)
 	pods, omitted := r.WritePods(16)
+	assert.Equal(t, before, r.FitPods, "WritePods sorts a copy, not the reading's FitPods")
 	assert.Equal(t, 4, omitted)
 	require.Len(t, pods, 16)
 	assert.Equal(t, "p00", pods[0]["pod"], "equal readings go by pod name")

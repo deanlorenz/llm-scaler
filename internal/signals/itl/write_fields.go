@@ -11,6 +11,12 @@ import (
 // the collector read that (domain.ReplicaMetrics.KvUsageForITL).
 const WriteTimeBase = "rate[1m]"
 
+// WriteMaxPods is how many pods one learner-write line lists, lowest reading
+// first; the rest are counted in podsOmitted, so a line stays under the CRI
+// line limit however large the fleet. Every analyzer's learner-write lines,
+// k2's and mu's as well as the ITL line's, take this one bound.
+const WriteMaxPods = 16
+
 // fitPods is the replicas obs came from, by pod name, each with how many of
 // obs were its and their mean k and ITL. Nil when obs is empty.
 func fitPods(obs []Observation) []FitPod {

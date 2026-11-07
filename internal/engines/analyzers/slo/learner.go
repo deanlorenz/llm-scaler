@@ -35,9 +35,9 @@ const LearnerHeartbeat = 10 * time.Minute
 
 // LearnerWriteMaxPods is how many pods one learner-write line lists, lowest
 // reading first; the rest are counted in podsOmitted, so a line stays under
-// the CRI line limit: the saturation analyzer's bound
-// (saturation.LearnerWriteMaxPods).
-const LearnerWriteMaxPods = 16
+// the CRI line limit: the bound every analyzer's learner-write lines share
+// (itl.WriteMaxPods).
+const LearnerWriteMaxPods = itl.WriteMaxPods
 
 // lineLogged is the line learner-write last logged for a key, and when.
 type lineLogged struct {
