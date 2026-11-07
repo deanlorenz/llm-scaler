@@ -51,12 +51,14 @@ const SwitchMuLatchRestoresSafe = "mu-latch-restores-safe-side"
 // reading was refused, and the sample was the readers' mean alone.
 const SwitchMuWeighsFleet = "mu-sample-weighs-the-fleet"
 
-// SwitchMuYieldsToFleet is the replay switch for what a measurement yields to
-// (fleetYield; analyzer-learner.md, 2.6). On, a measurement under the
-// tolerance of the Ready replicas' figure yields to that figure, at any fill.
-// Off, as before, it yielded to the lower median of the full replicas, which
-// left the slow pod out.
-const SwitchMuYieldsToFleet = "mu-yield-reads-the-fleet"
+// SwitchMuYieldCappedAtMeasurement is the replay switch for the sibling
+// yield's cap (yieldCapped; analyzer-learner.md, 2.6 and 3.4). On, a yield
+// never prices mu above the measurement it replaces; since the yield opens
+// only under the tolerance of a higher figure, it no longer moves the price.
+// Off, as before, a measurement under SiblingMuTolerance of its full
+// siblings' lower median priced at that median, which left the slow pod out
+// and sat over the fleet's mean.
+const SwitchMuYieldCappedAtMeasurement = "mu-yield-capped-at-measurement"
 
 // SwitchMuUnreadAtTarget is the replay switch for the rate an unread replica
 // under the KV line counts at (servedPod.credit; analyzer-learner.md, 2.6).

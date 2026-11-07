@@ -196,7 +196,7 @@ func TestMuSlowPod_AFleetThatSaturatedTogetherKeepsItsFigure(t *testing.T) {
 
 // The two ledger cases #495 cleared, each failing with its switch off, as
 // they did on the parent: the slow reading refused (SwitchMuWeighsFleet) and
-// the yield to the full siblings' median (SwitchMuYieldsToFleet).
+// the yield to the full siblings' median (SwitchMuYieldCappedAtMeasurement).
 func TestMuSlowPod_TheClearedLedgerCasesFailWithTheirSwitchOff(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -204,7 +204,7 @@ func TestMuSlowPod_TheClearedLedgerCasesFailWithTheirSwitchOff(t *testing.T) {
 		off   string
 	}{
 		{"half-served-max-slow-pod", checkMuHalfServedWith, SwitchMuWeighsFleet},
-		{"sibling-yield-slow-pod", checkMuSiblingYieldWith, SwitchMuYieldsToFleet},
+		{"sibling-yield-slow-pod", checkMuSiblingYieldWith, SwitchMuYieldCappedAtMeasurement},
 	} {
 		for seed := uint64(1); seed <= 3; seed++ {
 			require.NoError(t, c.check(nil)(seed), "%s seed %d with the switch on", c.name, seed)
@@ -215,4 +215,47 @@ func TestMuSlowPod_TheClearedLedgerCasesFailWithTheirSwitchOff(t *testing.T) {
 			t.Logf("%s, %s off, seed %d: %s", c.name, c.off, seed, v.Msg)
 		}
 	}
+}
+
+// The sibling yield never prices mu above the measurement it replaces
+// (SwitchMuYieldCappedAtMeasurement). The fixture is the ttft-three-pods
+// cycle the uncapped fleet yield moved: a variant measured at 3.39 whose full
+// replicas served 5.18 unqueued. Capped, there is no yield; uncapped, the
+// negative control, it priced 5.18, 53 % over the measurement.
+func TestMuSlowPod_TheYieldNeverPricesAboveTheMeasurement(t *testing.T) {
+	tn := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
+	served := servedRates{max: 5.18, saturated: 5.18, unqueued: true}
+	for _, capped := range []bool{true, false} {
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchMuYieldCappedAtMeasurement: capped}))
+		rate, yielded := a.siblingYield(propMuKey, throughputReading{rate: 3.39}, served, tn)
+		t.Logf("capped %v: yielded %v at %.2f against a measured 3.39", capped, yielded, rate)
+		if capped {
+			require.False(t, yielded, "a yield priced above the measurement")
+		} else {
+			require.True(t, yielded, "premise: uncapped, the yield prices the siblings")
+			require.Greater(t, rate, 3.39)
+		}
+	}
+
+	// Through Analyze, the weighing off so the yield alone decides: p0 queued
+	// at 3.39, two full siblings unqueued at 5.18.
+	bucket := func(switches map[string]bool) string {
+		a := newE1Analyzer(t, false)
+		require.NoError(t, a.SetSwitchesForReplay(switches))
+		var b map[string]string
+		for i := range 20 {
+			rows := make([]e1Row, 0, 3)
+			rows = append(rows, e1Row{"p0", 30, 330_000, 3.39, 3.39*498 + float64(i%3)})
+			for _, p := range []string{"p1", "p2"} {
+				rows = append(rows, e1Row{p, 0, 330_000, 5.18, 5.18*498 + float64(i%3)})
+			}
+			b, _ = tunedE1(t, a, e1Start.Add(time.Duration(i)*15*time.Second), rows, nil)
+		}
+		return b["p0"]
+	}
+	require.NotEqual(t, servedBucket, bucket(map[string]bool{SwitchMuWeighsFleet: false}), "capped, p0 priced its siblings")
+	require.Equal(t, servedBucket, bucket(map[string]bool{SwitchMuWeighsFleet: false, SwitchMuYieldCappedAtMeasurement: false}),
+		"premise: uncapped, p0 yields to its siblings")
+	require.NotEqual(t, servedBucket, bucket(nil), "all on, p0 priced its siblings")
 }

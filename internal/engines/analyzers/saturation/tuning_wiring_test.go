@@ -110,10 +110,11 @@ func TestTuningMaxRatioIsTheServedBound(t *testing.T) {
 
 // analyzerTuning.admission.siblingMuTolerance reaches the sibling yield: p0
 // measured at 3.3 beside three full siblings at 3.6 stands at the default 0.8
-// and yields to them at 0.95. That is with SwitchMuWeighsFleet off; on, the
-// same tolerance gates the sample first: at 0.95 p0's sample counts the three
-// it did not read, (3.3 + 3 x 3.6) / 4 = 3.525, and nothing is left to yield,
-// while at 0.8 the sample is p0's 3.3 alone.
+// and yields to them at 0.95. That is with SwitchMuWeighsFleet and
+// SwitchMuYieldCappedAtMeasurement off, the yield as it was: on, the cap
+// keeps a yield from pricing above the measurement, so the tolerance reaches
+// the sample instead. At 0.95 p0's sample counts the three it did not read,
+// (3.3 + 3 x 3.6) / 4 = 3.525, while at 0.8 the sample is p0's 3.3 alone.
 func TestTuningSiblingMuToleranceReachesAnalyze(t *testing.T) {
 	sibTol := func(p *config.ScalingPolicy) { p.AnalyzerTuning.Admission.SiblingMuTolerance = 0.95 }
 	run := func(tune func(*config.ScalingPolicy), switches map[string]bool) (string, float64) {
@@ -130,7 +131,7 @@ func TestTuningSiblingMuToleranceReachesAnalyze(t *testing.T) {
 		}
 		return b["p0"], lowestThroughputSample(a)
 	}
-	off := map[string]bool{SwitchMuWeighsFleet: false}
+	off := map[string]bool{SwitchMuWeighsFleet: false, SwitchMuYieldCappedAtMeasurement: false}
 	bucket, _ := run(nil, off)
 	assert.NotEqual(t, servedBucket, bucket, "0.92x its siblings yielded under the default 0.8")
 	bucket, _ = run(sibTol, off)
@@ -165,13 +166,9 @@ func TestTuningLowHoldForReachesAnalyze(t *testing.T) {
 // 1.2 gives way to derived when a replica serves 3.0 (over 2x it), and stays
 // given way at a served 2.2 under the default returnRatio 1.6 (1.92). At 1.9
 // (2.28) the 2.2 no longer holds it, and the fresh measurement prices again.
-// That is with SwitchMuYieldsToFleet off: on, a replica serving 2.2 unqueued
-// is a lower bound the measurement yields to (mu_slow_pod.go), which this
-// test is not about.
 func TestTuningReturnRatioReachesAnalyze(t *testing.T) {
 	second := func(tune func(*config.ScalingPolicy)) (string, string) {
 		a, _ := muChoiceSeed(t, 600)
-		require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchMuYieldsToFleet: false}))
 		first, _ := tunedE1(t, a, e1Start.Add(4*time.Minute), []e1Row{{"p0", 0, 200_000, 3.0, 3.0 * 498}}, tune)
 		then, _ := tunedE1(t, a, e1Start.Add(4*time.Minute+15*time.Second), []e1Row{{"p0", 0, 200_000, 2.2, 2.2 * 498}}, tune)
 		return first["p0"], then["p0"]

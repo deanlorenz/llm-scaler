@@ -442,12 +442,6 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		// MinThroughputSamplesToOrder, and the floor ordered on lambda / 3.43
 		// = 1.75 replicas' worth. One sample holds; the second, a window on,
 		// may order.
-		//
-		// The drained row serves lambda unqueued, more than the measurement.
-		// A served rate is a lower bound on mu, so with SwitchMuYieldsToFleet
-		// on the measurement would yield to it (mu_slow_pod.go). This spec is
-		// about the sample count, and runs that yield off.
-		Expect(analyzer.SetSwitchesForReplay(map[string]bool{SwitchMuYieldsToFleet: false})).To(Succeed())
 		for i := 0; i < 4; i++ {
 			in := makeAnalyzerInput(
 				[]domain.ReplicaMetrics{decode("decode-0", 1_150_207, 20, 3.433333333333333), prefill("prefill-0", 66_183)},
@@ -575,10 +569,6 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		// floor holds the fleet where it is (RC = 0 exactly); after the second
 		// -- a reading of its own, a rate window later -- it orders.
 		// Straddles runMu so the pair's median is runMu (RollingAverage.Median).
-		// The row serves lambda unqueued, more than mu: with
-		// SwitchMuYieldsToFleet on the measurement would yield to that lower
-		// bound (mu_slow_pod.go). The spec is about the order, and runs it off.
-		Expect(analyzer.SetSwitchesForReplay(map[string]bool{SwitchMuYieldsToFleet: false})).To(Succeed())
 		saturateOnce(runMu + 0.01)
 		in0 := makeAnalyzerInput(
 			[]domain.ReplicaMetrics{decode("decode-0", 200_000, 0, runLambda), prefill("prefill-0", 0)},
@@ -629,13 +619,7 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 	// shape, and so the throughput key, stays where the window was learned,
 	// so the floor has an own window to order on. promptTokens is the queue's
 	// prompt length; disable turns the shape-change hold off.
-	//
-	// The row serves lambda unqueued, more than mu: with
-	// SwitchMuYieldsToFleet on the measurement would yield to that lower bound
-	// (mu_slow_pod.go). The specs are about the shape-change hold, and run it
-	// off.
 	declaring := func(promptTokens int64, disable bool) domain.AnalyzerInput {
-		Expect(analyzer.SetSwitchesForReplay(map[string]bool{SwitchMuYieldsToFleet: false})).To(Succeed())
 		in := makeAnalyzerInput(
 			[]domain.ReplicaMetrics{decode("decode-0", 200_000, 0, runLambda), prefill("prefill-0", 0)},
 			states(1, 1))

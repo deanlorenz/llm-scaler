@@ -81,18 +81,6 @@ func (s servedRates) unread(reads map[string]float64) (float64, int) {
 	return meanOf(rates), len(rates)
 }
 
-// queuedMean is the mean rate served by the queued replicas, and how many
-// they are.
-func (s servedRates) queuedMean() (float64, int) {
-	rates := make(map[string]float64, len(s.pods))
-	for name, p := range s.pods {
-		if p.queued {
-			rates[name] = p.rate
-		}
-	}
-	return meanOf(rates), len(rates)
-}
-
 // byWeight is the mean over two groups of replicas, given each group's mean
 // and size.
 func byWeight(meanA float64, nA int, meanB float64, nB int) float64 {
@@ -195,33 +183,17 @@ func (a *SaturationAnalyzer) minorityFigureExpired(key string, reading throughpu
 	return a.lowHeldOut(fresh, reading, t, now)
 }
 
-// fleetYield is siblingYield with SwitchMuYieldsToFleet on: the rate a
-// measured mu yields to, and whether it does. It yields to the figure of the
-// Ready replicas themselves, the queued at what they serve and the unqueued as
-// a sample counts them (weighUnreadReplicas), while the measurement sits under
-// the tolerance of that figure. That is the fleet's mean, or under it, where
-// the lower median of the full replicas read their rate and left the slow pod
-// out, 12 % over {1, 1, 1, 0.569}. No full cache is needed: mean served is a
-// bound at any fill, and it is what a window written while one pod was slow
-// cannot see once that pod recovers. With every replica queued there is no
-// yield: each is measured, and the window takes them.
-func (a *SaturationAnalyzer) fleetYield(key string, reading throughputReading, served servedRates, t tuning) (float64, bool) {
-	if !(reading.rate > 0) {
-		return 0, false
-	}
-	mean, n := served.unread(nil)
-	if n == 0 {
-		return 0, false
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if c := a.throughputMuChoice[key]; c != nil {
-		mean = max(mean, c.unread)
-	}
-	queued, q := served.queuedMean()
-	figure := byWeight(queued, q, mean, n)
-	if !(reading.rate < t.Admission.SiblingMuTolerance*figure) {
-		return 0, false
-	}
-	return figure, true
+// yieldCapped reports whether a sibling yield to rate is refused by the cap
+// (SwitchMuYieldCappedAtMeasurement): a yield may never price mu above the
+// measurement it replaces. The yield opens only while the measurement sits
+// under SiblingMuTolerance of what it yields to, so every figure it could
+// price is above the measurement, and the cap refuses them all: the yield no
+// longer moves the price, and the weighing (weighUnreadReplicas) carries the
+// fleet into the sample instead. Uncapped, the lower median of the full
+// replicas priced {1, 1, 1, 0.569} at 1.000 against a mean of 0.892, and a
+// variant whose replicas served more than its measurement at 5.18 against a
+// measured 3.39: both on the side that breaks the SLO, with no reading of the
+// replica's own behind them.
+func (a *SaturationAnalyzer) yieldCapped(reading throughputReading, rate float64) bool {
+	return a.muYieldCapped && !(rate < reading.rate)
 }

@@ -147,7 +147,7 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	//     them (start-seed-restart-2: a sample of 0.304 against 0.351, so the
 	//     priced mu falls 5.7 % on 14 cycles; ttft-staircase-b-off: 15.06
 	//     against 15.62 on 12 rows, decode demand up 7.7 % on 8).
-	//   - SwitchMuYieldsToFleet: a measurement under the tolerance of the
+	//   - SwitchMuYieldCappedAtMeasurement: a measurement under the tolerance of the
 	//     Ready replicas' figure yields to it (mu-paths: variant-02 at 09:01
 	//     priced 8.08 against 12.12 on 44 rows; ttft-three-pods: variant-02
 	//     priced 5.18 against a measured 3.39 on one cycle, the replicas
@@ -164,7 +164,7 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 		"ttft-staircase-b-off/composite-results.csv", "ttft-staircase-b-off/composite-roles.csv",
 		"ttft-staircase-b-off/results.csv", "ttft-staircase-b-off/variant-capacities.csv",
 	},
-	saturation.SwitchMuYieldsToFleet: {
+	saturation.SwitchMuYieldCappedAtMeasurement: {
 		"mu-paths/variant-capacities.csv", "ttft-three-pods/variant-capacities.csv",
 	},
 	saturation.SwitchMuUnreadAtTarget:        nil,
@@ -702,8 +702,9 @@ var heldBy = map[string][]heldTest{
 	saturation.SwitchMuWeighsFleet: {
 		{"../saturation", "TestMuSlowPod_TheClearedLedgerCasesFailWithTheirSwitchOff"},
 	},
-	saturation.SwitchMuYieldsToFleet: {
+	saturation.SwitchMuYieldCappedAtMeasurement: {
 		{"../saturation", "TestMuSlowPod_TheClearedLedgerCasesFailWithTheirSwitchOff"},
+		{"../saturation", "TestMuSlowPod_TheYieldNeverPricesAboveTheMeasurement"},
 	},
 	saturation.SwitchMuUnreadAtTarget: {
 		{"../saturation", "TestMuSlowPod_TheCreditReachesTheSample"},

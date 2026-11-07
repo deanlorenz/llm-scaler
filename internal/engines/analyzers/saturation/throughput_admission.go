@@ -135,7 +135,11 @@ import (
 // they stop filling, until they read what it does (siblingYield). A replica at 0.55x its siblings passes the served bound
 // above, and as the only queued replica it is the window: in review it priced
 // the fleet at 1.8x the replicas for as long as it stayed slow, and neither
-// the bound nor MeasuredLowHoldFor released it.
+// the bound nor MeasuredLowHoldFor released it. Since #495 the yield is
+// capped at the measurement (SwitchMuYieldCappedAtMeasurement), so it no
+// longer prices: the siblings reach mu through the weighed sample
+// (mu_slow_pod.go), and that slow replica's figure is released by the
+// minority rule instead.
 //
 // The yield is latched: once a stale measurement has given way it stays given
 // way until the two figures come back within MeasuredDerivedReturnRatio, or
@@ -418,11 +422,10 @@ const SiblingMuTolerance = config.DefaultSiblingMuTolerance
 // newer sibling evidence moves or drops it, the measurement comes within the
 // tolerance of it, or the window starts over (recordSaturatedThroughputFrom).
 //
-// With SwitchMuYieldsToFleet on this is fleetYield.
+// With SwitchMuYieldCappedAtMeasurement on no yield prices mu above the
+// measurement it replaces (yieldCapped), so the yield memo is still kept but
+// the price stays the measurement's.
 func (a *SaturationAnalyzer) siblingYield(key string, reading throughputReading, served servedRates, t tuning) (float64, bool) {
-	if a.muYieldsToFleet {
-		return a.fleetYield(key, reading, served, t)
-	}
 	tol := t.Admission.SiblingMuTolerance
 	if !(reading.rate > 0) {
 		return 0, false
@@ -446,6 +449,9 @@ func (a *SaturationAnalyzer) siblingYield(key string, reading throughputReading,
 		c.sibling = sibling
 	}
 	if c == nil || !(reading.rate < tol*c.sibling) {
+		return 0, false
+	}
+	if a.yieldCapped(reading, c.sibling) {
 		return 0, false
 	}
 	return c.sibling, true

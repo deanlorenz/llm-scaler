@@ -234,10 +234,11 @@ func checkMuChoiceTruth(choose muChooser) func(uint64) error {
 
 // checkMuSiblingYield: a fleet with one genuinely slow pod, queued, its
 // reading the one on record, beside three full siblings at 1 serving
-// unqueued. What the measurement yields to is at most the fleet's mean
-// (fleetYield). Before #495 it yielded to the siblings' lower median, 12 %
-// over {1, 1, 1, 0.569}: the risky side (checkMuSiblingYieldWith, with
-// SwitchMuYieldsToFleet off).
+// unqueued. The yield never prices above the measurement (yieldCapped), so
+// mu is at most the slow reading, under the fleet's mean. Before #495 it
+// yielded to the siblings' lower median, 12 % over {1, 1, 1, 0.569}: the
+// risky side (checkMuSiblingYieldWith, with SwitchMuYieldCappedAtMeasurement
+// off).
 func checkMuSiblingYield(seed uint64) error { return checkMuSiblingYieldWith(nil)(seed) }
 
 // checkMuSiblingYieldWith is checkMuSiblingYield under switches.
@@ -250,10 +251,7 @@ func checkMuSiblingYieldWith(switches map[string]bool) func(uint64) error {
 		}
 		t := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
 		slow := 0.5 + 0.25*r.Float64()
-		served := servedRates{max: 1, saturated: 1, unqueued: true, target: floorTarget, pods: map[string]servedPod{
-			"p0": {rate: 1, full: true}, "p1": {rate: 1, full: true}, "p2": {rate: 1, full: true},
-			"p3": {rate: slow, queued: true, full: true},
-		}}
+		served := servedRates{max: 1, saturated: 1, unqueued: true}
 		priced := slow
 		if s, yielded := a.siblingYield(propMuKey, throughputReading{rate: slow}, served, t); yielded {
 			priced = s
