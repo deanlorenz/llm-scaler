@@ -807,21 +807,10 @@ func mustPricedTTFT(t *testing.T, r whatif.Result) whatif.TTFT {
 // 0.05 of the knee, nor a higher rate at the target, on seeded fleets. Past the
 // peak the rate side fails (TestTTFT_TheCVClaimsThatDoNotHold), and so does
 // the bottom of the range; PromptSpreadAbovePeak flags the first.
-//
-// Every draw holds the TTFT side; the first draw of each percentile and kind
-// holds the rate side too. A RateForTTFT here costs about 100 ms against a few
-// for a TTFTAt, nearly all of it the price's unused old-sum floor, so 60 rate
-// draws took minutes. Both kinds, because the rate falls steeply near the floor
-// and a small fault shows only on the draws above it.
 func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
-	type rateCase struct {
-		percent   int
-		nearFloor bool
-	}
-	percents := []int{90, 91, 92, 93, 95, 99}
 	r := rand.New(rand.NewPCG(11, 13))
 	const draws = 60
-	priced := map[rateCase]int{}
+	priced := 0
 	for range draws {
 		in := ttftInputsAt(1+r.IntN(4), 0)
 		in.prompt = 500 + 12000*r.Float64()
@@ -832,7 +821,7 @@ func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
 		if r.IntN(2) == 0 {
 			in.decodeTTFT = whatif.DecodeTTFT{Seconds: 0.05 * r.Float64(), PromptTokens: in.prompt}
 		}
-		percent := percents[r.IntN(len(percents))]
+		percent := []int{90, 91, 92, 93, 95, 99}[r.IntN(6)]
 		q := float64(percent) / 100
 		fl, _ := ttftFleet(in, in.pods)
 		knee, ok := whatif.PrefillKnee(fl.Prefill).(whatif.Answer)
@@ -851,13 +840,11 @@ func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
 			floor = max(floor, at.Floor)
 		}
 		// Half the draws sit just over the highest floor, where a fault shows.
-		margin, nearFloor := 1.001, true
+		margin := 1.001
 		if r.IntN(2) == 0 {
-			margin, nearFloor = 1.1+4*r.Float64(), false
+			margin = 1.1 + 4*r.Float64()
 		}
 		target := whatif.TTFTTarget{Seconds: floor * margin, Percentile: q}
-		kind := rateCase{percent, nearFloor}
-		rateSide := priced[kind] == 0
 		prevT, prevR := 0.0, math.Inf(1)
 		for _, cv := range cvs {
 			in.spread.CV = cv
@@ -866,21 +853,14 @@ func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
 			require.True(t, ok)
 			require.GreaterOrEqual(t, at.Seconds, prevT*(1-1e-9), "TTFT fell as cv rose to %g: %+v at %g q %g", cv, fl.Prefill, rate, q)
 			prevT = at.Seconds
-			if !rateSide {
-				continue
-			}
 			ans, ok := whatif.RateForTTFT(fl, target).(whatif.Answer)
 			require.True(t, ok, "a target above every floor is answered")
 			require.LessOrEqual(t, ans.Value, prevR*(1+1e-9), "the rate rose as cv rose to %g: %+v", cv, fl.Prefill)
 			prevR = ans.Value
-			priced[kind]++
+			priced++
 		}
 	}
-	for _, percent := range percents {
-		for _, nearFloor := range []bool{true, false} {
-			assert.Greater(t, priced[rateCase{percent, nearFloor}], 10, "the rate side must be exercised at p%d, near the floor %v", percent, nearFloor)
-		}
-	}
+	assert.Greater(t, priced, draws*10, "the rate side must be exercised")
 }
 
 // The S1 decisions take TTFT as rising with cv over [0, 3] at p90. At the

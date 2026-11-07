@@ -683,9 +683,14 @@ type GoldenCheck struct {
 // the throughput analyzer's line (requiredThroughputPaths). With the
 // engine's replay registered, its composite paths are required too.
 func requiredPaths() []string {
-	return slices.Concat(saturation.PathNames(), requiredSettlePaths(), slo.PathNames(),
+	return slices.Concat(requiredSaturationPaths(), requiredSettlePaths(), slo.PathNames(),
 		requiredThroughputPaths(), enginePathNames())
 }
+
+// requiredSaturationPaths is saturation's paths the goldens must keep
+// reaching (saturation.RequiredPathNames): all but the sibling yield pricing,
+// which the cap keeps from acting; the cap refusing it is required instead.
+func requiredSaturationPaths() []string { return saturation.RequiredPathNames() }
 
 // requiredThroughputPaths is the throughput line's fits the goldens must
 // keep reaching: full, pinned and held (learner PR 4b-1; the in-process
