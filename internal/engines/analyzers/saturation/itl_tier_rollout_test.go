@@ -17,7 +17,7 @@ import (
 // the first rows of a new revision clear it, B and the slope stand, and the
 // tier latch goes back. A status with no new revision clears nothing.
 func TestITLWindow_ANewRevisionClearsIt(t *testing.T) {
-	run := func(switches map[string]bool, after string) (int, bool, float64) {
+	run := func(switches map[string]bool, after string) (int, bool) {
 		store := capacity.NewStore()
 		file := func(rolling bool) {
 			store.Update("test-ns", "test-model", "decode-a", capacity.Record{
@@ -58,17 +58,17 @@ func TestITLWindow_ANewRevisionClearsIt(t *testing.T) {
 		cycle(after)
 		kept, _ := a.itlTracker.Baseline(key)
 		require.Equal(t, b, kept, "B moved")
-		return a.itlWindowLen(key), a.itlTracker.Readings(key).OLSLatched, kept
+		return a.itlWindowLen(key), a.itlTracker.Readings(key).OLSLatched
 	}
-	held, latched, _ := run(nil, "rev-2")
+	held, latched := run(nil, "rev-2")
 	assert.Equal(t, 10, held, "only the new revision's readings")
 	assert.False(t, latched)
 
-	held, latched, _ = run(nil, "rev-1")
+	held, latched = run(nil, "rev-1")
 	assert.Greater(t, held, 10, "a status with no new revision clears nothing")
 	assert.True(t, latched)
 
-	held, latched, _ = run(map[string]bool{SwitchITLClearsOnNewRevision: false}, "rev-2")
+	held, latched = run(map[string]bool{SwitchITLClearsOnNewRevision: false}, "rev-2")
 	assert.Greater(t, held, 10, "negative control: off, the readings join")
 	assert.True(t, latched, "negative control")
 }

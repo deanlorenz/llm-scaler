@@ -18,6 +18,9 @@ import (
 // The line in a rollout (issue #481), through Analyze, with the switch on and
 // off.
 
+// newRevision is the revision a rollout brings.
+const newRevision = "rev-2"
+
 // rolloutRig runs Analyze over a store holding agg's engine.
 type rolloutRig struct {
 	t     *testing.T
@@ -72,7 +75,7 @@ func TestRollout_ThePublishedRolloutOffersNoRows(t *testing.T) {
 		r.file(true)
 		during = r.cycle(revised(settleFleet(), "rev-1"))
 		r.file(false)
-		after = r.cycle(revised(settleFleet(), "rev-2"))
+		after = r.cycle(revised(settleFleet(), newRevision))
 		return before, during, after
 	}
 	before, during, after := run(nil)
@@ -90,7 +93,7 @@ func TestRollout_MixedRevisionsOfferTheNewestOnly(t *testing.T) {
 	run := func(switches map[string]bool) int {
 		r := newRolloutRig(t, switches)
 		rows := aged(revised(settleFleet(), "rev-1"), r.now.Add(-time.Hour))
-		rows[1].Revision, rows[1].ReadySince = "rev-2", r.now
+		rows[1].Revision, rows[1].ReadySince = newRevision, r.now
 		return r.cycle(rows)
 	}
 	assert.Equal(t, 1, run(nil))
@@ -140,7 +143,7 @@ func stall(t *testing.T, hold time.Duration, c stallCase, cycles int) (int, *rol
 		rows := aged(revised(settleFleet(), "rev-1"), early)
 		if c.newPod {
 			pod := row("agg", "agg-new", 0.45)
-			pod.Revision, pod.ReadySince = "rev-2", first
+			pod.Revision, pod.ReadySince = newRevision, first
 			rows = append(rows, pod)
 		}
 		r.cycle(rows)
@@ -215,7 +218,7 @@ func TestRollout_TheForgetWaitsForANewPod(t *testing.T) {
 	_, r := stall(t, time.Hour, stallCase{argsChange: true}, 8)
 	assert.Empty(t, r.a.TakeLearnerReports()["ns|m"][0].Forgotten, "forgotten with the old pods serving")
 	pod := row("agg", "agg-new", 0.45)
-	pod.Revision, pod.ReadySince = "rev-2", r.now
+	pod.Revision, pod.ReadySince = newRevision, r.now
 	r.cycle(append(aged(revised(settleFleet(), "rev-1"), r.now.Add(-time.Hour)), pod))
 	reports := r.a.TakeLearnerReports()["ns|m"]
 	assert.Equal(t, []learn.Forgotten{{Key: windowKey("ns", "m", settleAgg), By: learn.ByArguments}}, reports[0].Forgotten)
@@ -235,7 +238,7 @@ func TestRollout_TheLatchGoesWhenItEnds(t *testing.T) {
 		r.cycle(revised(settleFleet(), "rev-1"))
 		require.True(t, r.a.lines.Readings(key).OLSLatched, "the tier moved mid-rollout, with no new reading")
 		r.file(false)
-		r.cycle(revised(settleFleet(), "rev-2"))
+		r.cycle(revised(settleFleet(), newRevision))
 		return r.a.lines.Readings(key).OLSLatched
 	}
 	assert.False(t, run(nil))

@@ -19,6 +19,9 @@ import (
 // and off: the newest revision's rows alone, a hold while no new pod serves,
 // and a forget under new engine arguments.
 
+// newRevision is the revision a rollout brings.
+const newRevision = "rev-2"
+
 // rollParams is an engine stating a cap of maxNumSeqs.
 func rollParams(maxNumSeqs int64) *capacity.EngineParams {
 	return &capacity.EngineParams{Engine: inferenceengine.EngineVLLM, MaxNumSeqs: maxNumSeqs, MaxNumSeqsSet: true}
@@ -85,7 +88,7 @@ func TestRollout_ThePublishedRolloutOffersNoRows(t *testing.T) {
 func TestRollout_MixedRevisionsOfferTheNewestOnly(t *testing.T) {
 	mixed := func() []domain.ReplicaMetrics {
 		f := spreadFleet("rev-1")
-		f[1].Revision, f[1].ReadySince = "rev-2", lineStart
+		f[1].Revision, f[1].ReadySince = newRevision, lineStart
 		return f
 	}
 	run := func(a *ThroughputAnalyzer) itl.Reading {
@@ -127,7 +130,7 @@ func TestRollout_TheLineReadsAgainWhenItEnds(t *testing.T) {
 	got, _, _ := lineRead(r.a)
 	require.Zero(t, got.Considered, "premise: rolling out")
 	fileRecord(store, rollParams(64), false)
-	r.step(spreadFleet("rev-2"))
+	r.step(spreadFleet(newRevision))
 	got, _, _ = lineRead(r.a)
 	require.Equal(t, 3, got.Considered)
 }
@@ -180,7 +183,7 @@ func stall(t *testing.T, a *ThroughputAnalyzer, c stallCase, cycles int) (silent
 		rows := spreadFleet("rev-1")
 		if c.newPod {
 			pod := lineRow("pod-new", 0.45, lineAt(0.45), lineStart)
-			pod.Revision = "rev-2"
+			pod.Revision = newRevision
 			rows = append(rows, pod)
 		}
 		r.step(rows)
@@ -262,7 +265,7 @@ func TestRollout_TheForgetWaitsForANewPod(t *testing.T) {
 	_, r := stall(t, NewThroughputAnalyzer(), c, 8)
 	require.Empty(t, r.a.TakeLearnerReports()["ns|m"][0].Forgotten, "forgotten with the old pods serving")
 	pod := lineRow("pod-new", 0.45, lineAt(0.45), lineStart)
-	pod.Revision = "rev-2"
+	pod.Revision = newRevision
 	r.step(append(spreadFleet("rev-1"), pod))
 	reports := r.a.TakeLearnerReports()["ns|m"]
 	require.Equal(t, []learn.Forgotten{{Key: variantKey("ns", "m", "v1"), By: learn.ByArguments}}, reports[0].Forgotten)
@@ -421,7 +424,7 @@ func TestRollout_TheLatchGoesWhenItEnds(t *testing.T) {
 		r.step(spreadFleet("rev-1"))
 		require.True(t, a.lines.Readings(key).OLSLatched, "the tier moved mid-rollout, with no new reading")
 		fileRecord(store, rollParams(64), false)
-		r.step(spreadFleet("rev-2"))
+		r.step(spreadFleet(newRevision))
 		return a.lines.Readings(key).OLSLatched
 	}
 	require.False(t, run(NewThroughputAnalyzer()))
