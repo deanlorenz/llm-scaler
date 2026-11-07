@@ -3609,9 +3609,11 @@ run_cleanup() {
     # After the Job, so the load stops first. On every exit of the arm, done,
     # failed or interrupted: the recordings are in an emptyDir that the next
     # controller restart or teardown deletes.
+    # stop ends the arm's periodic copy and takes the final one, and takes it
+    # even when the periodic copy never started.
     if [ -n "$RUN_RECDIR" ]; then
         bash "$HERE/learner_recordings.sh" ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} \
-            snapshot "$WVA_NS" "$RUN_RECDIR" >&2 || true
+            stop "$WVA_NS" "$RUN_RECDIR" >&2 || true
         RUN_RECDIR=""
     fi
 }
@@ -3787,6 +3789,10 @@ verb_run() {
     RUN_RECDIR="$out_dir/learner-recordings"
     trap run_interrupted INT TERM HUP
     trap run_cleanup EXIT
+    # A copy every RECORDINGS_INTERVAL seconds while the arm runs, as
+    # benchmark-run takes, so a controller that dies mid-arm was copied recently.
+    bash "$HERE/learner_recordings.sh" ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} --force \
+        start "$WVA_NS" "$RUN_RECDIR" >&2 || warn "the periodic copy of the learner recordings did not start; the arm still copies them when it ends"
     k delete job "$RUN_JOB" --ignore-not-found >/dev/null 2>&1
     render_load_job "$RUN_JOB" "$arm" "$start_at" "$url_a" "$url_b" > "$out_dir/job.yaml"
     [ -s "$out_dir/job.yaml" ] || die "the load Job rendered empty"

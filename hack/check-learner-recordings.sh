@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Executes hack/benchmark/learner_recordings.sh, and the harness paths that
-# call it, against a stub kubectl, and asserts the benchmark keeps the learner
-# recordings on every exit path.
+# Executes hack/benchmark/learner_recordings.sh, file_capture.sh and the
+# two-model arm cleanup against a stub kubectl, and asserts the benchmark keeps
+# the learner recordings on every exit path. The Makefile recipes and the
+# two-model arm start are not executed: the "harness wiring" cases read them
+# and assert each calls the script, in the right place.
 #
 # The recorder writes to an emptyDir. Before this, nothing in the harness
 # copied it, so every teardown deleted the run's recordings and learnreplay had
@@ -16,16 +18,18 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BENCH="$ROOT/hack/benchmark"
 LR="$BENCH/learner_recordings.sh"
-EXPECTED_CASES=47
+EXPECTED_CASES=59
 
 command -v python3 >/dev/null 2>&1 || {
     echo "FATAL: python3 is required by this check and is missing. Nothing below would be about the code."
     exit 2
 }
-command -v timeout >/dev/null 2>&1 || {
-    echo "FATAL: timeout (coreutils) is required by this check; the hang case needs it."
-    exit 2
-}
+for tool in timeout flock pgrep; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "FATAL: $tool is required by this check (the hang, lock and orphan cases need it) and is missing."
+        exit 2
+    }
+done
 
 WORK="$(mktemp -d)"
 STARTED=""
@@ -83,6 +87,9 @@ def pods():
     return {"items": items}
 
 if clean[:2] == ["get", "pods"]:
+    if os.environ.get("STUB_BAD_JSON"):
+        print("<html>502 Bad Gateway</html>")
+        sys.exit(0)
     if os.environ.get("STUB_LIST_FAIL"):
         print('Error from server (Forbidden): pods is forbidden: User "x" cannot list resource "pods"', file=sys.stderr)
         sys.exit(1)
@@ -90,11 +97,21 @@ if clean[:2] == ["get", "pods"]:
     sys.exit(0)
 
 if clean and clean[0] == "exec":
-    pod = [a for a in clean[1:] if not a.startswith("-") and a not in ("demo-ns", "other-ns")][0]
+    pod, j, rest = None, 1, clean[1:]
+    while j < len(clean):
+        a = clean[j]
+        if a == "--":
+            break
+        if a in ("-n", "-c"):
+            j += 2; continue
+        if pod is None and not a.startswith("-"):
+            pod = a
+        j += 1
     with open(os.environ.get("KEXEC", os.devnull), "a") as f:
         f.write(pod + "\n")
     if os.environ.get("STUB_EXEC_HANG"):
-        time.sleep(60)
+        # Named, so the check can find a copy that outlived its stop.
+        os.execvp("sleep", ["sleep", os.environ["STUB_EXEC_HANG"]])
     if os.environ.get("STUB_EXEC_FAIL"):
         print("error: unable to upgrade connection: container not found", file=sys.stderr)
         sys.exit(1)
@@ -183,6 +200,21 @@ ls -a "$D" | grep -q '^\.incoming' \
     && bad "a temporary directory was left behind: $(ls -a "$D")" \
     || ok "no temporary copy is left behind"
 
+# ---- two copies of one Pod do not interleave compare and rename ------------
+# Another copy holds the Pod's lock for 3 s; this one must wait for it rather
+# than compare sizes while the other is between its compare and its rename.
+DL="$WORK/lock"; mkdir -p "$DL"
+( flock 9 && sleep 3 ) 9>"$DL/.$A.lock" &
+holder=$!
+sleep 0.5
+t0="$(date +%s)"
+snap "$DL"
+t1="$(date +%s)"
+wait "$holder" 2>/dev/null
+[ $((t1 - t0)) -ge 2 ] && [ "$(lines "$DL/$A/$REC")" = 9 ] \
+    && ok "a copy waits for the Pod's lock held by another copy ($((t1 - t0))s for a 3s hold), then installs" \
+    || bad "a copy did not wait for the Pod's lock: $((t1 - t0))s, $(lines "$DL/$A/$REC") lines"
+
 # ---- a Pod that is not Running keeps its last copy, and is not exec-ed ----
 export STUB_PODS="$A,Failed,/var/lib/wva/learner-recordings,yes"
 grow "$A" 1
@@ -203,7 +235,7 @@ grep -q "copy-failed (exit 1: error: unable to upgrade connection" "$WORK/o" \
     && ok "a failed exec is reported with its error" \
     || bad "the failed exec is not reported: $(cat "$WORK/o")"
 t0="$(date +%s)"
-STUB_EXEC_HANG=1 RECORDINGS_COPY_TIMEOUT=2 snap "$D"
+STUB_EXEC_HANG=30 RECORDINGS_COPY_TIMEOUT=2 snap "$D"
 t1="$(date +%s)"
 [ $((t1 - t0)) -lt 15 ] && ok "a hung exec is cut off by RECORDINGS_COPY_TIMEOUT ($((t1 - t0))s for a 2s bound)" || bad "a hung exec ran $((t1 - t0))s"
 grep -q "timed out after 2s" "$WORK/o" && ok "the timeout is named" || bad "the timeout is not named: $(cat "$WORK/o")"
@@ -237,6 +269,11 @@ STUB_LIST_FAIL=1 snap "$WORK/empty5"; rc=$?
 [ "$rc" -eq 1 ] && grep -q "could not list the controller Pods in demo-ns: Error from server (Forbidden)" "$WORK/o" \
     && ok "a refused Pod list is reported as refused, not as no controller" \
     || bad "a refused Pod list: exit $rc, $(cat "$WORK/o")"
+STUB_BAD_JSON=1 snap "$WORK/empty6"; rc=$?
+[ "$rc" -eq 1 ] && grep -q "could not read the controller Pod list (controller_pods.py exit 1" "$WORK/o" \
+    && ! grep -q "no controller Pod in namespace" "$WORK/o" \
+    && ok "a Pod list the helper cannot read is named as such, not as no controller" \
+    || bad "an unreadable Pod list: exit $rc, $(cat "$WORK/o")"
 
 echo "learner_recordings.sh start/stop"
 # ---- the background copy runs during the run, stop takes the final one ----
@@ -281,12 +318,77 @@ bash "$LR" stop demo-ns "$D3" > "$WORK/o" 2>&1
     && ok "a stop whose start failed still takes the final copy" \
     || bad "no final copy without a loop: $(cat "$WORK/o")"
 
+# ---- a final copy that finds no Pod keeps the earlier copy -----------------
+STUB_PODS="" bash "$LR" stop demo-ns "$D3" > "$WORK/o" 2>&1
+[ "$(lines "$D3/$A/$REC")" = 7 ] && grep -q "1 file(s), [0-9]* bytes held in $D3" "$WORK/o" \
+    && ok "a stop after the controller is gone keeps the copy taken before" \
+    || bad "a stop with no controller Pod lost the earlier copy: $(lines "$D3/$A/$REC") lines, $(cat "$WORK/o")"
+
+# ---- start will not mix runs in one directory unless told to ---------------
+if bash "$LR" start demo-ns "$D3" > "$WORK/o" 2>&1; then
+    bad "start took a directory holding a previous run's copies"
+    bash "$LR" stop demo-ns "$D3" > /dev/null 2>&1
+else
+    grep -q "already holds 1 recording copies of a previous run" "$WORK/o" \
+        && ok "start refuses a directory that holds a previous run's copies" \
+        || bad "start failed for another reason: $(cat "$WORK/o")"
+fi
+[ ! -e "$D3/collection.tsv.owner" ] && ok "the refused start leaves no ownership record" || bad "the refused start left $(cat "$D3/collection.tsv.owner")"
+if RECORDINGS_INTERVAL=60 bash "$LR" --force start demo-ns "$D3" > "$WORK/o" 2>&1; then
+    ok "start --force adds to a directory that holds copies"
+    STARTED="$STARTED $(cat "$D3/collection.tsv.pid" 2>/dev/null)"
+    bash "$LR" stop demo-ns "$D3" > /dev/null 2>&1
+else
+    bad "start --force refused: $(cat "$WORK/o")"
+fi
+
+# ---- a stop reaches the copy in flight -------------------------------------
+# The exec hangs; timeout used to put it in a process group of its own, so the
+# stop's group signal missed it and it ran on after the stop said it was done.
+HANGV="47.$$"
+D6="$WORK/run/hang"
+reset_calls
+STUB_EXEC_HANG="$HANGV" RECORDINGS_COPY_TIMEOUT=120 RECORDINGS_INTERVAL=1 \
+    bash "$LR" start demo-ns "$D6" > "$WORK/o" 2>&1
+STARTED="$STARTED $(cat "$D6/collection.tsv.pid" 2>/dev/null)"
+waited=0
+while ! pgrep -f "sleep $HANGV" >/dev/null 2>&1 && [ "$waited" -lt 50 ]; do sleep 0.2; waited=$((waited + 1)); done
+pgrep -f "sleep $HANGV" >/dev/null 2>&1 \
+    && ok "the background copy has an exec in flight" \
+    || bad "no exec in flight to stop: $(cat "$D6/capture.log" 2>/dev/null | head -3)"
+bash "$LR" stop demo-ns "$D6" > "$WORK/o" 2>&1; rc=$?
+sleep 0.5
+left="$(pgrep -f "sleep $HANGV" | tr '\n' ' ')"
+if [ -z "$left" ] && [ "$rc" -eq 0 ]; then
+    ok "no exec outlives the stop"
+else
+    bad "the stop (exit $rc) left the exec running: pid(s) $left"
+    for p in $left; do kill "$p" 2>/dev/null; done
+fi
+
+# ---- a stop that names no context, of a copy that named one, warns --------
+D7="$WORK/run/ctx"
+RECORDINGS_INTERVAL=60 bash "$LR" --context c1 start demo-ns "$D7" > /dev/null 2>&1
+STARTED="$STARTED $(cat "$D7/collection.tsv.pid" 2>/dev/null)"
+bash "$LR" stop demo-ns "$D7" > "$WORK/o" 2> "$WORK/e"
+grep -q "was started with --context c1, and this stop names none" "$WORK/e" \
+    && ok "a stop that names no context warns when the copy was started with one" \
+    || bad "no warning for a stop without the copy's context: $(cat "$WORK/e")"
+RECORDINGS_INTERVAL=60 bash "$LR" --context c1 start demo-ns "$D7" > /dev/null 2>&1
+STARTED="$STARTED $(cat "$D7/collection.tsv.pid" 2>/dev/null)"
+bash "$LR" --context c1 stop demo-ns "$D7" > "$WORK/o" 2> "$WORK/e"
+grep -q "warning" "$WORK/e" \
+    && bad "a stop that names the same context warned: $(cat "$WORK/e")" \
+    || ok "a stop that names the copy's context does not warn"
+
 # ---- an interrupted run: teardown finds its copy and finishes it ----------
+# The second capture's namespace, demo-ns-2, shares the demo-ns- prefix, so
+# only the namespace in its ownership record keeps stop-all off it.
 D4="$WORK/run/wva_learner_recordings-demo-ns-2"
-D5="$WORK/run/wva_learner_recordings-other-ns-3"
+D5="$WORK/run/wva_learner_recordings-demo-ns-2-3"
 RECORDINGS_INTERVAL=60 bash "$LR" start demo-ns "$D4" > /dev/null 2>&1
 P4="$(cat "$D4/collection.tsv.pid" 2>/dev/null || true)"; STARTED="$STARTED $P4"
-RECORDINGS_INTERVAL=60 bash "$LR" start other-ns "$D5" > /dev/null 2>&1
+RECORDINGS_INTERVAL=60 bash "$LR" start demo-ns-2 "$D5" > /dev/null 2>&1
 P5="$(cat "$D5/collection.tsv.pid" 2>/dev/null || true)"; STARTED="$STARTED $P5"
 sleep 1
 grow "$A" 11
@@ -295,8 +397,8 @@ bash "$LR" stop-all demo-ns "$WORK/run/wva_learner_recordings-demo-ns-" > "$WORK
     && ok "stop-all takes the final copy of an interrupted run's capture" \
     || bad "stop-all: exit $rc, $(lines "$D4/$A/$REC") lines, $(head -3 "$WORK/o")"
 kill -0 "$P4" 2>/dev/null && bad "stop-all left the interrupted run's copy running" || ok "stop-all stops the interrupted run's copy"
-kill -0 "$P5" 2>/dev/null && ok "stop-all leaves another namespace's copy alone" || bad "stop-all stopped another namespace's copy"
-bash "$LR" stop other-ns "$D5" > /dev/null 2>&1
+kill -0 "$P5" 2>/dev/null && ok "stop-all leaves another namespace's copy alone, under the same prefix" || bad "stop-all stopped namespace demo-ns-2's copy"
+bash "$LR" stop demo-ns-2 "$D5" > /dev/null 2>&1
 bash "$LR" stop-all demo-ns "$WORK/run/wva_learner_recordings-demo-ns-" > "$WORK/o" 2>&1; rc=$?
 [ "$rc" -eq 1 ] && grep -q "no background copy of namespace demo-ns" "$WORK/o" \
     && ok "stop-all with nothing running says so and exits 1, so the teardown copies itself" \
@@ -314,6 +416,13 @@ bash "$BENCH/file_capture.sh" "$R2" "$WORK/none.json" "$WORK/none.log" "$WORK/em
 grep -q "NO learner recordings to file" "$WORK/o" \
     && ok "a run with no recordings says so when filing" \
     || bad "filing no recordings is silent: $(cat "$WORK/o")"
+R3="$WORK/results/guidellm-3_3"; mkdir -p "$R3"
+touch "$D2.startfailed"
+bash "$BENCH/file_capture.sh" "$R3" "$WORK/none.json" "$WORK/none.log" "$D2" > "$WORK/o" 2>&1
+rm -f "$D2.startfailed"
+grep -q "not filing the learner recordings: their capture never started" "$WORK/o" && [ ! -e "$R3/learner-recordings/$A" ] \
+    && ok "recordings whose capture never started are withheld, and the output says where they are" \
+    || bad "recordings were filed although their capture never started: $(cat "$WORK/o")"
 
 echo "harness wiring"
 # ---- every exit path of the harness calls it -------------------------------
@@ -348,6 +457,12 @@ printf '%s\n' "$ra" | grep -q "trap 'rec .*exit 130' INT TERM" \
     && [ "$(printf '%s\n' "$ra" | grep -c 'rec "$$scenario_name"')" -eq 3 ] \
     && ok "benchmark-run-all copies after each run, on a failed standup or run, and on an interrupt (which exits)" \
     || bad "benchmark-run-all is missing a copy: $(printf '%s\n' "$ra" | grep -c 'rec "$$scenario_name"') per-scenario copies"
+
+# Continued lines joined, so a call split over two lines reads as one.
+tm="$(sed -n '/^verb_run()/,/^}/p' "$BENCH/two_model_pool.sh" | awk '{ if (sub(/\\$/, "")) printf "%s", $0; else print }')"
+printf '%s\n' "$tm" | grep -q 'learner_recordings.sh.* start "$WVA_NS" "$RUN_RECDIR"' \
+    && ok "a two-model arm starts a periodic copy of the recordings" \
+    || bad "a two-model arm takes no periodic copy"
 
 # ---- the two-model arm copies on its cleanup, once ------------------------
 reset_calls

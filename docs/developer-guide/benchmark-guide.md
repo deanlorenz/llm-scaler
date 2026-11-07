@@ -198,7 +198,12 @@ Results are saved automatically in a timestamped directory at the repo root:
 
 The learner recordings are copied out of the controller during the run, at
 its end and at teardown, because they are deleted with the controller's Pod.
-The run says `learner recordings: NONE held` when there were none to copy. See
+The run says `learner recordings: NONE held` when there were none to copy.
+The copies that teardown, `benchmark-restart-controller` and
+`benchmark-run-all` take are not filed with a run's results. They stay in
+`/tmp/wva_learner_recordings-<namespace>-<run id>` (`BENCHMARK_CAPTURE_DIR`
+sets the directory), with `/<scenario>` added for `benchmark-run-all`, and
+each command prints where. See
 [Learner Recordings](testing.md#learner-recordings).
 
 **3. Tear down when done:**

@@ -295,8 +295,14 @@ bash hack/benchmark/learner_recordings.sh snapshot "$NS" ./learner-recordings
   running, it takes one itself. Either way the copy stops itself an hour after
   `BENCHMARK_WAIT_TIMEOUT`.
 - `make benchmark-restart-controller` copies before it scales the controller
-  down, `make benchmark-run-all` after each scenario, and the two-model arms
-  when each arm exits.
+  down, and `make benchmark-run-all` after each scenario. The two-model arms
+  copy every 300 s while each arm runs and once more when it exits, into the
+  arm's own results directory as `learner-recordings/`.
+- Copies that are not filed with a run's results stay where they were taken:
+  `$(BENCHMARK_CAPTURE_DIR)/wva_learner_recordings-<namespace>-<run id>`
+  (`/tmp` by default), with `/<scenario>` added for `benchmark-run-all`. A
+  teardown that finishes an interrupted run's copy writes into that run's
+  directory. Each command prints the directory it wrote to.
 - Each directory has a `collection.tsv`: one row per Pod per copy, with the
   time, the Pod, its phase, what happened and what is held for it.
 - A copy never replaces a larger one. A Pod that is not Running is skipped

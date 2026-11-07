@@ -26,7 +26,8 @@ With --pods it prints one line per controller Pod instead, tab-separated:
 its name, its phase, the learner recording directory the manager was given
 (LEARNER_RECORDING_DIR or --learner-recording-dir), and the container that can
 read it (the `recordings` sidecar of the recorder patch). An absent field is
-`-`. hack/benchmark/learner_recordings.sh reads it.
+`-`. hack/benchmark/learner_recordings.sh reads it. A list with no controller
+Pod prints nothing and exits 0; only a list it cannot read exits 1.
 
 Usage
 -----
@@ -153,11 +154,12 @@ def main():
         print(f"controller_pods.py: not a Pod list: {e}", file=sys.stderr)
         return 1
     if rows_mode:
-        rows = pod_rows(pods, deployment)
-        if not rows:
-            print(f"controller_pods.py: no Pod of Deployment {deployment}", file=sys.stderr)
+        # No controller Pod is an answer, not a failure: exit 0 with no rows,
+        # so a caller can tell it from a list it could not read (exit 1).
+        if not isinstance(pods, dict):
+            print("controller_pods.py: not a Pod list", file=sys.stderr)
             return 1
-        for r in rows:
+        for r in pod_rows(pods, deployment):
             print("\t".join(r))
         return 0
     selector = log_selector(pods, deployment)

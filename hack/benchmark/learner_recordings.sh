@@ -35,11 +35,14 @@
 #   - a copy never shrinks the stored one. Each file is copied to a temporary
 #     name and replaces the stored copy only when it is larger; a recording is
 #     append-only, so a smaller copy is a truncated stream, not new data.
+#     The compare and the rename hold a per-Pod flock, so two copies running
+#     at once cannot interleave them.
 #   - `kubectl exec` needs a Running Pod. A Pod in any other phase is skipped
 #     and its last copy kept, which is why `start` snapshots during the run
 #     and not only at the end.
 #   - every exec is bounded (RECORDINGS_COPY_TIMEOUT, default 300 s, through
-#     `timeout` when it is installed); every list carries --request-timeout
+#     `timeout --foreground` when it is installed, so a stop's group signal
+#     reaches the copy in flight); every list carries --request-timeout
 #     (RECORDINGS_REQUEST_TIMEOUT, default 30s).
 #   - no recordings is said, never implied: an empty result is not a pass.
 #
@@ -104,11 +107,49 @@ _held() {
 }
 
 # _bounded <cmd...> -- run a command for at most COPY_TIMEOUT seconds.
+#
+# --foreground keeps the command in the caller's process group. Without it,
+# timeout puts its child in a group of its own, so the group signal a stop
+# sends missed the copy in flight: the stop reported success, dropped the
+# ownership record, and the exec ran on for up to COPY_TIMEOUT seconds.
 _bounded() {
-    if command -v timeout >/dev/null 2>&1; then
+    if timeout --foreground 1 true >/dev/null 2>&1; then
+        timeout --foreground "$COPY_TIMEOUT" "$@"
+    elif command -v timeout >/dev/null 2>&1; then
         timeout "$COPY_TIMEOUT" "$@"
     else
         "$@"
+    fi
+}
+
+# _locked <lockfile> <cmd...> -- run a command holding an exclusive lock, so
+# two copies of one Pod (the background one and a stop or teardown) cannot
+# each compare sizes and then rename in the other order, which shrank a copy.
+# flock, because the kernel drops the lock when its holder dies; where it is
+# missing the command runs unlocked.
+_locked() {
+    local lock="$1"; shift
+    if command -v flock >/dev/null 2>&1; then
+        ( flock 9 && "$@" ) 9>"$lock"
+    else
+        "$@"
+    fi
+}
+
+# _install <new-file> <stored-file> -- replace the stored copy only when the
+# new one is larger. Prints grown, kept or same. Run under _locked.
+_install() {
+    local new old
+    new="$(_size "$1")"; old=0
+    [ -f "$2" ] && old="$(_size "$2")"
+    if [ "${new:-0}" -gt "${old:-0}" ]; then
+        # Same filesystem, so the rename is atomic: a reader sees the old
+        # copy or the new one, never half of either.
+        mv -f "$1" "$2" && echo grown
+    elif [ "${new:-0}" -lt "${old:-0}" ]; then
+        echo kept
+    else
+        echo same
     fi
 }
 
@@ -152,17 +193,11 @@ _copy_pod() {
     for f in "$tmp/x"/* "$tmp/x"/.[!.]*; do
         [ -f "$f" ] || continue
         base="$(basename "$f")"
-        new="$(_size "$f")"; old=0
-        [ -f "$dir/$pod/$base" ] && old="$(_size "$dir/$pod/$base")"
-        if [ "${new:-0}" -gt "${old:-0}" ]; then
-            # Same filesystem, so the rename is atomic: a reader sees the old
-            # copy or the new one, never half of either.
-            mv -f "$f" "$dir/$pod/$base" && replaced=$((replaced + 1))
-        elif [ "${new:-0}" -lt "${old:-0}" ]; then
-            kept=$((kept + 1))
-        else
-            same=$((same + 1))
-        fi
+        case "$(_locked "$dir/.$pod.lock" _install "$f" "$dir/$pod/$base")" in
+            grown) replaced=$((replaced + 1)) ;;
+            kept) kept=$((kept + 1)) ;;
+            *) same=$((same + 1)) ;;
+        esac
     done
     rm -rf "$tmp"
     COPY_OUTCOME="copied"
@@ -184,8 +219,16 @@ snapshot_once() {
         reasons="could not list the controller Pods in $ns: $(head -1 "$dir/.list.stderr" 2>/dev/null)"
         _record "$dir" "-" "-" "list-failed" 0 0 "$(head -1 "$dir/.list.stderr" 2>/dev/null | tr '\t' ' ')"
     else
-        rows="$(printf '%s' "$list" | python3 "$CONTROLLER_PODS" --pods 2>/dev/null)" || rows=""
-        if [ -z "$rows" ]; then
+        # The helper exits 0 with no rows for a list with no controller Pod,
+        # and non-zero when it could not read the list at all (bad JSON, no
+        # python3). The second is not "no controller", so it is named.
+        rows="$(printf '%s' "$list" | python3 "$CONTROLLER_PODS" --pods 2>"$dir/.list.stderr")"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            reasons="could not read the controller Pod list (controller_pods.py exit $rc: $(head -1 "$dir/.list.stderr" 2>/dev/null))"
+            _record "$dir" "-" "-" "list-unreadable" 0 0 "$(head -1 "$dir/.list.stderr" 2>/dev/null | tr '\t' ' ')"
+            rows=""
+        elif [ -z "$rows" ]; then
             reasons="no controller Pod in namespace $ns"
             _record "$dir" "-" "-" "no-controller-pod" 0 0 "-"
         fi
@@ -262,7 +305,9 @@ case "$CMD" in
     [ -n "$CAPTURE_CTX" ] && ctxargs=(--context "$CAPTURE_CTX")
     set -m
     (
-      # The trap exits: a loop that ignored TERM outlived the stop that sent it.
+      # TERM's default action would end the loop too; the trap only makes it
+      # end with 0. It must exit: a loop that ignored TERM would outlive the
+      # stop that sent it.
       trap 'exit 0' TERM INT HUP
       deadline=$(( $(date +%s) + MAX_SECONDS ))
       while [ ! -f "$OUT.stop" ]; do
@@ -292,9 +337,18 @@ case "$CMD" in
     rc=0
     if capture_owned "$OUT"; then
         capture_check_owner "$OUT" "$NS" "$CAPTURE_CTX"
+        # capture_check_owner treats an unnamed context as "not stated". Here
+        # it matters: the final copy below would read whatever KUBECONFIG says,
+        # which may be another cluster than the one the run copied from.
+        owner_ctx="$(sed -n 's/.* context=\([^ ]*\) .*/\1/p' "$OUT.owner" 2>/dev/null)"
+        if [ -z "$CAPTURE_CTX" ] && [ -n "$owner_ctx" ] && [ "$owner_ctx" != "<inherited" ]; then
+            echo "warning: the copy into $DIR was started with --context $owner_ctx, and this stop names none;" >&2
+            echo "         the final copy reads the cluster KUBECONFIG names" >&2
+        fi
         touch "$OUT.stop"
         # A capture that will not die is reported, and the final snapshot is
-        # still taken: never shrinking makes a concurrent copy harmless.
+        # still taken: the per-Pod lock and the larger-only rule make a copy
+        # that runs beside it harmless.
         capture_stop "$OUT" "$OUT.pid" || rc=1
         rm -f "$OUT.stop"
         [ "$rc" -eq 0 ] && capture_finish "$OUT"
