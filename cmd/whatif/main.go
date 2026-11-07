@@ -9,14 +9,12 @@
 //	whatif generate        -in run.capture.jsonl.gz -o run.jsonl
 //	whatif replicas-to-slo --recording FILE [--cycle N|last] [--model M] [--decode N]
 //	                       [--headroom H | --rate R] [--tpot-percentile P [--assume-tpot-ratio R]]
-//	                       [--assume-a D]
 //	                       [--ttft-percentile P] [--prefill N] [--prefill-variant V] [--assume-vp TOKENS]
-//	                       [--assume-router-hop D] [-o json]
+//	                       [--assume-a D] [--assume-prompt-cv CV] [--arrival-cv2 C] [--assume-router-hop D] [-o json]
 //	whatif slo-to-rate     --recording FILE [--cycle N|last] [--model M] [--decode N]
 //	                       --tpot 4ms[@p90] [--assume-tpot-ratio R] [--headroom H]
-//	                       [--assume-a D]
 //	                       [--ttft 200ms[@p95]] [--prefill N] [--prefill-variant V] [--assume-vp TOKENS]
-//	                       [--assume-router-hop D] [-o json]
+//	                       [--assume-a D] [--assume-prompt-cv CV] [--arrival-cv2 C] [--assume-router-hop D] [-o json]
 //	whatif replicas-to-slo|slo-to-rate --prometheus URL --namespace NS (--kube-state-metrics | --role-of ROLE=SELECTOR ...)
 //	                       --from T0 --to T1 [capture's flags] [the question's flags]
 //

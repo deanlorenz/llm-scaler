@@ -1,5 +1,5 @@
 decode          refused: NoLine (no ITL line learned by cycle 193)
-shape           IL 36661 OL 16 (measured, cycles 171-190)
+shape           IL 36661 OL 16 (measured, cycles 171-190), output spread D 1.000 (measured)
 prefill knee    3.46 r/s    [2.94 .. 3.98]   N_p 1 x V_P 134775 x (1 - 0.05 margin) / (f 1 x 36966 tokens); UNVALIDATED; a ASSUMED
 TTFT p95        14634.2 ms  [7423.9 .. Saturated] end to end; UNVALIDATED; a ASSUMED
                 (bands: V_P +-15%, a sweep, not a confidence interval)

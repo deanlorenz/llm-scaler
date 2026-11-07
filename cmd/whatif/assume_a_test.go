@@ -102,7 +102,7 @@ func TestAssumeA_UsageAndAsking(t *testing.T) {
 		{"a of 0", append(slices.Clone(q2), "--assume-a", "0s"), "--assume-a"},
 		{"a below 0", append(slices.Clone(q2), "--assume-a", "-1ms"), "--assume-a"},
 		{"a with no unit", append(slices.Clone(q2), "--assume-a", "11"), "assume-a"},
-		{"no target", append(slices.Clone(q1), "--assume-a", "11ms"), "needs a --ttft target"},
+		{"no target", append(slices.Clone(q1), "--assume-a", "11ms"), "need a --ttft target"},
 		{"question 2 at the knee", append(slices.Clone(q2), "--assume-a", "11ms", "--headroom", "1"), "at the knee no TTFT exists"},
 	} {
 		t.Run(c.name, func(t *testing.T) {

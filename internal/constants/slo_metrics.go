@@ -240,7 +240,7 @@ var SLOTTFTFlags = []string{
 	"AboveFlowControlOnset", "HeldByDecodeAdmission", "DecodeOnsetUnchecked",
 	"BelowFittedBand", "KVBoundSlots",
 	"AssumedPoissonArrivals", "PromptSpreadClamped", "FlowControlMismatch",
-	"PromptSpreadAbovePeak", "ImbalanceNotSustained",
+	"PromptSpreadAbovePeak", "ImbalanceNotSustained", "OutputSpreadUnread",
 }
 
 // SLOSources is every SLO source value, in the order they are published.

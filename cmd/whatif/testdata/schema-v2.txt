@@ -58,6 +58,7 @@ roles[].inputs.shape.cycles number
 roles[].inputs.shape.fromCycle number
 roles[].inputs.shape.inputSource string
 roles[].inputs.shape.inputTokens number
+roles[].inputs.shape.outputDispersion number
 roles[].inputs.shape.outputSource string
 roles[].inputs.shape.outputTokens number
 roles[].inputs.shape.prefixHitRate number
@@ -256,6 +257,7 @@ roles[].results.ttft.refused.flags[] string
 roles[].results.ttft.refused.reason string
 roles[].role string
 roles[].ttft object
+roles[].ttft.arrivalCV2 number
 roles[].ttft.arrivalsSource string
 roles[].ttft.assumed array
 roles[].ttft.assumed[] string
@@ -278,6 +280,7 @@ roles[].ttft.imbalance number
 roles[].ttft.imbalanceSource string
 roles[].ttft.percentile number
 roles[].ttft.promptCV number
+roles[].ttft.promptCVRead number
 roles[].ttft.promptCVSource string
 roles[].ttft.promptFromCycle number
 roles[].ttft.promptSource string

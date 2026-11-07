@@ -206,16 +206,18 @@ func (t termPlan) at(itl, oldStep float64) (engine, hop float64) {
 	return max(engine, 0), max(t.hop, 0)
 }
 
-// termFlags are the flags that say what a decode term rests on: a refusal keeps
-// them.
-var termFlags = []Flag{DecodeTermOmitted, DecodeStepSlopeAssumed, RouterHopAssumed, DecodeTermFloored, DecodeTermPrefixHits}
+// floorFlags are the flags that say what a floor rests on, the decode term and
+// the prompt's own prefill: a refusal keeps them. Nothing that sets only a wait
+// is here: a floor has none.
+var floorFlags = []Flag{DecodeTermOmitted, DecodeStepSlopeAssumed, RouterHopAssumed, DecodeTermFloored, DecodeTermPrefixHits,
+	AssumedVP, VPLowerBound, VPAboveSlopeBound, VPScaledToPrompt, VPShapeMoved, AssumedPromptSpread}
 
-// belowFloor is the refusal of a target at or under the floor, with the term's
+// belowFloor is the refusal of a target at or under the floor, with the floor's
 // flags. Where the term's assumed parts alone put the floor over the target, it
 // says so (Unanswerable.AssumedTermDecides): that is no reading of the fleet.
 func (pl ttftPlan) belowFloor(fl TTFTFleet, t TTFTTarget, detail string, raised []Flag) Unanswerable {
 	u := refuse(TargetBelowFloor, detail)
-	for _, f := range termFlags {
+	for _, f := range floorFlags {
 		if slices.Contains(pl.flags, f) || slices.Contains(raised, f) {
 			u.Flags = append(u.Flags, f)
 		}

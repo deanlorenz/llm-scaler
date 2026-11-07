@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "question": "replicas-to-slo",
   "source": {
     "recording": "../../internal/engines/analyzers/learnreplay/testdata/goldens/ttft-saturated/recording.jsonl.gz",
@@ -39,12 +39,13 @@
           "hi": 0.8
         },
         "capacityTokens": 1162240,
-        "kvPerRequest": 36668.926799267305,
+        "kvPerRequest": 36669.04952173474,
         "shape": {
-          "inputTokens": 36661.158295345034,
+          "inputTokens": 36661.28083853533,
           "inputSource": "measured",
-          "outputTokens": 15.53700784454022,
+          "outputTokens": 15.53711604889602,
           "outputSource": "measured",
+          "outputDispersion": 1.0000161130249339,
           "prefixHitRate": 0,
           "fromCycle": 171,
           "toCycle": 190,

@@ -127,6 +127,8 @@ func flagsLine(b *strings.Builder, pv pricedVariant, results ...whatif.Result) {
 			parts = append(parts, fmt.Sprintf("%s (from %s)", f, pv.state.BorrowedFrom))
 		case whatif.TierUnstable:
 			parts = append(parts, fmt.Sprintf("%s (%d/%d resamples changed tier)", f, pv.lines.TierChanges(), pv.lines.Drawn))
+		case whatif.OutputSpreadUnread:
+			parts = append(parts, fmt.Sprintf("%s (%s)", f, outputSpreadUnreadWords))
 		case whatif.LineNearGate:
 			parts = append(parts, fmt.Sprintf("%s (%d/%d)", f, pv.lines.TierChanges(), pv.lines.Drawn))
 		default:

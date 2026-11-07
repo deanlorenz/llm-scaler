@@ -1170,6 +1170,9 @@ asserted.
     could exceed it. `DecodeStepSlopeAssumed` is not on the list: it holds a
     measured figure and takes the slope that asks for more;
   - `AssumedPoissonArrivals`, until the staircase's bursty bucket passes;
+  - `OutputSpreadUnread`: no output-length histogram on a priced decode line,
+    so `KVreq` is `ILeff + O/2`, over-promising by 7-44% on a real spread, and
+    S2 does not act on a rate that rests on it;
   - `AboveFlowControlOnset` on the rate answer, where the per-pod model is
     not proven conservative;
   - `FlowControlInferredOff`, so S2 waits for a declared
@@ -1462,7 +1465,7 @@ priced cycle, so the flow-control paths still ran on synthetic fleets only. The 
   (64 slots, 4 replicas), and under 1 ms without one. The review measured 107 ms,
   on a fleet not reproduced here, so budget from the larger. It is paid once
   per variant per cycle today; S2's search multiplies it by `N_p + cap`.
-- **The no-act list** gains `PromptSpreadAbovePeak`
+- **The no-act list** gains `PromptSpreadAbovePeak` and `OutputSpreadUnread`
   ([decision 5](#5-s2-as-a-sketch)).
 
 ##### As built (Q1)

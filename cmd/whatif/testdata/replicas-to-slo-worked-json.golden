@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "question": "replicas-to-slo",
   "source": {
     "recording": "../../internal/engines/analyzers/learnreplay/testdata/goldens/ols-sweep/recording.jsonl.gz",
@@ -103,6 +103,7 @@
             },
             "flags": [
               "AssumedShape",
+              "OutputSpreadUnread",
               "ExtrapolatedFill"
             ]
           }
@@ -126,7 +127,8 @@
               "tier": "ols"
             },
             "flags": [
-              "AssumedShape"
+              "AssumedShape",
+              "OutputSpreadUnread"
             ]
           }
         },
@@ -147,7 +149,8 @@
               "tier": "ols"
             },
             "flags": [
-              "AssumedShape"
+              "AssumedShape",
+              "OutputSpreadUnread"
             ]
           }
         },
@@ -169,7 +172,8 @@
             },
             "flags": [
               "AssumedTPOTRatio",
-              "AssumedShape"
+              "AssumedShape",
+              "OutputSpreadUnread"
             ]
           }
         }
