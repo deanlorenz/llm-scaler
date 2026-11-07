@@ -121,10 +121,25 @@ func gpuPausePod(namespace, generateName, app, resourceName string, gpus int) *c
 // labelled key=product. The scheduler counts their GPUs as used until they
 // are gone, so a fill taken while any remains leaves GPUs that come free
 // later.
-func TerminatingPodsOnNodes(ctx context.Context, k8sClient *kubernetes.Clientset, key, product string) (int, error) {
+//
+// A pod in a namespace being deleted counts too, before it has a deletion
+// timestamp of its own: an earlier spec's cleanup deletes its namespace and
+// returns at once, and the namespace controller reaches the pods only some
+// seconds later. Counted by their own timestamp alone, they read as running
+// in that gap, the fill leaves their GPUs to them, and they come free after.
+func TerminatingPodsOnNodes(ctx context.Context, k8sClient kubernetes.Interface, key, product string) (int, error) {
 	nodes, err := k8sClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: key + "=" + product})
 	if err != nil {
 		return 0, fmt.Errorf("list %s nodes: %w", product, err)
+	}
+	namespaces, err := k8sClient.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return 0, fmt.Errorf("list namespaces: %w", err)
+	}
+	leaving := map[string]bool{}
+	for i := range namespaces.Items {
+		ns := &namespaces.Items[i]
+		leaving[ns.Name] = ns.DeletionTimestamp != nil || ns.Status.Phase == corev1.NamespaceTerminating
 	}
 	n := 0
 	for i := range nodes.Items {
@@ -133,7 +148,7 @@ func TerminatingPodsOnNodes(ctx context.Context, k8sClient *kubernetes.Clientset
 			return 0, fmt.Errorf("list pods on %s: %w", nodes.Items[i].Name, err)
 		}
 		for j := range pods.Items {
-			if pods.Items[j].DeletionTimestamp != nil {
+			if pods.Items[j].DeletionTimestamp != nil || leaving[pods.Items[j].Namespace] {
 				n++
 			}
 		}
