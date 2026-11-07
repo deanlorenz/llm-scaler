@@ -2,8 +2,20 @@ package whatif
 
 import (
 	"math"
+	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
+)
+
+const (
+	// MinLineRows is the fewest rows a line check reads a verdict from, as
+	// the decode validation reads a figure from. Fewer is "not run".
+	MinLineRows = 5
+	// MaxLineRowAge is the oldest row a line check compares, the age the
+	// tracker's window drops a reading at (itl.DefaultObservationMaxAge): a
+	// line says nothing of a load it can no longer have read.
+	MaxLineRowAge = itl.DefaultObservationMaxAge
 )
 
 // The line check (docs/proposals/slo-capacity-planner.md, "Uncertainty"): does
@@ -16,6 +28,8 @@ import (
 // LineRow is one replica's reading at one cycle.
 type LineRow struct {
 	Cycle int
+	// At is the clock of the row's cycle.
+	At time.Time
 	// K is the fill paired with the rate's minute, and KVPerRequest the KV a
 	// request held at that cycle: the row's own shape, not the shape asked.
 	K, KVPerRequest float64
@@ -26,12 +40,17 @@ type LineRow struct {
 	// minute's rate and a minute's fill then span two levels, and say nothing
 	// of the line.
 	Ramp bool
+	// AboveBand says the row's fill is above the band: no answer reads the
+	// line there.
+	AboveBand bool
 }
 
 // LineCheck is the line against a window of rows.
 type LineCheck struct {
-	// Compared is the rows priced, and OnRamp the rows left out as on a ramp.
-	Compared, OnRamp int
+	// Compared is the rows priced. OnRamp, AboveBand and TooOld are the rows
+	// left out, each for one of those reasons, in that order of asking: TooOld
+	// first, so a row is counted once.
+	Compared, OnRamp, AboveBand, TooOld int
 	// Past is how many of the Compared read more than
 	// itl.DefaultGPSMismatchThresholdPct off the line.
 	Past int
@@ -44,28 +63,45 @@ type LineCheck struct {
 	// FillLo and FillHi the fills.
 	FromCycle, ToCycle int
 	FillLo, FillHi     float64
+	// RowKVPerRequest is the median KV a request held on the Compared rows,
+	// and OtherShape says it is more than shape.DefaultChangeTolerance from
+	// the KV the answer priced: the verdict is then of that traffic, not the
+	// traffic asked about.
+	RowKVPerRequest float64
+	OtherShape      bool
 }
+
+// Ran reports a check with enough rows to say anything.
+func (c LineCheck) Ran() bool { return c.Compared >= MinLineRows }
 
 // Mismatch reports a line the rows do not support: the median error past
-// itl.DefaultGPSMismatchThresholdPct. A check with no row compared is no
-// mismatch, and no pass: Compared says which it is.
+// itl.DefaultGPSMismatchThresholdPct. A check that did not run is no mismatch,
+// and no pass: Ran says which it is.
 func (c LineCheck) Mismatch() bool {
-	return c.MedianErrorPct > itl.DefaultGPSMismatchThresholdPct
+	return c.Ran() && c.MedianErrorPct > itl.DefaultGPSMismatchThresholdPct
 }
 
-// CheckLine prices each row off a ramp on d's line, capacity and cap, at the
-// row's own fill and KV per request, against the rate it reported. A row the
+// CheckLine prices each row off a ramp, in the band and no older than
+// MaxLineRowAge at now, on d's line, capacity and cap, at the row's own fill
+// and KV per request, against the rate it reported. A row the
 // GPS check would not compare, one below itl.DefaultGPSMinKForVerification or
 // with no rate or KV per request, is left out and counted nowhere: it is the
 // absence of evidence either way.
-func CheckLine(d Decode, rows []LineRow) LineCheck {
+func CheckLine(d Decode, rows []LineRow, now time.Time) LineCheck {
 	var c LineCheck
-	var absolute, signed []float64
+	var absolute, signed, kv []float64
 	for _, r := range rows {
 		if !(r.K >= itl.DefaultGPSMinKForVerification) || !(r.TokenRate > 0) || !Finite(r.TokenRate) || !(r.KVPerRequest > 0) {
 			continue
 		}
-		if r.Ramp {
+		switch {
+		case now.Sub(r.At) > MaxLineRowAge:
+			c.TooOld++
+			continue
+		case r.AboveBand:
+			c.AboveBand++
+			continue
+		case r.Ramp:
 			c.OnRamp++
 			continue
 		}
@@ -74,7 +110,7 @@ func CheckLine(d Decode, rows []LineRow) LineCheck {
 			continue
 		}
 		e := 100 * (predicted - r.TokenRate) / r.TokenRate
-		absolute, signed = append(absolute, math.Abs(e)), append(signed, e)
+		absolute, signed, kv = append(absolute, math.Abs(e)), append(signed, e), append(kv, r.KVPerRequest)
 		if math.Abs(e) > itl.DefaultGPSMismatchThresholdPct {
 			c.Past++
 		}
@@ -87,7 +123,8 @@ func CheckLine(d Decode, rows []LineRow) LineCheck {
 		c.FillLo, c.FillHi = min(c.FillLo, r.K), max(c.FillHi, r.K)
 	}
 	if c.Compared > 0 {
-		c.MedianErrorPct, c.SignedErrorPct = median(absolute), median(signed)
+		c.MedianErrorPct, c.SignedErrorPct, c.RowKVPerRequest = median(absolute), median(signed), median(kv)
+		c.OtherShape = math.Abs(c.RowKVPerRequest-d.KVPerRequest) > shape.DefaultChangeTolerance*d.KVPerRequest
 	}
 	return c
 }

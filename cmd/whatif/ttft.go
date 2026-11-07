@@ -864,6 +864,11 @@ func (pf *pricedFleet) atOperatingPoint(q ttftQuestion, query whatif.ReplicasQue
 		if o.prefillBinds {
 			query.Rate, query.Headroom = o.rate, 0
 			o.rateSpan = &whatif.Sensitivity{Lo: headroom * pk.Sensitivity.Lo, Hi: headroom * pk.Sensitivity.Hi}
+			if decoded {
+				// The rate is the headroom on the lower knee: past the decode
+				// knee a better V_P raises nothing.
+				o.rateSpan.Hi = min(o.rateSpan.Hi, headroom*dk.Value)
+			}
 		}
 	}
 	pf.in.Rate = &o.rate

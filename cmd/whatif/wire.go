@@ -218,25 +218,32 @@ type wireLine struct {
 	Check *wireLineCheck `json:"check,omitempty"`
 }
 
-// wireLineCheck is whatif.LineCheck on the wire. Status is ok, mismatch, or
-// not-run where no row could be compared.
+// wireLineCheck is whatif.LineCheck on the wire. Status is ok,
+// ok-at-another-shape, mismatch, or not-run under whatif.MinLineRows rows.
+// OtherShape says the same of a mismatch.
 type wireLineCheck struct {
 	Status         string  `json:"status"`
 	Compared       int     `json:"compared"`
 	OnRamp         int     `json:"onRamp"`
+	AboveBand      int     `json:"aboveBand"`
+	TooOld         int     `json:"tooOld"`
 	Past           int     `json:"past"`
 	MedianErrorPct float64 `json:"medianErrorPct"`
 	WorstErrorPct  float64 `json:"worstErrorPct"`
 	SignedErrorPct float64 `json:"signedErrorPct"`
 	FromCycle      int     `json:"fromCycle"`
 	ToCycle        int     `json:"toCycle"`
+	// RowKVPerRequest is the median KV a request held on the rows compared.
+	RowKVPerRequest float64 `json:"rowKVPerRequest"`
+	OtherShape      bool    `json:"otherShape"`
 }
 
 // The statuses of a line check.
 const (
-	checkOK       = "ok"
-	checkMismatch = "mismatch"
-	checkNotRun   = "not-run"
+	checkOK         = "ok"
+	checkOtherShape = "ok-at-another-shape"
+	checkMismatch   = "mismatch"
+	checkNotRun     = "not-run"
 )
 
 // wireCheck is the line check on the wire, nil with no line.
@@ -245,13 +252,16 @@ func wireCheck(pv pricedVariant) *wireLineCheck {
 		return nil
 	}
 	c := pv.check
-	w := &wireLineCheck{Status: checkOK, Compared: c.Compared, OnRamp: c.OnRamp, Past: c.Past, MedianErrorPct: c.MedianErrorPct,
-		WorstErrorPct: c.WorstErrorPct, SignedErrorPct: c.SignedErrorPct, FromCycle: c.FromCycle, ToCycle: c.ToCycle}
+	w := &wireLineCheck{Status: checkOK, Compared: c.Compared, OnRamp: c.OnRamp, AboveBand: c.AboveBand, TooOld: c.TooOld, Past: c.Past,
+		MedianErrorPct: c.MedianErrorPct, WorstErrorPct: c.WorstErrorPct, SignedErrorPct: c.SignedErrorPct, FromCycle: c.FromCycle,
+		ToCycle: c.ToCycle, RowKVPerRequest: c.RowKVPerRequest, OtherShape: c.OtherShape}
 	switch {
-	case c.Compared == 0:
+	case !c.Ran():
 		w.Status = checkNotRun
 	case c.Mismatch():
 		w.Status = checkMismatch
+	case c.OtherShape:
+		w.Status = checkOtherShape
 	}
 	return w
 }

@@ -91,11 +91,7 @@ func sloToRate(ctx context.Context, args []string, out, warn io.Writer) error {
 		if asksTPOT {
 			res := withRatioRefusal(whatif.RateForTPOT(pv.decode, query), ratioRefused)
 			res = pv.band(res, func(d whatif.Decode) whatif.Result { return whatif.RateForTPOT(d, query) })
-			if ans, ok := res.(whatif.Answer); ok {
-				ans.Flags = append(ans.Flags, ratioFlags...)
-				res = ans
-			}
-			a.result = pv.qualify(res)
+			a.result = pv.qualify(onRatio(res, target.Ratio, ratioFlags))
 			results = append(results, a.result)
 		}
 		if ttft != nil {

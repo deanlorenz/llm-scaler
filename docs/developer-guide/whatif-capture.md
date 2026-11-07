@@ -111,8 +111,12 @@ predicts against the rate the recording's decode rows reported, off a ramp.
 - **`MISMATCH`** is a median error above 15%, flagged `LineMismatch` on every
   answer on that line. Do not size from it: the line or the shape is wrong, and
   the check cannot say which.
-- **`not run`** is no row to compare: a recording that only ran on a ramp, or
-  below fill 0.30. It is not a pass.
+- **`at another shape`** is a verdict on rows whose KV a request is more than 20%
+  from the one priced. Both figures print. It says nothing of the traffic you asked
+  about.
+- **`not run`** is under 5 rows to compare. The row counts where the others went:
+  on a ramp, above the band, or older than 30 minutes. Rows below fill 0.30 are not
+  counted. It is not a pass.
 
 [The rules and the figures on the goldens](../proposals/slo-capacity-planner.md#the-line-check-as-built).
 

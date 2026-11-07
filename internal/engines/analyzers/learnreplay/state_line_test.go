@@ -82,13 +82,20 @@ func TestLineSamples_AMovedShapeIsARamp(t *testing.T) {
 	assert.Equal(t, 1, offRamp(noteCycles(lineT0, moved...).rows("v")))
 }
 
-// A row above the band is no row of the check, and below the GPS floor neither.
+// A row below the GPS floor is no row of the check. One above the band is kept
+// to be counted, marked, and holds no window against rows in the band.
 func TestLineSamples_RowsOutsideTheCheck(t *testing.T) {
-	for _, k := range []float64{0.29, 0.81} {
-		l := noteCycles(lineT0, repeated(12, lineInput(k, 1000))...)
-		assert.Empty(t, l.rows("v"), "fill %g", k)
+	assert.Empty(t, noteCycles(lineT0, repeated(12, lineInput(0.29, 1000))...).rows("v"))
+
+	above := noteCycles(lineT0, repeated(12, lineInput(0.81, 1000))...).rows("v")
+	require.Len(t, above, 12)
+	for _, r := range above {
+		assert.True(t, r.AboveBand)
 	}
-	assert.Len(t, noteCycles(lineT0, repeated(12, lineInput(0.79, 1000))...).rows("v"), 12)
+	in := noteCycles(lineT0, repeated(12, lineInput(0.79, 1000))...).rows("v")
+	require.Len(t, in, 12)
+	assert.False(t, in[0].AboveBand)
+	assert.Equal(t, lineT0.Add(11*15*time.Second), in[len(in)-1].At, "a row carries its clock")
 }
 
 // A prefill pod makes one token a request: it says nothing of a decode line.

@@ -54,6 +54,10 @@ const (
 	// TPOTQuantileUnbounded is a TPOT quantile that falls in a histogram's
 	// +Inf bucket, which has no upper edge to read.
 	TPOTQuantileUnbounded Reason = "TPOTQuantileUnbounded"
+	// TPOTBucketTooWide is a per-request TPOT percentile the engine's histogram
+	// was asked for, the router's holding no observation, with a q bucket past
+	// MaxEngineBucketWidth: the bucket's edge, whatever q was asked.
+	TPOTBucketTooWide Reason = "TPOTBucketTooWide"
 	// TargetBelowFloor is a target below what any number of replicas
 	// reaches: the line's ITL at the bottom of the band, times R_q, already
 	// meets or exceeds it.
@@ -87,7 +91,7 @@ const (
 // Reasons lists every Reason this package can return, in a fixed order.
 func Reasons() []Reason {
 	r := []Reason{NoLine, PinnedDefaultB, NoCapacity, NoBatchCap, NoTraffic, TokenGapPercentile,
-		NoTPOTHistogram, TPOTQuantileUnbounded, TargetBelowFloor, Saturated,
+		NoTPOTHistogram, TPOTQuantileUnbounded, TPOTBucketTooWide, TargetBelowFloor, Saturated,
 		NoDecodeReplicas, MalformedHistogram, TooManySlots, InvalidInput}
 	return append(r, ttftReasons()...)
 }
@@ -131,6 +135,9 @@ const (
 	// quarter of the window's mean: the ratio is set by the bucket grid, not
 	// by the traffic.
 	CoarseTPOTBucket Flag = "CoarseTPOTBucket"
+	// EngineTPOTHistogram is an R_q read from the engine's TPOT histogram in
+	// place of the router's, or a refusal of it.
+	EngineTPOTHistogram Flag = "EngineTPOTHistogram"
 	// BelowFittedBand is a fill below the band the line was fitted over: the
 	// TPOT is read at the band's bottom, the higher, safer reading, so the
 	// answer's TPOT is a floor rather than the line's extrapolation.

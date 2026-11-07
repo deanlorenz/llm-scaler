@@ -303,7 +303,7 @@ var identityCases = []struct {
 	{"replicas-to-slo at cycle 90", []string{"replicas-to-slo", "--cycle", "90"}, 0},
 	{"replicas-to-slo, an assumed ratio", []string{"replicas-to-slo", "--tpot-percentile", "90", "--assume-tpot-ratio", "1.3",
 		"--assume-output-tokens", "500"}, 0},
-	{"replicas-to-slo, the engine's TPOT histogram", []string{"replicas-to-slo", "--tpot-percentile", "90"}, 0},
+	{"replicas-to-slo refused: the engine's bucket is too wide", []string{"replicas-to-slo", "--tpot-percentile", "90"}, 3},
 	{"slo-to-rate", []string{"slo-to-rate", "--tpot", "15ms"}, 0},
 	{"slo-to-rate, a headroom", []string{"slo-to-rate", "--tpot", "12ms", "--headroom", "0.6", "--seed", "7"}, 0},
 	{"slo-to-rate refused: below the floor", []string{"slo-to-rate", "--tpot", "5ms"}, 3},

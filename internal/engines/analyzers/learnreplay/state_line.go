@@ -23,29 +23,30 @@ type fillAt struct {
 	at       time.Time
 }
 
-// lineSamples keeps each variant's rows off a ramp and on one, each of its
-// latest cycles that have one, and each pod's fill over the steady gate's
-// time. The two are kept apart so that a recording that ends on a ramp is
-// checked on the rows it last held still at, as a shape is taken from the
-// traffic last served (shapeOf).
+// lineSamples keeps each variant's rows off a ramp, on one and above the band,
+// each of its latest cycles that have one, and each pod's fill over the steady
+// gate's time. They are kept apart so that a recording that ends on a ramp, or
+// above the band, is checked on the rows it last held still at in it, as a
+// shape is taken from the traffic last served (shapeOf).
 type lineSamples struct {
-	steady, ramps map[string][]whatif.LineRow
-	fills         map[string][]fillAt
+	steady, ramps, above map[string][]whatif.LineRow
+	fills                map[string][]fillAt
 }
 
 func newLineSamples() *lineSamples {
-	return &lineSamples{steady: map[string][]whatif.LineRow{}, ramps: map[string][]whatif.LineRow{}, fills: map[string][]fillAt{}}
+	return &lineSamples{steady: map[string][]whatif.LineRow{}, ramps: map[string][]whatif.LineRow{},
+		above: map[string][]whatif.LineRow{}, fills: map[string][]fillAt{}}
 }
 
-// rows is the variant's rows, off a ramp and on one.
+// rows is the variant's rows, of all three.
 func (l *lineSamples) rows(variant string) []whatif.LineRow {
-	return slices.Concat(l.steady[variant], l.ramps[variant])
+	return slices.Concat(l.steady[variant], l.ramps[variant], l.above[variant])
 }
 
 // note reads one cycle: every row of a variant that is not prefill, with a
-// token rate, at a fill the check compares and the line prices. A row above
-// the band is neither: no answer reads the line there (whatif.ReachableFill,
-// and the band's clamp), and it would hold the window against rows in it.
+// token rate, at a fill the check compares. A row above the band is kept to
+// be counted, and is not compared: no answer reads the line there
+// (whatif.ReachableFill, and the band's clamp).
 func (l *lineSamples) note(in domain.AnalyzerInput, cycle int, at time.Time) {
 	policy, _ := in.Config.(*config.ScalingPolicy)
 	steady := policy.ITLSteadiness()
@@ -61,15 +62,18 @@ func (l *lineSamples) note(in domain.AnalyzerInput, cycle int, at time.Time) {
 			s = s.WithOutputDispersion(shape.Dispersion(rm.AvgOutputTokens, rm.AvgOutputTokensSquared))
 		}
 		ramp := l.onRamp(rm.PodName, fillAt{k: k, kvReq: s.KVreq, at: at}, steady)
-		if !rm.GenerationTokenRateKnown || !(rm.GenerationTokenRate > 0) || !(k >= itl.DefaultGPSMinKForVerification) || k > top {
+		if !rm.GenerationTokenRateKnown || !(rm.GenerationTokenRate > 0) || !(k >= itl.DefaultGPSMinKForVerification) {
 			continue
 		}
 		kept := l.steady
-		if ramp {
+		switch {
+		case k > top:
+			kept = l.above
+		case ramp:
 			kept = l.ramps
 		}
-		kept[rm.VariantName] = keepCycles(append(kept[rm.VariantName], whatif.LineRow{Cycle: cycle, K: k, KVPerRequest: s.KVreq,
-			TokenRate: rm.GenerationTokenRate, Ramp: ramp}), shapeCycles)
+		kept[rm.VariantName] = keepCycles(append(kept[rm.VariantName], whatif.LineRow{Cycle: cycle, At: at, K: k, KVPerRequest: s.KVreq,
+			TokenRate: rm.GenerationTokenRate, Ramp: ramp, AboveBand: k > top}), shapeCycles)
 	}
 }
 
@@ -78,8 +82,8 @@ func (l *lineSamples) note(in domain.AnalyzerInput, cycle int, at time.Time) {
 // within it (itl's replicaTrace.still, the rule the line's readings pass), or
 // the KV a request holds moved past shape.DefaultChangeTolerance. The last is
 // the row's lengths, means over minutes, lagging a change of shape while the
-// fill is already at the new one: 2.4 times the sequences that ran, on the
-// last cycles of ols-sweep.
+// fill is already at the new one: without it ols-sweep reads 39.8% high, its
+// worst row 237%, and with it 3.0%.
 func (l *lineSamples) onRamp(pod string, now fillAt, s itl.Steadiness) bool {
 	cutoff := now.at.Add(-s.For)
 	trace := l.fills[pod]

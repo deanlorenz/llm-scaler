@@ -138,11 +138,7 @@ func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) erro
 		}
 		if slo.PercentileTPOT != nil {
 			p := pv.band(slo.PercentileTPOT, on(func(s whatif.DecodeSLO) whatif.Result { return s.PercentileTPOT }))
-			if a, ok := p.(whatif.Answer); ok {
-				a.Flags = append(a.Flags, ratioFlags...)
-				p = a
-			}
-			slo.PercentileTPOT = pv.qualify(p)
+			slo.PercentileTPOT = pv.qualify(onRatio(p, ratio, ratioFlags))
 			if at != nil {
 				slo.PercentileTPOT = at.onDecode(slo.PercentileTPOT)
 			}

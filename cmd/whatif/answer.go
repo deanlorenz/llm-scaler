@@ -372,7 +372,7 @@ func (f *answerFlags) decodeVariants(st *learnreplay.State) ([]pricedVariant, er
 			pv.flags = append(pv.flags, whatif.HeldLine)
 		}
 		if !vs.Line.IsZero() {
-			pv.check = whatif.CheckLine(pv.decode, vs.LineRows)
+			pv.check = whatif.CheckLine(pv.decode, vs.LineRows, st.At)
 			if pv.check.Mismatch() {
 				pv.flags = append(pv.flags, lineMismatch)
 			}
@@ -467,16 +467,14 @@ func (f *answerFlags) headroomFor(p *config.ScalingPolicy) float64 {
 	return config.DefaultScaleUpThreshold
 }
 
-// engineTPOTHistogram is an R_q read from the engine's TPOT histogram in place
-// of the router's. The CLI alone raises it.
-const engineTPOTHistogram whatif.Flag = "EngineTPOTHistogram"
-
 // tpotRatioFor resolves R_q for a percentile q: --assume-tpot-ratio, else
 // learned from the router's TPOT windows, which are what the client sees; else,
 // flagged, from the engine's, where the router's hold no observation or read
-// coarse and the engine's do not. Any other refusal of the router's stands: it
-// says that data is wrong. A refusal comes back as the Result the percentile
-// answers with.
+// coarse and the engine's do not. With no router to fall back to, a refusal of
+// the engine's is the answer (whatif.EngineTPOTRatio): it says more than that
+// no histogram exists. Any other refusal of the router's stands: it says that
+// data is wrong. A refusal comes back as the Result the percentile answers
+// with.
 func (f *answerFlags) tpotRatioFor(st *learnreplay.State, q float64) (whatif.TPOTRatio, []whatif.Flag, *whatif.Unanswerable) {
 	if f.set["assume-tpot-ratio"] {
 		return whatif.TPOTRatio{Value: f.tpotRatio, Assumed: true}, nil, nil
@@ -490,12 +488,16 @@ func (f *answerFlags) tpotRatioFor(st *learnreplay.State, q float64) (whatif.TPO
 	if !coarse && (refused == nil || refused.Reason != whatif.NoTPOTHistogram) || len(st.EngineTPOTWindows) == 0 {
 		return r, flags, refused
 	}
-	er, eflags, erefused := whatif.TPOTRatioFromWindows(st.EngineTPOTWindows, q)
-	if erefused != nil || coarse && slices.Contains(eflags, whatif.CoarseTPOTBucket) {
+	er, eflags, erefused := whatif.EngineTPOTRatio(st.EngineTPOTWindows, q)
+	switch {
+	case erefused == nil && !(coarse && slices.Contains(eflags, whatif.CoarseTPOTBucket)):
+		f.engineTPOT = true
+		return er, eflags, nil
+	case coarse, erefused == nil, erefused.Reason == whatif.NoTPOTHistogram:
 		return r, flags, refused
 	}
-	f.engineTPOT = true
-	return er, append(eflags, engineTPOTHistogram), nil
+	erefused.Detail += "; pass --assume-tpot-ratio for a flagged answer"
+	return whatif.TPOTRatio{}, nil, erefused
 }
 
 // tpotWindowCount is how many windows R_q was read from.
@@ -521,6 +523,32 @@ func withRatioRefusal(r whatif.Result, refused *whatif.Unanswerable) whatif.Resu
 		return r
 	}
 	return *refused
+}
+
+// onRatio is r, a figure or a refusal priced on R_q, saying where R_q came
+// from. A refusal is priced on it too: a floor at an assumed ratio is the
+// assumption's. InvalidInput is the question's, and rests on nothing.
+func onRatio(r whatif.Result, ratio whatif.TPOTRatio, flags []whatif.Flag) whatif.Result {
+	switch v := r.(type) {
+	case whatif.Answer:
+		v.Flags = append(v.Flags, flags...)
+		return v
+	case whatif.Unanswerable:
+		if v.Reason == whatif.InvalidInput {
+			return v
+		}
+		add := slices.Clone(flags)
+		if ratio.Assumed {
+			add = append(add, whatif.AssumedTPOTRatio)
+		}
+		for _, fl := range add {
+			if !slices.Contains(v.Flags, fl) {
+				v.Flags = append(slices.Clone(v.Flags), fl)
+			}
+		}
+		return v
+	}
+	return r
 }
 
 // ratioNote says where R_q came from, for the human output.

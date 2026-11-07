@@ -29,9 +29,11 @@ import (
 // pass mark: goldens scale out, and were not run to validate this.
 //
 // GREEN IS NOT A PASS. The test holds the figures to the frozen table in
-// testdata/decode-validation.txt, so a change to the line, the arithmetic or
-// the replay that moves one says so. A row past its bound is a finding, frozen
-// as OUT. A check with no data is SKIPPED with a reason, never passed.
+// cmd/whatif/testdata/decode-validation.golden, so a change to the line, the
+// arithmetic or the replay that moves one says so, and the goldens gate, which
+// reads that directory, makes the PR name it. A row past its bound is a
+// finding, frozen as OUT. A check with no data is SKIPPED with a reason, never
+// passed.
 // LEARNREPLAY_WRITE_DECODE_VALIDATION=1 rewrites the table.
 
 const (
@@ -39,14 +41,14 @@ const (
 	decodeLearnShare = 0.6
 	// decodeMinRows is the fewest held-out rows a check reports on: the
 	// page's "at least 5" for the knee, taken for all three.
-	decodeMinRows = 5
+	decodeMinRows = whatif.MinLineRows
 	// The page's bounds on the median signed error, in percent.
 	decodeTPOTBound = 10.0
 	decodeOwnBound  = 15.0
 	decodeKneeBound = 15.0
 )
 
-const decodeTable = "testdata/decode-validation.txt"
+const decodeTable = "../../../../cmd/whatif/testdata/decode-validation.golden"
 
 // decodeCycle is one of a model's cycles, and the clock it ran at.
 type decodeCycle struct {
@@ -82,16 +84,21 @@ func signedErrors(name string, errs []float64, bound float64, none string) strin
 	if len(errs) < decodeMinRows {
 		return fmt.Sprintf("%s SKIPPED %d rows, want %d", name, len(errs), decodeMinRows)
 	}
-	slices.Sort(errs)
-	med := errs[len(errs)/2]
-	if len(errs)%2 == 0 {
-		med = (errs[len(errs)/2-1] + errs[len(errs)/2]) / 2
-	}
+	med := medianOf(errs)
 	verdict := "in"
 	if math.Abs(med) > bound {
 		verdict = "OUT"
 	}
 	return fmt.Sprintf("%s %+.1f%% over %d rows, %s of +-%g%%", name, med, len(errs), verdict, bound)
+}
+
+// medianOf is the median of xs, which it sorts.
+func medianOf(xs []float64) float64 {
+	slices.Sort(xs)
+	if n := len(xs); n%2 == 1 {
+		return xs[n/2]
+	}
+	return (xs[len(xs)/2-1] + xs[len(xs)/2]) / 2
 }
 
 // rowsOf is the rows of variant that served, of the cycles from start on, and
@@ -138,21 +145,34 @@ func rowShape(rm domain.ReplicaMetrics) shape.Shape {
 }
 
 // meanTPOTCheck is the frozen line at each row's fill, clamped to the band as
-// an answer is, against the ITL the engine read there.
+// an answer is, against the ITL the engine read there. The bound reads that
+// figure. The line beside it prints the unclamped one too, and how many rows
+// the clamp moved each way: a figure in bound only through the clamp says so.
 func meanTPOTCheck(vs VariantState, band whatif.FillBand, rows []domain.ReplicaMetrics) string {
 	if vs.Line.IsZero() {
 		return "tpot SKIPPED no line at the freeze"
 	}
-	var errs []float64
+	var errs, raw []float64
+	below, above := 0, 0
 	for _, rm := range rows {
 		k := rm.KvUsageForITL()
 		if rm.ITLState() != domain.ITLFinite || !(k > 0) {
 			continue
 		}
+		switch {
+		case k < band.Lo:
+			below++
+		case k > band.Hi:
+			above++
+		}
 		predicted := vs.Line.ITLAt(min(max(k, band.Lo), band.Hi))
 		errs = append(errs, 100*(predicted-rm.AvgITL)/rm.AvgITL)
+		raw = append(raw, 100*(vs.Line.ITLAt(k)-rm.AvgITL)/rm.AvgITL)
 	}
 	line := signedErrors("tpot", errs, decodeTPOTBound, "no held-out row reads an ITL")
+	if len(raw) >= decodeMinRows {
+		line += fmt.Sprintf(", unclamped %+.1f%%, %d below the band, %d above it", medianOf(raw), below, above)
+	}
 	if plannerRefuses(vs, band) {
 		line += ", on a line the planner refuses"
 	}
@@ -358,9 +378,9 @@ func TestDecodeValidation_ChecksAreOutOfSampleArithmetic(t *testing.T) {
 	vs := VariantState{}
 	vs.Line.A, vs.Line.B = 0.02, 0.01
 	band := whatif.DefaultBand()
-	assert.Equal(t, "tpot +0.0% over 6 rows, in of +-10%", meanTPOTCheck(vs, band, rows))
+	assert.Equal(t, "tpot +0.0% over 6 rows, in of +-10%, unclamped +0.0%, 0 below the band, 0 above it", meanTPOTCheck(vs, band, rows))
 	vs.Line.B = 0.014
-	assert.Equal(t, "tpot +20.0% over 6 rows, OUT of +-10%", meanTPOTCheck(vs, band, rows))
+	assert.Equal(t, "tpot +20.0% over 6 rows, OUT of +-10%, unclamped +20.0%, 0 below the band, 0 above it", meanTPOTCheck(vs, band, rows))
 	assert.Equal(t, "tpot SKIPPED no line at the freeze", meanTPOTCheck(VariantState{}, band, rows))
 
 	// The policy default band: a row above it is priced at its top, as an
@@ -370,7 +390,9 @@ func TestDecodeValidation_ChecksAreOutOfSampleArithmetic(t *testing.T) {
 	vs.Line.B = 0.01
 	_, top := (*config.ScalingPolicy)(nil).ITLBand()
 	want := 100 * (vs.Line.ITLAt(top) - high.AvgITL) / high.AvgITL
-	assert.Equal(t, fmt.Sprintf("tpot %+.1f%% over 6 rows, OUT of +-10%%", want), meanTPOTCheck(vs, band, slices.Repeat([]domain.ReplicaMetrics{high}, 6)))
+	raw := 100 * (vs.Line.ITLAt(0.99) - high.AvgITL) / high.AvgITL
+	assert.Equal(t, fmt.Sprintf("tpot %+.1f%% over 6 rows, OUT of +-10%%, unclamped %+.1f%%, 0 below the band, 6 above it", want, raw),
+		meanTPOTCheck(vs, band, slices.Repeat([]domain.ReplicaMetrics{high}, 6)))
 }
 
 // The prefill check is a + I/V_P against the service time, and no golden gives

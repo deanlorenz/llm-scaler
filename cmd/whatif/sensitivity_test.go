@@ -92,6 +92,24 @@ func TestSensitivity_ThePrefillKneeBindsTheRate(t *testing.T) {
 	assert.Equal(t, v.Value, v.Sensitivity.Hi, "a refused corner gives no figure")
 }
 
+// Where V_P sits just under the decode knee, V_P up does not lift the rate past
+// the decode knee's: the operating rate is the headroom on the lower knee.
+func TestSensitivity_TheSpanStopsAtTheDecodeKnee(t *testing.T) {
+	q := append(workedTTFT("replicas-to-slo", "--ttft-percentile", "90"), "--assume-vp", "12500", "--headroom", "0.85", "-o", "json")
+	out, _ := runCmd(t, q...)
+	w := decodeOutput(t, out)
+	require.Equal(t, "decode", w.Roles[0].Role)
+	decode := w.Roles[0]
+	assert.Equal(t, sourcePrefillKnee, decode.Inputs.RateSource)
+	dk := decode.Results.Knee.Answer.Value
+	require.Less(t, 12.5, dk)
+	s := decode.Results.OperatingRate.Answer.Sensitivity
+	require.NotNil(t, s)
+	assert.Less(t, dk, 12.5*1.15, "uncapped it would pass the decode knee")
+	assert.InDelta(t, 0.85*dk, s.Hi, 1e-9)
+	assert.InDelta(t, 0.85*12.5*0.85, s.Lo, 1e-9)
+}
+
 // A decode knee that binds leaves the operating rate without a span: it does
 // not rest on V_P.
 func TestSensitivity_ADecodeKneeRateHasNone(t *testing.T) {

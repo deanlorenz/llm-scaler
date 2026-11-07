@@ -16,7 +16,7 @@ import (
 // of the one the rows were made from.
 func checkedState(factor float64) *learnreplay.State {
 	line := itl.Model{A: 0.01, B: 0.005}
-	fills := []float64{0.4, 0.5, 0.6}
+	fills := []float64{0.4, 0.45, 0.5, 0.55, 0.6}
 	rows := make([]whatif.LineRow, len(fills))
 	for c, k := range fills {
 		rows[c] = whatif.LineRow{Cycle: c + 1, K: k, KVPerRequest: 1500,
@@ -44,7 +44,7 @@ func TestLineCheck_ABadLineIsPrintedAndFlagged(t *testing.T) {
 
 	good := pv(t, checkedState(1))
 	assert.False(t, good.check.Mismatch())
-	assert.Equal(t, 3, good.check.Compared)
+	assert.Equal(t, 5, good.check.Compared)
 	assert.NotContains(t, good.flags, lineMismatch)
 	assert.Contains(t, good.checkText(), "ok: median 0.0%")
 
@@ -54,7 +54,7 @@ func TestLineCheck_ABadLineIsPrintedAndFlagged(t *testing.T) {
 	assert.Contains(t, bad.flags, lineMismatch)
 	text := bad.checkText()
 	assert.Contains(t, text, "MISMATCH: median 100.0% off the rate read, line high")
-	assert.Contains(t, text, "3 of 3 rows past 15%")
+	assert.Contains(t, text, "5 of 5 rows past 15%")
 	a, ok := bad.qualify(whatif.Answer{Value: 1}).(whatif.Answer)
 	require.True(t, ok)
 	assert.Contains(t, a.Flags, lineMismatch, "every answer read from the line carries it")
@@ -67,9 +67,15 @@ func TestLineCheck_NothingComparedIsNotAPass(t *testing.T) {
 	f := answerFlags{set: map[string]bool{}}
 	vs, err := f.decodeVariants(st)
 	require.NoError(t, err)
-	assert.Contains(t, vs[0].checkText(), "not run:")
+	assert.Contains(t, vs[0].checkText(), "not run: 0 rows to compare at fill 0.30 to 0.80, want 5")
 	assert.Equal(t, checkNotRun, wireCheck(vs[0]).Status)
 	assert.NotContains(t, vs[0].flags, lineMismatch)
+
+	// Rows above the band are named: "no row" read wrongly of a fleet there.
+	st.Variants[0].LineRows = []whatif.LineRow{{Cycle: 1, K: 0.9, KVPerRequest: 1500, TokenRate: 100, AboveBand: true}}
+	vs, err = f.decodeVariants(st)
+	require.NoError(t, err)
+	assert.Contains(t, vs[0].checkText(), "(0 on a ramp, 1 above the band, 0 older than 30m0s)")
 
 	st.Variants[0].Line = itl.Model{}
 	vs, err = f.decodeVariants(st)
@@ -80,7 +86,8 @@ func TestLineCheck_NothingComparedIsNotAPass(t *testing.T) {
 
 // The check reads the recording's rows at their own shape, not the shape asked:
 // --assume-input-tokens prices another traffic, and the line still has to
-// describe the traffic it was read from.
+// describe the traffic it was read from. So the figures do not move, and the
+// verdict says when they are of another shape than the one priced.
 func TestLineCheck_ReadsTheRowsNotTheShapeAsked(t *testing.T) {
 	recorded := []string{"replicas-to-slo", "--recording", olsSweep, "--model", "model-02", "-o", "json"}
 	check := func(args ...string) wireLineCheck {
@@ -95,7 +102,39 @@ func TestLineCheck_ReadsTheRowsNotTheShapeAsked(t *testing.T) {
 	asked := check(workedShape...)
 	plain := check()
 	require.Positive(t, plain.Compared, "ols-sweep has rows to compare: an empty check here reads as a pass")
-	assert.Equal(t, plain, asked)
+	assert.Equal(t, plain.MedianErrorPct, asked.MedianErrorPct)
+	assert.Equal(t, plain.Compared, asked.Compared)
+	assert.False(t, plain.OtherShape, "%+v", plain)
+	assert.True(t, asked.OtherShape, "%+v", asked)
+	assert.Equal(t, checkOtherShape, asked.Status)
+}
+
+// An ok on rows of another shape never reads as a plain ok.
+func TestLineCheck_AnotherShapeIsSaid(t *testing.T) {
+	st := checkedState(1)
+	for i := range st.Variants[0].LineRows {
+		st.Variants[0].LineRows[i].KVPerRequest = 3000
+		k := st.Variants[0].LineRows[i].K
+		st.Variants[0].LineRows[i].TokenRate = whatif.ReplicaTokenRate(st.Variants[0].Line, k, 100000, 3000, 1000)
+	}
+	f := answerFlags{set: map[string]bool{}}
+	vs, err := f.decodeVariants(st)
+	require.NoError(t, err)
+	assert.False(t, vs[0].check.Mismatch())
+	assert.Contains(t, vs[0].checkText(), "ok at another shape (rows at KV 3000 a request, priced at 1500): median 0.0%")
+	assert.Equal(t, checkOtherShape, wireCheck(vs[0]).Status)
+}
+
+// A row older than the tracker's window is no row of the check.
+func TestLineCheck_AnOldRowIsNotCompared(t *testing.T) {
+	st := checkedState(1)
+	st.At = st.Variants[0].LineRows[0].At.Add(whatif.MaxLineRowAge + 1)
+	f := answerFlags{set: map[string]bool{}}
+	vs, err := f.decodeVariants(st)
+	require.NoError(t, err)
+	assert.Equal(t, 5, vs[0].check.TooOld)
+	assert.Contains(t, vs[0].checkText(), "not run: 0 rows")
+	assert.Contains(t, vs[0].checkText(), "5 older than 30m0s")
 }
 
 const goldenDir = "../../internal/engines/analyzers/learnreplay/testdata/goldens/"
@@ -112,7 +151,7 @@ func TestLineCheck_OnTheGoldens(t *testing.T) {
 		compared int
 		median   float64
 	}{
-		{"ols-sweep", checkOK, 20, 2.9},
+		{"ols-sweep", checkOK, 10, 3.0},
 		{"ttft-three-pods", checkOK, 57, 2.0},
 		{"ttft-staircase-b-off", checkMismatch, 36, 49.8},
 		{"ttft-staircase-c-on", checkMismatch, 26, 61.7},

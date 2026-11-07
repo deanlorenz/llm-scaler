@@ -188,18 +188,28 @@ when the router histogram is empty or its resolution is flagged. The SLO
 analyzer's percentile ([SLO tiers](slo-tiers.md#later-a-tpot-percentile)) uses
 the same rule and the same library.
 
-As built in the CLI, with two choices the page left open. The engine's replaces a
+As built in the CLI, with three choices the page left open. The engine's replaces a
 coarse router only when it is not coarse itself: swapping one grid for another
 buys nothing, and the router's is what the client sees. A router histogram that is
 malformed, or whose quantile is unbounded, stands as its refusal: that is a reading,
-not an absence. The collector reads the engine's buckets and not its `_sum`, so the
-window's mean is each row's `AvgITL`, weighted by its requests, the assumption the
-mean TPOT target already makes. It answers `throughput-sweep-restart`, which has no
-router latency, and which refused `NoTPOTHistogram` before: mean TPOT 3.21 ms, p90
-21.79 ms. That `R_q` of 6.78 is the engine's grid and not the traffic, and is flagged
-`CoarseTPOTBucket` too: vLLM's edges are 10, then 25 ms, around a 3 ms mean. The flag
-is `EngineTPOTHistogram`, the row says `R_q 6.78 from 314 engine TPOT windows, not the
-router's`, and `inputs.tpot.ratioSource` is `engine histogram`.
+not an absence. And with no router to fall back to, the engine's histogram answers
+only where it resolves the percentile. A `q` bucket wider than the window's mean
+(`whatif.MaxEngineBucketWidth`, four times the coarse flag's width, read at `R_q`'s
+own rank) refuses `TPOTBucketTooWide`, and names `--assume-tpot-ratio`. That line is
+stated, not measured. It is what `throughput-sweep-restart` needs: it has no router
+latency, and vLLM's edges of 10, then 25 ms sit around a 3 ms mean, so p90, p99 and
+p99.9 each read the same bucket's edge, 21.79 ms, and the window's bucket is 6.78
+times the mean. No figure there answers the percentile asked. A refusal of the
+engine's own, such as `TPOTQuantileUnbounded`, is returned as it is.
+
+The collector reads the engine's buckets and not its `_sum`, so the window's mean is
+each row's `AvgITL`, weighted by its requests, the assumption the mean TPOT target
+already makes. An answer from it is flagged `EngineTPOTHistogram`, and the row says
+`R_q 1.2 from 40 engine TPOT windows, not the router's`, with
+`inputs.tpot.ratioSource` `engine histogram`. No committed recording answers from it:
+the case is held on built windows (`TestEngineTPOT_TheOrder`). A refusal priced on
+`R_q` keeps what it rests on, `EngineTPOTHistogram`, `CoarseTPOTBucket` or
+`AssumedTPOTRatio`, as an answer does.
 
 **Without a histogram**, a percentile TPOT is refused (`NoTPOTHistogram`).
 `--assume-tpot-ratio R` gives a flagged answer instead. Recommendation: refuse
@@ -451,44 +461,49 @@ is [the staircase](slo-capacity-planner-ttft.md#ground-truth-and-the-staircase).
 
 `TestDecodeValidation_OnTheGoldens` does this over all 23 goldens, the four staircase
 ones among them, and freezes every line in
-`internal/engines/analyzers/learnreplay/testdata/decode-validation.txt`: 56 lines,
-one per variant. Green means the figures did not move. It is not a pass, and a row
-past its bound stays in the file as `OUT`.
+`cmd/whatif/testdata/decode-validation.golden`: 56 lines, one per variant. Green means
+the figures did not move. It is not a pass, and a row past its bound stays in the file
+as `OUT`. The file sits there so that the goldens gate makes a PR name it.
 
 Nothing here tunes the model. The error is predicted minus measured, so above 0 the
-line reads slow on TPOT and fast on the knee. A figure needs at least 5 rows.
+line reads slow on TPOT and fast on the knee. A figure needs at least 5 rows. The bound
+reads the figure clamped to the band, as an answer is; the unclamped one is the line
+read at the row's own fill, and "rows clamped" is how many the clamp moved.
 
-| Golden | Tier at the freeze | Mean TPOT error | Rows | Against ±10% | Knee error | Windows | Against ±15% |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `ols-sweep` | pinned-B | -3.9% | 87 | in | SKIPPED: 2 windows | | |
-| `ols-sweep-slo` | held | +10.5% | 33 | **out** | +70.1% | 7 | **out** |
-| `ols-sweep-slo-restart` | pinned-B | -8.5% | 54 | in | +103.4% | 5 | **out** |
-| `throughput-sweep` | held | +3.5% | 33 | in | SKIPPED: none off a ramp | | |
-| `throughput-sweep-restart` | held | +50.1% | 124 | **out** | SKIPPED: none off a ramp | | |
-| `mu-paths` variant-01 (synthetic) | ols | -4.9% | 76 | in | +76.3% | 38 | **out** |
-| `mu-paths` variant-02 (synthetic) | ols | -9.8% | 95 | in | +44.4% | 19 | **out** |
-| `mu-paths` variant-03 (synthetic) | ols | 0.0% | 57 | in | SKIPPED: none off a ramp | | |
+| Golden | Tier at the freeze | Mean TPOT error | Unclamped | Rows | Rows clamped | Against ±10% | Knee error | Windows | Against ±15% |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `ols-sweep` | pinned-B | -3.9% | -3.9% | 87 | 7 | in | SKIPPED: 2 windows | | |
+| `ols-sweep-slo` | held | +10.5% | +10.5% | 33 | 0 | **out** | +70.1% | 7 | **out** |
+| `ols-sweep-slo-restart` | pinned-B | -8.5% | -8.5% | 54 | 3 | in | +103.4% | 5 | **out** |
+| `throughput-sweep` | held | +3.5% | +3.5% | 33 | 0 | in | SKIPPED: none off a ramp | | |
+| `throughput-sweep-restart` | held | +50.1% | +32.6% | 124 | 124, all below | **out** | SKIPPED: none off a ramp | | |
+| `mu-paths` variant-01 (synthetic) | ols | -4.9% | 0.0% | 76 | 38 above | in | +76.3% | 38 | **out** |
+| `mu-paths` variant-02 (synthetic) | ols | -9.8% | 0.0% | 95 | 57 above | in | +44.4% | 19 | **out** |
+| `mu-paths` variant-03 (synthetic) | ols | 0.0% | 0.0% | 57 | 0 | in | SKIPPED: none off a ramp | | |
 
 **On a line the planner refuses** (`PinnedDefaultB`, or held from one), so the tool
 prints no TPOT there and this is the line's error, not an answer's. All knees here
 are SKIPPED for that refusal, or for no saturated window off a ramp:
 
-| Golden | Mean TPOT error | Rows | Against ±10% |
-| --- | --- | --- | --- |
-| `e1` model-02, model-03 | -3.0%, +59.9% | 327, 244 | in, **out** |
-| `e1-tuned` model-02, model-03 | -4.8%, +75.2% | 311, 244 | in, **out** |
-| `mu-paths` variant-04 (synthetic) | 0.0% | 57 | in |
-| `start-seed-restart-2` variant-01, variant-02 | +101.5%, +99.4% | 65, 23 | **out**, **out** |
-| `ttft-staircase-b-off` | -18.7% | 210 | **out** |
-| `ttft-staircase-b-on` | -22.1% | 227 | **out** |
-| `ttft-staircase-c-on` | -21.2% | 227 | **out** |
-| `ttft-three-pods` | -9.4% | 237 | in |
+| Golden | Mean TPOT error | Unclamped | Rows | Rows clamped | Against ±10% |
+| --- | --- | --- | --- | --- | --- |
+| `e1` model-02, model-03 | -3.0%, +59.9% | -39.1%, -36.6% | 327, 244 | 295, 226 | in, **out** |
+| `e1-tuned` model-02, model-03 | -4.8%, +75.2% | -39.1%, -33.8% | 311, 244 | 276, 223 | in, **out** |
+| `mu-paths` variant-04 (synthetic) | 0.0% | 0.0% | 57 | 19 | in |
+| `start-seed-restart-2` variant-01, variant-02 | +101.5%, +99.4% | +150.4%, +147.7% | 65, 23 | 65, 18 | **out**, **out** |
+| `ttft-staircase-b-off` | -18.7% | -18.7% | 210 | 23 | **out** |
+| `ttft-staircase-b-on` | -22.1% | -22.1% | 227 | 1 | **out** |
+| `ttft-staircase-c-on` | -21.2% | -21.2% | 227 | 2 | **out** |
+| `ttft-three-pods` | -9.4% | -9.4% | 237 | 44 | in |
 
 **What it says.**
 
 - **Mean TPOT:** 6 of the 8 lines the planner answers on are in bound, of 19 lines
   with a figure. Three of the six are synthetic, so the real runs are 3 of 5.
-  `throughput-sweep-restart` reads 50.1% slow; no cause was read from this run.
+  `throughput-sweep-restart` reads 50.1% slow, and that is a low-fill tail: all 124
+  held-out rows sit below the band, so each is priced at the band's bottom. Unclamped it
+  still reads 32.6% slow. `e1` model-02 and `e1-tuned` model-02 are in bound only through
+  the clamp: unclamped both read 39.1% fast. Those are lines the planner refuses.
 - **Decode knee:** four figures, all out, from 44.4% to 103.4% high. Two are
   synthetic. The other two are `ols-sweep-slo` runs, recorded before `QueueMin`, so
   a "saturated window" is a queue seen at one instant, not a busy minute. Treat the
@@ -721,6 +736,7 @@ Every answer is an `Answer{Value, Band, Basis, Flags}` or an
 | `TokenGapPercentile` | A percentile over token gaps (ITL); per-request TPOT percentiles are supported |
 | `NoTPOTHistogram` | A per-request TPOT percentile with no router or engine TPOT histogram holding an observation (the router's needs `usage` on responses) and no `--assume-tpot-ratio` |
 | `TPOTQuantileUnbounded` | The TPOT `q` quantile falls in the histogram's `+Inf` bucket |
+| `TPOTBucketTooWide` | A TPOT percentile the engine's histogram was asked for, the router's holding no observation, with a `q` bucket wider than the window's mean (`whatif.MaxEngineBucketWidth`): the bucket's edge, whatever `q` was asked. It names `--assume-tpot-ratio`, and keeps `EngineTPOTHistogram` and `CoarseTPOTBucket` |
 | `TargetBelowFloor` | The target is below what any number of replicas reaches |
 | `FlowControlUnknown` | Flow control on and the detector's thresholds unknown |
 | `AboveDecodeOnset` | A TTFT asked at or above the decode gate's onset with flow control on, where the gate is not work conserving and TTFT is not priced |
@@ -989,7 +1005,9 @@ on the ITL line alone would read narrower than the truth. So the prefill knee, e
 TTFT and each TTFT rate, the fleet row, and an operating rate the prefill knee sets
 print a span instead: the figure at `V_P` and `f` each 15% either way, in the corners
 (`whatif.SensitivityFleets`), `f` held between 1 and `N_p`. One pod has one `f`, so
-only `V_P` moves there. The rate of question 2 is held while `V_P` moves: an operator
+only `V_P` moves there. An operating rate's span stops at the headroom on the decode
+knee: past it a better `V_P` raises nothing. The rate of question 2 is held while
+`V_P` moves: an operator
 who believes the figure runs at that rate. So at a headroom of 0.85, where the prefill
 knee sets the rate, `V_P` 15% down is the knee, and the span prints `Saturated` on its
 worse side (`[2384.1 .. Saturated]`). That is the point of it: such an operating rate has
@@ -1028,28 +1046,35 @@ the line predicts against the `generation_tokens` rate each decode row reported,
 at the row's own fill and shape, not the shape asked (`whatif.CheckLine`). A
 median error above 15% prints `MISMATCH`, says which way the line reads, and
 flags every answer on that line `LineMismatch`. The answer still stands: it is a
-flag, not a refusal.
+flag, not a refusal. When the rows' KV a request is more than 20%
+(`shape.DefaultChangeTolerance`) from the KV priced, the verdict says `at another
+shape` and gives both, and the JSON's status is `ok-at-another-shape`, or `mismatch`
+with `otherShape`. That is not an ok for the traffic asked about.
 
 | What | Rule |
 | --- | --- |
-| The rows | The variant's serving rows, on the replay up to the cycle asked, at fill 0.30 (`itl.DefaultGPSMinKForVerification`) to the band's top, with a token rate. Above the band no answer reads the line |
+| The rows | The variant's serving rows, on the replay up to the cycle asked, at fill 0.30 (`itl.DefaultGPSMinKForVerification`) or above, with a token rate |
 | Off a ramp | The pod read for the steady gate's time (2 minutes), its fill within the gate's drift (0.10) and the KV a request holds within 20% (`shape.DefaultChangeTolerance`) over it. The last 20 cycles with such a row are compared, so a recording that ends on a ramp is checked where it last held still. Rows on a ramp are counted and left out |
+| Above the band | Counted and left out: no answer reads the line there |
+| Too old | A row older than 30 minutes at the cycle asked (`whatif.MaxLineRowAge`, the age the tracker's window drops a reading at) is counted and left out: a line says nothing of a load it can no longer have read |
 | The figure | The median of the rows' errors, so one noisy minute decides nothing; the worst and the count past 15% print beside it |
 | The price | Sequences capped at the batch cap, as every price is. `itl.GPSErrorPct` does not cap, and a replica at its cap would read as a mismatch |
-| Nothing compared | `not run`, with how many rows were on a ramp. It is not a pass, and raises no flag |
+| Too few | Under 5 rows (`whatif.MinLineRows`, the decode validation's floor) prints `not run`, and how many rows went where. It is not a pass, and raises no flag |
 
 **Measured on the goldens, at the last cycle.** Of the 23 lines the goldens price,
-`ols-sweep` (2.9%), `ols-sweep-slo` (8.3%), `ols-sweep-slo-restart` (0.9%),
-`throughput-sweep` (14.3%), `throughput-sweep-restart` (10.8%),
-`ttft-staircase-b-on` (8.0%) and `ttft-three-pods` (2.0%) pass. Ten are `not run`
-on `e1`, `e1-tuned`, or the `start-*` runs read only on a ramp or above the band.
+three pass: `ols-sweep` (3.0%), `ttft-staircase-b-on` (8.0%) and `ttft-three-pods`
+(2.0%). Three pass at another shape: `ols-sweep-slo` (8.3%, rows at KV 2992, priced at
+1300), `ols-sweep-slo-restart` (0.9%, 6492 and 5382) and `throughput-sweep` (14.3%, 2992
+and 1301). Eleven are `not run`: `e1` and `e1-tuned`, which rest on a ramp or above the
+band, the six `start-*` lines, on a ramp or above the band, and `throughput-sweep-restart`,
+whose 53 rows are all older than 30 minutes.
 Six mismatch: the four lines of `mu-paths`, a synthetic run, up to 974%, and
 `ttft-staircase-b-off` and `ttft-staircase-c-on`, 49.8% and 61.7% low. Those two
 are pinned-B lines on the default intercept, which the planner refuses
 (`PinnedDefaultB`), so no answer rests on them and the row prints beside the
 refusal. `TestLineCheck_OnTheGoldens` freezes four of these. A row whose lengths lag a change
-of shape reads as a false mismatch: before the KV rule, `ols-sweep` read 138% high
-on rows that priced 2.4 times the sequences that ran. The check says the line and the
+of shape reads as a false mismatch: without the KV rule `ols-sweep` reads 39.8% high,
+its worst row 237%, against 3.0% with it. The check says the line and the
 shape disagree with the tokens read. It cannot say which is wrong.
 
 ### JSON output
@@ -1166,7 +1191,7 @@ four results only `meanTPOT` is kept here):
 | `source` | The recording, the model, `firstCycle` (1), `lastCycle` (the cycle answered at) and `totalCycles` (the recording's), with their clocks. With `--prometheus`, `recording` is empty and `window` names the window: `prometheus` (the URL's scheme and host alone), `from`, `to`, `stepSeconds`, and `roles` (`kube-state-metrics` or `role-of`); absent in recording mode. Absent on an error object. |
 | `bands` | How the bands were drawn: block bootstrap, `blockCycles`, `resamples`, `seed`, the percentiles. Absent on an error object. |
 | `roles[]` | One per decode variant priced: `inputs` (what it was priced from) and `results`. |
-| `inputs.line.check` | The [line check](#the-line-check-as-built): `status` `ok`, `mismatch` or `not-run`, the rows `compared`, `onRamp` and `past` 15%, and the median, worst and signed errors in percent. |
+| `inputs.line.check` | The [line check](#the-line-check-as-built): `status` `ok`, `ok-at-another-shape`, `mismatch` or `not-run`, the rows `compared`, `onRamp`, `aboveBand`, `tooOld` and `past` 15%, the median, worst and signed errors in percent, the median `rowKVPerRequest` and `otherShape`. |
 | `inputs.line` | The ITL line (`a` in seconds per unit of fill, `b` in seconds), its `tier`, the `readings` it was fitted from, their `observedFill` range and `fromCycle`-`toCycle`, and of the bootstrap's `resamples` how many (`tierChanges`) landed at another tier. |
 | `inputs.shape` | Lengths in tokens, each with its source, `measured` (over `fromCycle`-`toCycle`) or `assumed`. |
 | `results` | `knee`, `operatingRate`, `meanTPOT`, `percentileTPOT` for question 2; `rate` for question 1. A question not asked has no key. |
@@ -1216,14 +1241,18 @@ roles[].inputs.line.a number
 roles[].inputs.line.b number
 roles[].inputs.line.borrowedFrom string
 roles[].inputs.line.check object
+roles[].inputs.line.check.aboveBand number
 roles[].inputs.line.check.compared number
 roles[].inputs.line.check.fromCycle number
 roles[].inputs.line.check.medianErrorPct number
 roles[].inputs.line.check.onRamp number
+roles[].inputs.line.check.otherShape boolean
 roles[].inputs.line.check.past number
+roles[].inputs.line.check.rowKVPerRequest number
 roles[].inputs.line.check.signedErrorPct number
 roles[].inputs.line.check.status string
 roles[].inputs.line.check.toCycle number
+roles[].inputs.line.check.tooOld number
 roles[].inputs.line.check.worstErrorPct number
 roles[].inputs.line.fromCycle number
 roles[].inputs.line.observedFill object

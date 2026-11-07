@@ -739,13 +739,14 @@ generator, the level windows and the evidence of each run live outside
 the repository; the windows are in the test.
 
 `decode_validation_test.go` learns on the first 60% of every golden's cycles,
-predicts the rest, and holds the figures to `testdata/decode-validation.txt`
+predicts the rest, and holds the figures to `cmd/whatif/testdata/decode-validation.golden`
 ([measured on the goldens](../proposals/slo-capacity-planner.md#measured-on-the-goldens)).
 Green says no figure moved: it is not a pass, and a row past its bound stays
 as `OUT`. A change that moves a figure rewrites the file with
 `LEARNREPLAY_WRITE_DECODE_VALIDATION=1 go test -run TestDecodeValidation_OnTheGoldens ./internal/engines/analyzers/learnreplay`,
-and says in its PR which lines moved. It is not a golden: the file is outside
-`testdata/goldens/`, and no `goldens:` line names it.
+and names it in the PR's `goldens:` section, which the gate enforces: a `.golden`
+in that directory is one, wherever its test lives. It lives in `cmd/whatif` for that
+reason, though `learnreplay` writes it.
 
 The four `ttft-staircase-*` goldens are four of the six phases of the what-if TTFT
 staircase, repeat 1

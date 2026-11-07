@@ -44,17 +44,22 @@ func (pv pricedVariant) checkText() string {
 		return ""
 	}
 	c := pv.check
-	if c.Compared == 0 {
-		return fmt.Sprintf("not run: no row off a ramp at fill %.2f or above with a token rate (%d on a ramp)",
-			itl.DefaultGPSMinKForVerification, c.OnRamp)
+	left := fmt.Sprintf("%d on a ramp, %d above the band, %d older than %s", c.OnRamp, c.AboveBand, c.TooOld, whatif.MaxLineRowAge)
+	if !c.Ran() {
+		return fmt.Sprintf("not run: %d rows to compare at fill %.2f to %.2f, want %d (%s)",
+			c.Compared, itl.DefaultGPSMinKForVerification, pv.decode.Band.Hi, whatif.MinLineRows, left)
 	}
 	verdict := "ok"
 	if c.Mismatch() {
 		verdict = "MISMATCH"
 	}
-	return fmt.Sprintf("%s: median %.1f%% off the rate read, line %s; %d of %d rows past %.0f%%, worst %.1f%%, fill %.2f-%.2f, cycles %d-%d, %d on a ramp left out",
+	if c.OtherShape {
+		verdict += fmt.Sprintf(" at another shape (rows at KV %s a request, priced at %s)",
+			num(round(c.RowKVPerRequest)), num(round(pv.decode.KVPerRequest)))
+	}
+	return fmt.Sprintf("%s: median %.1f%% off the rate read, line %s; %d of %d rows past %.0f%%, worst %.1f%%, fill %.2f-%.2f, cycles %d-%d; left out %s",
 		verdict, c.MedianErrorPct, directionText(c.SignedErrorPct), c.Past, c.Compared, itl.DefaultGPSMismatchThresholdPct,
-		c.WorstErrorPct, c.FillLo, c.FillHi, c.FromCycle, c.ToCycle, c.OnRamp)
+		c.WorstErrorPct, c.FillLo, c.FillHi, c.FromCycle, c.ToCycle, left)
 }
 
 // directionText says which way a line reads, from its signed median error.
