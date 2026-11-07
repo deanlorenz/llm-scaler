@@ -9,7 +9,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 )
 
 // The line in a rollout (issue #481), through Analyze, with the switch on and
@@ -21,11 +24,14 @@ type rolloutRig struct {
 	a     *Analyzer
 	store *capacity.Store
 	now   time.Time
+	// seqs is the engine's stated cap, and last the last cycle's result.
+	seqs int64
+	last *domain.AnalyzerResult
 }
 
 func newRolloutRig(t *testing.T, switches map[string]bool) *rolloutRig {
 	t.Helper()
-	r := &rolloutRig{t: t, store: capacity.NewStore(), now: time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)}
+	r := &rolloutRig{t: t, store: capacity.NewStore(), now: time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC), seqs: 64}
 	r.file(false)
 	r.a = New(nil, r.store)
 	r.a.now = func() time.Time { return r.now }
@@ -35,16 +41,17 @@ func newRolloutRig(t *testing.T, switches map[string]bool) *rolloutRig {
 
 // file files agg's engine, rolling out or not.
 func (r *rolloutRig) file(rolling bool) {
-	r.store.Update("ns", "m", "agg", capacity.Record{EngineParams: &capacity.EngineParams{MaxNumSeqs: 64, MaxNumSeqsSet: true},
+	r.store.Update("ns", "m", "agg", capacity.Record{EngineParams: &capacity.EngineParams{MaxNumSeqs: r.seqs, MaxNumSeqsSet: true},
 		RollingOut: rolling}, r.now)
 }
 
 // cycle analyzes rows, and returns how many readings the line's window holds.
 func (r *rolloutRig) cycle(rows []domain.ReplicaMetrics) int {
 	r.t.Helper()
-	_, err := r.a.Analyze(context.Background(), domain.AnalyzerInput{Namespace: "ns", ModelID: "m",
+	res, err := r.a.Analyze(context.Background(), domain.AnalyzerInput{Namespace: "ns", ModelID: "m",
 		Config: policy(44*time.Millisecond, 0), VariantStates: []domain.VariantReplicaState{settleAgg}, ReplicaMetrics: rows})
 	require.NoError(r.t, err)
+	r.last = res
 	r.now = r.now.Add(settleCycle)
 	return r.a.lines.WindowLen(windowKey("ns", "m", settleAgg))
 }
@@ -71,21 +78,22 @@ func TestRollout_ThePublishedRolloutOffersNoRows(t *testing.T) {
 	before, during, after := run(nil)
 	require.Equal(t, 3, before, "premise: the window takes the rows")
 	assert.Equal(t, before, during, "the window took a reading mid-rollout")
-	assert.Equal(t, before+3, after, "the readings come back when it ends")
+	assert.Equal(t, 3, after, "the old readings go, and the new revision's come")
 
 	_, during, _ = run(map[string]bool{SwitchITLRolloutGuard: false})
 	assert.Equal(t, 6, during, "negative control: off, the window takes them")
 }
 
-// Revisions that disagree are a rollout whatever the status says.
-func TestRollout_MixedRevisionsOfferNoRows(t *testing.T) {
+// Revisions that disagree are a rollout whatever the status says, and the new
+// pods go on teaching the line.
+func TestRollout_MixedRevisionsOfferTheNewestOnly(t *testing.T) {
 	run := func(switches map[string]bool) int {
 		r := newRolloutRig(t, switches)
-		rows := revised(settleFleet(), "rev-1")
-		rows[1].Revision = "rev-2"
+		rows := aged(revised(settleFleet(), "rev-1"), r.now.Add(-time.Hour))
+		rows[1].Revision, rows[1].ReadySince = "rev-2", r.now
 		return r.cycle(rows)
 	}
-	assert.Zero(t, run(nil))
+	assert.Equal(t, 1, run(nil))
 	assert.Equal(t, 3, run(map[string]bool{SwitchITLRolloutGuard: false}), "negative control")
 }
 
@@ -98,11 +106,103 @@ func TestRollout_OneVariantsRolloutIsNotAnother(t *testing.T) {
 
 	bare := New(nil, nil)
 	in := domain.AnalyzerInput{Namespace: "ns", ModelID: "m"}
-	assert.True(t, bare.rollingOut(in, fleetReading{mixed: map[string]bool{"agg": true}}, "agg"))
+	rows, held := bare.lineRows(in, fleetReading{mixed: map[string]bool{"agg": true}}, "k", "agg")
+	assert.Nil(t, rows)
+	assert.True(t, held)
 }
 
-// The cycle after a rollout the line's tier latch is gone: what put it at the
-// full fit was old pods' readings. Off, it stands.
+func aged(rows []domain.ReplicaMetrics, ready time.Time) []domain.ReplicaMetrics {
+	for i := range rows {
+		rows[i].ReadySince = ready
+	}
+	return rows
+}
+
+// stall warms a line, rolls out and stalls for cycles at 15 s, and counts the
+// cycles the variant had no price.
+func stall(t *testing.T, hold time.Duration, c stallCase, cycles int) (int, *rolloutRig) {
+	t.Helper()
+	r := newRolloutRig(t, nil)
+	r.a.WithSlopeHoldFor(hold)
+	early := r.now.Add(-time.Hour)
+	for range 8 {
+		r.cycle(aged(revised(settleFleet(), "rev-1"), early))
+	}
+	require.Contains(t, r.last.VariantCapacities[0].Reason, "slo-", "premise: priced")
+	r.seqs = 64
+	if c.argsChange {
+		r.seqs = 128
+	}
+	r.file(true)
+	first := r.now
+	silent := 0
+	for range cycles {
+		rows := aged(revised(settleFleet(), "rev-1"), early)
+		if c.newPod {
+			pod := row("agg", "agg-new", 0.45)
+			pod.Revision, pod.ReadySince = "rev-2", first
+			rows = append(rows, pod)
+		}
+		r.cycle(rows)
+		if r.last.VariantCapacities[0].Reason == domain.ReasonNoData {
+			silent++
+		}
+	}
+	return silent, r
+}
+
+type stallCase struct {
+	name         string
+	argsChange   bool
+	newPod       bool
+	silentAtMost int
+}
+
+// The guard and the forget together on a rollout that stalls: priced on every
+// cycle while the old pods serve, whether or not the arguments changed, and a
+// new pod brings the line back. As first built, an arguments change left this
+// line without a price for all 720 cycles.
+func TestRollout_AStalledRolloutDoesNotSilenceTheLine(t *testing.T) {
+	for _, c := range []stallCase{
+		{name: "image only, no new pod"},
+		{name: "new arguments, no new pod", argsChange: true},
+		{name: "image only, a new pod", newPod: true},
+		// Forgotten when the new pod comes: its settle, then 10 readings.
+		{name: "new arguments, a new pod", argsChange: true, newPod: true, silentAtMost: 16},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			silent, r := stall(t, 7*24*time.Hour, c, 720)
+			assert.LessOrEqual(t, silent, c.silentAtMost)
+			assert.NotEqual(t, domain.ReasonNoData, r.last.VariantCapacities[0].Reason)
+		})
+	}
+}
+
+// Past the hold the variant has no price, and the composite reads no need into
+// it: not eligible, so it neither sizes the role nor votes it down.
+func TestRollout_PastTheHoldTheCompositeReadsNoNeed(t *testing.T) {
+	hold := time.Hour
+	cycles := int((itl.DefaultObservationMaxAge + hold + 10*time.Minute) / settleCycle)
+	silent, r := stall(t, hold, stallCase{argsChange: true}, cycles)
+	assert.Positive(t, silent)
+	nr := allocation.NamedAnalyzerResult{Name: domain.SLOAnalyzerName, Result: r.last, Live: true}
+	assert.False(t, allocation.Eligible(nr), "no price read as a figure")
+	assert.False(t, allocation.ResolveSO([]allocation.NamedAnalyzerResult{nr}, nil, "agg").OK)
+}
+
+// A held line's change of arguments waits for a new pod, and is filed then.
+func TestRollout_TheForgetWaitsForANewPod(t *testing.T) {
+	_, r := stall(t, time.Hour, stallCase{argsChange: true}, 8)
+	assert.Empty(t, r.a.TakeLearnerReports()["ns|m"][0].Forgotten, "forgotten with the old pods serving")
+	pod := row("agg", "agg-new", 0.45)
+	pod.Revision, pod.ReadySince = "rev-2", r.now
+	r.cycle(append(aged(revised(settleFleet(), "rev-1"), r.now.Add(-time.Hour)), pod))
+	reports := r.a.TakeLearnerReports()["ns|m"]
+	assert.Equal(t, []learn.Forgotten{{Key: windowKey("ns", "m", settleAgg), By: learn.ByArguments}}, reports[0].Forgotten)
+}
+
+// The first rows of a new revision take the tier latch with the window: what
+// put it at the full fit was old pods' readings. Off, it stands.
 func TestRollout_TheLatchGoesWhenItEnds(t *testing.T) {
 	run := func(switches map[string]bool) bool {
 		r := newRolloutRig(t, switches)
@@ -115,7 +215,7 @@ func TestRollout_TheLatchGoesWhenItEnds(t *testing.T) {
 		r.cycle(revised(settleFleet(), "rev-1"))
 		require.True(t, r.a.lines.Readings(key).OLSLatched, "the tier moved mid-rollout, with no new reading")
 		r.file(false)
-		r.cycle(revised(settleFleet(), "rev-1"))
+		r.cycle(revised(settleFleet(), "rev-2"))
 		return r.a.lines.Readings(key).OLSLatched
 	}
 	assert.False(t, run(nil))

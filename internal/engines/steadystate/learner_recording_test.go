@@ -533,11 +533,12 @@ func TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult(t *testing
 		// are fitted and published, a decode line and, since #432, an
 		// aggregated one under its own |both key, and each is borrowed on
 		// three cycles.
-		saturation.KindPublishLine:  2,
-		saturation.KindBorrowLine:   6,
-		slo.KindBeginCycle:          12,
-		slo.KindEvictStale:          12,
-		slo.KindNoteVariantsPresent: 28,
+		saturation.KindPublishLine:         2,
+		saturation.KindBorrowLine:          6,
+		slo.KindBeginCycle:                 12,
+		slo.KindEvictStale:                 12,
+		slo.KindNoteVariantsPresent:        28,
+		throughput.KindNoteVariantsPresent: 28,
 		// The forget reaches the slo line (#431) and the throughput line too,
 		// on the same token.
 		slo.KindForgetVariant:        1,
@@ -633,6 +634,7 @@ func TestLearnerRecording_EveryEventRoundTripsByteForByte(t *testing.T) {
 		slo.KindForgetVariant:               func() any { return &slo.ForgetVariantEvent{} },
 		throughput.KindAnalyze:              func() any { return &throughput.AnalyzeEvent{} },
 		throughput.KindForgetVariant:        func() any { return &throughput.ForgetVariantEvent{} },
+		throughput.KindNoteVariantsPresent:  func() any { return &throughput.PresentEvent{} },
 		capacity.KindFileScaleTarget:        func() any { return &capacity.FileScaleTargetEvent{} },
 		capacity.KindEvictStale:             func() any { return &capacity.EvictStaleEvent{} },
 		settle.KindObserve:                  func() any { return &settle.ObserveEvent{} },
@@ -747,8 +749,9 @@ func TestLearnerRecording_StartStopStart(t *testing.T) {
 	assert.Equal(t, string(before), string(files[0].data), "something wrote to the closed recording")
 	events, err := readEvents(before)
 	require.NoError(t, err)
-	// 36, and the settle observation of each of the cycle's 3 models.
-	assert.Len(t, events, 39, "events of the one recorded cycle")
+	// 36, and the settle observation and the throughput presence of each of
+	// the cycle's 3 models.
+	assert.Len(t, events, 42, "events of the one recorded cycle")
 }
 
 // The same run thirty days later records the same results: nothing an
@@ -1055,11 +1058,14 @@ func assertResultsPriced(t *testing.T, recording []byte) {
 	// after the controller start and after each day the clock jumps
 	// (throughput.SwitchITLWaitsAfterRestart and the tracker's absence
 	// tolerance). Its above-band fallback does not wait after the restart
-	// (it is one-sided): it prices 8, 4 of them pd-d from above the band
-	// (T2-above-band), which the wait kept silent before 4b-2's review.
-	assert.Equal(t, map[string]int{saturation.KindAnalyze: 64, slo.KindAnalyze: 6, throughput.KindAnalyze: 8}, priced,
+	// (it is one-sided): it prices 10, 4 of them pd-d from above the band
+	// (T2-above-band), which the wait kept silent before 4b-2's review. Two
+	// are pd-d's held slope after a day's jump: the engine stamps a present
+	// variant (throughput.SwitchITLKeepsPresentVariants), so its state outlives
+	// the jump.
+	assert.Equal(t, map[string]int{saturation.KindAnalyze: 64, slo.KindAnalyze: 6, throughput.KindAnalyze: 10}, priced,
 		"variants priced per analyzer")
-	assert.Equal(t, map[string]int{"agg-a T1-ols": 1, "agg-a T2-held": 2, "pd-d T2-above-band": 4, "pd-d T2-default": 1},
+	assert.Equal(t, map[string]int{"agg-a T1-ols": 1, "agg-a T2-held": 2, "pd-d T2-above-band": 4, "pd-d T2-default": 1, "pd-d T2-held": 2},
 		throughputPriced, "the throughput analyzer's priced variants, by reason")
 }
 

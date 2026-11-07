@@ -466,7 +466,7 @@ func TestForget_EveryVariantStateFieldIsClassified(t *testing.T) {
 		"lastITLModel", "lastPerReplicaSupply", "lastTotalSupply", "lastDemand", "reading", "hasReading"}
 	// The traffic now, or what a log line last said: no line is priced from
 	// them. batchCap and its source are read again each cycle.
-	kept := []string{"shapeTracker", "role", "lastSanityReport", "lastObservedAt", "rollout", "shapeChanged", "everLive",
+	kept := []string{"shapeTracker", "role", "lastSanityReport", "lastObservedAt", "rollout", "rolloutHeld", "loggedRolloutHeld", "shapeChanged", "everLive",
 		"gpsMismatched", "lineSilent", "batchCap", "batchCapSource", "summaryLogged", "loggedAtCap", "loggedCapSource"}
 	typ := reflect.TypeFor[variantState]()
 	fields := make([]string, 0, typ.NumField())

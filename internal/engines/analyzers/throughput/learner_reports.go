@@ -17,6 +17,12 @@ import (
 // before, the line files none. Nothing the analyzer prices reads them.
 const SwitchITLFilesReports = "throughput-itl-files-learner-reports"
 
+// SwitchITLKeepsPresentVariants is the replay switch for the state of a
+// variant the engine reports present. On, it is not evicted, so a parked
+// variant keeps its line and its series. Off, as before, it goes
+// 2 * itl.DefaultObservationMaxAge after its last Analyze.
+const SwitchITLKeepsPresentVariants = "throughput-itl-keeps-present-variants"
+
 // reportModel is the key of a model's reports.
 func reportModel(namespace, modelID string) string {
 	return namespace + "|" + modelID

@@ -306,4 +306,5 @@ var (
 	_ learnerReporter       = (*saturation.SaturationAnalyzer)(nil)
 	_ learnerReporter       = (*slo.Analyzer)(nil)
 	_ learnerReporter       = (*throughput.ThroughputAnalyzer)(nil)
+	_ presenceNoter         = (*throughput.ThroughputAnalyzer)(nil)
 )

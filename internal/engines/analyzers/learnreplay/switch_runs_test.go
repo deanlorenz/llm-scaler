@@ -149,10 +149,10 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	throughput.SwitchITLForgetsOnNewArguments: nil,
 	slo.SwitchITLRolloutGuard:                 nil,
 
-	// #481 with #498: the saturation line's tier latch goes when a rollout
-	// ends, as the slo and throughput lines' does under their guards. It
-	// moves no golden: no recording holds a rollout.
-	saturation.SwitchITLTierResetsAfterRollout: nil,
+	// #481 with #498: the saturation line clears its window on a new
+	// revision, as the slo and throughput lines do under their guards. It
+	// moves no golden: no recording changes a key's revision.
+	saturation.SwitchITLClearsOnNewRevision: nil,
 
 	// #495: the slo and throughput lines file reports, and the slo line logs
 	// learner-write. They move no golden: nothing the analyzers price reads a
@@ -160,6 +160,10 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// (heldBy).
 	slo.SwitchITLFilesReports:        nil,
 	throughput.SwitchITLFilesReports: nil,
+
+	// #504: a variant the engine reports present keeps its throughput state.
+	// It moves no replay golden: no recording holds the event.
+	throughput.SwitchITLKeepsPresentVariants: nil,
 
 	// #495: k2 waits after a rollout under a key already seen
 	// (saturation.SwitchK2WaitsAfterRollout). It moves no golden: no recording
@@ -748,8 +752,12 @@ var heldBy = map[string][]heldTest{
 		{"../slo", "TestTTFT_TheRouterMeanReachesTheWindow"},
 	},
 	// It runs the switch on and off through Analyze and asserts both.
-	saturation.SwitchITLTierResetsAfterRollout: {
-		{"../saturation", "TestITLTier_TheLatchGoesWhenARolloutEnds"},
+	saturation.SwitchITLClearsOnNewRevision: {
+		{"../saturation", "TestITLWindow_ANewRevisionClearsIt"},
+	},
+	// It runs the switch on and off and asserts both.
+	throughput.SwitchITLKeepsPresentVariants: {
+		{"../throughput", "TestRollout_APresentVariantKeepsItsState"},
 	},
 	// #495: each runs with the switch on, and the last with it off.
 	slo.SwitchITLFilesReports: {
@@ -768,7 +776,7 @@ var heldBy = map[string][]heldTest{
 	// #481: each runs the switch on and off through Analyze and asserts both.
 	throughput.SwitchITLRolloutGuard: {
 		{"../throughput", "TestRollout_ThePublishedRolloutOffersNoRows"},
-		{"../throughput", "TestRollout_MixedRevisionsOfferNoRows"},
+		{"../throughput", "TestRollout_MixedRevisionsOfferTheNewestOnly"},
 		{"../throughput", "TestRollout_AnOldPodIsNotJudgedAgainstTheNewCap"},
 	},
 	throughput.SwitchITLForgetsOnNewArguments: {
@@ -776,7 +784,7 @@ var heldBy = map[string][]heldTest{
 	},
 	slo.SwitchITLRolloutGuard: {
 		{"../slo", "TestRollout_ThePublishedRolloutOffersNoRows"},
-		{"../slo", "TestRollout_MixedRevisionsOfferNoRows"},
+		{"../slo", "TestRollout_MixedRevisionsOfferTheNewestOnly"},
 	},
 	// #495: each runs the switch on and off and asserts both (the keys
 	// reported and the logged value gone on; neither off).

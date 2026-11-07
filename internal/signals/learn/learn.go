@@ -68,6 +68,9 @@ const (
 	// ByEvicted is the learner's own sweep: the key went unused past its
 	// horizon.
 	ByEvicted By = "evicted"
+	// ByArguments is a change of the variant's engine arguments: the key's
+	// line was the old engine's.
+	ByArguments By = "arguments"
 )
 
 // Forgotten is one key a learner forgot, and what forgot it.

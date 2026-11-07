@@ -1,20 +1,23 @@
 package throughput
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 )
 
 // The line in a rollout (issue #481), each through Analyze with its switch on
-// and off: no rows while the variant rolls out, and a forget under new engine
-// arguments.
+// and off: the newest revision's rows alone, a hold while no new pod serves,
+// and a forget under new engine arguments.
 
 // rollParams is an engine stating a cap of maxNumSeqs.
 func rollParams(maxNumSeqs int64) *capacity.EngineParams {
@@ -78,11 +81,11 @@ func TestRollout_ThePublishedRolloutOffersNoRows(t *testing.T) {
 }
 
 // Revisions that disagree are a rollout with no store at all: the status may
-// not say so (domain.RevisionsMixed).
-func TestRollout_MixedRevisionsOfferNoRows(t *testing.T) {
+// not say so (domain.RevisionsMixed). The new pods go on teaching the line.
+func TestRollout_MixedRevisionsOfferTheNewestOnly(t *testing.T) {
 	mixed := func() []domain.ReplicaMetrics {
 		f := spreadFleet("rev-1")
-		f[1].Revision = "rev-2"
+		f[1].Revision, f[1].ReadySince = "rev-2", lineStart
 		return f
 	}
 	run := func(a *ThroughputAnalyzer) itl.Reading {
@@ -92,7 +95,7 @@ func TestRollout_MixedRevisionsOfferNoRows(t *testing.T) {
 		got, _, _ := lineRead(r.a)
 		return got
 	}
-	require.Zero(t, run(NewThroughputAnalyzer()).Considered)
+	require.Equal(t, 1, run(NewThroughputAnalyzer()).Considered)
 	require.Equal(t, 3, run(withSwitchOff(SwitchITLRolloutGuard)()).Considered, "negative control")
 }
 
@@ -142,6 +145,129 @@ func TestRollout_AnOldPodIsNotJudgedAgainstTheNewCap(t *testing.T) {
 	}
 	require.Zero(t, run(NewThroughputAnalyzer()).Capped)
 	require.Equal(t, 1, run(withSwitchOff(SwitchITLRolloutGuard)()).Capped, "negative control: off, the old pod is at the new cap")
+}
+
+// stallCase is a rollout that stalls for 3 h, at 15 s a cycle.
+type stallCase struct {
+	name          string
+	argsChange    bool
+	newPod        bool
+	silentAtMost  int
+	heldOnOldPods bool
+}
+
+var stallCases = []stallCase{
+	{name: "image only, no new pod", heldOnOldPods: true},
+	{name: "new arguments, no new pod", argsChange: true, heldOnOldPods: true},
+	{name: "image only, a new pod", newPod: true},
+	// Forgotten when the new pod comes: its settle, then 10 readings.
+	{name: "new arguments, a new pod", argsChange: true, newPod: true, silentAtMost: 16},
+}
+
+// stall warms a line, rolls out and stalls, and counts the silent cycles.
+func stall(t *testing.T, a *ThroughputAnalyzer, c stallCase, cycles int) (silent int, r *lineRun) {
+	t.Helper()
+	store := capacity.NewStore()
+	fileRecord(store, rollParams(64), false)
+	r = newLineRun(t, a.WithCapacityStore(store))
+	warm(t, r, 8, spreadFleet("rev-1"))
+	params := rollParams(64)
+	if c.argsChange {
+		params = rollParams(128)
+	}
+	fileRecord(store, params, true)
+	for range cycles {
+		rows := spreadFleet("rev-1")
+		if c.newPod {
+			pod := lineRow("pod-new", 0.45, lineAt(0.45), lineStart)
+			pod.Revision = "rev-2"
+			rows = append(rows, pod)
+		}
+		r.step(rows)
+		got, _, _ := lineRead(r.a)
+		if got.Tier == "" {
+			silent++
+		}
+	}
+	return silent, r
+}
+
+// The guard and the forget together on a rollout that stalls: the line is
+// never silent while the old pods serve, whether or not the arguments changed,
+// and a new pod brings it back. As it was first built, an arguments change
+// silenced this line for all 720 cycles.
+func TestRollout_AStalledRolloutDoesNotSilenceTheLine(t *testing.T) {
+	for _, c := range stallCases {
+		t.Run(c.name, func(t *testing.T) {
+			silent, r := stall(t, NewThroughputAnalyzer().WithSlopeHoldFor(7*24*time.Hour), c, 720)
+			require.LessOrEqual(t, silent, c.silentAtMost)
+			got, _, _ := lineRead(r.a)
+			require.NotEmpty(t, got.Tier, "live at the end")
+			r.a.mu.Lock()
+			defer r.a.mu.Unlock()
+			require.Equal(t, c.heldOnOldPods, r.a.variantStates[variantKey("ns", "m", "v1")].rolloutHeld)
+		})
+	}
+}
+
+// A held line stands under the arguments it was learned under, and the forget
+// waits. A new pod ends the hold, and the forget is filed then.
+func TestRollout_TheForgetWaitsForANewPod(t *testing.T) {
+	c := stallCases[1]
+	_, r := stall(t, NewThroughputAnalyzer(), c, 8)
+	require.Empty(t, r.a.TakeLearnerReports()["ns|m"][0].Forgotten, "forgotten with the old pods serving")
+	pod := lineRow("pod-new", 0.45, lineAt(0.45), lineStart)
+	pod.Revision = "rev-2"
+	r.step(append(spreadFleet("rev-1"), pod))
+	reports := r.a.TakeLearnerReports()["ns|m"]
+	require.Equal(t, []learn.Forgotten{{Key: variantKey("ns", "m", "v1"), By: learn.ByArguments}}, reports[0].Forgotten)
+}
+
+// Past the hold the line is silent, with its cause, and the composite reads no
+// need into it: the analyzer is not eligible, so it neither sizes the role nor
+// votes it down. Listed alone, the role is held (allocation.CompositeHasSignal).
+func TestRollout_PastTheHoldTheCompositeReadsNoNeed(t *testing.T) {
+	hold := time.Hour
+	c := stallCases[1]
+	a := NewThroughputAnalyzer().WithSlopeHoldFor(hold)
+	cycles := int((itl.DefaultObservationMaxAge + hold + 10*time.Minute) / (15 * time.Second))
+	silent, r := stall(t, a, c, cycles)
+	require.Positive(t, silent)
+	r.a.mu.Lock()
+	state := r.a.variantStates[variantKey("ns", "m", "v1")]
+	require.Equal(t, silenceRollout, silenceCause(state, state.reading))
+	r.a.mu.Unlock()
+
+	res, err := r.a.Analyze(context.Background(), domain.AnalyzerInput{ModelID: "m", Namespace: "ns", ArrivalRate: 4,
+		ReplicaMetrics: spreadFleet("rev-1"),
+		VariantStates:  []domain.VariantReplicaState{{VariantName: "v1", CurrentReplicas: 3, GPUsPerReplica: 1}}})
+	require.NoError(t, err)
+	nr := allocation.NamedAnalyzerResult{Name: AnalyzerName, Result: res, Live: true}
+	require.False(t, allocation.Eligible(nr), "a silent line read as a figure")
+	require.False(t, allocation.ResolveSO([]allocation.NamedAnalyzerResult{nr}, nil, "v1").OK)
+}
+
+// A variant parked past the state's age keeps its line and its series: the
+// engine stamps it. Off the list, it goes.
+func TestRollout_APresentVariantKeepsItsState(t *testing.T) {
+	r := newLineRun(t, NewThroughputAnalyzer())
+	warm(t, r, 2, spreadFleet("rev-1"))
+	r.a.TakeLearnerReports()
+	later := lineStart.Add(3 * itl.DefaultObservationMaxAge)
+	r.clock.SetTime(later)
+	r.a.NoteVariantsPresent("ns", "m", []string{"v1"})
+	r.a.observeDefaultBand(context.Background(), later, "other", "ns", nil)
+	require.Empty(t, r.a.TakeLearnerReports(), "evicted though present")
+	r.a.observeDefaultBand(context.Background(), later.Add(3*itl.DefaultObservationMaxAge), "other", "ns", nil)
+	require.NotEmpty(t, r.a.TakeLearnerReports()["ns|m"], "negative control: unstamped, it goes")
+
+	off := newLineRun(t, withSwitchOff(SwitchITLKeepsPresentVariants)())
+	warm(t, off, 2, spreadFleet("rev-1"))
+	off.a.TakeLearnerReports()
+	off.clock.SetTime(later)
+	off.a.NoteVariantsPresent("ns", "m", []string{"v1"})
+	off.a.observeDefaultBand(context.Background(), later, "other", "ns", nil)
+	require.NotEmpty(t, off.a.TakeLearnerReports()["ns|m"], "negative control: off, it goes though present")
 }
 
 // A silent line in a rollout says so, ahead of the restart a line that was
@@ -236,8 +362,8 @@ func TestRollout_NewArgumentsKeepTheTraces(t *testing.T) {
 	require.Equal(t, 3, got.Unsteady, "the traces went with the line: the step reads as steady")
 }
 
-// The cycle after a rollout the line's tier latch is gone: what put it at the
-// full fit was old pods' readings. Off, it stands.
+// The first rows of a new revision take the tier latch with the window: what
+// put it at the full fit was old pods' readings. Off, it stands.
 func TestRollout_TheLatchGoesWhenItEnds(t *testing.T) {
 	run := func(a *ThroughputAnalyzer) bool {
 		store := capacity.NewStore()

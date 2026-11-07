@@ -540,6 +540,8 @@ func (c *cycle) fitLines() {
 		rollingOut := rec.InRollout() || mixed[variant]
 		if rollingOut {
 			rows = nil
+		} else if c.a.itlClearsOnRevision {
+			rows = c.a.itlTracker.RolloutRows(variantKey, variant, rows, false).Rows
 		}
 		// The namespace rides on every ITL line because the variant name alone
 		// does not identify one: the same Deployment applied to two namespaces
@@ -561,7 +563,7 @@ func (c *cycle) fitLines() {
 		adm := itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: atCap.perRank, MaxNumSeqsSource: atCap.source,
 			CapMaxPreemptionRate: c.cfg.ITLCapPreemptionRate(), Steady: c.tune.steadiness(),
 			SlopeHoldFor: c.a.Horizons().BucketRetention, Args: windowArgs(params),
-			TierHysteresis: c.a.tierHysteresisOn(), Rollout: rollingOut && c.a.itlTierRolloutReset}
+			TierHysteresis: c.a.tierHysteresisOn()}
 		// When each replica's settle began: the engine's settle tracker
 		// (itl_settle.go).
 		c.a.itlSettleAdmission(&adm, c.input.Namespace, c.input.ModelID)

@@ -234,47 +234,6 @@ func TestDwellTier_ARestoredKeyStartsOnTheSafeSide(t *testing.T) {
 	}
 }
 
-// A rollout leaves the tier alone while it runs, the window being frozen, and
-// resets the latch the cycle after: a key that rested between the clear and
-// set values on old pods' readings no longer does, and its first line is the
-// pinned one, as a restored key's. Without Admission.Rollout it rests on.
-func TestDwellTier_ARolloutEndsTheLatch(t *testing.T) {
-	spread := latchPods(0.46, 0.73)
-	run := func(rollout bool) (during, after Reading, l *latchRig) {
-		l = atOLS(t)
-		l.adm.Rollout = rollout
-		l.after(15*time.Second, spread, 1)
-		during = l.after(30*time.Second, spread, 1)
-		l.adm.Rollout = false
-		after = l.after(45*time.Second, spread, 1)
-		return during, after, l
-	}
-	during, after, l := run(true)
-	if during.Tier != TierOLS || during.Ready {
-		t.Fatalf("mid-rollout: tier %q Ready %v, want the full fit resting as it stood", during.Tier, during.Ready)
-	}
-	if after.Tier == TierOLS {
-		t.Fatalf("the cycle after: tier %q, want the latch gone", after.Tier)
-	}
-	if got := l.tr.latches[latchKey]; got.rolled || !got.since.Equal(latchStart.Add(45*time.Second)) {
-		t.Fatalf("the latch after: %+v, want a new one, its dwell from now", got)
-	}
-	if _, after, _ = run(false); after.Tier != TierOLS {
-		t.Fatalf("negative control: with no rollout the key rests on, got %q", after.Tier)
-	}
-}
-
-// A change of tier inside the rollout keeps the mark, or the reset is lost.
-func TestDwellTier_AChangeOfTierKeepsTheRollout(t *testing.T) {
-	l := atOLS(t)
-	l.adm.Rollout = true
-	l.see(0, nil)
-	l.tr.latch(latchKey, TierPinnedB, latchStart)
-	if !l.tr.latches[latchKey].rolled {
-		t.Fatal("a change of tier dropped the rollout's mark")
-	}
-}
-
 // A slope the admission may not hold is no reason to refuse: other engine
 // arguments, or one past its age, end the hold as they do on a short window.
 func TestDwellTier_ASlopeItMayNotHoldEndsTheDwell(t *testing.T) {

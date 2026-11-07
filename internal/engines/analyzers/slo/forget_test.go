@@ -110,8 +110,8 @@ func TestForget_DropsTheArgumentsTheLineWasLearnedUnder(t *testing.T) {
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 	key := windowKey("ns", "m", settleAgg)
 	sib := windowKey("ns", "m", forgetSibling)
-	a.linesUnderArgs(key, "args-1", now)
-	a.linesUnderArgs(sib, "args-1", now)
+	a.linesUnderArgs(key, "args-1", "ns", "m", "agg", now)
+	a.linesUnderArgs(sib, "args-1", "ns", "m", "agg", now)
 	a.mu.Lock()
 	a.seen[key], a.seen[sib] = now, now
 	a.mu.Unlock()

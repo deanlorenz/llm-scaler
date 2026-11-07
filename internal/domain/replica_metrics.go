@@ -815,6 +815,44 @@ func RevisionsMixed(rows []ReplicaMetrics) map[string]bool {
 	return mixed
 }
 
+// NewestRevision is variant's own Ready replicas' newest revision, and how
+// many revisions they report: warm-pool bridges and a replica with no revision
+// aside. A rollout makes new pods, so the newest revision is the one whose
+// oldest Ready pod is youngest: a youngest pod would name an old pod restarted
+// in place. "" when none reports one, or when more than one do and they cannot
+// be ordered: a Ready time unread, or two alike.
+func NewestRevision(rows []ReplicaMetrics, variant string) (string, int) {
+	oldest := map[string]time.Time{}
+	for _, rm := range rows {
+		if rm.VariantName != variant || rm.FromWarmPool || !rm.Ready || rm.Revision == "" {
+			continue
+		}
+		at, seen := oldest[rm.Revision]
+		if !seen || (!rm.ReadySince.IsZero() && (at.IsZero() || rm.ReadySince.Before(at))) {
+			oldest[rm.Revision] = rm.ReadySince
+		}
+	}
+	newest := ""
+	var newestAt time.Time
+	for revision, at := range oldest {
+		if len(oldest) == 1 {
+			return revision, 1
+		}
+		if at.IsZero() {
+			return "", len(oldest)
+		}
+		if newest == "" || at.After(newestAt) {
+			newest, newestAt = revision, at
+		}
+	}
+	for revision, at := range oldest {
+		if revision != newest && at.Equal(newestAt) {
+			return "", len(oldest)
+		}
+	}
+	return newest, len(oldest)
+}
+
 // ReplicaMetricsMetadata contains freshness information for replica metrics
 type ReplicaMetricsMetadata struct {
 	// CollectedAt is when the metrics were collected

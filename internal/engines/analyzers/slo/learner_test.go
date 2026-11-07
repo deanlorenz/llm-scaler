@@ -82,9 +82,11 @@ func TestLearner_NoLineIsNoPricingKey(t *testing.T) {
 // test here.
 func TestLearner_TheSwitchOffFilesNothing(t *testing.T) {
 	r := newRolloutRig(t, map[string]bool{SwitchITLFilesReports: false})
-	assert.Empty(t, learnerCycles(t, r, 3, steadyRows))
+	assert.Empty(t, learnerCycles(t, r, 8, steadyRows), "learner-write on a line that fitted")
+	require.NotEmpty(t, r.a.lines.Readings(windowKey("ns", "m", settleAgg)).All, "premise: the line has readings")
 	r.a.ForgetVariant(context.Background(), "ns", "m", "agg")
 	assert.Empty(t, r.a.TakeLearnerReports())
+	assert.Len(t, learnerCycles(t, newRolloutRig(t, nil), 8, steadyRows), 1, "negative control: on, it logs")
 }
 
 // learner-write logs a key's first line, then only what moves it: a steady

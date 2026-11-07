@@ -1513,6 +1513,7 @@ lineHeld
 lineKey
 linePinnedAtBPrior
 linePriorBeyondReadings
+lineRolloutHeld
 lineShapeG
 lineSlopeAge
 lineSlopeHeld
@@ -2256,6 +2257,7 @@ rolesKnownNow
 rolled-out
 rolling
 rollout
+rolloutHeld
 rollouts
 room
 rose
@@ -2291,9 +2293,9 @@ saturatedThroughput
 saturatedThroughputBucket
 saturation
 saturation-holds-role
+saturation-itl-clears-on-a-new-revision
 saturation-itl-one-sided-at-cap
 saturation-itl-tier-hysteresis
-saturation-itl-tier-resets-after-a-rollout
 saturation-only
 saturation-token-based
 saturation.Analyze
@@ -2638,6 +2640,7 @@ throughput-itl-forget-reaches-the-line
 throughput-itl-forgets-on-new-arguments
 throughput-itl-held
 throughput-itl-idle-needs-evidence
+throughput-itl-keeps-present-variants
 throughput-itl-keeps-the-settle-through-a-missing-row
 throughput-itl-keeps-the-window-on-gps-mismatch
 throughput-itl-ols
@@ -2652,6 +2655,7 @@ throughput-itl-tier-hysteresis
 throughput-itl-waits-after-controller-restart
 throughput.Analyze
 throughput.ForgetVariant
+throughput.NoteVariantsPresent
 throughput.Observe
 throughputEntries
 throughputHeld

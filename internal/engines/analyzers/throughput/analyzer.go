@@ -70,6 +70,9 @@ type ThroughputAnalyzer struct {
 	// itlAdmitsAtCap is the replay switch of learner PR 4b-3 (admission.go):
 	// SwitchITLAdmitsAtSequenceCap. On by the constructor.
 	itlAdmitsAtCap bool
+	// itlKeepsPresent is SwitchITLKeepsPresentVariants (learner_reports.go).
+	// On by the constructor.
+	itlKeepsPresent bool
 	// itlFilesReports is SwitchITLFilesReports (learner_reports.go). On by
 	// the constructor. learnerReports is each model's reports of its last
 	// cycle, by namespace|model, and forgottenReports what was forgotten
@@ -142,11 +145,13 @@ type variantState struct {
 	reading    itl.Reading
 	hasReading bool
 	// lineArgs is the engine arguments the line was learned under, "" when
-	// unknown (lineUnderArgsLocked), and rollout whether the line took no
-	// rows this cycle because the variant is rolling out, which names a
-	// silence (silenceCause).
-	lineArgs string
-	rollout  bool
+	// unknown (lineUnderArgsLocked). rollout is the variant rolling out, which
+	// names a silence (silenceCause); rolloutHeld is the line held on the old
+	// pods, no new pod serving (itl.RolloutSight.Held), and loggedRolloutHeld
+	// what the summary last said of it.
+	lineArgs                       string
+	rollout                        bool
+	rolloutHeld, loggedRolloutHeld bool
 	// shapeChanged is set by a shape change and cleared when the line is
 	// next live, and everLive once the line has been live: what names the
 	// cause of a silent line (silenceCause). SwitchITLSteadyGate only.
@@ -190,6 +195,7 @@ func NewThroughputAnalyzer() *ThroughputAnalyzer {
 		itlFiniteOnly:         true,
 		itlRolloutGuard:       true,
 		itlFilesReports:       true,
+		itlKeepsPresent:       true,
 		learnerReports:        make(map[string][]learn.Report),
 		itlForgetsOnNewArgs:   true,
 		itlAdmitsAtCap:        true,
@@ -328,12 +334,16 @@ func (a *ThroughputAnalyzer) observe(
 		// On the shared tracker (SwitchITLSteadyGate, itl_line.go) the
 		// tracker judges each row; the window below is left as it was.
 		if a.itlSteadyGate {
-			a.lineUnderArgsLocked(key, state, adm.Args, now)
 			rows := freshRows(variantMetrics)
-			state.rollout = rolling && a.itlRolloutGuard
-			adm.Rollout = state.rollout
-			if state.rollout {
-				rows = nil
+			state.rollout, state.rolloutHeld = rolling && a.itlRolloutGuard, false
+			if a.itlRolloutGuard {
+				sight := a.lines.RolloutRows(key, variantName, rows, rolling)
+				rows, state.rolloutHeld = sight.Rows, sight.Held
+			}
+			if state.rolloutHeld && state.lineArgs != "" {
+				adm.Args = state.lineArgs
+			} else {
+				a.lineUnderArgsLocked(key, state, adm.Args, namespace, modelID, variantName, now)
 			}
 			state.reading = a.lines.Observe(key, variantName, rows, adm, now)
 			a.paths.count(state.reading)

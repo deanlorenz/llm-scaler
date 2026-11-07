@@ -68,22 +68,26 @@ const itlReasonT2Held = "T2-held"
 const itlReasonT2AboveBand = "T2-above-band"
 
 // SwitchITLRolloutGuard is the replay switch for the line's rollout guard
-// (issue #481). On, while the variant's scale target rolls out
-// (capacity.Record.InRollout) or its replicas report more than one revision
-// (domain.RevisionsMixed), the line is offered no rows and fits from what it
-// holds, as the saturation analyzer's: a reading may be an old pod's, and it
-// would be judged against the new engine's sequence cap. Off, as before, every
-// fresh row is offered. The cycle after a rollout resets the line's tier latch
-// (itl.Admission.Rollout). Only on the tracker (SwitchITLSteadyGate).
+// (issue #481, itl.Tracker.RolloutRows). On, while the variant's scale target
+// rolls out (capacity.Record.InRollout) or its replicas report more than one
+// revision (domain.RevisionsMixed), the line is offered the newest revision's
+// rows alone: an old pod's reading would be judged against the new engine's
+// sequence cap, and a fit would span two engines. The first rows of a new
+// revision clear the window. With no new pod serving it is offered none, and
+// holds what it has, under the arguments it was learned under
+// (variantState.rolloutHeld): the old pods still serve. Off, as before, every
+// fresh row is offered. Only on the tracker (SwitchITLSteadyGate).
 const SwitchITLRolloutGuard = "throughput-itl-rollout-guard"
 
 // SwitchITLForgetsOnNewArguments is the replay switch for the line under new
 // engine arguments (issue #481). On, a change of the variant's arguments
 // (capacity.EngineParams.ArgsTag) forgets what the tracker learned of the key,
 // keeping the replicas' traces, as the slo line's linesUnderArgs does: the
-// window and B of the old engine. Off, as before, only a held slope ends on a
-// change of arguments, and the window goes on being fitted for up to
-// itl.DefaultObservationMaxAge. Only on the tracker (SwitchITLSteadyGate).
+// window and B of the old engine. While the guard holds the line, the forget
+// waits for a pod of the new revision: until then the old engine is what
+// serves. Off, as before, only a held slope ends on a change of arguments, and
+// the window goes on being fitted for up to itl.DefaultObservationMaxAge. Only
+// on the tracker (SwitchITLSteadyGate).
 const SwitchITLForgetsOnNewArguments = "throughput-itl-forgets-on-new-arguments"
 
 // ITLWriteBand is how far a variant's A or B must move from the value
@@ -115,6 +119,7 @@ func (a *ThroughputAnalyzer) switchFields() map[string]*bool {
 		SwitchITLReadsFinitePodMean:           &a.itlFiniteOnly,
 		SwitchITLRolloutGuard:                 &a.itlRolloutGuard,
 		SwitchITLFilesReports:                 &a.itlFilesReports,
+		SwitchITLKeepsPresentVariants:         &a.itlKeepsPresent,
 		SwitchITLForgetsOnNewArguments:        &a.itlForgetsOnNewArgs,
 		SwitchITLAdmitsAtSequenceCap:          &a.itlAdmitsAtCap,
 		SwitchITLForgetReachesTheLine:         &a.itlForgetReachesLine,
@@ -160,7 +165,7 @@ func (a *ThroughputAnalyzer) lineAdmission(adm itl.Admission, namespace, modelID
 // traces, as a forget does (forget.go). There is no stash: a rollback relearns
 // its line, as on the slo line. Unknown arguments change nothing. Called with
 // a.mu held; the tracker's lock is taken under it, as observe's sweep takes it.
-func (a *ThroughputAnalyzer) lineUnderArgsLocked(key string, state *variantState, args string, now time.Time) {
+func (a *ThroughputAnalyzer) lineUnderArgsLocked(key string, state *variantState, args, namespace, modelID, variant string, now time.Time) {
 	if !a.itlForgetsOnNewArgs || args == "" {
 		return
 	}
@@ -169,7 +174,8 @@ func (a *ThroughputAnalyzer) lineUnderArgsLocked(key string, state *variantState
 	if prev == "" || prev == args {
 		return
 	}
-	a.lines.SweepKeepingTraces(now, func(k string) bool { return k == key })
+	_, _, forgotten := a.lines.ForgetKeysKeepingTraces(now, learn.ByArguments, func(k string) bool { return k == key })
+	a.noteForgottenLocked(namespace, modelID, variant, forgotten)
 }
 
 // freshRows is rows less those whose metrics are stale: the tracker judges
@@ -216,8 +222,9 @@ const (
 	// silenceShapeChange: the request shape changed, which empties the
 	// window and drops the held slope, and the new shape has not fitted.
 	silenceShapeChange = "shape-change"
-	// silenceRollout: the variant is rolling out, so the line takes no rows
-	// (SwitchITLRolloutGuard), and what it holds gives no line.
+	// silenceRollout: the variant is rolling out (SwitchITLRolloutGuard), and
+	// the line has no line: the new pods have not taught one, or, with no new
+	// pod serving, the hold has run past the slope's.
 	silenceRollout = "rollout"
 	// silenceAboveBandUnderKSat: every reading this cycle was above the
 	// band at a k under itl.DefaultKSat: the band gets none, and the
@@ -260,7 +267,8 @@ func silenceCause(state *variantState, r itl.Reading) string {
 // sequence cap, with the cap and its source (SwitchITLAdmitsAtSequenceCap;
 // 0 and "none" when nothing states one, or the switch is off); and whether
 // the line was priced one-sided through the least ITL past kSat
-// (itl.Reading.PinnedAtLeastITL). It logs the
+// (itl.Reading.PinnedAtLeastITL); and whether it is held on the old pods
+// (rolloutHeld), which also logs the line when it changes. It logs the
 // same line once too when the cap's source changes, or when readings at the
 // cap start (atCap above 0) or stop, so a line that stays live still says
 // when it is taught from above the band; a source change or a stop is
@@ -278,15 +286,15 @@ func noteLineSilence(ctx context.Context, state *variantState, r itl.Reading, re
 	atCap := r.Capped > 0
 	capChanged := atCap != state.loggedAtCap ||
 		(state.summaryLogged && state.batchCapSource != state.loggedCapSource)
-	if silent == state.lineSilent && !capChanged {
+	if silent == state.lineSilent && !capChanged && state.rolloutHeld == state.loggedRolloutHeld {
 		return
 	}
-	state.lineSilent = silent
+	state.lineSilent, state.loggedRolloutHeld = silent, state.rolloutHeld
 	state.summaryLogged, state.loggedAtCap, state.loggedCapSource = true, atCap, state.batchCapSource
 	ctrl.LoggerFrom(ctx).Info("throughput analyzer: ITL line", "namespace", namespace, "modelID", modelID,
 		"variant", variant, "silent", silent, "cause", cause, "source", reason,
 		"inBand", r.Offered-r.Capped, "aboveBand", r.AboveBand, "belowBand", r.BelowBand, "settling", r.Settling,
-		"tierHeld", r.TierHeld,
+		"tierHeld", r.TierHeld, "rolloutHeld", state.rolloutHeld,
 		"held", r.Held, "aboveBandHeld", r.AboveBandHeld,
 		"atCap", r.Capped, "batchCap", state.batchCap, "batchCapSource", state.batchCapSource,
 		"pinnedAtLeastITL", r.PinnedAtLeastITL)

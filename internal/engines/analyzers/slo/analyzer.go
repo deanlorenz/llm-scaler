@@ -367,6 +367,7 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 				// A held slope reads pinned or pinned-default on the metric
 				// like a fit made this cycle; these say it is an old one.
 				"lineSlopeHeld", d.line.SlopeHeld, "lineSlopeAge", d.line.SlopeAge(now),
+				"lineRolloutHeld", d.rolloutHeld,
 				// Priced one-sided at the cap (SwitchITLOneSidedAtCap): no
 				// learned B, and the prior's line (its intercept the prior on
 				// B, capped at the window's least ITL, through the mean of the
@@ -472,6 +473,9 @@ type pricingDetail struct {
 	// nothing is declared.
 	lineBatchCap       int64
 	lineBatchCapSource string
+	// rolloutHeld is the line held on the old pods: the variant rolls out and
+	// no new pod serves (itl.RolloutSight.Held).
+	rolloutHeld bool
 }
 
 // Where the batch cap a replica is priced at came from (pricingDetail), as
@@ -520,7 +524,13 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	// (itl.Admission), and a change of arguments forgets the window first, so
 	// the old engine's readings are neither refitted nor held as the new one's.
 	args := params.ArgsTag()
-	a.linesUnderArgs(key, args, now)
+	rows, held := a.lineRows(input, fleet, key, vs.VariantName)
+	d.rolloutHeld = held
+	if held {
+		args = a.heldArgs(key, args)
+	} else {
+		a.linesUnderArgs(key, args, input.Namespace, input.ModelID, vs.VariantName, now)
+	}
 	adm.SlopeHoldFor, adm.Args = a.slopeHoldFor, args
 	// When each replica's settle began: the engine's settle tracker
 	// (settle.go).
@@ -533,10 +543,6 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 		kvPerRequest: fleet.shape.KVreq, ranks: fleet.engineRanks(vs.VariantName)}, params)
 	// The fill is clamped to the band the line is fitted over.
 	band := whatif.FillBand{Lo: adm.MinK, Hi: adm.MaxK}
-	rows := input.ReplicaMetrics
-	if adm.Rollout = a.rollingOut(input, fleet, vs.VariantName); adm.Rollout {
-		rows = nil
-	}
 	line, source, r := a.fitLine(key, rows, vs.VariantName, adm, now)
 	d.line, d.source, d.band = r, source, band
 	if !(tpotTarget > 0) {
@@ -752,7 +758,7 @@ func (a *Analyzer) judge(ctx context.Context, input domain.AnalyzerInput, slo *c
 // and stamped it with the new arguments, and the old engine's slope was then
 // held as the new one's for the whole slope hold (issue #284). Unknown
 // arguments change nothing. There is no stash: a rollback relearns its line.
-func (a *Analyzer) linesUnderArgs(key, args string, now time.Time) {
+func (a *Analyzer) linesUnderArgs(key, args, namespace, modelID, variant string, now time.Time) {
 	if args == "" {
 		return
 	}
@@ -764,7 +770,8 @@ func (a *Analyzer) linesUnderArgs(key, args string, now time.Time) {
 		return
 	}
 	// The tracker's lock is taken under a.mu, as EvictStale takes it.
-	a.lines.Sweep(now, func(k string) bool { return k == key })
+	_, _, forgotten := a.lines.ForgetKeys(now, learn.ByArguments, func(k string) bool { return k == key })
+	a.noteForgottenLocked(namespace, modelID, variant, forgotten)
 }
 
 func (a *Analyzer) engineParams(namespace, modelID, variant string) *capacity.EngineParams {

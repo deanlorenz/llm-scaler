@@ -41,8 +41,6 @@ type tierLatch struct {
 	// fitted is set once the key has stood at the full fit, which a B at or
 	// under zero leaves no other mark of (Observe remembers none).
 	fitted bool
-	// rolled is set while the key's variant rolls out (Admission.Rollout).
-	rolled bool
 }
 
 // clearReady reports whether the steady readings keep a key at the full fit.
@@ -57,12 +55,6 @@ func clearReady(steady []Observation) bool {
 // that went past DefaultSteadyCarry without one, has lost what put it at the
 // full fit, and it goes back to the pinned tier, as a forget does (unlatch):
 // new readings earn the full fit at the set values.
-//
-// So does a rollout, which leaves readings behind. The window is frozen
-// through it, so the tier stands: a reset there would move the line with no
-// new reading. On the first cycle after it the latch goes, as for a restored
-// key (dwellTier): its tier, its clear values and its dwell were old pods'
-// evidence, and the new engine earns them at the set values.
 func (t *Tracker) fullFitReady(key string, set bool, steady []Observation, adm Admission, now time.Time) bool {
 	if !adm.TierHysteresis {
 		return set
@@ -73,11 +65,6 @@ func (t *Tracker) fullFitReady(key string, set bool, steady []Observation, adm A
 	if !ok {
 		return set
 	}
-	if l.rolled && !adm.Rollout {
-		delete(t.latches, key)
-		return set
-	}
-	l.rolled = adm.Rollout
 	if len(steady) == 0 || now.Sub(l.seen) > DefaultSteadyCarry {
 		l.tier = TierPinnedB
 	}
@@ -183,8 +170,7 @@ func (t *Tracker) dwellTier(key string, c fitChoice, in tierInputs, adm Admissio
 func (t *Tracker) latch(key, tier string, now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	l := t.latches[key]
-	t.latches[key] = tierLatch{tier: tier, since: now, seen: now, fitted: l.fitted || tier == TierOLS, rolled: l.rolled}
+	t.latches[key] = tierLatch{tier: tier, since: now, seen: now, fitted: t.latches[key].fitted || tier == TierOLS}
 }
 
 // pricedLine is the line Observe would take from a pinned choice, one-sided

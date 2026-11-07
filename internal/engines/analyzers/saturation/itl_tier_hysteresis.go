@@ -5,11 +5,13 @@ package saturation
 // chooses its tier alone, as before.
 const SwitchITLTierHysteresis = "saturation-itl-tier-hysteresis"
 
-// SwitchITLTierResetsAfterRollout is the replay switch for the latch across a
-// rollout (itl.Admission.Rollout). On, the cycle after a rollout resets the
-// key's latch. Off, it stands on old pods' evidence for as long as the window
-// holds them, as #498 built it.
-const SwitchITLTierResetsAfterRollout = "saturation-itl-tier-resets-after-a-rollout"
+// SwitchITLClearsOnNewRevision is the replay switch for the window across a
+// rollout (itl.Tracker.RolloutRows). This line takes no rows mid-rollout. On,
+// the first rows after it clear the window when their revision is new, which
+// keeps B and the slope and puts the tier latch back: the line holds its slope
+// until 10 new readings arrive. Off, new pods' readings join the old pods', and
+// a full fit spans two engines and rewrites B.
+const SwitchITLClearsOnNewRevision = "saturation-itl-clears-on-a-new-revision"
 
 // tierHysteresisOn reports SwitchITLTierHysteresis.
 func (a *SaturationAnalyzer) tierHysteresisOn() bool {
