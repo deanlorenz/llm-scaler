@@ -16,6 +16,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
@@ -66,6 +67,10 @@ type State struct {
 	// input to whatif.TPOTRatioFromWindows. Empty in a recording made before
 	// the recorder carried it.
 	TPOTWindows []whatif.TPOTWindow
+	// EngineTPOTWindows is the decode engines' per-request TPOT histogram of
+	// every cycle up to Cycle that recorded one, pooled over the rows, oldest
+	// first (engineTPOTWindow): the fall-back for TPOTWindows.
+	EngineTPOTWindows []whatif.TPOTWindow
 	// Prefill is each prefill variant at the cycle, by name, as a TTFT
 	// question reads it (state_ttft.go).
 	Prefill []PrefillState
@@ -130,6 +135,9 @@ type VariantState struct {
 	// DecodeTTFT is what the variant's rows say of a TTFT's decode side; the
 	// zero value on a variant that is not decode (state_ttft.go).
 	DecodeTTFT DecodeTTFTState
+	// LineRows is the variant's rows of its latest cycles that have one, off
+	// a ramp and on one, for the line check (state_line.go).
+	LineRows []whatif.LineRow
 }
 
 // MeasuredShape is the shape a variant served over the cycles it had
@@ -137,6 +145,11 @@ type VariantState struct {
 type MeasuredShape struct {
 	// InputTokens, OutputTokens and PrefixHitRate are the means.
 	InputTokens, OutputTokens, PrefixHitRate float64
+	// OutputDispersion is the spread of the output lengths, D =
+	// E[O^2]/E[O]^2, at least 1, over the cycles whose every row read the
+	// bound on E[O^2] (domain.SquaredMeanLowerBound); 0 with no such cycle:
+	// no reading, which is not D = 1.
+	OutputDispersion float64
 	// FromCycle and ToCycle are the first and the last cycle they were
 	// taken over, and Cycles how many of the cycles between had traffic;
 	// all 0 when no cycle up to the one asked had any.
@@ -148,9 +161,11 @@ type MeasuredShape struct {
 const shapeCycles = whatif.PromptWindowCycles
 
 // shapeSample is one cycle's shape of a variant, and its request rate.
+// squared is the rows' mean bound on E[O^2], 0 unless every row read one, so
+// that it and ol are one reading of the same rows.
 type shapeSample struct {
-	cycle            int
-	il, ol, hit, req float64
+	cycle                     int
+	il, ol, squared, hit, req float64
 }
 
 // StateAt replays recording through the analyzers (in Normal mode, whatever
@@ -184,8 +199,10 @@ func StateAt(ctx context.Context, recording []byte, opts Options, q StateQuery) 
 		n        int
 		firstAt  time.Time
 		windows  []whatif.TPOTWindow
+		engine   []whatif.TPOTWindow
 		shapes   = map[string][]shapeSample{}
 		ttft     = newTTFTSamples()
+		lines    = newLineSamples()
 		cycleAt  = map[time.Time]int{}
 	)
 	opts.stop = func(r *replayer, ev learnrec.RawEvent) bool {
@@ -213,8 +230,12 @@ func StateAt(ctx context.Context, recording []byte, opts Options, q StateQuery) 
 		if w, ok := tpotWindow(in.RouterLatency); ok {
 			windows = append(windows, w)
 		}
+		if w, ok := engineTPOTWindow(in.ReplicaMetrics, rolesOf(in)); ok {
+			engine = append(engine, w)
+		}
 		noteShapes(shapes, in.ReplicaMetrics, n)
 		ttft.note(in, n, ev.Now)
+		lines.note(in, n, ev.Now)
 		ttft.noteTerm(in, ev.Now, func(variant string) string {
 			if rec := r.store.Get(in.Namespace, in.ModelID, variant); rec != nil {
 				return rec.EngineParams.ArgsTag()
@@ -237,9 +258,10 @@ func StateAt(ctx context.Context, recording []byte, opts Options, q StateQuery) 
 	if st == nil {
 		return nil, fmt.Errorf("learnreplay: the replay ended after %d of the %d cycles of %s/%s", n, cycle, ns, model)
 	}
-	st.FirstAt, st.TPOTWindows, st.Cycles = firstAt, windows, total
+	st.FirstAt, st.TPOTWindows, st.EngineTPOTWindows, st.Cycles = firstAt, windows, engine, total
 	for i := range st.Variants {
 		st.Variants[i].ReadingsFrom, st.Variants[i].ReadingsTo = cyclesSpanned(st.Variants[i].LineReadings, cycleAt)
+		st.Variants[i].LineRows = lines.rows(st.Variants[i].Variant)
 	}
 	return st, nil
 }
@@ -309,9 +331,18 @@ func cyclesSpanned(readings []itl.Observation, cycleAt map[time.Time]int) (from,
 // shapeCycles cycles with traffic: a row serving requests, or generating
 // tokens, at the cycle.
 func noteShapes(shapes map[string][]shapeSample, rows []domain.ReplicaMetrics, cycle int) {
-	type acc struct{ n, il, ol, hit, req float64 }
+	type acc struct {
+		weight, il, ol, squared, hit, req float64
+		unread                            bool
+	}
 	byVariant := map[string]*acc{}
 	traffic := map[string]bool{}
+	rate := func(rm domain.ReplicaMetrics) float64 {
+		if rm.RequestRateKnown && rm.RequestRate > 0 {
+			return rm.RequestRate
+		}
+		return 0
+	}
 	for _, rm := range rows {
 		a := byVariant[rm.VariantName]
 		if a == nil {
@@ -321,22 +352,37 @@ func noteShapes(shapes map[string][]shapeSample, rows []domain.ReplicaMetrics, c
 		if rm.RunningRequests > 0 || rm.RequestRate > 0 || rm.GenerationTokenRate > 0 {
 			traffic[rm.VariantName] = true
 		}
-		if rm.AvgOutputTokens > 0 {
-			a.n++
-			a.il += rm.AvgInputTokens
-			a.ol += rm.AvgOutputTokens
-			a.hit += rm.PrefixCacheHitRate
+		a.req += rate(rm)
+	}
+	// Rows weighted by their request rate, as the analyzers weight them, and
+	// alike when none read one: a busy row of short requests and a quiet one
+	// of long ones are one mean only by what each served.
+	for _, rm := range rows {
+		a := byVariant[rm.VariantName]
+		w := 1.0
+		if a.req > 0 {
+			w = rate(rm)
 		}
-		if rm.RequestRateKnown && rm.RequestRate > 0 {
-			a.req += rm.RequestRate
+		if !(rm.AvgOutputTokens > 0) || !(w > 0) {
+			continue
 		}
+		a.weight += w
+		a.il += w * rm.AvgInputTokens
+		a.ol += w * rm.AvgOutputTokens
+		a.hit += w * rm.PrefixCacheHitRate
+		a.squared += w * rm.AvgOutputTokensSquared
+		a.unread = a.unread || !rm.AvgOutputTokensSquaredKnown || !(rm.AvgOutputTokensSquared > 0)
 	}
 	for v, a := range byVariant {
-		if !traffic[v] || a.n == 0 {
+		if !traffic[v] || a.weight == 0 {
 			continue
 		}
 		s := shapes[v]
-		s = append(s, shapeSample{cycle: cycle, il: a.il / a.n, ol: a.ol / a.n, hit: a.hit / a.n, req: a.req})
+		sample := shapeSample{cycle: cycle, il: a.il / a.weight, ol: a.ol / a.weight, hit: a.hit / a.weight, req: a.req}
+		if !a.unread {
+			sample.squared = a.squared / a.weight
+		}
+		s = append(s, sample)
 		if len(s) > shapeCycles {
 			s = s[len(s)-shapeCycles:]
 		}
@@ -351,6 +397,14 @@ func noteShapes(shapes map[string][]shapeSample, rows []domain.ReplicaMetrics, c
 // as one at load, and taking cycles with traffic only means a recording
 // that ends idle is priced at the traffic it last served rather than at
 // none.
+//
+// The spread is taken over the cycles that read it, with their own weights
+// and their own mean, so a cycle with a row that read none (a rollout) costs
+// the window that cycle and not its reading. Across a change of shape the
+// window holds both, and their difference reads as spread: D reads high, and
+// the question asks for more replicas, the side the planner may err on.
+// Saturation prices D 1 there (resolvePricing); this mean is a mix of the two
+// shapes too.
 func shapeOf(samples []shapeSample) MeasuredShape {
 	if len(samples) == 0 {
 		return MeasuredShape{}
@@ -360,6 +414,7 @@ func shapeOf(samples []shapeSample) MeasuredShape {
 		total += s.req
 	}
 	var out MeasuredShape
+	var readWeight, readMean, readSquared float64
 	for _, s := range samples {
 		w := 1 / float64(len(samples))
 		if total > 0 {
@@ -368,6 +423,14 @@ func shapeOf(samples []shapeSample) MeasuredShape {
 		out.InputTokens += w * s.il
 		out.OutputTokens += w * s.ol
 		out.PrefixHitRate += w * s.hit
+		if s.squared > 0 {
+			readWeight += w
+			readMean += w * s.ol
+			readSquared += w * s.squared
+		}
+	}
+	if readWeight > 0 {
+		out.OutputDispersion = shape.Dispersion(readMean/readWeight, readSquared/readWeight)
 	}
 	out.FromCycle, out.ToCycle, out.Cycles = samples[0].cycle, samples[len(samples)-1].cycle, len(samples)
 	return out
@@ -480,6 +543,7 @@ func (vs *VariantState) refit() {
 	if vs.Tier == whatif.TierPinnedB && vs.analyzerRaised {
 		adm = vs.analyzerOneSided
 	}
+	adm.OLSLatched = vs.Tier == whatif.TierOLS && vs.Readings.OLSLatched
 	if got := itl.Refit(vs.Readings.All, vs.Readings.Steady, vs.Baseline, vs.MinSettled, adm); got.Tier != "" && sameLine(got.Model, vs.Line) {
 		vs.Tier, vs.LineReadings, vs.Refitted, vs.OneSided = got.Tier, got.Read, true, adm
 		return

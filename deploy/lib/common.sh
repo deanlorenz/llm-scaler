@@ -70,6 +70,16 @@ kc_not_found() {
     return 1
 }
 
+# wva_check_so_name refuses a ScaledObject name KEDA would refuse later. KEDA
+# names the HPA keda-hpa-<ScaledObject> and an HPA name holds 63 characters, so a
+# ScaledObject name holds 54 (KEDA v2.21.0, scaledobject_webhook.go). Stopped here
+# it is a line with the name in it; past here it is a ScaledObject that never
+# gets an HPA. Only for objects this repository generates, which never set
+# spec.advanced.horizontalPodAutoscalerConfig.name.
+wva_check_so_name() {
+    [ "${#1}" -le 54 ] || log_error "ScaledObject name $1 is ${#1} characters, and KEDA takes 54: keda-hpa-<name> must fit in 63. Shorten the workload or pool name, or set spec.advanced.horizontalPodAutoscalerConfig.name on your own ScaledObject."
+}
+
 # wva_make_cmd echoes the make command that repeats THIS install's shape for
 # target $1; any VAR=value arguments after it are put in front.
 #
@@ -806,94 +816,6 @@ wva_kueue_reader_names() {
         WVA_KUEUE_READER_NAMES="${WVA_KUEUE_READER_NAMES:+$WVA_KUEUE_READER_NAMES }$n"
     done
     return 0
-}
-
-# WVA_LEGACY_CLUSTER_ROLE_BINDINGS are cluster-scoped bindings this project used
-# to render and no longer does.
-#
-# They need deleting BY NAME, because the uninstall works by rendering the overlay
-# and deleting what it renders -- so the moment a resource file leaves the overlay,
-# `delete -k` can no longer see it and every copy already on the cluster is
-# stranded. Measured on the shared GPU cluster when the Prometheus binding was dropped: 12 of them
-# were sitting there, aged 2 to 78 days, one per install, with no tooling left that
-# could remove any of them.
-WVA_LEGACY_CLUSTER_ROLE_BINDINGS=(
-    # Granted the user-workload Prometheus SA cluster-monitoring-view "so it can
-    # scrape the controller's secure /metrics endpoint". It never did: that
-    # ClusterRole carries `namespaces get` and `prometheuses/api` and no
-    # nonResourceURLs rule, so it cannot authorize a /metrics scrape at all --
-    # confirmed by reading it off a live cluster. The scrape is authorized by
-    # WVA's OWN SA via the ServiceMonitor's bearerTokenSecret plus the
-    # metrics-reader nonResourceURLs rule. So this only ever handed a
-    # cluster-wide platform-API read to a service account that did not need it.
-    wva-prometheus-cluster-monitoring-view
-)
-
-# wva_delete_legacy_crbs removes THIS INSTALL's copies of the bindings above.
-#
-# Scoped by name to this install, never a label sweep. These are cluster-scoped
-# objects on a shared cluster with one copy per install, and this repo has already
-# paid for getting that wrong once -- an uninstall that resolved fixed names
-# stripped a different, healthy install of its permissions (see
-# wva_append_crb_name_patches). Deleting only the names this namespace would have
-# produced keeps other tenants' copies untouched.
-#
-# TWO SUFFIX GENERATIONS, both tried: the current suffix is a hash of the
-# namespace, an older one used the namespace name verbatim. A cluster upgraded
-# through both carries both, which is exactly what the shared GPU cluster shows --
-# `...-016f647d` beside `...-benchmark-epp-keda`. Computing only the hash would
-# have left half of them behind.
-#
-# Failure is reported, not fatal: a namespace-scoped install has no rights to
-# delete a ClusterRoleBinding, and the object is inert anyway.
-wva_delete_legacy_crbs() {
-    local ns="$1" crb name
-    [ -n "$ns" ] || return 0
-    for crb in "${WVA_LEGACY_CLUSTER_ROLE_BINDINGS[@]}"; do
-        for name in "${crb}-$(wva_ns_suffix "$ns")" "${crb}-${ns}"; do
-            kubectl get clusterrolebinding "$name" >/dev/null 2>&1 || continue
-            if kubectl delete clusterrolebinding "$name" >/dev/null 2>&1; then
-                log_info "Removed obsolete ClusterRoleBinding $name (granted the user-workload Prometheus SA cluster-monitoring-view; it never authorized a scrape)."
-            else
-                log_warning "Obsolete ClusterRoleBinding $name is still present and needs a cluster admin to remove:"
-                log_warning "    kubectl delete clusterrolebinding $name"
-                log_info   "  It grants the user-workload Prometheus SA cluster-wide monitoring read and is not used by anything."
-            fi
-        done
-    done
-}
-
-# wva_delete_legacy_controller_token removes the non-expiring token Secret the
-# OpenShift overlay used to mint for the CONTROLLER's ServiceAccount, in
-# namespace $1.
-#
-# The ServiceMonitor now scrapes as wva-metrics-scraper, which holds only
-# `get /metrics`. The old Secret is no longer rendered, so `kubectl apply`
-# leaves it behind and `delete -k` can never see it -- and while it exists it is
-# a permanent copy of the controller's whole identity for anyone who can read
-# Secrets in the namespace. Deleted by name, and only when its annotation still
-# names wva-controller-manager: a Secret of that name that is something else is
-# not ours to remove. Called after the apply, once nothing references it.
-wva_delete_legacy_controller_token() {
-    local ns="$1" name="wva-controller-manager-token" sa err rc=0
-    [ -n "$ns" ] || return 0
-    sa="$(kubectl get secret "$name" -n "$ns" \
-        -o jsonpath='{.metadata.annotations.kubernetes\.io/service-account\.name}' 2>&1)" || rc=$?
-    if [ "$rc" -ne 0 ]; then
-        case "$sa" in
-            *NotFound*|*"not found"*) return 0 ;;
-        esac
-        log_warning "Could not check for the obsolete token Secret $ns/$name: $sa"
-        log_warning "  If it exists it is a non-expiring token for the controller's ServiceAccount; remove it: kubectl delete secret $name -n $ns"
-        return 0
-    fi
-    [ "$sa" = "wva-controller-manager" ] || return 0
-    if err="$(kubectl delete secret "$name" -n "$ns" 2>&1)"; then
-        log_info "Removed obsolete Secret $ns/$name (a non-expiring token for the controller ServiceAccount; the ServiceMonitor scrapes as wva-metrics-scraper now)."
-    else
-        log_warning "Obsolete Secret $ns/$name is still present ($err). It is a non-expiring token for the controller ServiceAccount; remove it:"
-        log_warning "    kubectl delete secret $name -n $ns"
-    fi
 }
 
 # wva_append_crb_name_patches appends the rename patches to a kustomization file.
@@ -1968,8 +1890,6 @@ wva_render_why() {
             deploy_wva_prerequisites_kube_like|deploy_wva_prerequisites) echo "A dependency of the scaling manager that the cluster does not have." ;;
             _install_crd_group|install_inference_crds) echo "CRDs the scaling manager watches and the cluster does not have." ;;
             wva_repair_immutable_rolerefs) echo "roleRef is immutable: this binding must point at a new role, so it is deleted and admin.yaml recreates it." ;;
-            wva_delete_legacy_crbs) echo "An obsolete binding from an older install; it grants access nothing uses." ;;
-            wva_delete_legacy_controller_token) echo "An obsolete non-expiring token for the controller's ServiceAccount." ;;
             wva_revoke_namespace|wva_prune_unlisted_namespaces) echo "This namespace is no longer in WVA_WATCH_NS; the controller's grant there is removed." ;;
             wva_append_scaler_networkpolicy_patch) echo "WVA_SCALER_NETWORKPOLICY=false: the external scaler NetworkPolicy is removed." ;;
             create_namespaces_shared_loop) echo "The namespace is stuck terminating and must finish before it is created again." ;;
@@ -2237,10 +2157,7 @@ wva_render_delete() {
         printf '%s "%s" not found, nothing to delete (rendered)\n' "$RT_RES" "${RT_NAME:-$RT_SELECTOR}" >&2
         return 0
     fi
-    # The live run makes some deletes after its apply, once nothing references
-    # what they remove; admin.sh keeps that order.
     local section=pre
-    case " ${FUNCNAME[*]} " in *" wva_delete_legacy_controller_token "*) section=post ;; esac
     if [ "$has_ignore" = true ]; then
         wva_render_record "$section" kubectl delete "${args[@]}"
     else

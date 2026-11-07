@@ -74,7 +74,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	served servedRates,
 	downstreamSaturated bool,
 	// revisionsMixed is the variant's replicas reporting more than one pod
-	// template revision this cycle (revisionsMixed): mid-rollout, whatever
+	// template revision this cycle (domain.RevisionsMixed): mid-rollout, whatever
 	// its scale target's status says.
 	revisionsMixed bool,
 	// routing is what the cycle's routing says about this replica's demand

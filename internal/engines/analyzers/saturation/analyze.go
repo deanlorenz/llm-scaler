@@ -493,7 +493,7 @@ func (c *cycle) fitLines() {
 	// itl.Model carries neither the tier nor the sample count, so there is
 	// nothing to tie-break on here yet; that is a known gap, not a property.
 	sort.Strings(variants)
-	mixed := revisionsMixed(c.input.ReplicaMetrics)
+	mixed := domain.RevisionsMixed(c.input.ReplicaMetrics)
 	for _, variant := range variants {
 		// Decode, and an aggregated variant (itlLineRole, issue #432); never
 		// prefill. ITL is the latency between GENERATED tokens, and
@@ -537,8 +537,11 @@ func (c *cycle) fitLines() {
 		}
 		c.a.itlUnderArgs(variantKey, windowArgs(params))
 		rows, withheld := c.a.itlRows(c.input.ReplicaMetrics, variant, params)
-		if rec.InRollout() || mixed[variant] {
+		rollingOut := rec.InRollout() || mixed[variant]
+		if rollingOut {
 			rows = nil
+		} else if c.a.itlClearsOnRevision {
+			rows = c.a.itlTracker.RolloutRows(variantKey, variant, rows, false).Rows
 		}
 		// The namespace rides on every ITL line because the variant name alone
 		// does not identify one: the same Deployment applied to two namespaces
@@ -559,7 +562,8 @@ func (c *cycle) fitLines() {
 		// arguments it was fitted under (issue #284).
 		adm := itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: atCap.perRank, MaxNumSeqsSource: atCap.source,
 			CapMaxPreemptionRate: c.cfg.ITLCapPreemptionRate(), Steady: c.tune.steadiness(),
-			SlopeHoldFor: c.a.Horizons().BucketRetention, Args: windowArgs(params)}
+			SlopeHoldFor: c.a.Horizons().BucketRetention, Args: windowArgs(params),
+			TierHysteresis: c.a.tierHysteresisOn()}
 		// When each replica's settle began: the engine's settle tracker
 		// (itl_settle.go).
 		c.a.itlSettleAdmission(&adm, c.input.Namespace, c.input.ModelID)
@@ -626,7 +630,11 @@ func (c *cycle) fitLines() {
 			// #467): it carries this variant's at-cap readings and pricing k,
 			// and a sibling borrowing it would be priced on another variant's
 			// evidence. While it is one-sided, nothing is published.
-			if !reading.SlopeHeld && !reading.PinnedAtBPrior {
+			//
+			// Nor is a resting full fit (itl.Reading.Resting): it prices this
+			// key, and a spread that earns no B on the tracker earns none
+			// here, where the prior on B, a borrower and the snapshot read it.
+			if !reading.SlopeHeld && !reading.PinnedAtBPrior && !reading.Resting() {
 				c.a.publishLineFor(physicsKey, variantKey, own, c.a.now(), params.SpeculatesPerStep())
 				if aggOn {
 					c.a.shapePublishedLine(physicsKey, aggG, aggSigma, aggSigmaOK, aggPoint, own.A, c.a.now())
@@ -706,7 +714,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 	// replica-capacity-summary: derived-mu says it at perReplicaLogLevel only.
 	muMissing := make(map[string]string)
 	c.reportedMu = make(map[string][]float64)
-	mixed := revisionsMixed(c.input.ReplicaMetrics)
+	mixed := domain.RevisionsMixed(c.input.ReplicaMetrics)
 	// Priced on the queue decode capacity drains: on decode of a P/D model,
 	// requests waiting for their KV from prefill are not one
 	// (decodeCapacityView), except on a replica at its sequence cap. The

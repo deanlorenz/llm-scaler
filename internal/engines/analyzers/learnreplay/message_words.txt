@@ -136,6 +136,7 @@ E1-const
 EPP
 EffectiveMaxBatchedTokens
 EngineParams
+EngineTPOTHistogram
 ErrImagePull
 Error
 Events
@@ -259,6 +260,7 @@ OLS
 OnePod
 Optimization
 Optimizer
+OutputSpreadUnread
 P/D
 P0-store
 P1
@@ -334,7 +336,6 @@ RollingOut
 RouterHopAssumed
 Running
 S
-SATURATION_CONFIG_MAP_NAME
 SCALE_FROM_ZERO_ENGINE_MAX_CONCURRENCY
 SCALING
 SCALING_POLICY_CONFIG_MAP_NAME
@@ -370,6 +371,7 @@ T2-failed
 T2-held
 T2-pinned
 TPOT
+TPOTBucketTooWide
 TPOTQuantileUnbounded
 TTFT
 Target
@@ -1369,6 +1371,7 @@ k2-obs-admitted
 k2-reads-the-settle-tracker
 k2-unsettled-joined
 k2-unsettled-window
+k2-waits-after-a-rollout
 k2-waits-after-controller-restart
 k2Borrows
 k2ComputeBound
@@ -1514,6 +1517,7 @@ lineHeld
 lineKey
 linePinnedAtBPrior
 linePriorBeyondReadings
+lineRolloutHeld
 lineShapeG
 lineSlopeAge
 lineSlopeHeld
@@ -2263,6 +2267,7 @@ rolesKnownNow
 rolled-out
 rolling
 rollout
+rolloutHeld
 rollouts
 room
 rose
@@ -2299,7 +2304,9 @@ saturatedThroughput
 saturatedThroughputBucket
 saturation
 saturation-holds-role
+saturation-itl-clears-on-a-new-revision
 saturation-itl-one-sided-at-cap
+saturation-itl-tier-hysteresis
 saturation-only
 saturation-token-based
 saturation.Analyze
@@ -2444,6 +2451,7 @@ slo
 slo-
 slo-batch-cap-admission
 slo-batch-cap-per-rank
+slo-itl-files-learner-reports
 slo-itl-forget-reaches-the-line
 slo-itl-idle-needs-evidence
 slo-itl-keeps-the-settle-through-a-missing-row
@@ -2453,7 +2461,10 @@ slo-itl-pinned
 slo-itl-reads-the-finite-pod-mean
 slo-itl-reads-the-settle-tracker
 slo-itl-restart-under-its-name-settles
+slo-itl-rollout-guard
+slo-itl-tier-hysteresis
 slo-itl-waits-after-controller-restart
+slo-kv-per-request-output-dispersion
 slo-model
 slo-transient
 slo-ttft-decode-term
@@ -2636,9 +2647,12 @@ throughput-demand-floor-total
 throughput-itl-above-band
 throughput-itl-admits-at-sequence-cap
 throughput-itl-at-cap
+throughput-itl-files-learner-reports
 throughput-itl-forget-reaches-the-line
+throughput-itl-forgets-on-new-arguments
 throughput-itl-held
 throughput-itl-idle-needs-evidence
+throughput-itl-keeps-present-variants
 throughput-itl-keeps-the-settle-through-a-missing-row
 throughput-itl-keeps-the-window-on-gps-mismatch
 throughput-itl-ols
@@ -2646,11 +2660,14 @@ throughput-itl-pinned
 throughput-itl-reads-the-finite-pod-mean
 throughput-itl-reads-the-settle-tracker
 throughput-itl-restart-under-its-name-settles
+throughput-itl-rollout-guard
 throughput-itl-settling
 throughput-itl-steady-gate
+throughput-itl-tier-hysteresis
 throughput-itl-waits-after-controller-restart
 throughput.Analyze
 throughput.ForgetVariant
+throughput.NoteVariantsPresent
 throughput.Observe
 throughputEntries
 throughputHeld
@@ -2665,6 +2682,7 @@ throughput|
 tier
 tier-1
 tier-2
+tierHeld
 tiers
 time
 time-base
@@ -2919,7 +2937,6 @@ wrong-side
 wva-learned-state
 wva-manager-config
 wva-policy
-wva-saturation-scaling-config
 wva-scaling-policy-config
 wva-utilization-share-history
 wva_unattributed_gpus

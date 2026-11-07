@@ -209,6 +209,15 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 			return err
 		}
 		r.tp.ForgetVariant(ctx, d.Namespace, d.ModelID, d.Variant)
+	case throughput.KindNoteVariantsPresent:
+		if r.tp == nil {
+			return nil
+		}
+		var d throughput.PresentEvent
+		if err := ev.DecodeData(&d); err != nil {
+			return err
+		}
+		r.tp.NoteVariantsPresent(d.Namespace, d.ModelID, d.Variants)
 	case throughput.KindObserve:
 		if r.tp == nil {
 			return errNoThroughput

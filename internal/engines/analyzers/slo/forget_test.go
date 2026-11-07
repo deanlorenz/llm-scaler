@@ -110,8 +110,8 @@ func TestForget_DropsTheArgumentsTheLineWasLearnedUnder(t *testing.T) {
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 	key := windowKey("ns", "m", settleAgg)
 	sib := windowKey("ns", "m", forgetSibling)
-	a.linesUnderArgs(key, "args-1", now)
-	a.linesUnderArgs(sib, "args-1", now)
+	a.linesUnderArgs(key, "args-1", "ns", "m", "agg", now)
+	a.linesUnderArgs(sib, "args-1", "ns", "m", "agg", now)
 	a.mu.Lock()
 	a.seen[key], a.seen[sib] = now, now
 	a.mu.Unlock()
@@ -201,8 +201,8 @@ func TestForget_ReportsEachForgottenKey(t *testing.T) {
 // struct, interface, func or sync type added later fails here until someone
 // decides. The forgotten ones are held by the tests above.
 func TestForget_EveryFieldIsClassified(t *testing.T) {
-	forgotten := []string{"lines", "seen", "args", "accelerators", "imbalance", "decodeTTFT", "decodeTerms", "prompts"}
-	kept := []string{"transients", "ownSettle", "ownSettled", "paths"}
+	forgotten := []string{"lines", "seen", "args", "lineLogged", "accelerators", "imbalance", "decodeTTFT", "decodeTerms", "prompts"}
+	kept := []string{"transients", "ownSettle", "ownSettled", "paths", "learnerReports", "forgottenReports"}
 	plumbing := []string{"router", "store", "now", "mu", "rec", "settle", "prefillEstimates"}
 	plain := func(k reflect.Kind) bool {
 		switch k {

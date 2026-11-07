@@ -111,6 +111,11 @@ const (
 	// token, is left out, and the answer over-promises by it (by 25% to 65%
 	// on the P2 recordings). No caller acts on it.
 	DecodeTTFTUnmeasured Flag = "DecodeTTFTUnmeasured"
+	// OutputSpreadUnread is a decode line priced with no reading of the output
+	// spread D: KVreq is ILeff + OL/2, which over-promises by 7-44% at IL = 2 OL
+	// on a real spread (shape.WithOutputDispersion). P3 does not raise it: the
+	// CLI and S1, which read the shape, do.
+	OutputSpreadUnread Flag = "OutputSpreadUnread"
 	// VPScaledToPrompt is a V_P read at one mean prompt and rescaled along
 	// P1's curve to a longer one (Prefill.shapedVP): V_P * s(I_vp)/s(I),
 	// s(I) = b + c*I.
@@ -224,6 +229,9 @@ type TTFT struct {
 	// decode side.
 	Tier  string
 	Flags []Flag
+	// Sensitivity is the figure's span over V_P and f either way, set by the
+	// caller that swept them (SensitivityFleets); nil when none did.
+	Sensitivity *Sensitivity
 }
 
 func (TTFT) result() {}

@@ -99,8 +99,8 @@ func (a *Analyzer) SlopeHoldFor() time.Duration { return a.slopeHoldFor }
 // SwitchITLKeepsSettleThroughMissingRow, SwitchITLReadsFinitePodMean,
 // SwitchITLRestartUnderName, SwitchITLIdleOnEvidence and
 // SwitchITLForgetReachesTheLine, SwitchITLOneSidedAtCap, SwitchTTFTPrice,
-// SwitchTTFTMeasuredSpread and SwitchTTFTMeasuredTransfer; a
-// name it does not know is an error, and sets nothing. Never called on a production
+// SwitchTTFTMeasuredSpread, SwitchTTFTMeasuredTransfer and
+// SwitchKVPerRequestOutputDispersion; a name it does not know is an error, and sets nothing. Never called on a production
 // path; a test holds that.
 func (a *Analyzer) SetSwitchesForReplay(switches map[string]bool) error {
 	rest := maps.Clone(switches)
@@ -131,6 +131,12 @@ func (a *Analyzer) switchFields() map[string]*bool {
 		SwitchITLRestartUnderName:             &a.itlRestartUnderName,
 		SwitchITLIdleOnEvidence:               &a.itlIdleOnEvidence,
 
+		// Issue #495: the line's reports and learner-write (learner.go).
+		SwitchITLFilesReports: &a.itlFilesReports,
+
+		// Issue #481: no rows for the line in a rollout (rollout.go).
+		SwitchITLRolloutGuard: &a.itlRolloutGuard,
+
 		// Issue #431: the forget-learned-state annotation reaches the line
 		// (forget.go).
 		SwitchITLForgetReachesTheLine: &a.itlForgetReachesLine,
@@ -139,6 +145,9 @@ func (a *Analyzer) switchFields() map[string]*bool {
 		// is unlearned (one_sided.go).
 		SwitchITLOneSidedAtCap: &a.itlOneSidedAtCap,
 
+		// The ITL line's tier latch (issue #495).
+		SwitchITLTierHysteresis: &a.itlTierHysteresis,
+
 		// S1: each prefill variant priced against the TTFT target, in shadow
 		// (ttft.go).
 		SwitchTTFTPrice:            &a.ttftPrice,
@@ -146,6 +155,10 @@ func (a *Analyzer) switchFields() map[string]*bool {
 		SwitchTTFTMeasuredTransfer: &a.ttftMeasuredTransfer,
 		// The decode term of a TTFT on a decode line (ttft.go).
 		SwitchTTFTDecodeTerm: &a.ttftDecodeTerm,
+
+		// Issue #276: the spread of output lengths in the KV per request
+		// (output_dispersion.go).
+		SwitchKVPerRequestOutputDispersion: &a.kvOutputDispersion,
 	}
 }
 

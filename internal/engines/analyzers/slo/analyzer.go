@@ -30,6 +30,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
@@ -127,10 +128,26 @@ type Analyzer struct {
 	// itlOneSidedAtCap is SwitchITLOneSidedAtCap (issue #467, one_sided.go):
 	// on from the constructor; a replay turns it off (SetSwitchesForReplay).
 	itlOneSidedAtCap bool
+	// itlTierHysteresis is SwitchITLTierHysteresis (issue #495,
+	// tier_hysteresis.go): on, the line's tier is latched.
+	itlTierHysteresis bool
 	// settleInterval is the controller's optimize interval
 	// (WithOptimizationInterval), zero until set: what the line's own trace
 	// judges an absence by (settle.Tolerance), as the saturation analyzer's.
 	settleInterval time.Duration
+
+	// itlFilesReports is SwitchITLFilesReports (learner.go): on from the
+	// constructor; a replay turns it off (SetSwitchesForReplay). lineLogged is
+	// what learner-write last logged per key, learnerReports each model's
+	// reports of its last cycle, by namespace|model, and forgottenReports what
+	// was forgotten since the engine last took them. Under mu.
+	itlFilesReports  bool
+	lineLogged       map[string]lineLogged
+	learnerReports   map[string][]learn.Report
+	forgottenReports []learn.Report
+	// itlRolloutGuard is SwitchITLRolloutGuard (rollout.go): on from the
+	// constructor; a replay turns it off (SetSwitchesForReplay).
+	itlRolloutGuard bool
 
 	// prefillEstimates is where P1's prefill estimates are read
 	// (WithPrefillEstimates, prefill_estimates.go); nil when none was given.
@@ -146,6 +163,10 @@ type Analyzer struct {
 	// ttftDecodeTerm is SwitchTTFTDecodeTerm (ttft.go): on from the
 	// constructor; a replay turns it off (SetSwitchesForReplay).
 	ttftDecodeTerm bool
+	// kvOutputDispersion is SwitchKVPerRequestOutputDispersion (issue #276,
+	// output_dispersion.go): on from the constructor; a replay turns it off
+	// (SetSwitchesForReplay).
+	kvOutputDispersion bool
 	// imbalance is each prefill variant's raw shares and decodeTTFT each
 	// decode variant's measured TTFT, keyed namespace|model|variant, for the
 	// TTFT pricing (ttft_fleet.go); decodeTerms is each decode variant's
@@ -207,16 +228,22 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		itlWaitsAfterRestart: true,
 		itlKeepsSettle:       true,
 		itlFiniteOnly:        true,
+		itlRolloutGuard:      true,
+		itlFilesReports:      true,
+		lineLogged:           make(map[string]lineLogged),
+		learnerReports:       make(map[string][]learn.Report),
 		itlRestartUnderName:  true,
 		itlIdleOnEvidence:    true,
 		itlForgetReachesLine: true,
 		itlOneSidedAtCap:     true,
+		itlTierHysteresis:    true,
 
 		ttftPrice: true,
 
 		ttftMeasuredSpread:   true,
 		ttftMeasuredTransfer: true,
 		ttftDecodeTerm:       true,
+		kvOutputDispersion:   true,
 		imbalance:            make(map[string]*imbalanceWindow),
 		prompts:              make(map[string]*promptSpreadWindow),
 		decodeTTFT:           make(map[string]*decodeTTFTWindow),
@@ -282,11 +309,17 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 		AnalyzedAt:   now,
 	}
 	snap := metrics.SLOModelSnapshot{Namespace: input.Namespace, ModelName: input.ModelID}
+	a.mu.Lock()
+	delete(a.learnerReports, reportModel(input.Namespace, input.ModelID))
+	a.mu.Unlock()
 	// Without the engine's settle tracker, the analyzer observes its own
 	// first, as the engine does before any analyzer runs (settle.go).
 	a.observeOwnSettle(input, now)
 
 	fleet := readFleet(input)
+	if a.kvOutputDispersion {
+		fleet.shape = fleet.shape.WithOutputDispersion(fleet.outputDispersion)
+	}
 	// An output length nobody has reported yet is not a demand of zero: it is
 	// no demand at all, and a combiner must read it as undefined. So the demand
 	// is left out, and every generating variant below reports no data.
@@ -310,6 +343,7 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 	for _, vs := range fleet.variants {
 		key := a.variantKey(input.Namespace, input.ModelID, vs)
 		vc, reading, d := a.priceVariant(input, vs, key, fleet, tpotTarget, scaleUp, now)
+		a.noteLineLearner(logger, input.Namespace, input.ModelID, vs, key, d, now)
 		if domain.CanonicalRole(vs.Role) == domain.RoleDecode {
 			decodeLines = append(decodeLines, ttftDecodeLine{state: vs, detail: d})
 		}
@@ -337,9 +371,11 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 				// Which line, and what it was fitted from: the window's key,
 				// the coefficients, and what the window was offered and held.
 				"lineKey", key, "lineA", d.line.Model.A, "lineB", d.line.Model.B, "lineTier", d.line.Tier,
+				"tierHeld", d.line.TierHeld,
 				// A held slope reads pinned or pinned-default on the metric
 				// like a fit made this cycle; these say it is an old one.
 				"lineSlopeHeld", d.line.SlopeHeld, "lineSlopeAge", d.line.SlopeAge(now),
+				"lineRolloutHeld", d.rolloutHeld,
 				// Priced one-sided at the cap (SwitchITLOneSidedAtCap): no
 				// learned B, and the prior's line (its intercept the prior on
 				// B, capped at the window's least ITL, through the mean of the
@@ -445,6 +481,9 @@ type pricingDetail struct {
 	// nothing is declared.
 	lineBatchCap       int64
 	lineBatchCapSource string
+	// rolloutHeld is the line held on the old pods: the variant rolls out and
+	// no new pod serves (itl.RolloutSight.Held).
+	rolloutHeld bool
 }
 
 // Where the batch cap a replica is priced at came from (pricingDetail), as
@@ -493,7 +532,13 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	// (itl.Admission), and a change of arguments forgets the window first, so
 	// the old engine's readings are neither refitted nor held as the new one's.
 	args := params.ArgsTag()
-	a.linesUnderArgs(key, args, now)
+	rows, held := a.lineRows(input, fleet, key, vs.VariantName)
+	d.rolloutHeld = held
+	if held {
+		args = a.heldArgs(key, args)
+	} else {
+		a.linesUnderArgs(key, args, input.Namespace, input.ModelID, vs.VariantName, now)
+	}
 	adm.SlopeHoldFor, adm.Args = a.slopeHoldFor, args
 	// When each replica's settle began: the engine's settle tracker
 	// (settle.go).
@@ -502,9 +547,11 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	// default B prices under the truth: priced one-sided until B is learned
 	// (one_sided.go).
 	a.oneSided(&adm, tpotTarget, a.priorScope(key, args, input.VariantStates))
+	a.tierPrice(&adm, tpotTarget, capacityInputs{tokens: fleet.capacityTokens(vs.VariantName, params),
+		kvPerRequest: fleet.shape.KVreq, ranks: fleet.engineRanks(vs.VariantName)}, params)
 	// The fill is clamped to the band the line is fitted over.
 	band := whatif.FillBand{Lo: adm.MinK, Hi: adm.MaxK}
-	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, adm, now)
+	line, source, r := a.fitLine(key, rows, vs.VariantName, adm, now)
 	d.line, d.source, d.band = r, source, band
 	if !(tpotTarget > 0) {
 		return vc, nil, d
@@ -611,6 +658,7 @@ func (a *Analyzer) fitLine(key string, rows []domain.ReplicaMetrics, variant str
 	a.mu.Lock()
 	a.seen[key] = now
 	a.mu.Unlock()
+	adm.TierHysteresis = a.tierHysteresisOn()
 	r := a.lines.Observe(key, variant, rows, adm, now)
 	a.paths.countFit(r.Tier)
 	switch {
@@ -718,7 +766,7 @@ func (a *Analyzer) judge(ctx context.Context, input domain.AnalyzerInput, slo *c
 // and stamped it with the new arguments, and the old engine's slope was then
 // held as the new one's for the whole slope hold (issue #284). Unknown
 // arguments change nothing. There is no stash: a rollback relearns its line.
-func (a *Analyzer) linesUnderArgs(key, args string, now time.Time) {
+func (a *Analyzer) linesUnderArgs(key, args, namespace, modelID, variant string, now time.Time) {
 	if args == "" {
 		return
 	}
@@ -730,7 +778,8 @@ func (a *Analyzer) linesUnderArgs(key, args string, now time.Time) {
 		return
 	}
 	// The tracker's lock is taken under a.mu, as EvictStale takes it.
-	a.lines.Sweep(now, func(k string) bool { return k == key })
+	_, _, forgotten := a.lines.ForgetKeys(now, learn.ByArguments, func(k string) bool { return k == key })
+	a.noteForgottenLocked(namespace, modelID, variant, forgotten)
 }
 
 func (a *Analyzer) engineParams(namespace, modelID, variant string) *capacity.EngineParams {
@@ -758,7 +807,9 @@ func (a *Analyzer) evictStale(now time.Time) Evicted {
 		return !ok || now.Sub(at) > a.stateTimeout
 	}
 	var ev Evicted
-	ev.Lines, ev.Baselines = a.lines.Sweep(now, stale)
+	var evicted []learn.Forgotten
+	ev.Lines, ev.Baselines, evicted = a.lines.ForgetKeys(now, learn.ByEvicted, stale)
+	a.noteEvictedLocked(evicted)
 	for key := range a.seen {
 		if stale(key) {
 			delete(a.seen, key)
@@ -923,14 +974,22 @@ type fleetReading struct {
 	generatingReplicas int
 	// shape is the request shape the generating replicas are serving.
 	shape shape.Shape
+	// outputDispersion is the spread of their output lengths, D =
+	// E[O^2]/E[O]^2, with shape's weights; 0 unless every row shape counted
+	// read the bound on E[O^2] (output_dispersion.go).
+	outputDispersion float64
 	// requestRate is the generating replicas' summed completion rate, the
 	// fallback when the router reports no arrival rate.
 	requestRate float64
 	rows        []domain.ReplicaMetrics
+	// mixed names the variants whose replicas report more than one revision
+	// (domain.RevisionsMixed).
+	mixed map[string]bool
 }
 
 func readFleet(input domain.AnalyzerInput) fleetReading {
-	f := fleetReading{ready: make(map[string]int), rows: input.ReplicaMetrics}
+	f := fleetReading{ready: make(map[string]int), rows: input.ReplicaMetrics,
+		mixed: domain.RevisionsMixed(input.ReplicaMetrics)}
 	f.variants = append(f.variants, input.VariantStates...)
 	sort.Slice(f.variants, func(i, j int) bool { return f.variants[i].VariantName < f.variants[j].VariantName })
 	roles := make(map[string]string, len(f.variants))
@@ -942,7 +1001,8 @@ func readFleet(input domain.AnalyzerInput) fleetReading {
 	}
 	// Request-rate weighted, so a replica serving most of the traffic decides
 	// the shape; equal weights when no replica reports a rate.
-	var in, out, hit, weight float64
+	var in, out, squared, hit, weight float64
+	spreadRead := true
 	for _, rm := range input.ReplicaMetrics {
 		if !rm.Ready || rm.FromWarmPool {
 			continue
@@ -974,9 +1034,17 @@ func readFleet(input domain.AnalyzerInput) fleetReading {
 		out += w * rm.AvgOutputTokens
 		hit += w * rm.PrefixCacheHitRate
 		weight += w
+		if rm.AvgOutputTokensSquaredKnown && rm.AvgOutputTokensSquared > 0 {
+			squared += w * rm.AvgOutputTokensSquared
+		} else {
+			spreadRead = false
+		}
 	}
 	if weight > 0 {
 		f.shape = shape.New(in/weight, out/weight, hit/weight)
+		if spreadRead {
+			f.outputDispersion = shape.Dispersion(out/weight, squared/weight)
+		}
 	}
 	return f
 }

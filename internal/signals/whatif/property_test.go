@@ -378,6 +378,9 @@ func TestProperty_EveryReasonHasACase(t *testing.T) {
 			Buckets: []HistogramBucket{{UpperEdge: 0.005, Count: 50}, {UpperEdge: math.Inf(1), Count: 100}},
 			Sum:     1, Count: 100,
 		}}, 0.9),
+		TPOTBucketTooWide: engineRatioFrom([]TPOTWindow{{
+			Buckets: []HistogramBucket{{UpperEdge: 0.05, Count: 100}}, Sum: 1, Count: 100,
+		}}, 0.9),
 		TargetBelowFloor: rateFor(d, TPOTTarget{Seconds: 0.002}, 0.85),
 		Saturated:        FillAtRate(d, knee),
 		NoDecodeReplicas: KneeRate(with(func(c *Decode) { c.Replicas = 0 })),

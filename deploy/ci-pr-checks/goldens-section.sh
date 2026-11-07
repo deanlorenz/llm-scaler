@@ -4,18 +4,23 @@
 # (docs/proposals/analyzer-learner.md 2.5, the rule; docs/developer-guide/
 # testing.md, "The goldens: section", the format).
 #
+#   PR_BODY_FILE=<a file holding the pull request's body> goldens-section.sh <base> <head>
 #   PR_BODY=<the pull request's body> goldens-section.sh <base> <head>
+#
+# The workflow uses the file: a body can be larger than one environment variable
+# may hold. When PR_BODY_FILE is set, PR_BODY is not read.
 #
 # <base> and <head> are any two commits git can diff. Exit 0: no golden moved,
 # or the section names every one that did. Exit 1: a moved golden is not named,
 # or the section is not of the format. Exit 2: the diff could not be read, or was
-# empty. An unread diff must not read as "no golden moved".
+# empty, or PR_BODY_FILE names no readable file. An unread diff must not read as
+# "no golden moved".
 #
 # The check catches honest mistakes, not an adversary: a PR runs its own copy of
 # it. So the body is not parsed as Markdown. The section is a strict line format,
 # and a line that is not of it fails, whatever it would render as.
 #
-# PR_BODY is whatever the author typed, so it stays data here: it is held in
+# The body is whatever the author typed, so it stays data here: it is held in
 # variables, matched against, and never evaluated. Nothing from it is printed,
 # because a line that opens with "::" in a job's output is a workflow command:
 # a bad line is reported by its number. Paths come from git, through %q, because
@@ -154,7 +159,11 @@ plural() {
 }
 
 if [ "$#" -ne 2 ]; then
-    echo "usage: PR_BODY=<body> goldens-section.sh <base> <head>" >&2
+    echo "usage: PR_BODY_FILE=<file> goldens-section.sh <base> <head>" >&2
+    exit 2
+fi
+if [ -n "${PR_BODY_FILE:-}" ] && { [ ! -f "$PR_BODY_FILE" ] || [ ! -r "$PR_BODY_FILE" ]; }; then
+    echo "FAIL: goldens: PR_BODY_FILE is not a readable file, so this run read no body" >&2
     exit 2
 fi
 
@@ -184,7 +193,11 @@ if [ "${#moved[@]}" -eq 0 ]; then
     exit 0
 fi
 
-read_section <<<"${PR_BODY:-}"
+if [ -n "${PR_BODY_FILE:-}" ]; then
+    read_section <"$PR_BODY_FILE"
+else
+    read_section <<<"${PR_BODY:-}"
+fi
 
 missing=()
 for path in "${moved[@]}"; do

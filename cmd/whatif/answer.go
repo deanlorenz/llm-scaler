@@ -46,14 +46,19 @@ type answerFlags struct {
 	inputTokens, outputTokens                float64
 	headroom, tpotRatio                      float64
 	seed                                     uint64
-	// ttft, ttftPercentile, assumeVP, prefill and prefillVariant are the
-	// TTFT half's flags (ttft.go); inputBucket only refuses per-bucket
-	// answers.
+	// ttft, ttftPercentile, assumeVP, assumePromptCV, arrivalCV2, prefill and
+	// prefillVariant are the TTFT half's flags (ttft.go); inputBucket only
+	// refuses per-bucket answers.
 	ttft, ttftPercentile, prefillVariant, inputBucket string
-	assumeVP                                          float64
+	assumeVP, assumePromptCV, arrivalCV2              float64
 	assumeRouterHop                                   time.Duration
 	prefill                                           int
 	set                                               map[string]bool
+	// assumeA is --assume-a, a TTFT flag (ttft.go).
+	assumeA time.Duration
+	// engineTPOT says R_q was read from the engine's TPOT histogram
+	// (tpotRatioFor).
+	engineTPOT bool
 	// window is the --prometheus mode's flags, capture's own, and its
 	// namespace the --namespace both modes take; captured is the window
 	// read, once it is. question names the command, and warn is where a
@@ -91,9 +96,12 @@ func (f *answerFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.ttft, "ttft", "", "the TTFT target of slo-to-rate, end to end: a mean (200ms) or a percentile (200ms@p95)")
 	fs.StringVar(&f.ttftPercentile, "ttft-percentile", "", "the TTFT percentile, in percent (90); on replicas-to-slo, default the policy's, else 90")
 	fs.Float64Var(&f.assumeVP, "assume-vp", 0, "V_P, a prefill pod's prompt tokens per second, in place of the learned one (flagged)")
+	fs.Float64Var(&f.assumePromptCV, "assume-prompt-cv", 0, "the prompt's coefficient of variation, 0 to 3, in place of the measured one or the default 2 (flagged)")
+	fs.Float64Var(&f.arrivalCV2, "arrival-cv2", 0, "Ca^2, the arrivals' squared coefficient of variation at the prefill queue, in place of Poisson's 1 (flagged)")
 	fs.DurationVar(&f.assumeRouterHop, "assume-router-hop", 0, "the hop between the router and the engines (8ms), in place of the learned or default one (flagged)")
 	fs.IntVar(&f.prefill, "prefill", 0, "prefill replicas to price; 0 takes the recorded count")
 	fs.StringVar(&f.prefillVariant, "prefill-variant", "", "the prefill variant to price, when the model has several")
+	fs.DurationVar(&f.assumeA, "assume-a", 0, "a, the fixed latency one request pays on a prefill pod (11ms), in place of the learned one (flagged)")
 	fs.StringVar(&f.inputBucket, "input-bucket", "", "not supported: per-bucket answers are the planner's M1")
 	f.window.registerWindow(fs)
 	fs.Lookup("prometheus").Usage = "answer from a window of this Prometheus (base URL), captured and generated in memory, in place of --recording"
@@ -307,6 +315,9 @@ type pricedVariant struct {
 	cycle   int
 	decode  whatif.Decode
 	shape   shape.Shape
+	// check is the line against the recording's rows, the zero value with no
+	// line.
+	check whatif.LineCheck
 	// assumedIL and assumedOL say which lengths the flags assumed.
 	assumedIL, assumedOL bool
 	flags                []whatif.Flag
@@ -338,7 +349,9 @@ func (f *answerFlags) decodeVariants(st *learnreplay.State) ([]pricedVariant, er
 		if f.set["assume-output-tokens"] {
 			ol, pv.assumedOL = f.outputTokens, true
 		}
-		pv.shape = shape.New(il, ol, vs.Shape.PrefixHitRate)
+		// A spread is a figure of the traffic the histogram counted, whatever
+		// length is asked: as the prompt's cv (prefillShape).
+		pv.shape = shape.New(il, ol, vs.Shape.PrefixHitRate).WithOutputDispersion(vs.Shape.OutputDispersion)
 		replicas := vs.Replicas
 		if f.decode > 0 {
 			replicas = f.decode
@@ -356,11 +369,20 @@ func (f *answerFlags) decodeVariants(st *learnreplay.State) ([]pricedVariant, er
 		if pv.assumed() {
 			pv.flags = append(pv.flags, whatif.AssumedShape)
 		}
+		if vs.Shape.OutputDispersion == 0 {
+			pv.flags = append(pv.flags, whatif.OutputSpreadUnread)
+		}
 		switch vs.Tier {
 		case whatif.TierBorrowed:
 			pv.flags = append(pv.flags, whatif.BorrowedLine)
 		case whatif.TierHeld:
 			pv.flags = append(pv.flags, whatif.HeldLine)
+		}
+		if !vs.Line.IsZero() {
+			pv.check = whatif.CheckLine(pv.decode, vs.LineRows, st.At)
+			if pv.check.Mismatch() {
+				pv.flags = append(pv.flags, lineMismatch)
+			}
 		}
 		if vs.Refitted {
 			pv.lines = whatif.BootstrapLines(vs.Readings, whatif.Refit{Tier: vs.Tier, Line: vs.Line,
@@ -453,17 +475,44 @@ func (f *answerFlags) headroomFor(p *config.ScalingPolicy) float64 {
 }
 
 // tpotRatioFor resolves R_q for a percentile q: --assume-tpot-ratio, else
-// learned from the recording's TPOT windows. A refusal comes back as the
-// Result the percentile answers with.
+// learned from the router's TPOT windows, which are what the client sees; else,
+// flagged, from the engine's, where the router's hold no observation or read
+// coarse and the engine's do not. With no router to fall back to, a refusal of
+// the engine's is the answer (whatif.EngineTPOTRatio): it says more than that
+// no histogram exists. Any other refusal of the router's stands: it says that
+// data is wrong. A refusal comes back as the Result the percentile answers
+// with.
 func (f *answerFlags) tpotRatioFor(st *learnreplay.State, q float64) (whatif.TPOTRatio, []whatif.Flag, *whatif.Unanswerable) {
 	if f.set["assume-tpot-ratio"] {
 		return whatif.TPOTRatio{Value: f.tpotRatio, Assumed: true}, nil, nil
 	}
-	if len(st.TPOTWindows) == 0 {
-		return whatif.TPOTRatio{}, nil, &whatif.Unanswerable{Reason: whatif.NoTPOTHistogram,
-			Detail: "the recording carries no TPOT histogram; pass --assume-tpot-ratio for a flagged answer"}
+	r, flags, refused := whatif.TPOTRatio{}, []whatif.Flag(nil), &whatif.Unanswerable{Reason: whatif.NoTPOTHistogram,
+		Detail: "the recording carries no TPOT histogram; pass --assume-tpot-ratio for a flagged answer"}
+	if len(st.TPOTWindows) > 0 {
+		r, flags, refused = whatif.TPOTRatioFromWindows(st.TPOTWindows, q)
 	}
-	return whatif.TPOTRatioFromWindows(st.TPOTWindows, q)
+	coarse := refused == nil && slices.Contains(flags, whatif.CoarseTPOTBucket)
+	if !coarse && (refused == nil || refused.Reason != whatif.NoTPOTHistogram) || len(st.EngineTPOTWindows) == 0 {
+		return r, flags, refused
+	}
+	er, eflags, erefused := whatif.EngineTPOTRatio(st.EngineTPOTWindows, q)
+	switch {
+	case erefused == nil && (!coarse || !slices.Contains(eflags, whatif.CoarseTPOTBucket)):
+		f.engineTPOT = true
+		return er, eflags, nil
+	case coarse, erefused == nil, erefused.Reason == whatif.NoTPOTHistogram:
+		return r, flags, refused
+	}
+	erefused.Detail += "; pass --assume-tpot-ratio for a flagged answer"
+	return whatif.TPOTRatio{}, nil, erefused
+}
+
+// tpotWindowCount is how many windows R_q was read from.
+func (f *answerFlags) tpotWindowCount(st *learnreplay.State) int {
+	if f.engineTPOT {
+		return len(st.EngineTPOTWindows)
+	}
+	return len(st.TPOTWindows)
 }
 
 // placeholderRatio prices a percentile whose R_q was refused, so that the
@@ -483,9 +532,37 @@ func withRatioRefusal(r whatif.Result, refused *whatif.Unanswerable) whatif.Resu
 	return *refused
 }
 
+// onRatio is r, a figure or a refusal priced on R_q, saying where R_q came
+// from. A refusal is priced on it too: a floor at an assumed ratio is the
+// assumption's. InvalidInput is the question's, and rests on nothing.
+func onRatio(r whatif.Result, ratio whatif.TPOTRatio, flags []whatif.Flag) whatif.Result {
+	switch v := r.(type) {
+	case whatif.Answer:
+		v.Flags = append(v.Flags, flags...)
+		return v
+	case whatif.Unanswerable:
+		if v.Reason == whatif.InvalidInput {
+			return v
+		}
+		add := slices.Clone(flags)
+		if ratio.Assumed {
+			add = append(add, whatif.AssumedTPOTRatio)
+		}
+		for _, fl := range add {
+			if !slices.Contains(v.Flags, fl) {
+				v.Flags = append(slices.Clone(v.Flags), fl)
+			}
+		}
+		return v
+	}
+	return r
+}
+
 // ratioNote says where R_q came from, for the human output.
 func (f *answerFlags) ratioNote(st *learnreplay.State, r whatif.TPOTRatio) string {
 	switch {
+	case f.engineTPOT:
+		return fmt.Sprintf("R_q %s from %d engine TPOT windows, not the router's", num(r.Value), f.tpotWindowCount(st))
 	case r.Assumed && len(st.TPOTWindows) == 0:
 		return fmt.Sprintf("R_q %s ASSUMED (no TPOT histogram)", num(r.Value))
 	case r.Assumed:
@@ -535,8 +612,17 @@ func footer(st *learnreplay.State, variants []pricedVariant) string {
 }
 
 // shapeText is the shape a variant was priced at and where each length came
-// from: the flags, or the cycles it was measured over.
+// from, and the spread of its output lengths where one was read.
 func (pv pricedVariant) shapeText() string {
+	if d := pv.state.Shape.OutputDispersion; d > 0 {
+		return fmt.Sprintf("%s, output spread D %.3f (measured)", pv.lengthsText(), d)
+	}
+	return pv.lengthsText()
+}
+
+// lengthsText is the lengths a variant was priced at and where each came from:
+// the flags, or the cycles it was measured over.
+func (pv pricedVariant) lengthsText() string {
 	m := pv.state.Shape
 	measured := fmt.Sprintf("measured, cycles %d-%d", m.FromCycle, m.ToCycle)
 	if m.Cycles == 0 {

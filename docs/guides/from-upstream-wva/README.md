@@ -192,9 +192,8 @@ kubectl edit configmap wva-scaling-policy-config -n <controller-namespace>
 - Re-running `make deploy-wva` resets the `default` entry. Keep lasting
   changes in a tier or a per-model entry ([re-running the installer resets the
   default entry](../../reference/scaling-policy.md#re-running-the-installer-resets-the-default-entry)).
-- A namespace-local `wva-saturation-scaling-config` in the namespace the
-  scaling manager now runs in is ignored, because the install creates
-  `wva-scaling-policy-config` there. Merge its entries into the new one.
+- A namespace-local `wva-saturation-scaling-config` is not read. Merge its
+  entries into `wva-scaling-policy-config`.
 
 Settings outside that ConfigMap do not carry over:
 
@@ -411,8 +410,9 @@ kubectl get clusterrolebinding -o name | grep -- "-${SUFFIX}$"
 <!-- guide:cleanup.openshift end -->
 
 - **The scaling manager runs in the upstream namespace**: five of them are now
-  its own; keep them. Its installer removes the sixth,
-  `wva-prometheus-cluster-monitoring-view-<suffix>`, when it may.
+  its own; keep them. Delete the sixth,
+  `wva-prometheus-cluster-monitoring-view-<suffix>`, with
+  `kubectl delete clusterrolebinding <name>`.
 - **It runs elsewhere**: delete all six with `kubectl delete clusterrolebinding <name>`.
 
 *Up to v0.8*:
@@ -446,7 +446,7 @@ kubectl delete crd variantautoscalings.llmd.ai --ignore-not-found
 | How a workload is registered | `llm-d.ai/managed` annotation on a ScaledObject or HPA | a ScaledObject `external-push` trigger ([trigger keys](../../reference/scaledobject-trigger.md)) |
 | Actuation | KEDA `prometheus` trigger, or HPA through Prometheus Adapter | KEDA only |
 | Install scope | cluster-wide on Kubernetes, one namespace on OpenShift | one namespace unless `SCOPE=cluster` ([which namespace is which](../../reference/configuration.md#which-namespace-is-which)) |
-| Scaling-policy ConfigMap | `wva-saturation-scaling-config` | `wva-scaling-policy-config`. The old name is read only while the new one does not exist; the installer creates the new one |
+| Scaling-policy ConfigMap | `wva-saturation-scaling-config` | `wva-scaling-policy-config`. The old name is not read, so merge your entries into the new one |
 | Turning on a limiter | `enableLimiter: true` | a `limiters:` entry |
 | Scale to zero | off (`WVA_SCALE_TO_ZERO: "false"`) | allowed (`ENABLE_SCALE_TO_ZERO=true`); a model parks only if its `minReplicaCount` is `0` |
 | Prometheus TLS | not verified on Kubernetes (`PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "true"`); verified on OpenShift | verified, except for a Prometheus the installer deploys ([TLS](../../reference/prometheus.md#tls-configuration)) |

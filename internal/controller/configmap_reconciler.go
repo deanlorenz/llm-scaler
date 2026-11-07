@@ -101,7 +101,7 @@ func (r *ConfigMapReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	isNamespaceLocal := !isGlobal && !isPolicySource && r.shouldWatchNamespaceLocalConfigMap(ctx, namespace)
 
 	if isPolicySource {
-		if slices.Contains(config.ScalingPolicyConfigMapNames(), name) {
+		if name == config.ScalingPolicyConfigMapName() {
 			// The error is a startup one only (errUnboundedAtStartup), and the
 			// handler has already reported it; a requeue would change nothing.
 			_ = r.handleClusterPolicyConfigMap(ctx, cm)
@@ -115,12 +115,9 @@ func (r *ConfigMapReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 
-	// Route to appropriate handler based on ConfigMap name. Both scaling-policy
-	// names are accepted — the current one and the pre-rename one — so an operator
-	// who has not renamed theirs keeps getting live updates. Using the old name is
-	// reported once per change by handleScalingPolicyConfigMap.
+	// Route to appropriate handler based on ConfigMap name.
 	switch {
-	case slices.Contains(config.ScalingPolicyConfigMapNames(), name):
+	case name == config.ScalingPolicyConfigMapName():
 		// As above: the error arises at startup only and is already reported.
 		_ = r.handleScalingPolicyConfigMap(ctx, cm, namespace, isGlobal)
 	case isGlobal && name == config.ConfigMapName():
@@ -148,7 +145,7 @@ func (r *ConfigMapReconciler) handleConfigMapDeletion(ctx context.Context, name,
 	// A deleted ConfigMap has no rejected entries and no unknown keys. Cleared
 	// for every scaling-policy ConfigMap, before any of the returns below: the
 	// gauges were set wherever one was loaded.
-	if slices.Contains(config.ScalingPolicyConfigMapNames(), name) {
+	if name == config.ScalingPolicyConfigMapName() {
 		metrics.DeleteConfigEntryGauges(namespace, name)
 	}
 
@@ -159,7 +156,7 @@ func (r *ConfigMapReconciler) handleConfigMapDeletion(ctx context.Context, name,
 	// that explained why. Removing a bound has to take effect as reliably as
 	// adding one.
 	if r.Config.PolicyNamespaceIsSeparate() && namespace == r.Config.PolicyNamespace() {
-		if slices.Contains(config.ScalingPolicyConfigMapNames(), name) {
+		if name == config.ScalingPolicyConfigMapName() {
 			// An empty policy, not nil: nil would send the limiter accessors back
 			// to this controller's own namespace, handing limit-setting to whoever
 			// writes that — the party the policy namespace exists to take it from.
@@ -211,48 +208,6 @@ func (r *ConfigMapReconciler) shouldWatchNamespaceLocalConfigMap(ctx context.Con
 
 	// Check label-based opt-in (explicit)
 	return isNamespaceConfigEnabled(ctx, r.Reader, namespace)
-}
-
-// supersededByCurrentName reports whether this ConfigMap should be ignored because
-// it carries the PRE-RENAME name while a ConfigMap with the current name also
-// exists — and logs the deprecation notice when it is the one being used.
-//
-// Both names are read so an upgrade cannot silently drop a deployment's scaling
-// configuration, but "both" needs an order, and bootstrap ordering alone does not
-// give one: after startup these arrive as independent watch events, so whichever
-// ConfigMap was edited last would win. A stale copy left behind by an upgrade
-// would then overwrite the live one at an arbitrary moment — the worst kind of
-// configuration bug, because nothing changed at the time it took effect.
-//
-// So the rule is positional, not temporal: if the current name exists, it is the
-// configuration, and the old one is inert.
-func (r *ConfigMapReconciler) supersededByCurrentName(ctx context.Context, cm *corev1.ConfigMap, namespace string) bool {
-	logger := log.FromContext(ctx)
-	current := config.ScalingPolicyConfigMapName()
-	if cm.GetName() != config.LegacyScalingPolicyConfigMapName || current == config.LegacyScalingPolicyConfigMapName {
-		return false
-	}
-
-	var existing corev1.ConfigMap
-	err := r.Get(ctx, client.ObjectKey{Name: current, Namespace: namespace}, &existing)
-	if err == nil {
-		logger.V(1).Info("Ignoring the pre-rename scaling-policy ConfigMap: one with the current "+
-			"name exists and takes precedence. Delete the old one once you have confirmed the "+
-			"new one carries everything.",
-			"ignoring", cm.GetName(), "using", current, "namespace", namespace)
-		return true
-	}
-	if !apierrors.IsNotFound(err) {
-		// Could not tell. Proceed rather than drop the only config we can see.
-		logger.V(1).Info("Could not check for a current-named scaling-policy ConfigMap; "+
-			"using the pre-rename one", "error", err.Error())
-	}
-
-	logger.Info("Reading scaling policy from the pre-rename ConfigMap name. It outgrew "+
-		"\"saturation\" — it now carries policy tiers, analyzer definitions, limiters and "+
-		"scale-to-zero — so rename it; the old name is still read but will not be forever.",
-		"using", config.LegacyScalingPolicyConfigMapName, "rename to", current)
-	return false
 }
 
 // handleClusterPolicyConfigMap loads limiters and quotas from the policy
@@ -438,10 +393,6 @@ func rejectedEntryOutcome(key string, kept, boundSource, bootstrapComplete bool)
 // still applied first, so what is recorded matches what was read.
 func (r *ConfigMapReconciler) handleScalingPolicyConfigMap(ctx context.Context, cm *corev1.ConfigMap, namespace string, isGlobal bool) error {
 	logger := log.FromContext(ctx)
-
-	if r.supersededByCurrentName(ctx, cm, namespace) {
-		return nil
-	}
 
 	// Parse scaling policy entries
 	configs, count, rejected, ignored := parseScalingPolicyConfigRejects(cm.Data, logger)

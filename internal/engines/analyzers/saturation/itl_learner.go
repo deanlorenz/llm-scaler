@@ -2,7 +2,6 @@ package saturation
 
 import (
 	"maps"
-	"math"
 	"slices"
 	"strings"
 	"time"
@@ -32,11 +31,10 @@ const ITLWriteBand = 0.05
 // The ITL line's sources, as its Report and its learner-write line name
 // them: the tier of the line it holds.
 const (
-	itlSourceOLS     learn.Source = itl.TierOLS
-	itlSourcePinned  learn.Source = itl.TierPinnedB
-	itlSourceHeld    learn.Source = "pinned-B-held"
-	itlSourceNoLine  learn.Source = ""
-	itlReasonOffered learn.Reason = "offered"
+	itlSourceOLS    learn.Source = itl.TierOLS
+	itlSourcePinned learn.Source = itl.TierPinnedB
+	itlSourceHeld   learn.Source = "pinned-B-held"
+	itlSourceNoLine learn.Source = ""
 )
 
 // itlLogged is the line learner-write last logged for a key, and when.
@@ -51,31 +49,12 @@ func itlSource(r itl.Reading) learn.Source {
 	switch {
 	case r.Tier == itl.TierOLS:
 		return itlSourceOLS
-	case r.Tier == itl.TierPinnedB && r.SlopeHeld:
+	case r.Tier == itl.TierPinnedB && (r.SlopeHeld || r.TierHeld):
 		return itlSourceHeld
 	case r.Tier == itl.TierPinnedB:
 		return itlSourcePinned
 	}
 	return itlSourceNoLine
-}
-
-// itlReasons is a reading's admission outcomes by reason: each row the
-// window was offered, counted once under why it was or was not taken, and of
-// those taken, the ones kept out of the full fit (unsteady) and those of a
-// replica inside its settle. Writes is the same count as "offered": the
-// Report's total of readings admitted, beside the outcome by reason.
-func itlReasons(r itl.Reading) map[learn.Reason]int64 {
-	out := map[learn.Reason]int64{}
-	for reason, n := range map[learn.Reason]int{
-		itlReasonOffered: r.Offered, "not-ready": r.NotReady, "no-itl": r.NoITL, "no-k": r.NoK,
-		"below-band": r.BelowBand, "above-band": r.AboveBand, "capped": r.Capped,
-		"unsteady": r.Unsteady, "settling": r.Settling,
-	} {
-		if n > 0 {
-			out[reason] = int64(n)
-		}
-	}
-	return out
 }
 
 // beginITLCycle starts the ITL line's cycle for a model, at the top of
@@ -96,22 +75,10 @@ func (a *SaturationAnalyzer) noteITLLearner(namespace, modelID, variant, role, k
 	model := namespace + "|" + modelID
 	source := itlSource(r)
 	role = a.itlReportRole(role)
-	report := learn.Report{Learner: learn.ITL, Namespace: namespace, ModelID: modelID, Variant: variant,
-		Role: role, Source: source, Counts: itlReasons(r), Samples: r.Held, Writes: int64(r.Offered)}
 	// The key priced the variant when it holds a line of its own: a variant
 	// with none borrows (after this), or has no line at all.
-	if source != itlSourceNoLine {
-		report.PricingKey = key
-	}
-	// A line resting on a held slope is as old as its fit once the window has
-	// aged out, or holds nothing since a restart. Only a line with neither has
-	// no stamp.
-	switch {
-	case r.Held > 0:
-		report.LastAdmitted = a.itlTracker.Newest(key)
-	case r.SlopeHeld:
-		report.LastAdmitted = r.SlopeFittedAt
-	}
+	report := a.itlTracker.Report(learn.Report{Learner: learn.ITL, Namespace: namespace, ModelID: modelID,
+		Variant: variant, Role: role, Source: source}, key, r)
 	restored := a.itlTracker.Restored(key)
 	a.mu.Lock()
 	report.Forgotten = a.itlForgotten[model][variant]
@@ -126,16 +93,8 @@ func (a *SaturationAnalyzer) noteITLLearner(namespace, modelID, variant, role, k
 		a.mu.Unlock()
 		return
 	}
-	// A value that is not a number moves when the other is one, or the
-	// comparison below never says so (NaN compares false).
-	moved := func(now, was float64) bool {
-		if math.IsNaN(now) || math.IsNaN(was) {
-			return math.IsNaN(now) != math.IsNaN(was)
-		}
-		return math.Abs(now-was) > ITLWriteBand*math.Abs(was)
-	}
-	if logged && last.source == source && !moved(r.Model.A, last.a) && !moved(r.Model.B, last.b) &&
-		now.Sub(last.at) < LearnerHeartbeat {
+	if logged && last.source == source && !itl.Moved(r.Model.A, last.a, ITLWriteBand) &&
+		!itl.Moved(r.Model.B, last.b, ITLWriteBand) && now.Sub(last.at) < LearnerHeartbeat {
 		a.mu.Unlock()
 		return
 	}

@@ -57,24 +57,50 @@ func ladderFleet(b ladderBucket) TTFTFleet {
 	}
 }
 
+// ladderBurstyNow is bucket C's percentiles at this tail, rate and q to old and
+// new sum. The frozen run priced Ca^2 4 at Kingman's 1/theta, which the stretched
+// Poisson tail replaced (prefillPlan.engineWait); ladderFigures keeps what was
+// frozen, the staircase's record. Means do not move: they read Kingman's theta.
+var ladderBurstyNow = map[[2]float64][2]float64{
+	{17.581, 0.9}:  {0.19719, 0.22269},
+	{17.581, 0.95}: {0.23378, 0.25927},
+	{24.174, 0.9}:  {0.23402, 0.26574},
+	{24.174, 0.95}: {0.28170, 0.31341},
+	{30.767, 0.9}:  {0.28699, 0.32975},
+	{30.767, 0.95}: {0.35057, 0.39333},
+	{33.404, 0.9}:  {0.32913, 0.37882},
+	{33.404, 0.95}: {0.40512, 0.45481},
+	{36.042, 0.9}:  {0.38758, 0.44624},
+	{36.042, 0.95}: {0.48051, 0.53917},
+	{38.679, 0.9}:  {0.44461, 0.51743},
+	{38.679, 0.95}: {0.55455, 0.62737},
+	{41.316, 0.9}:  {0.63295, 0.73149},
+	{41.316, 0.95}: {1.05750, 1.15603},
+}
+
 // The ladder before and after the term. Before is the frozen run of main at
-// 59772fce2, to its 5 decimals: the old sum must reproduce it. After pins the
-// term. Every figure rises, the floors with them.
+// 59772fce2, to its 5 decimals: the old sum must reproduce it, bucket C's
+// percentiles at the tail that replaced the frozen one. After pins the term.
+// Every figure rises, the floors with them.
 func TestLadder_BeforeAndAfterTheTerm(t *testing.T) {
 	const tol = 6e-6 // half the last decimal printed, and a little
 	for _, l := range ladderFigures {
 		t.Run(fmt.Sprintf("%s at %g q %g", l.bucket, l.rate, l.q), func(t *testing.T) {
 			fl := ladderFleet(ladderBuckets[l.bucket])
+			oldSeconds, newSeconds := l.oldSeconds, l.newSeconds
+			if now, ok := ladderBurstyNow[[2]float64{l.rate, l.q}]; ok && l.bucket == "C" {
+				oldSeconds, newSeconds = now[0], now[1]
+			}
 			old := mustTTFT(t, ttftAt(t, fl, l.rate, l.q))
-			if math.Abs(old.Seconds-l.oldSeconds) > tol || math.Abs(old.Floor-l.oldFloor) > tol {
-				t.Errorf("before: %.5f floor %.5f, frozen %.5f floor %.5f", old.Seconds, old.Floor, l.oldSeconds, l.oldFloor)
+			if math.Abs(old.Seconds-oldSeconds) > tol || math.Abs(old.Floor-l.oldFloor) > tol {
+				t.Errorf("before: %.5f floor %.5f, frozen %.5f floor %.5f", old.Seconds, old.Floor, oldSeconds, l.oldFloor)
 			}
 			fl.LegacyDecodeSum = false
 			term := ladderTerm
 			fl.DecodeTerm = &term
 			now := mustTTFT(t, ttftAt(t, fl, l.rate, l.q))
-			if math.Abs(now.Seconds-l.newSeconds) > tol || math.Abs(now.Floor-l.newFloor) > tol {
-				t.Errorf("after: %.5f floor %.5f, pinned %.5f floor %.5f", now.Seconds, now.Floor, l.newSeconds, l.newFloor)
+			if math.Abs(now.Seconds-newSeconds) > tol || math.Abs(now.Floor-l.newFloor) > tol {
+				t.Errorf("after: %.5f floor %.5f, pinned %.5f floor %.5f", now.Seconds, now.Floor, newSeconds, l.newFloor)
 			}
 			if !(now.Seconds > old.Seconds) || !(now.Floor > old.Floor) {
 				t.Errorf("fell: %.5f -> %.5f, floor %.5f -> %.5f", old.Seconds, now.Seconds, old.Floor, now.Floor)

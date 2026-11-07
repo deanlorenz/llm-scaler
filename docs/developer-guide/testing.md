@@ -738,6 +738,16 @@ frozen, and a change that moves a figure there fails it. The load
 generator, the level windows and the evidence of each run live outside
 the repository; the windows are in the test.
 
+`decode_validation_test.go` learns on the first 60% of every golden's cycles,
+predicts the rest, and holds the figures to `cmd/whatif/testdata/decode-validation.golden`
+([measured on the goldens](../proposals/slo-capacity-planner.md#measured-on-the-goldens)).
+Green says no figure moved: it is not a pass, and a row past its bound stays
+as `OUT`. A change that moves a figure rewrites the file with
+`LEARNREPLAY_WRITE_DECODE_VALIDATION=1 go test -run TestDecodeValidation_OnTheGoldens ./internal/engines/analyzers/learnreplay`,
+and names it in the PR's `goldens:` section, which the gate enforces: a `.golden`
+in that directory is one, wherever its test lives. It lives in `cmd/whatif` for that
+reason, though `learnreplay` writes it.
+
 The four `ttft-staircase-*` goldens are four of the six phases of the what-if TTFT
 staircase, repeat 1
 ([as built, M2](../proposals/slo-capacity-planner-ttft.md#as-built-m2)): the
@@ -1506,20 +1516,33 @@ the reviewer. Naming a file that did not move is not an error.
 **How it runs.** `.github/workflows/ci-goldens-gate.yaml` runs on `opened`,
 `edited`, `reopened` and `synchronize`, so editing the body re-runs it without a
 new commit. It has its own workflow because `edited` on `ci-pr-checks.yaml` would
-restart the e2e jobs on every title change. The workflow passes
-`github.event.pull_request.body` to `deploy/ci-pr-checks/goldens-section.sh` in
-the `PR_BODY` environment variable, and diffs the merge commit against its first
-parent. It runs on `pull_request`, with a `contents: read` token. The script
-never evaluates the body and never prints it.
+restart the e2e jobs on every title change. The workflow reads the body from the
+GitHub API in the job, writes it to a file outside the checkout, and passes that
+file to `deploy/ci-pr-checks/goldens-section.sh` in `PR_BODY_FILE`. The script
+diffs the merge commit against its first parent, never evaluates the body and
+never prints it.
+
+The body is read from the API, not from the event, because a rerun replays the
+event's saved payload. If the check went red on a push, before you updated the
+body, update the body: the edit starts a new run, and rerunning the failed job
+now reads the body as it is at that moment too.
+
+The workflow runs on `pull_request`, with `contents: read` and
+`pull-requests: read`. The token is on the step that reads the body, before the
+checkout. On a PR from a fork the token is read-only, and it can still read the
+body because this repository is public. If the read fails, the job fails: it does
+not go on with an empty body.
 
 To try a body before you open the PR:
 
 ```bash
-PR_BODY="$(cat body.md)" bash deploy/ci-pr-checks/goldens-section.sh "$(git merge-base main HEAD)" HEAD
+PR_BODY_FILE=body.md bash deploy/ci-pr-checks/goldens-section.sh "$(git merge-base main HEAD)" HEAD
 ```
 
 `hack/check-goldens-section.sh` runs the script on fixture PRs, and holds the
-workflow to its event, token and env var. `make lint-deploy-scripts` runs it.
+workflow to its event, its permissions, and where the token and the body go. It
+runs the workflow's read against a stub `gh`, not the real API.
+`make lint-deploy-scripts` runs it.
 
 #### Write the acceptance run again
 

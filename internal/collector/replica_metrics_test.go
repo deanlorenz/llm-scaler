@@ -385,16 +385,12 @@ func TestCollectReplicaMetrics_MetricsObservation(t *testing.T) {
 
 	// Create test dependencies
 	scheme := runtime.NewScheme()
-	err := llmdVariantAutoscalingV1alpha1.AddToScheme(scheme)
-	if err != nil {
-		t.Fatalf("Failed to add scheme: %v", err)
-	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	fakeRecorder := record.NewFakeRecorder(100)
 	collector := NewReplicaMetricsCollector(mockSource, k8sClient, nil, fakeRecorder, nil)
 
 	// Call the function
-	_, err = collector.CollectReplicaMetrics(
+	_, err := collector.CollectReplicaMetrics(
 		context.Background(),
 		"test-model",
 		"test-namespace",
@@ -495,16 +491,12 @@ func TestCollectReplicaMetrics_ErrorMetrics(t *testing.T) {
 
 	// Create test dependencies
 	scheme := runtime.NewScheme()
-	err := llmdVariantAutoscalingV1alpha1.AddToScheme(scheme)
-	if err != nil {
-		t.Fatalf("Failed to add scheme: %v", err)
-	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	fakeRecorder := record.NewFakeRecorder(100)
 	collector := NewReplicaMetricsCollector(mockSource, k8sClient, nil, fakeRecorder, nil)
 
 	// Call the function - should return error
-	_, err = collector.CollectReplicaMetrics(
+	_, err := collector.CollectReplicaMetrics(
 		context.Background(),
 		"test-model",
 		"test-namespace",
@@ -587,9 +579,6 @@ func TestCollectReplicaMetrics_ThroughputKeyMerge(t *testing.T) {
 	}
 
 	scheme := runtime.NewScheme()
-	if err := llmdVariantAutoscalingV1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	podLabels := map[string]string{
@@ -670,9 +659,6 @@ func TestCollectReplicaMetrics_Freshness(t *testing.T) {
 	}
 
 	scheme := runtime.NewScheme()
-	if err := llmdVariantAutoscalingV1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	// fixture returns a source that reports all ten tracked metrics at timestamp
@@ -796,9 +782,6 @@ func TestCollectReplicaMetrics_SGLangCacheConfig(t *testing.T) {
 	}
 
 	scheme := runtime.NewScheme()
-	if err := llmdVariantAutoscalingV1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	podLabels := map[string]string{
@@ -867,9 +850,6 @@ func TestCollectReplicaMetrics_SGLangPrefixCacheHitRate(t *testing.T) {
 		t.Fatalf("InitMetrics: %v", err)
 	}
 	scheme := runtime.NewScheme()
-	if err := llmdVariantAutoscalingV1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
 
 	podLabels := map[string]string{
 		seriesModelLabel: "test-model",
@@ -942,9 +922,6 @@ func TestCollectReplicaMetrics_MixedEngine(t *testing.T) {
 		t.Fatalf("InitMetrics: %v", err)
 	}
 	scheme := runtime.NewScheme()
-	if err := llmdVariantAutoscalingV1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	ts := time.Now()
 
@@ -1035,7 +1012,6 @@ func TestCollectReplicaMetrics_UnattributedReadyPodsEvent(t *testing.T) {
 	require.NoError(t, metrics.InitMetrics(registry))
 
 	scheme := runtime.NewScheme()
-	require.NoError(t, llmdVariantAutoscalingV1alpha1.AddToScheme(scheme))
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	fakeRecorder := record.NewFakeRecorder(10)
 
@@ -1113,7 +1089,6 @@ func TestCollectReplicaMetrics_ThroughputOrphanSkipped(t *testing.T) {
 	require.NoError(t, metrics.InitMetrics(registry))
 
 	scheme := runtime.NewScheme()
-	require.NoError(t, llmdVariantAutoscalingV1alpha1.AddToScheme(scheme))
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	// KV-cache: only pod-known at 10.0.0.1:8000.
@@ -1432,9 +1407,6 @@ func TestCollectReplicaMetrics_LWSWorkerPodsFiltered(t *testing.T) {
 	}
 
 	scheme := runtime.NewScheme()
-	if err := llmdVariantAutoscalingV1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme corev1: %v", err)
 	}
@@ -1662,9 +1634,6 @@ func TestCollectReplicaMetrics_DeploymentUnchanged(t *testing.T) {
 	}
 
 	scheme := runtime.NewScheme()
-	if err := llmdVariantAutoscalingV1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme corev1: %v", err)
 	}
@@ -1830,7 +1799,6 @@ func TestCollectReplicaMetrics_NamespaceQueriesSharedAcrossModels(t *testing.T) 
 	registry := prometheus.NewRegistry()
 	require.NoError(t, metrics.InitMetrics(registry))
 	scheme := runtime.NewScheme()
-	require.NoError(t, llmdVariantAutoscalingV1alpha1.AddToScheme(scheme))
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	ts := time.Now()
@@ -1891,7 +1859,6 @@ func TestCollectReplicaMetrics_WithoutCycleRefreshesPerCall(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	require.NoError(t, metrics.InitMetrics(registry))
 	scheme := runtime.NewScheme()
-	require.NoError(t, llmdVariantAutoscalingV1alpha1.AddToScheme(scheme))
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	ts := time.Now()
@@ -2052,9 +2019,6 @@ func TestCollectReplicaMetrics_ServiceTimePopulated(t *testing.T) {
 	}
 
 	scheme := runtime.NewScheme()
-	if err := llmdVariantAutoscalingV1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	podLabels := map[string]string{
@@ -2123,9 +2087,6 @@ func TestCollectReplicaMetrics_TimingExcludedWhenNotReady(t *testing.T) {
 	}
 
 	scheme := runtime.NewScheme()
-	if err := llmdVariantAutoscalingV1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme corev1: %v", err)
 	}
@@ -2294,9 +2255,6 @@ func TestCollectReplicaMetrics_ImplausibleServiceTime(t *testing.T) {
 				t.Fatalf("InitMetrics: %v", err)
 			}
 			scheme := runtime.NewScheme()
-			if err := llmdVariantAutoscalingV1alpha1.AddToScheme(scheme); err != nil {
-				t.Fatalf("AddToScheme: %v", err)
-			}
 			if err := corev1.AddToScheme(scheme); err != nil {
 				t.Fatalf("AddToScheme corev1: %v", err)
 			}

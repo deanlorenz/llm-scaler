@@ -146,6 +146,7 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 	return map[string]*bool{
 		SwitchK2ReadsSettle:              &a.k2ReadsSettle,
 		SwitchK2WaitsAfterRestart:        &a.k2WaitsAfterRestart,
+		SwitchK2WaitsAfterRollout:        &a.k2WaitsAfterRollout,
 		SwitchMuRepeatIsUse:              &a.muRepeatIsUse,
 		SwitchMuUnknownAgeSafe:           &a.muUnknownAgeSafe,
 		SwitchMuLatchRestoresSafe:        &a.muLatchRestoresSafe,
@@ -224,6 +225,11 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		// Issue #467: the ITL line priced one-sided at the sequence cap
 		// while B is unlearned (itl_one_sided.go).
 		SwitchITLOneSidedAtCap: &a.itlOneSidedAtCap,
+
+		// The ITL line's tier latch (issue #495).
+		SwitchITLTierHysteresis: &a.itlTierHysteresis,
+		// The window across a rollout (itl_tier_hysteresis.go).
+		SwitchITLClearsOnNewRevision: &a.itlClearsOnRevision,
 	}
 }
 

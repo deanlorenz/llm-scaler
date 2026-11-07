@@ -153,14 +153,14 @@ func scalingPolicyConfigMapName() string {
 	return saturationConfigMapNameFromDeployment(dep)
 }
 
-// saturationConfigMapNameFromDeployment extracts SATURATION_CONFIG_MAP_NAME from manager container env.
+// saturationConfigMapNameFromDeployment extracts SCALING_POLICY_CONFIG_MAP_NAME from manager container env.
 func saturationConfigMapNameFromDeployment(dep *appsv1.Deployment) string {
 	for _, c := range dep.Spec.Template.Spec.Containers {
 		if c.Name != testutils.ControllerContainerName {
 			continue
 		}
 		for _, e := range c.Env {
-			if e.Name == "SATURATION_CONFIG_MAP_NAME" && e.Value != "" {
+			if e.Name == "SCALING_POLICY_CONFIG_MAP_NAME" && e.Value != "" {
 				return e.Value
 			}
 		}

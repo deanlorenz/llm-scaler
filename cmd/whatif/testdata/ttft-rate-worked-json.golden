@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "question": "slo-to-rate",
   "source": {
     "recording": "../../internal/engines/analyzers/learnreplay/testdata/goldens/ols-sweep/recording.jsonl.gz",
@@ -36,7 +36,22 @@
           "fromCycle": 197,
           "toCycle": 220,
           "resamples": 200,
-          "tierChanges": 22
+          "tierChanges": 10,
+          "check": {
+            "status": "ok-at-another-shape",
+            "compared": 10,
+            "onRamp": 20,
+            "aboveBand": 0,
+            "tooOld": 10,
+            "past": 0,
+            "medianErrorPct": 3.0095802156512965,
+            "worstErrorPct": 4.353289520922821,
+            "signedErrorPct": -3.0095802156512965,
+            "fromCycle": 122,
+            "toCycle": 131,
+            "rowKVPerRequest": 6501.878012338539,
+            "otherShape": true
+          }
         },
         "fillBand": {
           "lo": 0.15,
@@ -71,8 +86,8 @@
             "value": 11.316587731453538,
             "unit": "r/s",
             "band": {
-              "lo": 11.217957797115359,
-              "hi": 11.375803589684955
+              "lo": 11.207013286686124,
+              "hi": 11.373692515251156
             },
             "basis": {
               "fill": 0.4740967917873882,
@@ -85,8 +100,8 @@
               "tier": "ols"
             },
             "flags": [
-              "LineNearGate",
-              "AssumedShape"
+              "AssumedShape",
+              "OutputSpreadUnread"
             ]
           }
         }
@@ -126,6 +141,7 @@
           "prompt cv 2 (no computed-prompt histogram)",
           "decode term omitted (no fit, TooFewDecodeMinutes, and no quiet decode row): T_xfer + ITL stands for it",
           "router hop 20 ms (no fit: NoRouterMean); --assume-router-hop supplies one",
+          "no output-length histogram: KVreq is ILeff + OL/2, which over-promises by 7-44% on a real spread",
           "flow control off (no queue series)",
           "Poisson arrivals",
           "an assumed decode term moves this answer from 1.187 to 0.2506"
@@ -157,8 +173,14 @@
               "FlowControlInferredOff",
               "BelowFittedBand",
               "AssumedShape",
+              "OutputSpreadUnread",
               "AssumedPoissonArrivals"
-            ]
+            ],
+            "sensitivity": {
+              "lo": 0.25063609988609226,
+              "hi": 1.6396930872300244,
+              "refused": "TargetBelowFloor"
+            }
           }
         }
       }
@@ -191,9 +213,14 @@
               "FlowControlInferredOff",
               "BelowFittedBand",
               "AssumedShape",
-              "AssumedPoissonArrivals",
-              "LineNearGate"
-            ]
+              "OutputSpreadUnread",
+              "AssumedPoissonArrivals"
+            ],
+            "sensitivity": {
+              "lo": 0.25063609988609226,
+              "hi": 1.6396930872300244,
+              "refused": "TargetBelowFloor"
+            }
           }
         }
       }

@@ -145,8 +145,9 @@ length. With equal lengths it contributes its mean, `O/2`; with lengths that
 vary, a long request stays resident longer and the average resident request
 holds `D x O/2`. `D` is 1 when any generating replica lacks the histogram,
 while a shape change is outstanding (on every path), and with the replay
-switch `kv-per-request-output-dispersion` off. The throughput and slo
-analyzers still price `ILeff + O/2` (#433).
+switch `kv-per-request-output-dispersion` off. The slo analyzer prices `D` too,
+behind `slo-kv-per-request-output-dispersion`, with no shape-change hold. The
+throughput analyzer still prices `ILeff + O/2` (#433).
 
 A hit saves KV only when another running request holds the block too, so the
 derived mu does not assume `ILeff` for memory where it can measure it (issue
@@ -257,7 +258,8 @@ line is not this physics) and `A·0.85 + B > 0`. A full fit needs
 samples clustered at one `k` fix an intercept, not a slope. Short of the
 spread, with 10 readings, `itl.Tracker` fits the slope alone with the intercept
 pinned to the key's last full fit, or to `DefaultBaselineSec` before it has
-one: on a balanced fleet that is the normal case.
+one: on a balanced fleet that is the normal case. The choice between the two is
+latched ([set, clear and dwell](saturation-analyzer.md#set-clear-and-dwell)).
 
 `GPSErrorPct` compares `TokenRate` against the observed `GenerationTokenRate`
 and **reports without acting**: a disagreement means the line is suspect, not

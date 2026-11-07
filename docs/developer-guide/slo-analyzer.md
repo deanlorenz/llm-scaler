@@ -53,7 +53,9 @@ the analyzer treats it as the nil it was before they existed.
    runs only where the policy lists it (`AnalyzerEnabled`).
 3. `Analyze`:
    - `readFleet`: Ready, not warm-pool rows; the request-weighted shape
-     (`shape.Shape`, so `KVreq = ILeff + O/2`); the demand, `λ × O` plus the
+     (`shape.Shape`, so `KVreq = ILeff + O/2`, or `ILeff + D·O/2` when every
+     row it counts read the output-length bound, switch
+     `slo-kv-per-request-output-dispersion`, `output_dispersion.go`); the demand, `λ × O` plus the
      router's backlog over `backlogDrainSeconds`.
    - Per decode or aggregated variant, `priceVariant`:
      - `variantKey` keys the line on `windowKey` with `stableAccelerator`;

@@ -61,7 +61,8 @@ type Prefill struct {
 	PromptCV        float64
 	PromptCVAssumed bool
 	// ArrivalCV2 is Ca^2, the arrivals' squared coefficient of variation:
-	// Kingman's 1 + Cs^2 becomes Ca^2 + Cs^2. 0 means Poisson, 1.
+	// Kingman's 1 + Cs^2 becomes Ca^2 + Cs^2 in the mean wait, and the wait's
+	// tail stretches by their ratio (engineWait). 0 means Poisson, 1.
 	ArrivalCV2 float64
 	// TransferSecondsPerToken is the KV transfer's time per prompt token,
 	// kappa/BW. 0 omits T_xfer, flagged TransferOmitted: it is folded into
@@ -409,7 +410,8 @@ func (pl prefillPlan) utilization(rate float64) float64 {
 	return pl.f * rate * pl.work / float64(pl.p.Replicas)
 }
 
-// waitScale is theta, E[S_work](Ca^2 + Cs^2) / (2(1 - rho)).
+// waitScale is theta, E[S_work](Ca^2 + Cs^2) / (2(1 - rho)), Kingman's mean
+// wait given a wait: the mean wait is rho * theta.
 func (pl prefillPlan) waitScale(rho float64) float64 {
 	return pl.work * (pl.ca2 + pl.cs2) / (2 * (1 - rho))
 }
@@ -439,32 +441,40 @@ func (pl prefillPlan) own() ownTime {
 //     atom under-states the wait of light-tailed work just past the atom:
 //     against Erlang's exact M/D/1 wait it read a p90 sojourn 10% short at
 //     rho 0.2.
-//   - Otherwise (Kingman's Ca^2 + Cs^2): rho * exp(-r t), r = 1/theta, never
-//     above the work's own tail rate b = 1/(cv^2 E[S]): a wait cannot thin
-//     out faster than one request's work does. Not checked against a
-//     simulation; bursty arrivals lengthen the tail, so Kingman's 1/theta is
-//     the conservative side of it.
+//   - Any other Ca^2: the Poisson tail stretched in time by Kingman's ratio
+//     s = (Ca^2 + Cs^2) / (1 + Cs^2), so its decay is r/s, the shape and its
+//     atom as they were, and never above the work's own tail rate b =
+//     1/(cv^2 E[S]): a wait cannot thin out faster than one request's work
+//     does. So a burstier Ca^2 lengthens the wait at every t, Ca^2 = 1 is the
+//     Poisson tail to the bit, and above 1 no decay beats Poisson's root. In
+//     heavy traffic gamma tends to 2(1 - rho)/(E[S](1 + Cs^2)), so r/s tends
+//     to Kingman's 1/theta. Below heavy traffic it is an interpolation, not a
+//     theorem: not checked against a simulation of a bursty queue. Kingman's
+//     1/theta alone is no bound on it: above cv 1 it decays faster than
+//     Poisson's root, which priced burstier arrivals better than Poisson.
 //
 // A rate that is not finite (no Cramer-Lundberg root) comes back as such;
 // price refuses it.
 func (pl prefillPlan) engineWait(rho float64) (waitTail, float64) {
-	r := 1 / pl.waitScale(rho)
-	if pl.ca2 == 1 {
-		g := lundbergRoot(rho/pl.work, pl.work, pl.cv)
-		if pl.cv < 1 {
-			c := 1.0
-			if pl.cv > 0 {
-				c = 1 - g*pl.cv*pl.cv*pl.work // 1 - g/b, b = 1/(cv^2 E[S])
-			}
-			return boundWait(rho, c, g), g
-		}
-		r = min(r, g)
-		return expWait(rho, r), r
+	g := lundbergRoot(rho/pl.work, pl.work, pl.cv)
+	r := g
+	if pl.cv >= 1 {
+		// The Poisson theta: at Ca^2 = 1 this is waitScale.
+		r = min(2*(1-rho)/(pl.work*(1+pl.cs2)), g)
 	}
+	// A quotient, so that Ca^2 = 1 is exactly 1 and the Poisson tail its own bits.
+	stretched := r / ((pl.ca2 + pl.cs2) / (1 + pl.cs2))
 	if pl.cv > 0 {
-		r = min(r, 1/(pl.cv*pl.cv*pl.work))
+		stretched = min(stretched, 1/(pl.cs2*pl.work))
 	}
-	return expWait(rho, r), r
+	if pl.cv >= 1 {
+		return expWait(rho, stretched), stretched
+	}
+	c := 1.0
+	if pl.cv > 0 {
+		c = 1 - g*pl.cs2*pl.work // 1 - g/b, b = 1/(cv^2 E[S])
+	}
+	return boundWait(rho, c, stretched), stretched
 }
 
 // queueLength is a pod's mean waiting count at utilization rho,
@@ -882,6 +892,10 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 			oldPv, _ := split(block{wait: pooled, own: oldOwn}, dec, q)
 			out.Pooled = max(out.Pooled, a+oldPv+oldFirst)
 		}
+		// Allen-Cunneen decays at Kingman's rate. Below cv 1 that is slower than
+		// the root the worst pod takes, so far enough out it would read above
+		// the figure it is the optimistic side of.
+		out.Pooled = min(out.Pooled, out.Seconds)
 	}
 	return priced{out: out}
 }

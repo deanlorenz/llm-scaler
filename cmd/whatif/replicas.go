@@ -134,15 +134,11 @@ func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) erro
 		slo.Rate = pv.qualify(slo.Rate)
 		slo.MeanTPOT = pv.qualify(pv.band(slo.MeanTPOT, on(func(s whatif.DecodeSLO) whatif.Result { return s.MeanTPOT })))
 		if at != nil {
-			slo.Rate, slo.MeanTPOT = at.onDecode(slo.Rate), at.onDecode(slo.MeanTPOT)
+			slo.Rate, slo.MeanTPOT = at.onRate(at.onDecode(slo.Rate)), at.onDecode(slo.MeanTPOT)
 		}
 		if slo.PercentileTPOT != nil {
 			p := pv.band(slo.PercentileTPOT, on(func(s whatif.DecodeSLO) whatif.Result { return s.PercentileTPOT }))
-			if a, ok := p.(whatif.Answer); ok {
-				a.Flags = append(a.Flags, ratioFlags...)
-				p = a
-			}
-			slo.PercentileTPOT = pv.qualify(p)
+			slo.PercentileTPOT = pv.qualify(onRatio(p, ratio, ratioFlags))
 			if at != nil {
 				slo.PercentileTPOT = at.onDecode(slo.PercentileTPOT)
 			}
@@ -178,7 +174,7 @@ func replicasToSLO(ctx context.Context, args []string, out, warn io.Writer) erro
 				in.Rate, in.RateSource = &a.ttft.rate, sourcePrefillKnee
 			}
 			if query.PercentileTarget != nil {
-				in.TPOT = tpotInputs(st, 0, q, a.ratio)
+				in.TPOT = f.tpotInputs(st, 0, q, a.ratio)
 			}
 			w.Roles = append(w.Roles, wireRole{Role: "decode", Variant: a.pv.state.Variant, Inputs: in, Results: wireResults{
 				Knee: toWire(a.slo.KneeRate, unitRate), OperatingRate: toWire(a.slo.Rate, unitRate),
@@ -219,12 +215,14 @@ func noDecode(st *learnreplay.State, variants []pricedVariant) *whatif.Unanswera
 }
 
 // tpotInputs is the wire's account of the TPOT question.
-func tpotInputs(st *learnreplay.State, target, q float64, r whatif.TPOTRatio) *wireTPOT {
-	t := &wireTPOT{TargetSeconds: target, Percentile: q, Ratio: r.Value, Windows: len(st.TPOTWindows)}
+func (f *answerFlags) tpotInputs(st *learnreplay.State, target, q float64, r whatif.TPOTRatio) *wireTPOT {
+	t := &wireTPOT{TargetSeconds: target, Percentile: q, Ratio: r.Value, Windows: f.tpotWindowCount(st)}
 	switch {
 	case r.Value == 0:
 	case r.Assumed:
 		t.RatioSource = "assumed"
+	case f.engineTPOT:
+		t.RatioSource = "engine histogram"
 	default:
 		t.RatioSource = sourceLearned
 	}
@@ -245,6 +243,7 @@ func writeReplicasText(out io.Writer, f *answerFlags, st *learnreplay.State, var
 		if u, ok := a.slo.KneeRate.(whatif.Unanswerable); ok {
 			fmt.Fprintf(&b, "%-16s%s\n", "decode", refusedText(u))
 			fmt.Fprintf(&b, "%-16s%s\n", "shape", a.pv.shapeText())
+			checkRow(&b, "%-16s%s\n", "line check", a.pv)
 			if a.ttft != nil {
 				a.ttft.writeRows(&b)
 				flagsLine(&b, a.pv, a.ttft.results()...)
@@ -270,7 +269,7 @@ func writeReplicasText(out io.Writer, f *answerFlags, st *learnreplay.State, var
 					why += "; " + a.ttft.fleet.verdict()
 				}
 			}
-			row(&b, "operating rate", rateText(r.Value), "", why)
+			row(&b, "operating rate", rateText(r.Value), spanText(r.Sensitivity, "%.2f", 1, false), why)
 		case whatif.Unanswerable:
 			fmt.Fprintf(&b, "%-16s%s\n", "operating rate", refusedText(r))
 		}
@@ -282,6 +281,7 @@ func writeReplicasText(out io.Writer, f *answerFlags, st *learnreplay.State, var
 			a.ttft.writeRows(&b)
 		}
 		fmt.Fprintf(&b, "%-16s%s\n", "shape", a.pv.shapeText())
+		checkRow(&b, "%-16s%s\n", "line check", a.pv)
 		results := []whatif.Result{a.slo.KneeRate, a.slo.Rate, a.slo.MeanTPOT, a.slo.PercentileTPOT}
 		if a.ttft != nil {
 			results = append(results, a.ttft.results()...)
@@ -301,6 +301,13 @@ func writeReplicasText(out io.Writer, f *answerFlags, st *learnreplay.State, var
 	}
 	_, err := io.WriteString(out, b.String())
 	return err
+}
+
+// checkRow prints the line check's row, none with no line.
+func checkRow(b *strings.Builder, layout, label string, pv pricedVariant) {
+	if s := pv.checkText(); s != "" {
+		fmt.Fprintf(b, layout, label, s)
+	}
 }
 
 // tpotRow is one TPOT row: the value in ms, its band, and its basis.
@@ -324,5 +331,5 @@ func row(b *strings.Builder, label, value, band, basis string) {
 		fmt.Fprintf(b, "%-16s%-12s%s\n", label, value, basis)
 		return
 	}
-	fmt.Fprintf(b, "%-16s%-12s%-17s%s\n", label, value, band, basis)
+	fmt.Fprintf(b, "%-16s%-12s%-16s %s\n", label, value, band, basis)
 }

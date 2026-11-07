@@ -145,9 +145,6 @@ func TestBuildInstanceKey_VANameExtraction(t *testing.T) {
 			}
 
 			scheme := runtime.NewScheme()
-			if err := llmdVariantAutoscalingV1alpha1.AddToScheme(scheme); err != nil {
-				t.Fatalf("AddToScheme: %v", err)
-			}
 			k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 			mockSource := &mockMetricsSource{

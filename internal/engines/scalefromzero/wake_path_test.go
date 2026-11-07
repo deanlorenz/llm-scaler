@@ -32,7 +32,6 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/datastore"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
-	vav1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
 	unittestutil "github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
 )
 
@@ -138,7 +137,6 @@ func newWakeFixture(t *testing.T, name string) wakeFixture {
 	require.NoError(t, clientgoscheme.AddToScheme(scheme))
 	require.NoError(t, v1alpha2.Install(scheme))
 	require.NoError(t, v1.Install(scheme))
-	require.NoError(t, vav1alpha1.AddToScheme(scheme))
 	require.NoError(t, kedav1alpha1.AddToScheme(scheme))
 	require.NoError(t, appsV1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))

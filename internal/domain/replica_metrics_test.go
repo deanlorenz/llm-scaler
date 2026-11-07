@@ -3,7 +3,36 @@ package domain
 import (
 	"math"
 	"testing"
+	"time"
 )
+
+func TestNewestRevision(t *testing.T) {
+	at := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	row := func(rev string, ready time.Time) ReplicaMetrics {
+		return ReplicaMetrics{VariantName: "v", Ready: true, Revision: rev, ReadySince: ready}
+	}
+	bridge, notReady, other := row("x", at.Add(time.Hour)), row("x", at.Add(time.Hour)), row("x", at.Add(time.Hour))
+	bridge.FromWarmPool, notReady.Ready, other.VariantName = true, false, "w"
+	for _, c := range []struct {
+		name     string
+		rows     []ReplicaMetrics
+		want     string
+		distinct int
+	}{
+		{"none", nil, "", 0},
+		{"one, no Ready time", []ReplicaMetrics{row("a", time.Time{})}, "a", 1},
+		{"the younger", []ReplicaMetrics{row("a", at), row("b", at.Add(time.Minute))}, "b", 2},
+		{"by each one's oldest pod", []ReplicaMetrics{row("a", at), row("a", at.Add(time.Hour)), row("b", at.Add(time.Minute))}, "b", 2},
+		{"an unread Ready time among others", []ReplicaMetrics{row("a", time.Time{}), row("a", at), row("b", at.Add(time.Minute))}, "b", 2},
+		{"no order", []ReplicaMetrics{row("a", time.Time{}), row("b", at)}, "", 2},
+		{"a tie", []ReplicaMetrics{row("a", at), row("b", at)}, "", 2},
+		{"what is not the variant's own", []ReplicaMetrics{row("a", at), bridge, notReady, other, row("", at.Add(time.Hour))}, "a", 1},
+	} {
+		if got, n := NewestRevision(c.rows, "v"); got != c.want || n != c.distinct {
+			t.Errorf("%s: %q, %d, want %q, %d", c.name, got, n, c.want, c.distinct)
+		}
+	}
+}
 
 // A record of one rank is its own busiest rank, whatever the busiest-rank
 // fields hold: the guards read exactly what they read before ranks existed.

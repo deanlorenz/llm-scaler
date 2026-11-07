@@ -187,7 +187,7 @@ func edgeCases() []propCase {
 // observeOnce offers rows to a fresh tracker, all present on its first cycle.
 func observeOnce(tn config.AnalyzerTuning, rows []domain.ReplicaMetrics) itl.Reading {
 	lo, hi := (&config.ScalingPolicy{AnalyzerTuning: tn}).ITLBand()
-	adm := itl.Admission{MinK: lo, MaxK: hi, Steady: steadinessOf(tn)}
+	adm := itl.Admission{MinK: lo, MaxK: hi, Steady: steadinessOf(tn), TierHysteresis: true}
 	return itl.NewTracker().Observe(propITLKey, "v", rows, adm, propStart)
 }
 

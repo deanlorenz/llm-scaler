@@ -412,7 +412,9 @@ func TestITLSettle_ANewRevisionUnderTheSameNameStartsTheSettle(t *testing.T) {
 			f[j].Revision = "rev-1"
 		}
 		if i >= rollAt {
-			f[2].Revision = "rev-2"
+			for j := range f {
+				f[j].Revision = "rev-2"
+			}
 		}
 		return f
 	}

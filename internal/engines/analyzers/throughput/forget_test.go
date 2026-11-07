@@ -434,7 +434,7 @@ func TestForget_LogsEachForgottenKeyOnTheCallersLogger(t *testing.T) {
 // names each): one added later fails here until someone decides.
 func TestForget_EveryFieldIsClassified(t *testing.T) {
 	forgotten := []string{"lines", "itlLogged", "variantStates"}
-	kept := []string{"ownSettle", "ownSettled", "paths"}
+	kept := []string{"ownSettle", "ownSettled", "paths", "learnerReports", "forgottenReports"}
 	plumbing := []string{"mu", "clock", "rec", "settle", "store"}
 	plain := func(k reflect.Kind) bool {
 		switch k {
@@ -462,11 +462,11 @@ func TestForget_EveryFieldIsClassified(t *testing.T) {
 // values too: a bool here can be what prices the line (hasFittedB). The
 // forgotten ones are held by a state with every field set, below.
 func TestForget_EveryVariantStateFieldIsClassified(t *testing.T) {
-	forgotten := []string{"observationWindow", "lastFittedB", "hasFittedB", "consecutiveGPSMismatches",
+	forgotten := []string{"observationWindow", "lastFittedB", "hasFittedB", "lineArgs", "consecutiveGPSMismatches",
 		"lastITLModel", "lastPerReplicaSupply", "lastTotalSupply", "lastDemand", "reading", "hasReading"}
 	// The traffic now, or what a log line last said: no line is priced from
 	// them. batchCap and its source are read again each cycle.
-	kept := []string{"shapeTracker", "role", "lastSanityReport", "lastObservedAt", "shapeChanged", "everLive",
+	kept := []string{"shapeTracker", "role", "lastSanityReport", "lastObservedAt", "rollout", "rolloutHeld", "loggedRolloutHeld", "shapeChanged", "everLive",
 		"gpsMismatched", "lineSilent", "batchCap", "batchCapSource", "summaryLogged", "loggedAtCap", "loggedCapSource"}
 	typ := reflect.TypeFor[variantState]()
 	fields := make([]string, 0, typ.NumField())
