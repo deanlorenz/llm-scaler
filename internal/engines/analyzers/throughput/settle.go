@@ -99,8 +99,11 @@ const SwitchITLReadsFinitePodMean = "throughput-itl-reads-the-finite-pod-mean"
 // (settlerow.ObserveOwnSince). Off, as before, the rows are observed at the
 // backdate and again at the cycle (settlerow.ObserveOwn), and below a 48 s
 // interval the gap between the two is past the tracker's absence
-// tolerance: every replica reads settle.Rejoined at the cycle. Read only by
-// an analyzer with no engine view.
+// tolerance: every replica reads settle.Rejoined at the cycle. On, the
+// sighting holds only the row read at the cycle, so at an interval of 48 s
+// or more, where the tolerance covered the gap and off kept both rows, the
+// trace and an idle run start at one row, not two. Read only by an analyzer
+// with no engine view.
 const SwitchITLOwnSettleBackdates = "throughput-itl-own-settle-backdates-the-first-sighting"
 
 // ownSettleBackdate is how far before its first Analyze of a model the

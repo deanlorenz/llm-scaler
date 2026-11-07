@@ -113,9 +113,15 @@ The engine holds the analyzer as `sloAnalyzer`, an interface
   more than `StateTimeout` ago as first-seen, backdated, with its line keys'
   replica traces dropped, whether `EvictStale` ran first, between two models,
   or not at all (issue #459). Backdated means one observation, at the cycle,
-  of replicas `settle.Joined` `itl.DefaultSteadyFor` earlier
+  of replicas `settle.Joined` `itl.DefaultSteadyFor` earlier, but never
+  before a Pod's own Ready time, or a bridge's lend time
   (`settlerow.ObserveOwnSince`, issue #511); two observations that far apart
-  would read the gap as an absence (`settle.Rejoined` at the cycle). That is
+  would read the gap as an absence (`settle.Rejoined` at the cycle). The
+  sighting holds only the row read at the cycle: its trace is one sample and
+  an idle run starts at one row. The throughput analyzer's own tracker does
+  the same, and at an optimize interval of 48 s or more, where its tolerance
+  covered the gap, its trace and `IdleRows` now start at 1, not 2 (replay
+  switch `throughput-itl-own-settle-backdates-the-first-sighting`). That is
   the settle reading only: the line's
   windows, intercepts and held slope still go when `EvictStale` sweeps them.
   Replay switch

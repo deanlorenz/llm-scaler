@@ -986,6 +986,7 @@ var heldBy = map[string][]heldTest{
 	},
 	throughput.SwitchITLOwnSettleBackdates: {
 		{"../throughput", "TestITLSettle_TheOwnTrackerBackdatesAFirstSighting"},
+		{"../throughput", "TestITLSettle_TheOwnTrackerInventsNoRowAtTheBackdate"},
 	},
 	// Issue #431's forget of the slo line.
 	slo.SwitchITLForgetReachesTheLine: {

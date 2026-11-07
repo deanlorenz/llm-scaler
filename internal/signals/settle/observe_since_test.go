@@ -84,3 +84,44 @@ func TestObserveSinceLeavesAHeldReplicaAlone(t *testing.T) {
 		t.Errorf("since after now: settle at %v, first seen %v; want %v", r.Since, r.FirstSeen, t0)
 	}
 }
+
+// A first sighting is never backdated before the Pod was Ready, nor a
+// bridge before it was lent: a Pod Ready 10 s ago begins 10 s ago, one Ready
+// an hour ago at since, a bridge lent 30 s ago 30 s ago, and a Ready time
+// ahead of the controller's clock at now.
+func TestObserveSinceNeverStartsBeforeTheReadyTime(t *testing.T) {
+	now := t0
+	since := now.Add(-2 * time.Minute)
+	fresh := busy("fresh")
+	fresh.ReadySince = now.Add(-10 * time.Second)
+	old := busy("old")
+	old.ReadySince = now.Add(-time.Hour)
+	ahead := busy("ahead")
+	ahead.ReadySince = now.Add(5 * time.Second)
+	bridge := busy("pool-0")
+	bridge.Bridge, bridge.LentSince = true, now.Add(-30*time.Second)
+
+	tr := NewTracker()
+	tr.ObserveSince(model, []Row{fresh, old, ahead, bridge}, since, now)
+	for _, tc := range []struct {
+		key  Key
+		want time.Time
+	}{
+		{fresh.Key, fresh.ReadySince},
+		{old.Key, since},
+		{ahead.Key, now},
+		{bridge.Key, bridge.LentSince},
+	} {
+		r, ok := tr.Replica(model, tc.key)
+		if !ok {
+			t.Fatalf("the tracker does not know %s", tc.key.Pod)
+		}
+		if !r.Since.Equal(tc.want) || !r.FirstSeen.Equal(tc.want) || !r.ReadySeen.Equal(tc.want) {
+			t.Errorf("%s: settle at %v, first seen %v, Ready seen %v; want all at %v",
+				tc.key.Pod, r.Since, r.FirstSeen, r.ReadySeen, tc.want)
+		}
+		if tc.key.Bridge && !r.LentSeen.Equal(tc.want) {
+			t.Errorf("%s: lend seen %v, want %v", tc.key.Pod, r.LentSeen, tc.want)
+		}
+	}
+}

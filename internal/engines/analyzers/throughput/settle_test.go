@@ -617,3 +617,33 @@ func TestITLSettle_TheParentsWindowReadsNoSettle(t *testing.T) {
 	assert.False(t, adm.WaitsAfterRestart || adm.KeepsThroughMissingRow || adm.FiniteOnly ||
 		adm.RestartUnderName || adm.IdleOnEvidence)
 }
+
+// At an optimize interval of 48 s or more the own tracker's tolerance covers
+// the backdate, so before issue #511 both observations stood: a first
+// sighting's trace held an invented row at the backdate as well as the row
+// read. With SwitchITLOwnSettleBackdates on it holds only the row read; off,
+// as before, both. The settle begins at the backdate either way.
+func TestITLSettle_TheOwnTrackerInventsNoRowAtTheBackdate(t *testing.T) {
+	const interval = time.Minute
+	require.GreaterOrEqual(t, settle.Tolerance(interval), ownSettleBackdate, "premise: the tolerance covers the backdate")
+	for _, on := range []bool{true, false} {
+		c := clocktesting.NewFakePassiveClock(lineStart)
+		r := &ownRig{t: t, a: NewThroughputAnalyzer().WithClock(c).WithOptimizationInterval(interval), clock: c, now: lineStart}
+		require.NoError(t, r.a.SetSwitchesForReplay(map[string]bool{SwitchITLOwnSettleBackdates: on}))
+		r.analyze("m", settleFleet())
+		want := 1
+		if !on {
+			want = 2
+		}
+		for _, rm := range settleFleet() {
+			key := settlerow.Key(rm)
+			got, ok := r.a.ownSettle.Replica("ns/m", key)
+			require.True(t, ok, "switch %v: %s is not held", on, rm.PodName)
+			assert.Equal(t, settle.Joined, got.Reason, "switch %v: %s", on, rm.PodName)
+			assert.Equal(t, lineStart.Add(-ownSettleBackdate), got.Since, "switch %v: %s", on, rm.PodName)
+			trace := r.a.ownSettle.Trace("ns/m", key)
+			assert.Len(t, trace, want, "switch %v: %s's trace", on, rm.PodName)
+			assert.Equal(t, lineStart, trace[len(trace)-1].At, "switch %v: %s's last row", on, rm.PodName)
+		}
+	}
+}

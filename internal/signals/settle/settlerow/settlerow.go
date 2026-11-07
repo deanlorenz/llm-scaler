@@ -95,9 +95,10 @@ func ObserveOwn(t *settle.Tracker, model string, rows []settle.Row, first bool, 
 
 // ObserveOwnSince is ObserveOwn for a backdate of any length: on the
 // model's first observation (first) it observes the rows once, at now, each
-// replica taken as seen since backdate earlier (settle.Tracker.ObserveSince),
-// so it reads settle.Joined (settle.Lent for a bridge) with that Since,
-// whatever the tracker's absence tolerance. Its trace and idle run hold only
+// replica taken as seen since backdate earlier, or since its Ready time (a
+// bridge's lend time) if later (settle.Tracker.ObserveSince), so it reads
+// settle.Joined (settle.Lent for a bridge) with that Since, whatever the
+// tracker's absence tolerance. Its trace and idle run hold only
 // the rows read at now. On any other observation it is Observe.
 func ObserveOwnSince(t *settle.Tracker, model string, rows []settle.Row, first bool, backdate time.Duration, now time.Time) {
 	if first {
