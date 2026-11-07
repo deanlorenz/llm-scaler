@@ -95,7 +95,7 @@ func TestLineSamples_RowsOutsideTheCheck(t *testing.T) {
 	in := noteCycles(lineT0, repeated(12, lineInput(0.79, 1000))...).rows("v")
 	require.Len(t, in, 12)
 	assert.False(t, in[0].AboveBand)
-	assert.Equal(t, lineT0.Add(11*15*time.Second), in[len(in)-1].At, "a row carries its clock")
+	assert.Equal(t, lineT0.Add(11*15*time.Second), in[3].At, "a row carries its clock: the fourth off a ramp, the twelfth read")
 }
 
 // A prefill pod makes one token a request: it says nothing of a decode line.
