@@ -820,10 +820,9 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 			out.Parts.DecodeEngine += excess
 		}
 	}
-	// oldFloorAt is the old sum's floor, read only with a term. With none,
-	// oldOwnZero is a zero ownTime, whose quantile (shape 0) runs the gamma's
-	// continued fraction to maxSeriesTerms for a NaN that nothing reads: about
-	// 100 ms a price, so most of every RateForTTFT with no decode term.
+	// floored applies the old sum's floor, which it works out only with a term:
+	// with none oldOwnZero is a zero ownTime, whose quantile runs to
+	// maxSeriesTerms for a NaN nothing reads, about 100 ms a RateForTTFT.
 	floored := func(seconds, old *float64, floor float64, oldFloorAt func() float64) {
 		if pl.term == nil {
 			out.Floor = floor
@@ -840,7 +839,11 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 	if q == 0 {
 		mean := out.Parts.EngineWait + out.Parts.OwnPrefill + out.Parts.DecodeWait + first
 		oldMean := out.Parts.EngineWait + a + oldOwn.mean + out.Parts.DecodeWait + oldFirst
-		floored(&mean, &oldMean, a+pl.pf.own().mean+floorStep, func() float64 { return a + oldOwnZero.mean + oldFloorStep })
+		oldMeanFloor := func() float64 {
+			noteOldFloor()
+			return a + oldOwnZero.mean + oldFloorStep
+		}
+		floored(&mean, &oldMean, a+pl.pf.own().mean+floorStep, oldMeanFloor)
 		if !Finite(mean) {
 			u := refuse(Saturated, fmt.Sprintf("no finite mean TTFT at %g r/s", rate))
 			return priced{u: &u}
@@ -876,7 +879,11 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 			out.DecodeShare = oldBeta
 		}
 	}
-	floored(&out.Seconds, &oldSeconds, a+pl.pf.own().quantile(q)+floorStep, func() float64 { return a + oldOwnZero.quantile(q) + oldFloorStep })
+	oldQuantileFloor := func() float64 {
+		noteOldFloor()
+		return a + oldOwnZero.quantile(q) + oldFloorStep
+	}
+	floored(&out.Seconds, &oldSeconds, a+pl.pf.own().quantile(q)+floorStep, oldQuantileFloor)
 	out.Independent = out.Seconds
 	if extras {
 		// The two waits always sum (a single-piece wait and the decode
@@ -1054,6 +1061,17 @@ func (pl ttftPlan) bisect(t TTFTTarget, limit float64, withDecodeWait bool) floa
 		return p.u == nil && p.out.Seconds <= t.Seconds
 	})
 	return lo
+}
+
+// onOldFloor, when set, is called each time a price works out the old sum's
+// floor. It is a test hook, nil outside tests, which run serially.
+var onOldFloor func()
+
+// noteOldFloor calls onOldFloor when it is set.
+func noteOldFloor() {
+	if onOldFloor != nil {
+		onOldFloor()
+	}
 }
 
 // addFlags appends each flag not already in flags.

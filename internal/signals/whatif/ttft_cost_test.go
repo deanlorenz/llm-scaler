@@ -3,7 +3,6 @@ package whatif
 import (
 	"fmt"
 	"testing"
-	"time"
 )
 
 // noTermCase is a fleet priced with no decode term (pl.term nil): no decode
@@ -108,37 +107,111 @@ func TestTTFT_NoTermFiguresUnmovedBySkippedFloor(t *testing.T) {
 	}
 }
 
-// noTermRateBudget bounds a RateForTTFT with no decode line. It takes 0.1 to
-// 3 ms on a developer machine; while each price worked out the unused old-sum
-// floor of a zero own time it took 93 to 100 ms.
-const noTermRateBudget = 20 * time.Millisecond
+// oldFloorReads counts the old-sum floors f works out, through onOldFloor.
+func oldFloorReads(t *testing.T, f func()) int {
+	t.Helper()
+	n := 0
+	onOldFloor = func() { n++ }
+	defer func() { onOldFloor = nil }()
+	f()
+	return n
+}
 
-// A RateForTTFT with no decode line (the SLO analyzer's prefill-only shape) is
-// cheap: no price works out a floor it does not read. The legacy sum is left
-// out: its decode admission chain costs tens of ms on its own. The fastest of
-// five calls is the figure, so a loaded machine slows it only if it slows
-// every call.
-func TestTTFT_NoTermRateForTTFTIsCheap(t *testing.T) {
-	timed := 0
+// A price with no decode term works out no old-sum floor, eagerly or
+// otherwise: with none its own time is a zero ownTime, whose quantile costs
+// about 100 ms a RateForTTFT for a NaN nothing reads. With a term the floor is
+// worked out, on the mean and the percentile branch both.
+func TestTTFT_OldFloorWorkedOutOnlyWithATerm(t *testing.T) {
 	for _, c := range noTermCases() {
 		fl := c.fleet()
-		if fl.Decode != nil {
-			continue
+		if n := oldFloorReads(t, func() { RateForTTFT(fl, c.target) }); n != 0 {
+			t.Errorf("%s: RateForTTFT worked out the old floor %d times, want 0", c.name, n)
 		}
-		fastest := time.Duration(1<<63 - 1)
-		for range 5 {
-			start := time.Now()
-			rateForTTFT(t, fl, c.target)
-			fastest = min(fastest, time.Since(start))
+		if n := oldFloorReads(t, func() { TTFTAt(fl, c.rate, c.target.Percentile) }); n != 0 {
+			t.Errorf("%s: TTFTAt worked out the old floor %d times, want 0", c.name, n)
 		}
-		t.Logf("%s: fastest RateForTTFT %v, budget %v", c.name, fastest, noTermRateBudget)
-		if fastest > noTermRateBudget {
-			t.Errorf("%s: RateForTTFT took %v at the fastest of 5, budget %v", c.name, fastest, noTermRateBudget)
-		}
-		timed++
 	}
-	if timed != 4 {
-		t.Fatalf("timed %d fleets with no decode line, want 4", timed)
+	for name, fl := range map[string]TTFTFleet{"default term": workedFleet(), "stated term": termFleet(stateTerm())} {
+		for _, q := range []float64{0, 0.9} {
+			if n := oldFloorReads(t, func() { RateForTTFT(fl, TTFTTarget{Seconds: 0.2, Percentile: q}) }); n == 0 {
+				t.Errorf("%s q %g: RateForTTFT worked out no old floor", name, q)
+			}
+			if n := oldFloorReads(t, func() { TTFTAt(fl, 8, q) }); n != 1 {
+				t.Errorf("%s q %g: TTFTAt worked out the old floor %d times, want 1", name, q, n)
+			}
+		}
+	}
+}
+
+// termFloorFleet is the worked fleet with a decode term (nil is the default,
+// engine omitted), four decode replicas so prefill's knee (30 r/s) is the
+// lower, a 5% V_P margin, and a KV transfer of xfer seconds per token.
+func termFloorFleet(term *DecodeTerm, xfer float64) TTFTFleet {
+	fl := termFleet(term)
+	d := *fl.Decode
+	d.Replicas = 4
+	fl.Decode = &d
+	fl.Prefill.VPMargin = 0.05
+	fl.Prefill.TransferSecondsPerToken = xfer
+	return fl
+}
+
+// termFloorFigures pins TTFTAt's floor, figure and DecodeTermFloored with a
+// decode term, at the mean and at p90, below the margin (6 r/s, rho 0.2) and
+// under all of it (24 r/s, rho 0.8, where the price's own time is the
+// margined one and the floor's must stay the zero-rate one).
+var termFloorFigures = map[string]string{
+	"default term at 6 r/s, q 0":                "floor 0.048156033333333334 seconds 0.056489366666666666 floored false margin 0",
+	"default term at 6 r/s, q 0.9":              "floor 0.09157553643313489 seconds 0.11076374554142299 floored false margin 0",
+	"default term at 24 r/s, q 0":               "floor 0.048156033333333334 seconds 0.23706165055538927 floored false margin 0.05",
+	"default term at 24 r/s, q 0.9":             "floor 0.09157553643313489 seconds 0.5265250045543252 floored false margin 0.05",
+	"default term, 2e-5 s/tok at 6 r/s, q 0":    "floor 0.06815603333333332 seconds 0.07648936666666666 floored false margin 0",
+	"default term, 2e-5 s/tok at 6 r/s, q 0.9":  "floor 0.13762723829301582 seconds 0.15446115912937 floored false margin 0",
+	"default term, 2e-5 s/tok at 24 r/s, q 0":   "floor 0.06815603333333332 seconds 0.25706165055538927 floored false margin 0.05",
+	"default term, 2e-5 s/tok at 24 r/s, q 0.9": "floor 0.13762723829301582 seconds 0.5516269093104237 floored false margin 0.05",
+	"stated term at 6 r/s, q 0":                 "floor 0.06371833333333334 seconds 0.07269366323523542 floored false margin 0",
+	"stated term at 6 r/s, q 0.9":               "floor 0.11234817680511108 seconds 0.1317117356315117 floored false margin 0",
+	"stated term at 24 r/s, q 0":                "floor 0.06371833333333334 seconds 0.25601936388799107 floored false margin 0.05",
+	"stated term at 24 r/s, q 0.9":              "floor 0.11234817680511108 seconds 0.5462841301053257 floored false margin 0.05",
+	"stated term, 2e-5 s/tok at 6 r/s, q 0":     "floor 0.06815603333333334 seconds 0.07648936666666667 floored true margin 0",
+	"stated term, 2e-5 s/tok at 6 r/s, q 0.9":   "floor 0.13762723829301582 seconds 0.15446115912937006 floored true margin 0",
+	"stated term, 2e-5 s/tok at 24 r/s, q 0":    "floor 0.06815603333333334 seconds 0.25706165055538927 floored true margin 0.05",
+	"stated term, 2e-5 s/tok at 24 r/s, q 0.9":  "floor 0.13762723829301582 seconds 0.5516269093104237 floored true margin 0.05",
+}
+
+// With a term the old sum's floor is the zero-rate own time's, at the asked
+// percentile, plus the old step: TTFTAt's floor and figure, and whether it is
+// flagged DecodeTermFloored, are pinned on floored and unfloored fleets, at
+// the mean and at p90, with and without the V_P margin.
+func TestTTFT_TermOldFloorPinned(t *testing.T) {
+	fleets := map[string]TTFTFleet{
+		"default term":             termFloorFleet(nil, 0),
+		"default term, 2e-5 s/tok": termFloorFleet(nil, 2e-5),
+		"stated term":              termFloorFleet(stateTerm(), 0),
+		"stated term, 2e-5 s/tok":  termFloorFleet(stateTerm(), 2e-5),
+	}
+	floored, unfloored := 0, 0
+	for name, fl := range fleets {
+		for _, rate := range []float64{6, 24} {
+			for _, q := range []float64{0, 0.9} {
+				key := fmt.Sprintf("%s at %g r/s, q %g", name, rate, q)
+				v := mustTTFT(t, ttftAt(t, fl, rate, q))
+				got := fmt.Sprintf("floor %v seconds %v floored %v margin %v", v.Floor, v.Seconds, v.HasFlag(DecodeTermFloored), v.VPMarginApplied)
+				if v.HasFlag(DecodeTermFloored) {
+					floored++
+				} else {
+					unfloored++
+				}
+				if want, ok := termFloorFigures[key]; !ok {
+					t.Errorf("no pin: %q: %q,", key, got)
+				} else if got != want {
+					t.Errorf("%s:\n got %s\nwant %s", key, got, want)
+				}
+			}
+		}
+	}
+	if floored == 0 || unfloored == 0 {
+		t.Errorf("floored %d, unfloored %d: want both", floored, unfloored)
 	}
 }
 
