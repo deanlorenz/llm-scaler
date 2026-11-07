@@ -1082,6 +1082,7 @@ firstDroppedSeq
 firstWrite
 fit
 fit-declined
+fitRows
 fitted
 fitting
 fix
@@ -1395,6 +1396,9 @@ k2WindowArgs
 k2stash|
 k2|
 kPrice
+kSpread
+kSpreadOverThreshold
+kSpreadThreshold
 keep
 keeping
 keeps
@@ -2579,6 +2583,8 @@ steadyGate.minSettledSamples
 steadyGate.steadyFor
 steadyGate.steadyFor/carry
 steadyHeld
+steadyHeldOverThreshold
+steadyHeldThreshold
 steadySpread
 steered
 step

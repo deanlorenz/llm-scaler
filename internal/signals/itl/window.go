@@ -79,6 +79,9 @@ type Observation struct {
 	// (replicaTrace.settling): a known transient, which the pinned fit leaves
 	// out.
 	settling bool
+	// pod is the replica the reading came from, for the learner-write line's
+	// pods (Reading.FitPods). Nothing fits from it.
+	pod string
 }
 
 // Window is a rolling window of (k, ITL_obs) pairs for one variant.

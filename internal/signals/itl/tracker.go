@@ -166,6 +166,24 @@ type Reading struct {
 	// SteadySpread is max k - min k over the steady readings: the other half
 	// of Ready, and how far it is from DefaultMinKSpread.
 	SteadySpread float64
+	// FitRows is how many readings the line was fitted from this cycle, and
+	// FitPods the replicas they came from, by pod name. Both are zero when no
+	// line was fitted this cycle: none, a refused fit, or a held slope, whose
+	// readings are those of the cycle it was fitted on. Log fields only:
+	// nothing prices from them.
+	FitRows int
+	FitPods []FitPod
+}
+
+// FitPod is one replica's part in the readings a line was fitted from
+// (Reading.FitPods).
+type FitPod struct {
+	// Pod is the replica.
+	Pod string
+	// Rows is how many of the fit's readings were the replica's.
+	Rows int
+	// K and ITLSec are the means of those readings' k and ITL.
+	K, ITLSec float64
 }
 
 // Resting reports a full fit taken between the clear and set values
@@ -337,15 +355,15 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 			if aw == nil || !atOrPastKSat(k) {
 				break
 			}
-			dropped := aw.add(Observation{K: k, ITLSec: rm.AvgITL, Timestamp: now, settling: aboveSettling})
+			dropped := aw.add(Observation{K: k, ITLSec: rm.AvgITL, Timestamp: now, settling: aboveSettling, pod: rm.PodName})
 			if !dropped && aboveSteady {
-				asw.Add(k, rm.AvgITL, now)
+				asw.add(Observation{K: k, ITLSec: rm.AvgITL, Timestamp: now, pod: rm.PodName})
 			}
 		default:
 			// Add drops nothing the cases above let through but a k above a
 			// full cache, which the collector never reports; counted as
 			// above the band all the same.
-			if w.add(Observation{K: k, ITLSec: rm.AvgITL, Timestamp: now, settling: settling}) {
+			if w.add(Observation{K: k, ITLSec: rm.AvgITL, Timestamp: now, settling: settling, pod: rm.PodName}) {
 				r.AboveBand++
 			} else {
 				r.Offered++
@@ -355,7 +373,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 				}
 				switch {
 				case steady:
-					sw.Add(k, rm.AvgITL, now)
+					sw.add(Observation{K: k, ITLSec: rm.AvgITL, Timestamp: now, pod: rm.PodName})
 				case settling:
 					r.Unsteady++
 					r.Settling++
@@ -429,6 +447,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 			t.mu.Unlock()
 		}
 		r.Model, r.Tier = c.model, TierOLS
+		r.FitRows, r.FitPods = len(c.read), fitPods(c.read)
 		return r
 	}
 	if c.hold {
@@ -486,6 +505,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 	t.slopes[key] = heldSlope{a: heldA, fittedAt: now, args: adm.Args}
 	t.mu.Unlock()
 	r.Model, r.Tier = m, TierPinnedB
+	r.FitRows, r.FitPods = len(c.read), fitPods(c.read)
 	return r
 }
 
@@ -825,11 +845,12 @@ func newKeyWindow(size int) *Window {
 //
 // It errs on one side only, by construction: see fitAboveBand.
 func aboveBandLine(r Reading, obs, steady []Observation, s Steadiness) Reading {
-	m, _, ok := aboveBandFit(obs, steady, s.MinSettledSamples)
+	m, read, ok := aboveBandFit(obs, steady, s.MinSettledSamples)
 	if !ok {
 		return r
 	}
 	r.Model, r.Tier, r.AboveBandFit = m, TierPinnedB, true
+	r.FitRows, r.FitPods = len(read), fitPods(read)
 	return r
 }
 

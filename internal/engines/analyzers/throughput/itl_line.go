@@ -99,6 +99,12 @@ const ITLWriteBand = 0.05
 // while it holds: the saturation analyzer's heartbeat.
 const LearnerHeartbeat = 10 * time.Minute
 
+// LearnerWriteMaxPods is how many pods one learner-write line lists, lowest
+// reading first; the rest are counted in podsOmitted, so a line stays under
+// the CRI line limit: the saturation analyzer's bound
+// (saturation.LearnerWriteMaxPods).
+const LearnerWriteMaxPods = 16
+
 // itlLogged is the line learner-write last logged for a variant, and when.
 type itlLogged struct {
 	a, b   float64
@@ -334,11 +340,13 @@ func (a *ThroughputAnalyzer) noteLearnerWrite(ctx context.Context, key string, r
 		return
 	}
 	a.itlLogged[key] = itlLogged{a: r.Model.A, b: r.Model.B, reason: reason, at: now}
-	ctrl.LoggerFrom(ctx).V(logging.VERBOSE).Info("learner-write",
-		"learner", learn.ITL, "analyzer", AnalyzerName, "modelID", modelID, "namespace", namespace,
+	pods, omitted := r.WritePods(LearnerWriteMaxPods)
+	kv := []any{"learner", learn.ITL, "analyzer", AnalyzerName, "modelID", modelID, "namespace", namespace,
 		"variant", variant, "a", r.Model.A, "b", r.Model.B, "previousA", last.a, "previousB", last.b,
 		"firstWrite", !logged, "source", reason, "previousSource", last.reason, "samples", r.Held,
-		"steadyHeld", r.SteadyHeld, "settling", r.Settling, "slopeAgeSeconds", r.SlopeAge(now).Seconds())
+		"steadyHeld", r.SteadyHeld, "settling", r.Settling, "slopeAgeSeconds", r.SlopeAge(now).Seconds(),
+		"pods", pods, "podsOmitted", omitted}
+	ctrl.LoggerFrom(ctx).V(logging.VERBOSE).Info("learner-write", append(kv, r.AdmissionMargins()...)...)
 }
 
 // lineVariantState is the variant's snapshot with the line on the tracker:

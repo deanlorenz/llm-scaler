@@ -931,7 +931,13 @@ Off, each does what the line did before 4a. The line is a
 learner on the shared rules too: a `learn.Report` per variant that fits a line
 (`itl_learner.go`), `learner-write` at `--v=3` when A or B moves more than
 `ITLWriteBand` (5 %) or the tier changes, and `learn.ITL` on `learn.Learners`,
-so the forget-learned-state annotation reaches it by name.
+so the forget-learned-state annotation reaches it by name. The line's `pods`
+and its admission margins come from the reading: `itl.Observation` carries the
+pod its row came from, `Observe` sets `itl.Reading.FitRows` and `FitPods` from
+the readings the line was fitted from (none for a held slope), and
+`Reading.WritePods(LearnerWriteMaxPods)` and `Reading.AdmissionMargins` give
+the fields, so the saturation, throughput and slo lines log them alike. Nothing
+fits from the pod.
 
 The last `A` also holds when the window itself runs short: fewer than
 `DefaultMinSamples` readings left after `DefaultObservationMaxAge`. A replica
