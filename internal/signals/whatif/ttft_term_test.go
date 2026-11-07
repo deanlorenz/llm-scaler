@@ -405,10 +405,23 @@ func TestTerm_ARefusalKeepsWhatItRestsOn(t *testing.T) {
 	// A learned term decides nothing assumed.
 	learned := termFleet(stateTerm())
 	u, _ = rateForTTFT(t, learned, TTFTTarget{Seconds: oldFloor + 0.001, Percentile: 0.9}).(Unanswerable)
-	if u.Reason != TargetBelowFloor || u.AssumedTermDecides || len(u.Flags) != 0 {
+	if u.Reason != TargetBelowFloor || u.AssumedTermDecides || slices.ContainsFunc(u.Flags, func(f Flag) bool {
+		return slices.Contains(termFlagsOf, f)
+	}) {
+		t.Errorf("%+v", u)
+	}
+
+	// The prompt's own prefill is in the floor too: an assumed cv and V_P stay.
+	spread := termFleet(stateTerm())
+	spread.Prefill.PromptCVAssumed, spread.Prefill.VPAssumed = true, true
+	u, _ = rateForTTFT(t, spread, TTFTTarget{Seconds: oldFloor + 0.001, Percentile: 0.9}).(Unanswerable)
+	if !slices.Contains(u.Flags, AssumedPromptSpread) || !slices.Contains(u.Flags, AssumedVP) {
 		t.Errorf("%+v", u)
 	}
 }
+
+// termFlagsOf is what says a decode term is assumed or floored.
+var termFlagsOf = []Flag{DecodeTermOmitted, DecodeStepSlopeAssumed, RouterHopAssumed, DecodeTermFloored, DecodeTermPrefixHits}
 
 func TestWithoutAssumedTerms(t *testing.T) {
 	if _, ok := WithoutAssumedTerms(workedFleet()); ok {

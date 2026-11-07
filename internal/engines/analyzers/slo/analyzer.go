@@ -163,6 +163,10 @@ type Analyzer struct {
 	// ttftDecodeTerm is SwitchTTFTDecodeTerm (ttft.go): on from the
 	// constructor; a replay turns it off (SetSwitchesForReplay).
 	ttftDecodeTerm bool
+	// kvOutputDispersion is SwitchKVPerRequestOutputDispersion (issue #276,
+	// output_dispersion.go): on from the constructor; a replay turns it off
+	// (SetSwitchesForReplay).
+	kvOutputDispersion bool
 	// imbalance is each prefill variant's raw shares and decodeTTFT each
 	// decode variant's measured TTFT, keyed namespace|model|variant, for the
 	// TTFT pricing (ttft_fleet.go); decodeTerms is each decode variant's
@@ -239,6 +243,7 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		ttftMeasuredSpread:   true,
 		ttftMeasuredTransfer: true,
 		ttftDecodeTerm:       true,
+		kvOutputDispersion:   true,
 		imbalance:            make(map[string]*imbalanceWindow),
 		prompts:              make(map[string]*promptSpreadWindow),
 		decodeTTFT:           make(map[string]*decodeTTFTWindow),
@@ -312,6 +317,9 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 	a.observeOwnSettle(input, now)
 
 	fleet := readFleet(input)
+	if a.kvOutputDispersion {
+		fleet.shape = fleet.shape.WithOutputDispersion(fleet.outputDispersion)
+	}
 	// An output length nobody has reported yet is not a demand of zero: it is
 	// no demand at all, and a combiner must read it as undefined. So the demand
 	// is left out, and every generating variant below reports no data.
@@ -966,6 +974,10 @@ type fleetReading struct {
 	generatingReplicas int
 	// shape is the request shape the generating replicas are serving.
 	shape shape.Shape
+	// outputDispersion is the spread of their output lengths, D =
+	// E[O^2]/E[O]^2, with shape's weights; 0 unless every row shape counted
+	// read the bound on E[O^2] (output_dispersion.go).
+	outputDispersion float64
 	// requestRate is the generating replicas' summed completion rate, the
 	// fallback when the router reports no arrival rate.
 	requestRate float64
@@ -989,7 +1001,8 @@ func readFleet(input domain.AnalyzerInput) fleetReading {
 	}
 	// Request-rate weighted, so a replica serving most of the traffic decides
 	// the shape; equal weights when no replica reports a rate.
-	var in, out, hit, weight float64
+	var in, out, squared, hit, weight float64
+	spreadRead := true
 	for _, rm := range input.ReplicaMetrics {
 		if !rm.Ready || rm.FromWarmPool {
 			continue
@@ -1021,9 +1034,17 @@ func readFleet(input domain.AnalyzerInput) fleetReading {
 		out += w * rm.AvgOutputTokens
 		hit += w * rm.PrefixCacheHitRate
 		weight += w
+		if rm.AvgOutputTokensSquaredKnown && rm.AvgOutputTokensSquared > 0 {
+			squared += w * rm.AvgOutputTokensSquared
+		} else {
+			spreadRead = false
+		}
 	}
 	if weight > 0 {
 		f.shape = shape.New(in/weight, out/weight, hit/weight)
+		if spreadRead {
+			f.outputDispersion = shape.Dispersion(out/weight, squared/weight)
+		}
 	}
 	return f
 }

@@ -252,6 +252,87 @@ func TestShapeOfWeightsByRequestRate(t *testing.T) {
 	}
 }
 
+// The spread is read over the cycles that read it, with their own weights and
+// mean: a window with one unread cycle keeps its reading, and a window with none
+// has no reading, which is not D = 1.
+func TestShapeOfReadsTheOutputSpread(t *testing.T) {
+	// 1 request a second of 100 tokens beside 3 of 500: E[O] 400, E[O^2]
+	// (1*1e4 + 3*25e4)/4 = 190000, D 1.1875, and a third cycle that read
+	// none, at OL 9000, has no say in it.
+	samples := []shapeSample{
+		{cycle: 7, il: 1000, ol: 100, squared: 1e4, req: 1},
+		{cycle: 8, il: 1000, ol: 9000, req: 2},
+		{cycle: 9, il: 2000, ol: 500, squared: 25e4, req: 3},
+	}
+	if got := shapeOf(samples); math.Abs(got.OutputDispersion-1.1875) > 1e-12 {
+		t.Errorf("D %g, want 1.1875 over the two cycles that read one", got.OutputDispersion)
+	}
+	samples[0].squared, samples[2].squared = 0, 0
+	if got := shapeOf(samples); got.OutputDispersion != 0 {
+		t.Errorf("D %g, want 0: no reading", got.OutputDispersion)
+	}
+}
+
+// Rows are weighted by their request rate, as the analyzers weight them: 9
+// requests a second of 100 tokens beside 1 of 1000 serve OL 190 and D 3.02, not
+// a plain mean of 550. With no rate read, rows count alike, and a row with no
+// rate beside rows with one has no say.
+func TestNoteShapesWeightsRowsByRequestRate(t *testing.T) {
+	row := func(pod string, rate, ol, in, hit float64, known bool) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{PodName: pod, VariantName: "d", RequestRate: rate, RequestRateKnown: known,
+			AvgInputTokens: in, PrefixCacheHitRate: hit, AvgOutputTokens: ol,
+			AvgOutputTokensSquared: ol * ol, AvgOutputTokensSquaredKnown: true, RunningRequests: 1}
+	}
+	near := func(what string, got, want float64) {
+		t.Helper()
+		if math.Abs(got-want) > 1e-9*max(1, math.Abs(want)) {
+			t.Errorf("%s %g, want %g", what, got, want)
+		}
+	}
+	shapes := map[string][]shapeSample{}
+	noteShapes(shapes, []domain.ReplicaMetrics{row("a", 9, 100, 1000, 0.5, true), row("b", 1, 1000, 2000, 0, true)}, 1)
+	got := shapeOf(shapes["d"])
+	near("OL", got.OutputTokens, 190)
+	near("IL", got.InputTokens, 1100)
+	near("hit", got.PrefixHitRate, 0.45)
+	near("D", got.OutputDispersion, 109000.0/(190*190))
+
+	none := map[string][]shapeSample{}
+	noteShapes(none, []domain.ReplicaMetrics{row("a", 0, 100, 1000, 0, false), row("b", 0, 1000, 1000, 0, false)}, 1)
+	near("OL with no rate", shapeOf(none["d"]).OutputTokens, 550)
+
+	mixed := map[string][]shapeSample{}
+	noteShapes(mixed, []domain.ReplicaMetrics{row("a", 2, 100, 1000, 0, true), row("b", 0, 1000, 1000, 0, false)}, 1)
+	near("OL beside a row with no rate", shapeOf(mixed["d"]).OutputTokens, 100)
+
+	// Nor does such a row cost the cycle its reading.
+	spread := map[string][]shapeSample{}
+	idle := row("b", 0, 1000, 1000, 0, false)
+	idle.AvgOutputTokensSquaredKnown = false
+	noteShapes(spread, []domain.ReplicaMetrics{row("a", 2, 100, 1000, 0, true), idle}, 1)
+	near("D beside an unrated, unread row", shapeOf(spread["d"]).OutputDispersion, 1)
+}
+
+// A cycle's bound is its rows' only when every row read one, so that the mean
+// it is set against is the same rows'. A row with no output length is no row
+// of the shape, reading or not.
+func TestNoteShapesReadsTheBoundOfEveryRow(t *testing.T) {
+	row := func(pod string, read bool) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{PodName: pod, VariantName: "d", RequestRate: 1, RequestRateKnown: true,
+			AvgOutputTokens: 100, AvgOutputTokensSquared: 2e4, AvgOutputTokensSquaredKnown: read}
+	}
+	idle := domain.ReplicaMetrics{PodName: "idle", VariantName: "d"}
+	shapes := map[string][]shapeSample{}
+	noteShapes(shapes, []domain.ReplicaMetrics{row("a", true), row("b", true), idle}, 1)
+	if got := shapes["d"][0].squared; got != 2e4 {
+		t.Errorf("every row read: %g, want 20000", got)
+	}
+	noteShapes(shapes, []domain.ReplicaMetrics{row("a", true), row("b", false)}, 2)
+	if got := shapes["d"][1].squared; got != 0 {
+		t.Errorf("one row unread: %g, want no reading", got)
+	}
+}
+
 // The last cycle is a cycle number like any other: asking for it by number
 // gives the same state, and the readings' cycles fall inside the replay.
 func TestStateAt_LastIsTheLastCycle(t *testing.T) {
