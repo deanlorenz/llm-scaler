@@ -19,6 +19,20 @@
   finding: "On the time base, a replica's first saturated rate[1m] covers only the part of the minute it served. Served for half the minute or more, the reading is at least half the derived mu and passes minMeasuredOfDerived, so a second reading moves the figure by up to half. The joined test refuses this for a replica Ready under a minute, not for one routed to late. Measured on throughputRefusal alone, so an upper bound: the analyzer's full path also applies tokensOutrunCompletions and the served bound, which may refuse some of these readings."
   measured: "51/100 seeds; seed 3: served 30 s of its first minute, rate[1m] 0.1095 against a derived 0.2118, admitted"
   owner: "#392"
+- id: liveness/floor/closed-loop-restart-before-step-start-463s
+  class: liveness
+  learner: floor
+  expect: stale
+  finding: "At a 463 s start (a cold JIT cache) a decode fleet of four stepping from 2.5 to 12 req/s (need 17) overshoots and does not settle by the 40 min horizon. The order climbs from 6 at the step to 29 at 27.5 min (1.7x need) while the replicas it ordered are still starting and the queue grows on the Ready ones; which demand term carries the climb is not established here. Once the replicas are Ready the fleet comes down one replica every few minutes. The controller restart is not the cause: the same step with no restart ends at 21, over the bound too (see the restored-snapshot row). At 15 s and 90 s the case settles at need."
+  measured: "1/1 seed (the probe draws nothing from it); at 40 min final 23 against need 17 (bound 20.5), peak 29, under need 8m0s (bound 11m13s); with a longer horizon 20 at 58.5 min, 17 from 74.5 min"
+  owner: "#495"
+- id: liveness/floor/closed-loop-restored-snapshot-start-463s
+  class: liveness
+  learner: floor
+  expect: stale
+  finding: "The restored snapshot carries the fleet through the restart at 463 s as at 15 s and 90 s: never under need, the same as with no restart. What fails is the step itself at a 463 s start: the order climbs from 22 at the step to 30 over 7.5 min while replicas start, and the fleet is still over the bound at the 40 min horizon. The same step with no restart fails identically, so this is the start-time overshoot of the restart-before-step row, not the snapshot."
+  measured: "1/1 seed; at 40 min final 21 against need 17 (bound 20.5), peak 30, under need 0s; with a longer horizon 20 at 47.5 min, 17 from 63.75 min"
+  owner: "#495"
 - id: liveness/k2/flow-control-on
   class: liveness
   learner: k2

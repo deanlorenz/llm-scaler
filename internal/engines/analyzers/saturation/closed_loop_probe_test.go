@@ -40,12 +40,18 @@ import (
 // (0.85), so need is ceil(0.95 lambda / (0.68 mu)) whatever n is. The two
 // verdicts, over- and under-ordered, are learnertest.Result.Verdict's.
 
-// probeStart is S, from an order to the replica Ready.
+// probeStart is S, from an order to the replica Ready, for a case that sets
+// none.
 const probeStart = learnertest.DefaultStartTime
 
 // probeCase is one closed-loop scenario.
 type probeCase struct {
 	name string
+	// start, when set, is the case's true S, and every row reports it as
+	// the replica's measured start (ReplicaMetrics.StartSeconds, the
+	// collector's figure), so the start learner reads the truth. Unset, S
+	// is probeStart and no row reports one: the analyzer prices its default.
+	start time.Duration
 	// pods is the fleet's true mu per replica at the start; added replicas
 	// serve addedMu.
 	pods    []float64
@@ -91,7 +97,7 @@ func probeITL(k float64) float64 { return 0.119 + 0.6*k }
 // probeProcess is one controller process of a decode probe: its analyzer
 // over a store holding the variant's engine parameters, and its settle
 // tracker, with switches set.
-func probeProcess(t *testing.T, rig *propRig, switches map[string]bool) *settle.Tracker {
+func probeProcess(t testing.TB, rig *propRig, switches map[string]bool) *settle.Tracker {
 	t.Helper()
 	store := capacity.NewStore()
 	store.Update("test-ns", "test-model", "v", capacity.Record{EngineParams: mtParams(1024, "vllm:v1")}, rig.clock)
@@ -124,7 +130,7 @@ type probeResult struct {
 }
 
 // runProbe drives the case to its horizon and returns what the fleet did.
-func runProbe(t *testing.T, pc probeCase) probeResult {
+func runProbe(t testing.TB, pc probeCase) probeResult {
 	t.Helper()
 	rig := newPropRig()
 	res := probeResult{muCounts: map[learn.Reason]int64{}}
@@ -135,10 +141,14 @@ func runProbe(t *testing.T, pc probeCase) probeResult {
 		require.NoError(t, rig.a.SetSwitchesForReplay(pc.switches))
 	}
 	restarted := false
+	start := probeStart
+	if pc.start > 0 {
+		start = pc.start
+	}
 	fleet := learnertest.Fleet{
 		Pods: pc.pods, AddedMu: pc.addedMu, Mu: pc.mu, Lambda: pc.lambda, Weight: pc.weight, Horizon: pc.horizon,
 		Need:  func(lambda float64) int { return int(math.Ceil(0.95*lambda/(0.68*pc.meanMu) - 1e-9)) },
-		Start: rig.clock, StartTime: probeStart, Stabilization: pc.stabilization,
+		Start: rig.clock, StartTime: start, Stabilization: pc.stabilization,
 	}
 	out := fleet.Run(func(now time.Time, elapsed time.Duration, lambda float64, ready []learnertest.Replica) int {
 		require.Equal(t, now, rig.clock, "the rig's clock and the fleet's")
@@ -165,6 +175,9 @@ func runProbe(t *testing.T, pc probeCase) probeResult {
 				kv = 0.95
 			}
 			rm := imbRow(r.Name, "v", kv, int(math.Round(r.Backlog)), 1000, 1000, r.Served)
+			if pc.start > 0 {
+				rm.StartSeconds = pc.start.Seconds()
+			}
 			if pc.decode {
 				rm.KvCacheUsageKnown, rm.GenerationTokenRateKnown, rm.RequestRateKnown = true, true, true
 				rm.AvgITL, rm.AvgITLKnown = probeITL(kv), true
