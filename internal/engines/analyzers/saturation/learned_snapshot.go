@@ -96,6 +96,14 @@ type LearnedState struct {
 	K2          map[string]capacity.RollingAverageSnapshot `json:"k2,omitempty"`
 	Throughput  map[string]ThroughputSnapshot              `json:"throughput,omitempty"`
 	ITLBaseline map[string]float64                         `json:"itlBaseline,omitempty"`
+	// ITLBaselineAdmittedAt is, keyed like ITLBaseline, when each baseline
+	// was last admitted: the newest reading of the full fit that set it
+	// (SwitchITLBaselineStamped).
+	// Restored with its baseline, it is the age the ITL learner's report
+	// publishes for a baseline with no reading and no slope to date it. A
+	// baseline it does not name, as in every document written before it, is
+	// as old as can be.
+	ITLBaselineAdmittedAt map[string]time.Time `json:"itlBaselineAdmittedAt,omitempty"`
 	// ITLBaselineStash is itlBaselineStash: a variant's ITL baseline put
 	// aside under the arguments it was learned under, for a rollback to
 	// them. Keyed like the ITL baseline plus "#" and the arguments.
@@ -355,6 +363,18 @@ type RestoreReport struct {
 	// it can name, pending with their variant's other entries.
 	StartKeys int
 }
+
+// SwitchITLBaselineStamped is the replay switch for the ITL baseline's
+// last-admitted stamp (issue #495; analyzer-learner.md, Deferred): the
+// snapshot carries when each baseline was last admitted
+// (LearnedState.ITLBaselineAdmittedAt), and a restore installs it with the
+// baseline, so the ITL learner's report of a key holding a restored baseline
+// and no reading or slope publishes that stamp. Off, nothing is exported or
+// installed, and such a report publishes zero (as old as can be), as before.
+// The report's stamp of a live baseline has no switch: no replay output reads
+// a report. On from the constructor; a replay turns it off
+// (SetSwitchesForReplay).
+const SwitchITLBaselineStamped = "itl-baseline-stamped"
 
 // maxClockSkew is how far ahead of now a restored clock may be and still be
 // taken, as now: two nodes' clocks disagreeing slightly is not a reason to
@@ -622,6 +642,18 @@ func (a *SaturationAnalyzer) exportLearnedState() LearnedState {
 			HeldSeconds:            st.heldFor.Seconds(),
 		}
 	}
+	// Beside a baseline only: one fitted between the two copies has its
+	// stamp in the next export.
+	if a.itlBaselineStamped {
+		s.ITLBaselineAdmittedAt = a.itlTracker.BaselinesAdmittedAt()
+		maps.DeleteFunc(s.ITLBaselineAdmittedAt, func(k string, _ time.Time) bool {
+			_, ok := s.ITLBaseline[k]
+			return !ok
+		})
+		if len(s.ITLBaselineAdmittedAt) == 0 {
+			s.ITLBaselineAdmittedAt = nil
+		}
+	}
 	for k, sl := range a.itlTracker.Slopes() {
 		if s.ITLSlopes == nil {
 			s.ITLSlopes = map[string]SlopeSnapshot{}
@@ -759,7 +791,20 @@ func (a *SaturationAnalyzer) exportLearnedState() LearnedState {
 			if p.perToken {
 				markITLPerToken(&s, v)
 			}
-			mergeAbsent(s.ITLBaseline, p.state.ITLBaseline)
+			// A pending baseline goes out with its stamp; a live one keeps
+			// its own, or none.
+			for k, b := range p.state.ITLBaseline {
+				if _, live := s.ITLBaseline[k]; live {
+					continue
+				}
+				s.ITLBaseline[k] = b
+				if at, ok := p.state.ITLBaselineAdmittedAt[k]; ok && a.itlBaselineStamped {
+					if s.ITLBaselineAdmittedAt == nil {
+						s.ITLBaselineAdmittedAt = map[string]time.Time{}
+					}
+					s.ITLBaselineAdmittedAt[k] = at
+				}
+			}
 			if len(p.state.ITLBaselineStash) > 0 {
 				if s.ITLBaselineStash == nil {
 					s.ITLBaselineStash = map[string]float64{}
@@ -910,6 +955,7 @@ func dropVariant(s *LearnedState, v string) {
 	maps.DeleteFunc(s.Throughput, func(k string, _ ThroughputSnapshot) bool { return of(k) })
 	maps.DeleteFunc(s.VariantSeenAt, func(k string, _ time.Time) bool { return of(k) })
 	maps.DeleteFunc(s.ITLBaseline, func(k string, _ float64) bool { return of(k) })
+	maps.DeleteFunc(s.ITLBaselineAdmittedAt, func(k string, _ time.Time) bool { return of(k) })
 	maps.DeleteFunc(s.ITLBaselineStash, func(k string, _ float64) bool { return of(k) })
 	maps.DeleteFunc(s.ITLSlopes, func(k string, _ SlopeSnapshot) bool { return of(k) })
 	maps.DeleteFunc(s.StartSeconds, func(k string, _ float64) bool { return of(k) })
@@ -1076,6 +1122,12 @@ func (a *SaturationAnalyzer) restoreLearnedState(s LearnedState) RestoreReport {
 		p.state.VariantSeenAt[k] = seen
 		if b, ok := s.ITLBaseline[k]; ok {
 			p.state.ITLBaseline[k] = b
+			if at, ok := s.ITLBaselineAdmittedAt[k]; ok {
+				if p.state.ITLBaselineAdmittedAt == nil {
+					p.state.ITLBaselineAdmittedAt = map[string]time.Time{}
+				}
+				p.state.ITLBaselineAdmittedAt[k] = at
+			}
 		}
 		if sl, ok := s.ITLSlopes[k]; ok {
 			if p.state.ITLSlopes == nil {
@@ -1482,7 +1534,7 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState, windowsUnder string, 
 		a.variantSeenAt[k] = seen
 		kept++
 		if b, ok := s.ITLBaseline[k]; ok && latency && finitePositive(b) {
-			a.itlTracker.RestoreBaseline(k, b)
+			a.itlTracker.RestoreBaselineAt(k, b, a.restoredBaselineAt(s, k, now))
 		}
 		// The slope is a latency figure like the baseline, and installed on
 		// the same terms. Its hold is then bounded as a live one is, from
@@ -1504,6 +1556,22 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState, windowsUnder string, 
 		}
 	}
 	return kept
+}
+
+// restoredBaselineAt is the stamp s carries for key's ITL baseline, as a
+// restore installs it (SwitchITLBaselineStamped): zero, an age unknown, when
+// s has none, the switch is off, or it is in the future past the skew. A
+// restore never makes the baseline younger: the stamp is the one it was
+// written with, or now for one inside the skew.
+func (a *SaturationAnalyzer) restoredBaselineAt(s LearnedState, key string, now time.Time) time.Time {
+	at, ok := s.ITLBaselineAdmittedAt[key]
+	if !ok || at.IsZero() || !a.itlBaselineStamped {
+		return time.Time{}
+	}
+	if at, inTime := notFuture(at, now); inTime {
+		return at
+	}
+	return time.Time{}
 }
 
 // installITLStashLocked installs a variant's put-aside ITL baselines, which

@@ -273,6 +273,16 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// publishes, the second a field on lines no output reads.
 	saturation.SwitchMuForgetReported: nil,
 
+	// #495: the ITL baseline's last-admitted stamp in the snapshot
+	// (saturation.SwitchITLBaselineStamped). Measured alone against all off
+	// at main 1573829cd, it adds rows and changes none: each export gains an
+	// ITLBaselineAdmittedAt row per baseline a full fit set (2 in
+	// acceptance, 27 in mu-paths). No recorded document holds the field, so
+	// no restore in any recording reads it, and no figure moves. The
+	// report's stamp has no switch: no output reads a report. Its unit tests
+	// hold the restore (itl_baseline_stamp_test.go).
+	saturation.SwitchITLBaselineStamped: {"acceptance/learned-state.csv", "mu-paths/learned-state.csv"},
+
 	throughput.SwitchITLAdmitsAtSequenceCap: {
 		"throughput-sweep-restart/composite-holds.csv",
 		"throughput-sweep-restart/composite-release.csv",
