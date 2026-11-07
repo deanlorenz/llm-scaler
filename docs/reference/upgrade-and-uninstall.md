@@ -617,8 +617,7 @@ Installer:
   If it prints a note, give the namespace a quota, or remove `physicalGroups`
   from the shared policy.
 - **OpenShift: a cluster admin runs `make setup-prereqs`.** The ServiceMonitor
-  now scrapes as `wva-metrics-scraper`, and the old non-expiring token Secret
-  `wva-controller-manager-token` is deleted. Only the admin phase does both.
+  now scrapes as `wva-metrics-scraper`. Only the admin phase applies that.
   `make deploy-wva INSTALL_PHASE=wva` alone keeps scraping with the old token.
   ```bash
   NAMESPACE=<namespace> make setup-prereqs ENVIRONMENT=openshift   # (cluster admin)

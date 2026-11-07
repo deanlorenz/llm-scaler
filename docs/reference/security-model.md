@@ -48,8 +48,7 @@ About the token Secrets:
 
 **On OpenShift the scrape token is not the controller's identity.** It used to
 be (`wva-controller-manager-token`, a non-expiring token for the controller's
-own ServiceAccount); the installer deletes that Secret on upgrade and on
-uninstall. Whoever can read Secrets in the controller's namespace still holds
+own ServiceAccount). Whoever can read Secrets in the controller's namespace still holds
 `wva-epp-metrics-token` and `wva-metrics-scraper-token`, both `get /metrics`
 only. The controller's own token stays projected and short-lived, and it
 carries `cluster-monitoring-view`, which lets it query the platform

@@ -56,7 +56,7 @@ for fn in so_model_id so_resolve_env_ref; do
     }
 done
 
-EXPECT_CASES=122
+EXPECT_CASES=125
 RAN=0
 FAILED=0
 
@@ -755,6 +755,19 @@ REPOINT_SOS='{"items":[{"metadata":{"name":"decode-so","namespace":"tenant"},"sp
 check 'repoint: a dead namespace that starts with this one is repointed here' \
     'wva-external-scaler.wva-ctl.svc.cluster.local:9090' \
     "$(run_so so_repoint_stale WVA_NS=wva-ctl WVA_NS_EXPLICIT=wva-ctl STUB_SVC='wva-ctl=present' "STUB_SOS='$REPOINT_SOS'" >/dev/null; written_addr)"
+
+# KEDA names the HPA keda-hpa-<ScaledObject>, and that must fit in 63.
+check 'so name: the longest name KEDA takes passes' \
+    'ok' "$( (wva_check_so_name "$(printf 'a%.0s' $(seq 54))" && echo ok) 2>/dev/null)"
+check 'so name: one more is refused, and says so' \
+    '1|keda-hpa' \
+    "$( out="$( (wva_check_so_name "$(printf 'a%.0s' $(seq 55))") 2>&1 )"; rc=$?; printf '%s|%s' "$rc" "$(printf '%s' "$out" | grep -o 'keda-hpa' | head -1)")"
+# Only creating a pool checks: delete, monitor and plan must still reach a pool
+# whose name is already over the limit.
+check 'so name: a pool is checked where it is created, and nowhere else' \
+    'cmd_create' \
+    "$(awk '/^[a-z_]+\(\) \{/{fn=$1} /^[[:space:]]*wva_check_so_name/{print (fn == "" ? "top level" : fn)}' \
+        "$(dirname "$0")/../deploy/warmpool.sh" | tr -d '()' | paste -sd, -)"
 
 if [ "$FAILED" -gt 0 ]; then
     printf '\n%d model-identification assertion(s) failed.\n' "$FAILED" >&2

@@ -42,9 +42,6 @@ func TestCollectReplicaMetrics_ShortWindowShapeAndPrefillRate(t *testing.T) {
 			t.Fatalf("InitMetrics: %v", err)
 		}
 		scheme := runtime.NewScheme()
-		if err := llmdVariantAutoscalingV1alpha1.AddToScheme(scheme); err != nil {
-			t.Fatalf("AddToScheme: %v", err)
-		}
 		k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 		ts := time.Now()
 

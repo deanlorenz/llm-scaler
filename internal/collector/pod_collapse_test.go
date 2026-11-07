@@ -98,7 +98,6 @@ func TestCollectReplicaMetrics_DPRanksCollapseToOneReplica(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	require.NoError(t, metrics.InitMetrics(registry))
 	scheme := runtime.NewScheme()
-	require.NoError(t, llmdVariantAutoscalingV1alpha1.AddToScheme(scheme))
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	ts := time.Now()

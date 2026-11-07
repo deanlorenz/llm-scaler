@@ -35,7 +35,6 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
-	llmdv1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -80,9 +79,6 @@ var _ = BeforeSuite(func() {
 	cfg, err = testEnv.Start()
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
-
-	err = llmdv1alpha1.AddToScheme(scheme.Scheme)
-	Expect(err).NotTo(HaveOccurred())
 
 	// +kubebuilder:scaffold:scheme
 

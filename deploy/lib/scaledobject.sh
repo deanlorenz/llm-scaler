@@ -4592,6 +4592,7 @@ render_default_scaledobject() {
         fallback_block="$(so_fallback_block "$min")"$'\n'
     fi
 
+    wva_check_so_name "${target}-wva" || exit 1
     cat <<EOF
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject

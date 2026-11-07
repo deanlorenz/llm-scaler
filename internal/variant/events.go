@@ -9,8 +9,8 @@ import (
 // hang on.
 //
 // Not the VariantAutoscaling itself. Those are synthesized per cycle from a
-// ScaledObject, never persisted, and deliberately absent from the manager's
-// scheme (see scheme.go). Recording against one therefore produced, on every
+// ScaledObject, never persisted, and in no scheme. Recording against one
+// therefore produced, on every
 // optimization cycle:
 //
 //	"Could not construct reference, will not report event"
@@ -33,8 +33,8 @@ import (
 // involvedObject.uid matches the object it describes, so an event recorded
 // without one appeared only in `kubectl get events`, never in describe.
 //
-// It lives here, beside the type and the scheme note that explains the absence,
-// because the collector and the engine both need it and two copies would have to
+// It lives here, beside the type, because the collector and the engine both need
+// it and two copies would have to
 // be kept in step -- the engine already went one release without a fix the
 // collector had.
 func EventTarget(va *VariantAutoscaling) *kedav1alpha1.ScaledObject {

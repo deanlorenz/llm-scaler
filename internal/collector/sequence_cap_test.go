@@ -42,9 +42,6 @@ func TestCollectReplicaMetrics_SequenceCap(t *testing.T) {
 			t.Fatalf("InitMetrics: %v", err)
 		}
 		scheme := runtime.NewScheme()
-		if err := llmdVariantAutoscalingV1alpha1.AddToScheme(scheme); err != nil {
-			t.Fatalf("AddToScheme: %v", err)
-		}
 		k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 		// Makes the pod discoverable; without it there is no row to assert on.
 		results["kv_cache_usage"] = &source.MetricResult{Values: []source.MetricValue{{Labels: podLabels, Value: 0.5}}}

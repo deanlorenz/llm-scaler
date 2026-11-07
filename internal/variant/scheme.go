@@ -1,32 +1,9 @@
 package variant
 
-import (
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-)
+import "k8s.io/apimachinery/pkg/runtime"
 
-// GroupVersion identifies the (historical) VariantAutoscaling group/version.
-//
-// VariantAutoscaling is no longer a served CRD; it exists only as an in-memory
-// type synthesized from annotated HPAs/ScaledObjects. GroupVersion and AddToScheme
-// are retained solely so unit tests can register the type with a controller-runtime
-// fake client, which requires every object it stores to be scheme-registered. The
-// production manager scheme (cmd/main.go) does NOT register these types.
-var GroupVersion = schema.GroupVersion{Group: "llmd.ai", Version: "v1alpha1"}
-
-// SchemeBuilder registers the VariantAutoscaling types with a runtime.Scheme.
-var SchemeBuilder = runtime.NewSchemeBuilder(func(s *runtime.Scheme) error {
-	s.AddKnownTypes(GroupVersion, &VariantAutoscaling{}, &VariantAutoscalingList{})
-	metav1.AddToGroupVersion(s, GroupVersion)
-	return nil
-})
-
-// AddToScheme adds the VariantAutoscaling types to the given scheme. Intended for
-// test fake clients only — see GroupVersion.
-var AddToScheme = SchemeBuilder.AddToScheme
-
-// ensure the types satisfy runtime.Object at compile time.
+// An event recorder takes a runtime.Object, and one caller still hands it a
+// variant (scalefromzero); the others use EventTarget.
 var (
 	_ runtime.Object = (*VariantAutoscaling)(nil)
 	_ runtime.Object = (*VariantAutoscalingList)(nil)

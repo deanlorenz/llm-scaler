@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
@@ -37,17 +36,11 @@ func (r *ConfigMapReconciler) BootstrapInitialConfigMaps(ctx context.Context) er
 		namespace string
 		isGlobal  bool
 	}{}
-	// Both names: the current one and the pre-rename one, so an upgrade does not
-	// silently drop a deployment's whole scaling configuration. The current name
-	// is bootstrapped last so it wins when both exist.
-	policyNames := config.ScalingPolicyConfigMapNames()
-	for i := len(policyNames) - 1; i >= 0; i-- {
-		targets = append(targets, struct {
-			name      string
-			namespace string
-			isGlobal  bool
-		}{name: policyNames[i], namespace: systemNamespace, isGlobal: true})
-	}
+	targets = append(targets, struct {
+		name      string
+		namespace string
+		isGlobal  bool
+	}{name: config.ScalingPolicyConfigMapName(), namespace: systemNamespace, isGlobal: true})
 
 	// Cluster policy, when it lives outside the controller's namespace, must be
 	// loaded before anything reads a limiter. Loading it here rather than on the
@@ -151,21 +144,19 @@ func (r *ConfigMapReconciler) bootstrapClusterPolicy(ctx context.Context) error 
 	logger := log.FromContext(ctx)
 	policyNS := r.Config.PolicyNamespace()
 
-	for _, name := range config.ScalingPolicyConfigMapNames() {
-		cm := &corev1.ConfigMap{}
-		err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: policyNS}, cm)
-		if err == nil {
-			if err := r.handleClusterPolicyConfigMap(ctx, cm); err != nil {
-				logger.Error(err, "Cannot start: the cluster policy's default entry is invalid",
-					"policyNamespace", policyNS, "configMap", name)
-				r.Config.MarkConfigMapsBootstrapFailed(err)
-				return err
-			}
-			return nil
+	name := config.ScalingPolicyConfigMapName()
+	cm := &corev1.ConfigMap{}
+	err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: policyNS}, cm)
+	if err == nil {
+		if err := r.handleClusterPolicyConfigMap(ctx, cm); err != nil {
+			logger.Error(err, "Cannot start: the cluster policy's default entry is invalid",
+				"policyNamespace", policyNS, "configMap", name)
+			r.Config.MarkConfigMapsBootstrapFailed(err)
+			return err
 		}
-		if apierrors.IsNotFound(err) {
-			continue
-		}
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
 		errorType := "Failed to read cluster policy"
 		logger.Error(err, errorType,
 			"policyNamespace", policyNS, "configMap", name,
@@ -183,9 +174,9 @@ func (r *ConfigMapReconciler) bootstrapClusterPolicy(ctx context.Context) error 
 	// limiters were in force. An admin who published no policy means no bound, and
 	// that is what an empty policy says.
 	logger.Info("No cluster policy ConfigMap in the policy namespace: no limiters or quotas are in force",
-		"policyNamespace", policyNS, "expectedNames", config.ScalingPolicyConfigMapNames())
+		"policyNamespace", policyNS, "expectedName", name)
 	r.Config.UpdateClusterPolicy(&config.ScalingPolicy{})
-	r.Status.RecordClusterPolicy(r.Config, policyNS, config.ScalingPolicyConfigMapName(), "", nil)
+	r.Status.RecordClusterPolicy(r.Config, policyNS, name, "", nil)
 	return nil
 }
 
@@ -200,7 +191,7 @@ func (r *ConfigMapReconciler) bootstrapConfigMap(ctx context.Context, name, name
 		return fmt.Errorf("failed to bootstrap ConfigMap %s/%s: %w", namespace, name, err)
 	}
 
-	if slices.Contains(config.ScalingPolicyConfigMapNames(), name) {
+	if name == config.ScalingPolicyConfigMapName() {
 		if err := r.handleScalingPolicyConfigMap(ctx, cm, namespace, isGlobal); err != nil {
 			logger.Error(err, "Cannot start: the scaling policy's default entry is invalid",
 				"namespace", namespace, "configMap", name)

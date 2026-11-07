@@ -119,9 +119,6 @@ func collectParsedCycle(t *testing.T, series map[string]model.Value, failed map[
 		t.Fatalf("InitMetrics: %v", err)
 	}
 	scheme := runtime.NewScheme()
-	if err := llmdVariantAutoscalingV1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
 	all := map[string]model.Value{}
 	for name, v := range series {
 		all[name] = v

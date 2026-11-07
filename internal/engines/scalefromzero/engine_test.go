@@ -156,7 +156,6 @@ func TestSingleInactiveVariant(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pool1 := tt.pool
 
-			va := unittestutil.CreateVariantAutoscalingResource(namespace, resourceName, deploymentName, modelId, acceleratorName, variantCost)
 			dp := unittestutil.MakeDeployment(deploymentName, namespace, tt.resourceReplicas, tt.labels)
 			svc := unittestutil.MakeService("epp-pool1-svc", namespace)
 
@@ -164,11 +163,10 @@ func TestSingleInactiveVariant(t *testing.T) {
 			_ = clientgoscheme.AddToScheme(scheme)
 			_ = v1alpha2.Install(scheme)
 			_ = v1.Install(scheme)
-			_ = vav1alpha1.AddToScheme(scheme)
 			_ = kedav1alpha1.AddToScheme(scheme)
 			_ = appsV1.AddToScheme(scheme)
 			_ = corev1.AddToScheme(scheme)
-			fakeClientInitialObjs := []client.Object{pool1, dp, va, svc}
+			fakeClientInitialObjs := []client.Object{pool1, dp, svc}
 
 			fakeClient := fake.NewClientBuilder().
 				WithScheme(scheme).
@@ -248,7 +246,6 @@ func TestMultipleInactiveVariants(t *testing.T) {
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = v1alpha2.Install(scheme)
 	_ = v1.Install(scheme)
-	_ = vav1alpha1.AddToScheme(scheme)
 	_ = kedav1alpha1.AddToScheme(scheme)
 	_ = appsV1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
@@ -343,7 +340,6 @@ func TestEmptyInactiveVariants(t *testing.T) {
 	pool1.SetGroupVersionKind(gvk)
 
 	// Create VA with non-zero replicas (active)
-	va := unittestutil.CreateVariantAutoscalingResource(namespace, resourceName, resourceName+"-deployment", modelId, acceleratorName, variantCost)
 	dp := unittestutil.MakeDeployment(resourceName+"-deployment", namespace, 1, selector_v1) // 1 replica = active
 	svc := unittestutil.MakeService("epp-pool1-svc", namespace)
 
@@ -351,12 +347,11 @@ func TestEmptyInactiveVariants(t *testing.T) {
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = v1alpha2.Install(scheme)
 	_ = v1.Install(scheme)
-	_ = vav1alpha1.AddToScheme(scheme)
 	_ = kedav1alpha1.AddToScheme(scheme)
 	_ = appsV1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
-	fakeClientInitialObjs := []client.Object{pool1, dp, va, svc}
+	fakeClientInitialObjs := []client.Object{pool1, dp, svc}
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -459,12 +454,11 @@ func TestNamespacedMetricsSourceLookup(t *testing.T) {
 			_ = clientgoscheme.AddToScheme(scheme)
 			_ = v1alpha2.Install(scheme)
 			_ = v1.Install(scheme)
-			_ = vav1alpha1.AddToScheme(scheme)
 			_ = kedav1alpha1.AddToScheme(scheme)
 			_ = appsV1.AddToScheme(scheme)
 			_ = corev1.AddToScheme(scheme)
 
-			fakeClientInitialObjs := []client.Object{pool, dp, va, svc}
+			fakeClientInitialObjs := []client.Object{pool, dp, svc}
 
 			fakeClient := fake.NewClientBuilder().
 				WithScheme(scheme).
@@ -610,7 +604,6 @@ func TestPoolGetFromLabelsWithNamespace(t *testing.T) {
 			_ = clientgoscheme.AddToScheme(scheme)
 			_ = v1alpha2.Install(scheme)
 			_ = v1.Install(scheme)
-			_ = vav1alpha1.AddToScheme(scheme)
 			_ = kedav1alpha1.AddToScheme(scheme)
 			_ = corev1.AddToScheme(scheme)
 
