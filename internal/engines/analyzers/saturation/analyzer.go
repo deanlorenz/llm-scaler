@@ -335,6 +335,9 @@ type SaturationAnalyzer struct {
 	muLogged         map[string]muLogged
 	muForgotten      map[string]map[string][]learn.Forgotten
 	muForgetReported bool
+	// itlBaselineStamped is SwitchITLBaselineStamped: on from the
+	// constructor; a replay turns it off (SetSwitchesForReplay).
+	itlBaselineStamped bool
 	// The ITL line as a learner (itl_learner.go): its reports of the cycle
 	// in progress per namespace|model, the line learner-write last logged
 	// per ITL key, and the keys forgotten per namespace|model and variant
@@ -675,6 +678,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		muLogged:               make(map[string]muLogged),
 		muForgotten:            make(map[string]map[string][]learn.Forgotten),
 		muForgetReported:       true,
+		itlBaselineStamped:     true,
 		itlCycles:              make(map[string][]learn.Report),
 		itlLogged:              make(map[string]itlLogged),
 		itlForgotten:           make(map[string]map[string][]learn.Forgotten),

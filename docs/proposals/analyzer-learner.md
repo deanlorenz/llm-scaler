@@ -2461,6 +2461,7 @@ The document stays v1. New fields, all `omitempty`:
 | --- | --- | --- | --- |
 | `startSamples` | `LearnedState` | per key: n (capped at N) and mean m | n = N: the estimate keeps full authority, as before. No fleet moves on upgrade |
 | `startAdmittedAt` | `LearnedState` | per key: last admitted start (the deferred last-admitted stamp) | zero: as old as can be |
+| `itlBaselineAdmittedAt` | `LearnedState` | per ITL key: when its baseline B was last admitted (#495, [as built](#bs-last-admitted-stamp-as-built-495)) | zero: as old as can be |
 | `startCounted` | `LearnedState` | per counted pod (`itlKey\|ns\|pod`): its Ready time | every running pod is folded again, as today |
 | `settle` | `learnedStateDoc`, beside `state` | per model: each replica's key and its three sighting times | every replica waits, as today |
 
@@ -3701,8 +3702,43 @@ and the `restored` field have none, because no replay output reads either.
   `forgetMuLocked` clears it, and counts the entries the variant's forget counted
   before. The prefill bound shares mu's maps: its keys still go with the variant,
   and are not reported. Eviction reports too, as k2's does.
-- **Open.** B's own last-admitted stamp (Deferred). Not measured on a cluster: no
-  run has read this series.
+- **Open.** Not measured on a cluster: no run has read this series. B's own
+  last-admitted stamp, Deferred here, is
+  [built since](#bs-last-admitted-stamp-as-built-495).
+
+#### B's last-admitted stamp, as built (#495)
+
+Built on main 1573829cd. One replay switch, `saturation.SwitchITLBaselineStamped`
+(`itl-baseline-stamped`), on from the constructor.
+
+- **The stamp.** `itl.Tracker` keeps, beside each intercept, when it was last
+  admitted: the newest reading of the full fit that set it, not the cycle's
+  clock, so a refit from the readings the steady window carries does not make B
+  younger. `Tracker.Report` publishes it for a key with no reading in its window,
+  no held slope and no above-band fit, where it published 0. A B put back from
+  `itlBaselineStash` has none: the stash holds bare floats. The series reads a
+  report only when it names a pricing key, and a B restored alone prices no line
+  on an empty window, so no series changes. Nor does a live line: the stamp is
+  read for a line with an empty window and no held slope, and `Observe` makes
+  none, since both windows age out on `DefaultObservationMaxAge` and an empty
+  main window leaves no steady reading to fit. What the stamp gives today is a
+  correct `Report.LastAdmitted` for a restored B, for any reader of the report
+  beyond the series.
+- **The snapshot.** `itlBaselineAdmittedAt`, keyed like `itlBaseline`, additive
+  and `omitempty`; the document stays v1. Exported beside a baseline only,
+  pending with its variant, installed with B and never without it, and not in
+  the future past `maxClockSkew` (one inside it is taken as now). A v1 document
+  without it loads, and its B reports 0, as before. `dropVariant` and the size
+  trim drop it with B; a stamp left with no B is spare and goes first. The store's
+  digest leaves it out, as it leaves out a slope's `fittedAt`: a full fit moves it
+  every cycle.
+- **Goldens.** On, it moves `acceptance/learned-state.csv` and
+  `mu-paths/learned-state.csv`, rows added and none changed (2 and 27): an
+  `ITLBaselineAdmittedAt` row per baseline per export. No recorded document holds
+  the field, so no restore reads it and no figure moves. The report's stamp has
+  no switch: no replay output reads a report. Slo and throughput lines report
+  the same way for their own intercepts.
+- Not measured on a cluster.
 
 #### Rollouts, k2's wait and the lines' reports, as built (#481, #495)
 
@@ -3984,7 +4020,7 @@ Round-3 lows, each settled in the PR named.
 | Each operator-column cell names its metric series, or "metrics: none" | each PR |
 | A witness column per learner in 3.4 ("witnessed when", "non-saturating witness"), which also tells the probe which side to drive | 3 |
 | 3.6's cycle-count clocks become durations, or record the cycle interval in the threshold | each learner's PR |
-| The snapshot gains a last-admitted stamp for start time and B, as an additive `omitempty` field of v1; a document without it publishes 0 (as old as can be) | Start time: 5c. B: still open; a line with an empty window publishes its held slope's fit, and 0 on an intercept with no slope ([as built](#reports-restored-and-mus-forget-as-built-495)) |
+| The snapshot gains a last-admitted stamp for start time and B, as an additive `omitempty` field of v1; a document without it publishes 0 (as old as can be) | Start time: 5c. B: #495, `itlBaselineAdmittedAt`; a line with an empty window publishes its held slope's fit, and an intercept with no slope its own stamp, 0 only when it has none ([as built](#bs-last-admitted-stamp-as-built-495)) |
 
 ## Review notes (round 1)
 

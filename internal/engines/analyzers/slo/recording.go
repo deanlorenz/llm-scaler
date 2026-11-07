@@ -135,6 +135,10 @@ func (a *Analyzer) switchFields() map[string]*bool {
 		// first-seen, whenever EvictStale ran (settle.go).
 		SwitchITLLongGapFirstSeen: &a.itlLongGapFirstSeen,
 
+		// Issue #511: the own tracker's first sighting is one observation,
+		// backdated (settle.go).
+		SwitchITLOwnSettleBackdates: &a.itlOwnBackdate,
+
 		// Issue #495: the line's reports and learner-write (learner.go).
 		SwitchITLFilesReports: &a.itlFilesReports,
 

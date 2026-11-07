@@ -35,6 +35,13 @@ type Tracker struct {
 	mu        sync.Mutex
 	windows   map[string]*Window
 	baselines map[string]float64
+	// baselineAt is, per key, when its intercept was last admitted: the
+	// newest reading of the full fit that set it (newestOf), or the stamp a
+	// snapshot carried with it
+	// (RestoreBaselineAt). A key it does not name holds an intercept of
+	// unknown age, as one put back from a stash does (SetBaseline). It goes
+	// with the intercept.
+	baselineAt map[string]time.Time
 	// steady holds, per key, only the readings taken while their replica's
 	// load had held still, and is the only window the full fit -- and so the
 	// remembered B -- is taken from. See DefaultSteadyFor.
@@ -74,6 +81,7 @@ func NewTracker() *Tracker {
 	return &Tracker{
 		windows:     map[string]*Window{},
 		baselines:   map[string]float64{},
+		baselineAt:  map[string]time.Time{},
 		steady:      map[string]*Window{},
 		traces:      map[string]*keyTraces{},
 		slopes:      map[string]heldSlope{},
@@ -442,6 +450,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 			t.mu.Lock()
 			if c.model.B > 0 {
 				t.baselines[key] = c.model.B
+				t.baselineAt[key] = newestOf(steadyObs, now)
 			}
 			t.slopes[key] = heldSlope{a: c.model.A, fittedAt: now, args: adm.Args}
 			t.mu.Unlock()
@@ -663,6 +672,22 @@ func priorCap(obs []Observation, bPrior float64) float64 {
 		}
 	}
 	return b
+}
+
+// newestOf is when the newest of obs was taken, or orElse when obs holds none:
+// the stamp of an intercept a full fit took from obs. A refit from readings the
+// steady window carries does not make the intercept younger than they are.
+func newestOf(obs []Observation, orElse time.Time) time.Time {
+	var newest time.Time
+	for _, o := range obs {
+		if o.Timestamp.After(newest) {
+			newest = o.Timestamp
+		}
+	}
+	if newest.IsZero() {
+		return orElse
+	}
+	return newest
 }
 
 // usable reports whether a reading has a finite positive k and ITL.
@@ -1047,6 +1072,7 @@ func (t *Tracker) sweep(now time.Time, stale func(key string) bool, keepTraces b
 	for key := range t.baselines {
 		if stale(key) {
 			delete(t.baselines, key)
+			delete(t.baselineAt, key)
 			baselines++
 		}
 	}
@@ -1170,14 +1196,57 @@ func (t *Tracker) Baseline(key string) (float64, bool) {
 	return b, ok
 }
 
+// BaselinesAdmittedAt returns a copy of when each key's intercept was last
+// admitted, for the keys whose stamp is known; nil when none is.
+func (t *Tracker) BaselinesAdmittedAt() map[string]time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out map[string]time.Time
+	for key, at := range t.baselineAt {
+		if _, have := t.baselines[key]; !have || at.IsZero() {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]time.Time, len(t.baselineAt))
+		}
+		out[key] = at
+	}
+	return out
+}
+
+// BaselineAdmittedAt is when the key's intercept was last admitted, zero when
+// it holds none or its age is unknown.
+func (t *Tracker) BaselineAdmittedAt(key string) time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, have := t.baselines[key]; !have {
+		return time.Time{}
+	}
+	return t.baselineAt[key]
+}
+
 // RestoreBaseline sets the key's intercept unless it already holds one: what
 // was learned since the process started wins over what a snapshot carried.
+// Its age is unknown: RestoreBaselineAt with a zero stamp.
 func (t *Tracker) RestoreBaseline(key string, b float64) {
+	t.RestoreBaselineAt(key, b, time.Time{})
+}
+
+// RestoreBaselineAt is RestoreBaseline with the stamp the snapshot carried:
+// when the intercept was last admitted, which its Report publishes until a
+// reading is kept (Report). A zero stamp is an intercept of unknown age. The
+// stamp is installed only with the intercept: one already held keeps its own.
+func (t *Tracker) RestoreBaselineAt(key string, b float64, at time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if _, have := t.baselines[key]; !have {
 		t.baselines[key] = b
 		t.restored[key] = struct{}{}
+		if at.IsZero() {
+			delete(t.baselineAt, key)
+		} else {
+			t.baselineAt[key] = at
+		}
 	}
 }
 
@@ -1236,11 +1305,13 @@ func (t *Tracker) RestoreSlope(key string, s Slope) {
 	}
 }
 
-// SetBaseline sets the key's intercept.
+// SetBaseline sets the key's intercept, of unknown age: one put back from a
+// stash carries no stamp.
 func (t *Tracker) SetBaseline(key string, b float64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.baselines[key] = b
+	delete(t.baselineAt, key)
 }
 
 // WindowLen is how many readings the window filed under key holds, 0 when there
@@ -1319,6 +1390,7 @@ func (t *Tracker) ForgetBaselines() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	clear(t.baselines)
+	clear(t.baselineAt)
 	for key := range t.latches {
 		t.unlatch(key)
 	}

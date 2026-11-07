@@ -137,8 +137,9 @@ func TestExport_EveryRecordedStringIsClassified(t *testing.T) {
 	assert.Len(t, values, 144, "string value sites")
 	// 51 since learner PR 5c: LearnedState.StartSamples and StartAdmittedAt,
 	// keyed like StartSeconds, and AnalyzerResult.RoleStartSeeded, by role.
-	// 52 since 5d: LearnedState.StartCounted.
-	assert.Len(t, keys, 52, "string-keyed maps")
+	// 52 since 5d: LearnedState.StartCounted. 53 since #495's
+	// LearnedState.ITLBaselineAdmittedAt, keyed like ITLBaseline.
+	assert.Len(t, keys, 53, "string-keyed maps")
 }
 
 // canaryRecording is a small recording with one more event, of an owner the

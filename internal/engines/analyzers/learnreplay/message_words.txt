@@ -1306,6 +1306,7 @@ itl-aggregated-shape-moved
 itl-aggregated-shape-term
 itl-aggregated-sizes
 itl-aggregated-spec-unknown
+itl-baseline-stamped
 itl-fit
 itl-fit-declined
 itl-gps-mismatch
@@ -1348,6 +1349,7 @@ itlWindows
 itlWithheldLogged
 itlZero
 itl_non_positive
+itlbaselineat|
 itlshape|
 itlslope|
 itlstash|
@@ -2470,6 +2472,7 @@ slo-itl-idle-needs-evidence
 slo-itl-keeps-the-settle-through-a-missing-row
 slo-itl-ols
 slo-itl-one-sided-at-cap
+slo-itl-own-settle-backdates-the-first-sighting
 slo-itl-own-settle-reads-a-long-gap-as-first-seen
 slo-itl-pinned
 slo-itl-reads-the-finite-pod-mean
@@ -2673,6 +2676,7 @@ throughput-itl-keeps-present-variants
 throughput-itl-keeps-the-settle-through-a-missing-row
 throughput-itl-keeps-the-window-on-gps-mismatch
 throughput-itl-ols
+throughput-itl-own-settle-backdates-the-first-sighting
 throughput-itl-pinned
 throughput-itl-reads-the-finite-pod-mean
 throughput-itl-reads-the-settle-tracker

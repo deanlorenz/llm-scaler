@@ -66,3 +66,23 @@ func TestReadyAgain(t *testing.T) {
 		}
 	}
 }
+
+// ObserveOwnSince backdates a first observation past the tracker's absence
+// tolerance (issue #511): the replica reads Joined at the backdate, and a
+// later observation keeps it. ObserveOwn at the same backdate reads the gap
+// as an absence.
+func TestObserveOwnSinceBackdatesPastTheTolerance(t *testing.T) {
+	at := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	const backdate = 2 * time.Minute
+	rows := []settle.Row{{Key: settle.Key{Pod: "p", Variant: "v"}, Ready: true}}
+	since, own := settle.NewTracker(), settle.NewTracker()
+	ObserveOwnSince(since, "m", rows, true, backdate, at)
+	ObserveOwnSince(since, "m", rows, false, backdate, at.Add(15*time.Second))
+	ObserveOwn(own, "m", rows, true, backdate, at)
+	if r, _ := since.Replica("m", rows[0].Key); r.Reason != settle.Joined || !r.Since.Equal(at.Add(-backdate)) {
+		t.Errorf("ObserveOwnSince: settle %s at %v, want joined at %v", r.Reason, r.Since, at.Add(-backdate))
+	}
+	if r, _ := own.Replica("m", rows[0].Key); r.Reason != settle.Rejoined || !r.Since.Equal(at) {
+		t.Errorf("ObserveOwn past the tolerance: settle %s at %v, want rejoined at %v", r.Reason, r.Since, at)
+	}
+}

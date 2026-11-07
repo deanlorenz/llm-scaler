@@ -123,6 +123,7 @@ func (a *ThroughputAnalyzer) switchFields() map[string]*bool {
 		SwitchITLRestartUnderName:             &a.itlRestartUnderName,
 		SwitchITLIdleOnEvidence:               &a.itlIdleOnEvidence,
 		SwitchITLReadsFinitePodMean:           &a.itlFiniteOnly,
+		SwitchITLOwnSettleBackdates:           &a.itlOwnBackdate,
 		SwitchITLRolloutGuard:                 &a.itlRolloutGuard,
 		SwitchITLFilesReports:                 &a.itlFilesReports,
 		SwitchITLKeepsPresentVariants:         &a.itlKeepsPresent,

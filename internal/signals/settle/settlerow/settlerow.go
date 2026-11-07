@@ -81,9 +81,29 @@ func ReadyAgain(trace []settle.Sample) time.Time {
 // earlier too, so a replica on that cycle is not a joiner. A controller
 // restart is the engine's tracker's first cycle; a test of one hands the
 // analyzer a tracker of its own making instead.
+//
+// The backdate must be at most the tracker's absence tolerance
+// (settle.Tolerance): past it the second observation reads the gap as an
+// absence, and every replica settles again at now (settle.Rejoined). A
+// longer backdate is ObserveOwnSince's.
 func ObserveOwn(t *settle.Tracker, model string, rows []settle.Row, first bool, backdate time.Duration, now time.Time) {
 	if first {
 		t.Observe(model, rows, now.Add(-backdate))
+	}
+	t.Observe(model, rows, now)
+}
+
+// ObserveOwnSince is ObserveOwn for a backdate of any length: on the
+// model's first observation (first) it observes the rows once, at now, each
+// replica taken as seen since backdate earlier, or since its Ready time (a
+// bridge's lend time) if later (settle.Tracker.ObserveSince), so it reads
+// settle.Joined (settle.Lent for a bridge) with that Since, whatever the
+// tracker's absence tolerance. Its trace and idle run hold only
+// the rows read at now. On any other observation it is Observe.
+func ObserveOwnSince(t *settle.Tracker, model string, rows []settle.Row, first bool, backdate time.Duration, now time.Time) {
+	if first {
+		t.ObserveSince(model, rows, now.Add(-backdate), now)
+		return
 	}
 	t.Observe(model, rows, now)
 }

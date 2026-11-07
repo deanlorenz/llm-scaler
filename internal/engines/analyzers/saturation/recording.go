@@ -170,6 +170,10 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		// #495: mu on learn's list of learners (mu_learner.go).
 		SwitchMuForgetReported: &a.muForgetReported,
 
+		// #495: the ITL baseline's last-admitted stamp in the snapshot
+		// (learned_snapshot.go).
+		SwitchITLBaselineStamped: &a.itlBaselineStamped,
+
 		// Learner PR 5b: the start guard opens on distinct Pods
 		// (start_est.go).
 		SwitchStartConfirmsByDistinctPod: &a.startConfirmsByPod,

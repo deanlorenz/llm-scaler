@@ -15,6 +15,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
@@ -238,11 +239,10 @@ func TestSettle_AfterALongGapWithTheMoveOffTheOwnTraceIsKept(t *testing.T) {
 // tracker's own forget horizon (settle.TraceHorizon), under which a gap
 // past the timeout is not long enough for the tracker to drop a replica that
 // left by itself. Holds the forget (without it, under the short timeout, a
-// replica that left stays held) and the backdate (without it the replicas
-// read settle.Joined; with it, as after an eviction, the backdated sighting
-// is ownSettleBackdate before the cycle's, past the tracker's absence
-// tolerance, so they read settle.Rejoined at the cycle: the line takes
-// neither as a settle, since its keys' traces start at that cycle too).
+// replica that left stays held) and the backdate: either way each replica
+// reads settle.Joined ownSettleBackdate before the cycle, as on a first
+// sighting (issue #511: two observations that far apart read the gap as an
+// absence, settle.Rejoined at the cycle).
 func TestSettle_AfterALongGapTheOwnTrackerHoldsWhatAnEvictionLeaves(t *testing.T) {
 	model := utils.GetNamespacedKey("ns", "m")
 	gone := settle.Key{Pod: "agg-c", Variant: "agg"}
@@ -264,6 +264,7 @@ func TestSettle_AfterALongGapTheOwnTrackerHoldsWhatAnEvictionLeaves(t *testing.T
 		for _, pod := range []string{"agg-a", "agg-b"} {
 			r, ok := a.ownSettle.Replica(model, settle.Key{Pod: pod, Variant: "agg"})
 			require.True(t, ok, "timeout %v, evicted first %v: %s is not held", timeout, evict, pod)
+			assertBackdatedJoin(t, r, now)
 			out[pod] = r
 		}
 		return out
@@ -277,6 +278,60 @@ func TestSettle_AfterALongGapTheOwnTrackerHoldsWhatAnEvictionLeaves(t *testing.T
 		}
 		assert.Equal(t, run(c.timeout, c.gap, true), run(c.timeout, c.gap, false),
 			"timeout %v: the stale model's own tracker differs from an evicted one's", c.timeout)
+	}
+}
+
+// assertBackdatedJoin asserts the own tracker holds r as a first sighting
+// at the cycle at: settle.Joined, seen since the line's settle earlier
+// (itl.DefaultSteadyFor), and last seen at the cycle.
+func assertBackdatedJoin(t *testing.T, r settle.Replica, at time.Time) {
+	t.Helper()
+	since := at.Add(-itl.DefaultSteadyFor)
+	assert.Equal(t, settle.Joined, r.Reason, "%s: the first sighting's settle", r.Pod)
+	assert.Equal(t, since, r.Since, "%s: the first sighting's settle began at the cycle, not backdated", r.Pod)
+	assert.Equal(t, since, r.FirstSeen, "%s: first seen", r.Pod)
+	assert.Equal(t, at, r.LastSeen, "%s: last seen", r.Pod)
+}
+
+// Issue #511: the analyzer alone takes a model's replicas on its first
+// Analyze as long joined: its own tracker holds each settle.Joined
+// itl.DefaultSteadyFor before the cycle. Observed at the backdate and again
+// at the cycle, the 2 min gap was past the tracker's absence tolerance
+// (settle.Period: the analyzer sets no interval on its own tracker), and
+// every replica read settle.Rejoined at the cycle. The line still keeps no
+// reading out as a settle on that cycle or after, with or without the
+// backdate: its keys' first sight is that cycle too.
+func TestSettle_TheOwnTrackerBackdatesAFirstSighting(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	a := newGapAnalyzer(t, nil, &now)
+	model := utils.GetNamespacedKey("ns", "m")
+	at := now
+	var settling []int
+	for i := range settleCycles + 2 {
+		if analyzeSettling(t, a, "m", settleFleet()) > 0 {
+			settling = append(settling, i)
+		}
+		if i == 0 {
+			for _, rm := range settleFleet() {
+				r, ok := a.ownSettle.Replica(model, settlerow.Key(rm))
+				require.True(t, ok, "%s is not held", rm.PodName)
+				assertBackdatedJoin(t, r, at)
+			}
+		}
+		now = now.Add(settleCycle)
+	}
+	assert.Empty(t, settling, "the line kept a first sighting's readings out as a settle")
+	assert.Equal(t, int64(0), a.ownSettle.Verdicts()[settle.Rejoined], "a replica of the first sighting rejoined")
+
+	// Off, as before: two observations, the gap read as an absence.
+	now = time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	off := newGapAnalyzer(t, map[string]bool{SwitchITLOwnSettleBackdates: false}, &now)
+	assert.Zero(t, analyzeSettling(t, off, "m", settleFleet()), "switch off: the line kept a first sighting's readings out")
+	for _, rm := range settleFleet() {
+		r, ok := off.ownSettle.Replica(model, settlerow.Key(rm))
+		require.True(t, ok, "switch off: %s is not held", rm.PodName)
+		assert.Equal(t, settle.Rejoined, r.Reason, "switch off: %s", rm.PodName)
+		assert.Equal(t, now, r.Since, "switch off: %s", rm.PodName)
 	}
 }
 
