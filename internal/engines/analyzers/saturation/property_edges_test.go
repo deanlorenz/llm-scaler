@@ -552,12 +552,16 @@ func probeFilling(tn config.AnalyzerTuning) probe {
 }
 
 // probeSibling: a measurement at x of what its full, unqueued siblings
-// serve: it yields under siblingMuTolerance.
+// serve: it yields under siblingMuTolerance. The siblings are named too, as
+// the fleet's figure reads them (fleetYield).
 func probeSibling(tn config.AnalyzerTuning) probe {
 	return func(r *rand.Rand, x float64) (bool, error) {
 		a := NewSaturationAnalyzer(capacity.NewStore())
 		sib := 1 + r.Float64()
-		_, y := a.siblingYield(propMuKey, throughputReading{rate: x * sib}, servedRates{max: sib, saturated: sib, unqueued: true},
+		served := servedRates{max: sib, saturated: sib, unqueued: true, pods: map[string]servedPod{
+			"s0": {rate: sib, full: true}, "s1": {rate: sib, full: true},
+		}}
+		_, y := a.siblingYield(propMuKey, throughputReading{rate: x * sib}, served,
 			tuning{AnalyzerTuning: tn.WithDefaults()})
 		return y, nil
 	}

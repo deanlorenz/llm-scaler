@@ -75,6 +75,13 @@ const (
 	// not written for want of one, past the margin toward shorter outputs
 	// (marginClamp).
 	muReasonMarginClamped learn.Reason = "margin-clamped"
+	// muReasonWeighedFleet is a sample that counted the Ready replicas it
+	// did not read (weighUnreadReplicas).
+	muReasonWeighedFleet learn.Reason = "weighed-fleet"
+	// muReasonMinorityExpired is a cycle whose measured mu was released:
+	// written by a minority of the fleet, with no line, and stale past
+	// MuChoice.LowHoldFor (minorityFigureExpired).
+	muReasonMinorityExpired learn.Reason = "minority-expired"
 )
 
 // muRefusalReason is the Report's reason for a refusal throughputRefusal

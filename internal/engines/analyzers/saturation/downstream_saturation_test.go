@@ -199,6 +199,12 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 		// 6 req/s offered is 1.5 replicas of one; against the one replica's
 		// P that is an order every cycle -- and this is the shape a mu
 		// learned under decode's metering has, below the offered rate.
+		//
+		// The idle prefill row serves more than that mu unqueued: with
+		// SwitchMuYieldsToFleet on the measurement would yield to that lower
+		// bound (mu_slow_pod.go). The spec is about the floor binding, and
+		// runs it off.
+		Expect(analyzer.SetSwitchesForReplay(map[string]bool{SwitchMuYieldsToFleet: false})).To(Succeed())
 		for i := 0; i < floor.MinThroughputSamplesToOrder; i++ {
 			clock = clock.Add(ThroughputSampleSpacing) // two readings, a rate window apart
 			slow := prefill()

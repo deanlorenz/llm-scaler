@@ -354,6 +354,15 @@ type SaturationAnalyzer struct {
 	muRepeatIsUse       bool
 	muUnknownAgeSafe    bool
 	muLatchRestoresSafe bool
+	// muWeighsFleet, muYieldsToFleet, muUnreadAtTarget and
+	// muMinorityExpires are the slow pod's replay switches (mu_slow_pod.go):
+	// SwitchMuWeighsFleet, SwitchMuYieldsToFleet, SwitchMuUnreadAtTarget and
+	// SwitchMuMinorityFigureExpires. On from the constructor; a replay turns
+	// them off (SetSwitchesForReplay).
+	muWeighsFleet     bool
+	muYieldsToFleet   bool
+	muUnreadAtTarget  bool
+	muMinorityExpires bool
 	// batchCapDeclared and batchCapLearned are the batch cap's replay
 	// switches (batch_cap.go): SwitchBatchCapDeclared and
 	// SwitchBatchCapLearned. On from the constructor; a replay turns them
@@ -664,6 +673,10 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		muRepeatIsUse:          true,
 		muUnknownAgeSafe:       true,
 		muLatchRestoresSafe:    true,
+		muWeighsFleet:          true,
+		muYieldsToFleet:        true,
+		muUnreadAtTarget:       true,
+		muMinorityExpires:      true,
 		batchCapDeclared:       true,
 		batchCapLearned:        true,
 		batchCapITLAdmission:   true,

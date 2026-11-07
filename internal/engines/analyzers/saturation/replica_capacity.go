@@ -335,7 +335,13 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 			// Nor is one under half of what a Ready replica of the variant
 			// served this cycle (served): a served rate is a lower bound on
 			// what one replica sustains.
-			why := tune.throughputRefusal(rm.RequestRate, mu, derived, served.max,
+			// With SwitchMuWeighsFleet on no served rate refuses it: it counts
+			// by its weight (mu_slow_pod.go).
+			servedBound := served.max
+			if a.muWeighsFleet {
+				servedBound = 0
+			}
+			why := tune.throughputRefusal(rm.RequestRate, mu, derived, servedBound,
 				tune.tokensOutrunCompletions(rm, role, fleetOutput))
 			// A low reading that repeats on every saturated cycle for
 			// MeasuredLowConfirmFor is a real low rate, not a fill -- unless
@@ -372,6 +378,10 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 				// carries k2's stamp (noteMuWrite).
 				w := a.recordSaturatedThroughputFrom(throughputKey, rm.PodName, write)
 				a.noteMuWrite(namespace, modelID, rm.VariantName, rm.PodName, write, w)
+				if a.weighUnreadReplicas(throughputKey, served, w, tune) {
+					a.noteMuCount(namespace, modelID, rm.VariantName, muReasonWeighedFleet)
+				}
+				a.noteSampleWriters(throughputKey, served, w)
 				if args != "" {
 					a.mu.Lock()
 					if _, ok := a.saturatedThroughput[throughputKey]; ok {
@@ -403,6 +413,17 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	}
 	reading := muSwapFrozen(a.carriedThroughput(throughputKey, leftKey, args,
 		a.saturatedThroughputReadingUnder(throughputKey, args, adm.serving())), frozen)
+	if a.minorityFigureExpired(throughputKey, reading, derived.OK, tune, a.now()) {
+		// A minority's figure, no line to give way to, and stale past the
+		// hold: released, as the hold releases one under a line.
+		a.noteMuCount(namespace, modelID, rm.VariantName, muReasonMinorityExpired)
+		logger.V(logging.DEFAULT).Info("saturated-throughput-minority-expired",
+			"modelID", modelID, "namespace", namespace, "variant", rm.VariantName,
+			"pod", rm.PodName, "role", role, "measuredRate", reading.rate,
+			"heldFor", tune.MuChoice.LowHoldFor.Duration().String(),
+			"reason", "written by a minority of the fleet, with no line, and no saturated reading agreeing with it for lowHoldFor: released, the floor prices from no mu")
+		reading = throughputReading{}
+	}
 	saturatedThroughput, throughputBucket := reading.rate, reading.bucket
 	// A derived figure prices the shape the fleet has NOT measured -- that is
 	// the whole of its job. Where the fleet HAS measured this shape, under this

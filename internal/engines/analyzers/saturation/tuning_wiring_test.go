@@ -59,7 +59,14 @@ var e1Start = time.Date(2026, 10, 23, 10, 0, 0, 0, time.UTC)
 // leave a throughput sample on record.
 func recordsAfter(t *testing.T, rows []e1Row, tune func(*config.ScalingPolicy)) (bool, []string) {
 	t.Helper()
+	return recordsAfterWith(t, rows, tune, nil)
+}
+
+// recordsAfterWith is recordsAfter under replay switches.
+func recordsAfterWith(t *testing.T, rows []e1Row, tune func(*config.ScalingPolicy), switches map[string]bool) (bool, []string) {
+	t.Helper()
 	a := newE1Analyzer(t, false)
+	require.NoError(t, a.SetSwitchesForReplay(switches))
 	reasons := make([]string, 0, 4)
 	for i := range 4 {
 		_, r := tunedE1(t, a, e1Start.Add(time.Duration(i)*time.Minute), rows, tune)
@@ -85,22 +92,33 @@ func TestTuningMaxTokensOverCompletionsReachesAnalyze(t *testing.T) {
 
 // analyzerTuning.muChoice.maxRatio is the served bound of the throughput
 // admission: a saturated reading of 1.5 beside a replica serving 3.6 is under
-// half of it and refused at the default ratio of 2, and recorded at 3.
+// half of it and refused at the default ratio of 2, and recorded at 3. The
+// bound refuses only with SwitchMuWeighsFleet off: on, the reading counts by
+// its weight (mu_slow_pod.go), and is recorded at either ratio.
 func TestTuningMaxRatioIsTheServedBound(t *testing.T) {
 	rows := []e1Row{{"p0", 30, 330_000, 1.5, 1.5 * 498}, {"p1", 0, 200_000, 3.6, 3.6 * 498}}
-	def, reasons := recordsAfter(t, rows, nil)
+	off := map[string]bool{SwitchMuWeighsFleet: false}
+	def, reasons := recordsAfterWith(t, rows, nil, off)
 	assert.False(t, def, "1.5 beside a served 3.6 was recorded under the default maxRatio 2")
 	assert.Contains(t, reasons, refusedUnderServed)
-	tuned, reasons := recordsAfter(t, rows, func(p *config.ScalingPolicy) { p.AnalyzerTuning.MuChoice.MaxRatio = 3 })
+	tuned, reasons := recordsAfterWith(t, rows, func(p *config.ScalingPolicy) { p.AnalyzerTuning.MuChoice.MaxRatio = 3 }, off)
 	assert.True(t, tuned, "maxRatio 3 on the policy did not reach the served bound; refused: %v", reasons)
+	weighed, reasons := recordsAfter(t, rows, nil)
+	assert.True(t, weighed, "with the slow reading weighed, the served bound refuses nothing; refused: %v", reasons)
+	assert.NotContains(t, reasons, refusedUnderServed)
 }
 
 // analyzerTuning.admission.siblingMuTolerance reaches the sibling yield: p0
 // measured at 3.3 beside three full siblings at 3.6 stands at the default 0.8
-// and yields to them at 0.95.
+// and yields to them at 0.95. That is with SwitchMuWeighsFleet off; on, the
+// same tolerance gates the sample first: at 0.95 p0's sample counts the three
+// it did not read, (3.3 + 3 x 3.6) / 4 = 3.525, and nothing is left to yield,
+// while at 0.8 the sample is p0's 3.3 alone.
 func TestTuningSiblingMuToleranceReachesAnalyze(t *testing.T) {
-	last := func(tune func(*config.ScalingPolicy)) string {
+	sibTol := func(p *config.ScalingPolicy) { p.AnalyzerTuning.Admission.SiblingMuTolerance = 0.95 }
+	run := func(tune func(*config.ScalingPolicy), switches map[string]bool) (string, float64) {
 		a := newE1Analyzer(t, false)
+		require.NoError(t, a.SetSwitchesForReplay(switches))
 		var b map[string]string
 		for i := range 20 {
 			rows := make([]e1Row, 0, 4)
@@ -110,11 +128,18 @@ func TestTuningSiblingMuToleranceReachesAnalyze(t *testing.T) {
 			}
 			b, _ = tunedE1(t, a, e1Start.Add(time.Duration(i)*15*time.Second), rows, tune)
 		}
-		return b["p0"]
+		return b["p0"], lowestThroughputSample(a)
 	}
-	assert.NotEqual(t, servedBucket, last(nil), "0.92x its siblings yielded under the default 0.8")
-	assert.Equal(t, servedBucket, last(func(p *config.ScalingPolicy) { p.AnalyzerTuning.Admission.SiblingMuTolerance = 0.95 }),
-		"siblingMuTolerance 0.95 on the policy did not reach the yield")
+	off := map[string]bool{SwitchMuWeighsFleet: false}
+	bucket, _ := run(nil, off)
+	assert.NotEqual(t, servedBucket, bucket, "0.92x its siblings yielded under the default 0.8")
+	bucket, _ = run(sibTol, off)
+	assert.Equal(t, servedBucket, bucket, "siblingMuTolerance 0.95 on the policy did not reach the yield")
+
+	_, def := run(nil, nil)
+	assert.InDelta(t, 3.3, def, 0.01, "under the default 0.8 the sample is p0's alone")
+	_, weighed := run(sibTol, nil)
+	assert.InDelta(t, (3.3+3*3.6)/4, weighed, 0.01, "siblingMuTolerance 0.95 on the policy did not reach the sample")
 }
 
 // analyzerTuning.muChoice.lowHoldFor reaches the measured/derived choice: a
@@ -140,9 +165,13 @@ func TestTuningLowHoldForReachesAnalyze(t *testing.T) {
 // 1.2 gives way to derived when a replica serves 3.0 (over 2x it), and stays
 // given way at a served 2.2 under the default returnRatio 1.6 (1.92). At 1.9
 // (2.28) the 2.2 no longer holds it, and the fresh measurement prices again.
+// That is with SwitchMuYieldsToFleet off: on, a replica serving 2.2 unqueued
+// is a lower bound the measurement yields to (mu_slow_pod.go), which this
+// test is not about.
 func TestTuningReturnRatioReachesAnalyze(t *testing.T) {
 	second := func(tune func(*config.ScalingPolicy)) (string, string) {
 		a, _ := muChoiceSeed(t, 600)
+		require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchMuYieldsToFleet: false}))
 		first, _ := tunedE1(t, a, e1Start.Add(4*time.Minute), []e1Row{{"p0", 0, 200_000, 3.0, 3.0 * 498}}, tune)
 		then, _ := tunedE1(t, a, e1Start.Add(4*time.Minute+15*time.Second), []e1Row{{"p0", 0, 200_000, 2.2, 2.2 * 498}}, tune)
 		return first["p0"], then["p0"]

@@ -714,6 +714,9 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 	rows := decodeCapacityViews(c.input.ReplicaMetrics, c.rolesByVariant, c.atCapBatchCaps())
 	served := c.tune.servedBounds(rows, c.rolesByVariant, c.cfg.QueueLengthThreshold, c.cfg.KvCacheThreshold, c.fleetOutput,
 		c.stableInput, c.stableOutput, c.fleetHitRate)
+	if c.a.muUnreadAtTarget {
+		served = withTarget(served, c.cfg.ScaleUpThreshold)
+	}
 	for i, rm := range rows {
 		raw := c.input.ReplicaMetrics[i]
 		select {

@@ -42,3 +42,32 @@ const SwitchMuUnknownAgeSafe = "mu-unknown-age-resolves-safe"
 // yields to the lower one past the return ratio), unlatched while it sits
 // under it (it keeps pricing the lower one).
 const SwitchMuLatchRestoresSafe = "mu-latch-restores-safe-side"
+
+// SwitchMuWeighsFleet is the replay switch for one slow pod in a sample
+// (mu_slow_pod.go; analyzer-learner.md, 2.6). On, a reading under half of what
+// a Ready replica served counts by its weight, and a sample whose readers sit
+// under the tolerance of what the replicas it did not read serve counts those
+// too, so it is the fleet's and not the part that queued. Off, as before, that
+// reading was refused, and the sample was the readers' mean alone.
+const SwitchMuWeighsFleet = "mu-sample-weighs-the-fleet"
+
+// SwitchMuYieldsToFleet is the replay switch for what a measurement yields to
+// (fleetYield; analyzer-learner.md, 2.6). On, a measurement under the
+// tolerance of the Ready replicas' figure yields to that figure, at any fill.
+// Off, as before, it yielded to the lower median of the full replicas, which
+// left the slow pod out.
+const SwitchMuYieldsToFleet = "mu-yield-reads-the-fleet"
+
+// SwitchMuUnreadAtTarget is the replay switch for the rate an unread replica
+// under the KV line counts at (servedPod.credit; analyzer-learner.md, 2.6).
+// On, it counts at what it serves over the scale-up target: its rate is what
+// it was offered, not its limit, and the floor charges the target on mu
+// again. Off, as SwitchMuWeighsFleet alone, it counted at what it serves.
+const SwitchMuUnreadAtTarget = "mu-unread-replica-at-target"
+
+// SwitchMuMinorityFigureExpires is the replay switch for a measured mu no
+// line can replace, written by a minority of the fleet
+// (minorityFigureExpired; analyzer-learner.md, 3.4). On, it is released after
+// MuChoice.LowHoldFor with no saturated reading in agreement with it. Off, as
+// before, with no line the measurement stood for good.
+const SwitchMuMinorityFigureExpires = "mu-minority-figure-expires"
