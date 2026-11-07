@@ -3749,6 +3749,24 @@ run on a cluster.
   A controller restart mid-rollout loses the revision: with one revision in the
   rows the key cannot tell old from new, so it holds until the status clears or a
   second revision shows.
+
+  A new pod that flaps does not move the key (round two). While it is not Ready
+  the old revision is the only one Ready, and a key already on the new revision
+  holds: no clear, no old rows, and the new pod's readings build up across the flap
+  (`TestRollout_AFlappingNewPodMovesNothing`). Before, each flap cleared the window
+  twice, so a crash-looping rollout never reached 10 readings.
+
+  **Limits.** Each of these can mislabel the newest revision. Each is read from
+  the code, not measured, and each is bounded by the window clearing again, so no
+  fit spans two engines for longer than the next move:
+
+  - a rollback mid-rollout;
+  - a restarted pod that is the last Ready pod of its revision, since it makes that
+    revision's oldest Ready pod young;
+  - a worker flap in the last LeaderWorkerSet group, for the same reason.
+
+  A stuck rollout's hold is log-only: `rolloutHeld` is on the summary line and
+  `lineRolloutHeld` on `slo-variant`, and no metric or alert carries it.
 - **The tier latch and B (#498, round-one review).** Resetting the latch alone kept
   nothing out: a full fit over both engines' readings rewrote the stored B for
   good. On an image-only rollout B went from .0100 to .0027 with one new pod, about

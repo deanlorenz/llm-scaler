@@ -60,6 +60,15 @@ func (t *Tracker) RolloutRows(key, variant string, rows []domain.ReplicaMetrics,
 	if newest == "" || (!known && distinct < 2) || (known && newest == st.revision && !st.moved) {
 		return RolloutSight{Held: true}
 	}
+	// A key already on the new revision whose only Ready revision is now
+	// another: the new pods flapped, or the rollout turned back. Moving would
+	// clear the window and teach the line from the pods it left, and moving
+	// again when the new pod returns would clear it again, so a crash-looping
+	// rollout never reached 10 readings. It holds; a rollback that finishes
+	// moves it when the status clears.
+	if known && st.moved && newest != st.revision && distinct < 2 {
+		return RolloutSight{Held: true}
+	}
 	var sight RolloutSight
 	if !known || newest != st.revision {
 		t.revisions[key] = revisionState{revision: newest, moved: true}

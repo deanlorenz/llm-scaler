@@ -129,6 +129,55 @@ func TestRollout_AFitNeverSpansTwoEngines(t *testing.T) {
 	}
 }
 
+// A new pod that flaps moves nothing: while it is not Ready the old revision is
+// the only one Ready, and the line holds, offered neither its rows nor a clear.
+// Its readings build up across the flap, so a crash-looping rollout reaches
+// 10 readings. Off the flap, a rollback that finishes still moves the key.
+func TestRollout_AFlappingNewPodMovesNothing(t *testing.T) {
+	r := newRollRig(t)
+	early := rollStart.Add(-time.Hour)
+	old := func() []domain.ReplicaMetrics { return rollRows("old", 5, early, oldA, oldB) }
+	newPods := func(ready bool) []domain.ReplicaMetrics {
+		rows := rollRows("new", 2, rollStart, newA, newB)
+		for i := range rows {
+			rows[i].Ready = ready
+		}
+		return rows
+	}
+	if _, s := r.cycle(append(old(), newPods(true)...), true); !s.Moved {
+		t.Fatal("premise: the first new rows move the key")
+	}
+	want := 2
+	for flap := range 8 {
+		_, s := r.cycle(append(old(), newPods(false)...), true)
+		if !s.Held || s.Moved || len(s.Rows) != 0 {
+			t.Fatalf("flap %d, new pods down: sight %+v", flap, s)
+		}
+		if got := r.tr.WindowLen("k"); got != want {
+			t.Fatalf("flap %d: the window holds %d, want %d", flap, got, want)
+		}
+		_, s = r.cycle(append(old(), newPods(true)...), true)
+		if s.Held || s.Moved || len(s.Rows) != 2 || s.Rows[0].Revision != "new" {
+			t.Fatalf("flap %d, new pods back: sight %+v", flap, s)
+		}
+		want += 2
+		if got := r.tr.WindowLen("k"); got != want {
+			t.Fatalf("flap %d: the window holds %d, want %d", flap, got, want)
+		}
+	}
+	if got := r.tr.WindowLen("k"); got < DefaultMinSamples {
+		t.Fatalf("the flapping rollout reached %d readings", got)
+	}
+	for _, o := range r.tr.Readings("k").All {
+		if o.ITLSec > newA*o.K+newB+1e-9 || o.ITLSec < newA*o.K+newB-1e-9 {
+			t.Fatalf("an old pod's reading in the window: %+v", o)
+		}
+	}
+	if _, s := r.cycle(old(), false); !s.Moved {
+		t.Fatal("a rollback that finished did not move the key")
+	}
+}
+
 // With three new pods the window fills, and past the dwell the fit is theirs
 // alone: the new engine's B, not a blend.
 func TestRollout_TheFullFitIsTheNewEngines(t *testing.T) {
