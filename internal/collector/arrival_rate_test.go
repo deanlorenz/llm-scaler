@@ -136,15 +136,20 @@ func TestCollectModelArrivalRate_NaNSeriesThroughPrometheusParse(t *testing.T) {
 	assert.Zero(t, series)
 }
 
-// A NaN scheduler queue series, through the real Prometheus parse path, is
-// not read. Read by its raw value it was a queue of 0: a router that
-// reported nothing read as a router with an empty queue.
+// A NaN scheduler queue series, through the real Prometheus parse path, adds
+// nothing to the sum but still counts as present. A non-nil result is what
+// AnalyzerInput.FlowControlSeries reads as the router publishing its queue
+// series, so a NaN-only series must not read as no series: that would flip
+// the slo analyzer's inferred gate from on to off.
 func TestCollectSchedulerQueueMetrics_NaNSeriesThroughPrometheusParse(t *testing.T) {
 	c := parsedRouterCollector(t, map[string]model.Value{
 		registration.QuerySchedulerQueueSize:  model.Vector{fcSample(math.NaN(), seriesTargetModelLabel, "model-a")},
 		registration.QuerySchedulerQueueBytes: model.Vector{fcSample(math.Inf(1), seriesTargetModelLabel, "model-a")},
 	})
-	assert.Nil(t, c.CollectSchedulerQueueMetrics(context.Background(), "model-a", "ns"))
+	nanOnly := c.CollectSchedulerQueueMetrics(context.Background(), "model-a", "ns")
+	require.NotNil(t, nanOnly, "a NaN series is a published series")
+	assert.Equal(t, int64(0), nanOnly.QueueSize)
+	assert.Equal(t, int64(0), nanOnly.QueueBytes)
 
 	c = parsedRouterCollector(t, map[string]model.Value{
 		registration.QuerySchedulerQueueSize: model.Vector{

@@ -283,12 +283,16 @@ func (c *ReplicaMetricsCollector) CollectSchedulerQueueMetrics(
 				elsewhere++
 				continue
 			}
-			// Finite, not a check of the raw value: the Prometheus source
-			// stores a NaN as 0 with a flag set, and a NaN queue read that
-			// way is a queue reported empty rather than not reported.
+			// Presence does not depend on finiteness. A non-nil result is
+			// what AnalyzerInput.FlowControlSeries reads as "the router
+			// publishes its flow-control queue series", which is how the
+			// slo analyzer infers the gate is on; a NaN series is still a
+			// published series. Only the sum skips it, by Finite rather
+			// than the raw value, since the Prometheus source stores a NaN
+			// as 0 with a flag set.
+			hasData = true
 			if value.Finite() {
 				*into += int64(value.Value)
-				hasData = true
 			}
 		}
 	}
