@@ -27,8 +27,7 @@ tell you what you need to know. We have a benchmark where the request rate
 never changed, no queue formed, and cache occupancy said one replica would do,
 while the load needed two replicas, and three after the request shape changed.
 
-It started in 2026 from the code of llm-d's workload-variant-autoscaler and
-has since been redesigned. The one-page case for
+The one-page case for
 evaluators, with costs and maturity: [Why llm-scaling-manager](why.md). Shorter
 version, for readers outside the repository:
 [Sub-second scale-ups on llm-d](blog/sub-second-scale-ups-on-llm-d.md).

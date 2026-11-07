@@ -26,17 +26,12 @@ Sharing is **experimental**: nine benchmark runs so far, two models at 1 GPU
 per Pod. Whole-node and multi-GPU pods, more than two models, a cluster-wide
 quota and the physical GPU limiter are not yet measured on real hardware.
 
-This project decides how many replicas each model needs and lets KEDA and
-the HPA apply it. It prices capacity from the throughput one replica actually
-serves, answers KEDA directly as an external scaler, can share one GPU budget
-between models, covers a slow scale-up with a warm pool of sleeping Pods, and
-learns each fleet's figures from its own measurements. llm-d itself
-autoscales with KEDA, mainly on the router's (EPP) metrics, one ScaledObject
-per Deployment, and leaves a shared GPU budget to Kueue; this project plugs
-into the same KEDA, as an external scaler.
+llm-d itself autoscales with KEDA, mainly on the router's (EPP) metrics, one
+ScaledObject per Deployment, and leaves a shared GPU budget to Kueue; this
+project plugs into the same KEDA, as an external scaler.
 ([Sharing a GPU budget, compared with Kueue](docs/comparison/gpu-sharing.md);
 [KEDA alone, compared](docs/comparison/keda-alone.md);
-[what it adds](#what-it-adds).)
+[beyond per-model scaling](#beyond-per-model-scaling).)
 
 **Choose it** for several models whose GPUs are paid for whether used or not
 (on-prem, a reservation, a team allotment) and whose peaks come at different
@@ -267,9 +262,7 @@ A model's share weight is set on its scaling-policy entry (`weightClass:
 important`), not on the trigger
 ([for model owners](docs/reference/scaling-policy.md#for-model-owners-what-the-optimizer-may-take-and-how-to-protect-a-model)).
 
-## What it adds
-
-Beyond scaling each model on its own:
+## Beyond per-model scaling
 
 - the **utilization-share optimizer** (experimental), which shares one GPU
   quota between models and moves GPUs by transfer, and **quotas read from

@@ -2,9 +2,7 @@
 
 Thanks for contributing to llm-scaling-manager.
 
-This project started in 2026 from the code of
-[llm-d's workload-variant-autoscaler](https://github.com/llm-d/llm-d-workload-variant-autoscaler)
-and has since been redesigned. Issues and pull requests for this project go to
+Issues and pull requests go to
 [github.com/ev-shindin/llm-scaling-manager](https://github.com/ev-shindin/llm-scaling-manager).
 
 ## Setting Up

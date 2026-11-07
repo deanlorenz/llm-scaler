@@ -267,7 +267,7 @@ run per arm unless it says otherwise.
 | P/D sizes for a request shape | 2 decode replicas at 5–15 % KV, a 3rd after the shape change, no queue; run twice, a day apart | [P/D, measured](../well-lit-paths/pd-disaggregation/measured.md) |
 | Sharing one quota, two plain models | six runs, each once: 24–81 % more GPU-seconds where measured. Five of them, on other burst shapes, found failures the first could not show. In the latest, the model that burst first had a median TTFT of 0.07 s against 25.6 s with the same fleet planned but not moved, and the second was no worse (GPU cost not measured) | [utilization share, measured](../well-lit-paths/utilization-share/measured.md) |
 | Sharing one quota, two P/D models | three runs. Two on the same settings: both bursts served far faster, no dropped requests against 116 and 123, 39–43 % more GPU-seconds. The first, with longer prompts and a 30 s router timeout, overloaded the prompt-heavy model in every arm, and sharing dropped more of its requests (257 against 240) at 36 % more GPU-seconds | [utilization share, P/D](../well-lit-paths/utilization-share/measured.md#pd-two-disaggregated-models-under-one-quota) |
-| Two models trading a quota across namespaces (failed) | the first load swap was served late: the model giving up a GPU was held about ten minutes, six of them after its new pod was Ready, with no reason logged. Fixed after the run. A one-replica move that is not called off when the giving model's load returns is still open | the issues |
+| Two models trading a quota across namespaces (failed) | the first load swap was served late: the model giving up a GPU was held about ten minutes, six of them after its new pod was Ready, with no reason logged. Fixed after the run. A one-replica move that is not called off when the giving model's load returns is still open | - |
 | The same, with the fix | passed every check except timing: the first two load swaps took about 16 and 15 minutes to settle, against a 12-minute target | [below](#analyzer-experiments-october-2026) |
 | The router overloads one of four replicas | run twice, on two builds; both passed: no scale-up, what the controller learned unchanged, the imbalance reported and cleared. The overloaded replica still held about 767 queued requests | [below](#analyzer-experiments-october-2026) |
 | A busy model goes quiet | utilization 0.22 against the 0.26 of capacity actually served | [below](#analyzer-experiments-october-2026) |
@@ -307,8 +307,8 @@ throughput.
   took 12. A move waits twice: the giving model lets its replica go only after
   its scale-down window (about 5 minutes), and the receiving model's new
   replica then takes about 4 minutes to start. In the first phase the giving
-  model was also held about 4 minutes while its own new pod started; with the
-  fix for it, that hold ended once the pod was stable, and the log said why.
+  model was also held about 4 minutes while its own new pod started; with
+  that fix, that hold ended once the pod was stable, and the log said why.
 
 **The router sends all load to one of four replicas** (run twice, on the two
 builds above). One phase routes every request to one replica while three sit
