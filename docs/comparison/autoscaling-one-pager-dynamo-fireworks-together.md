@@ -1,6 +1,6 @@
 # LLM Autoscaling Landscape — Dynamo · Fireworks · Together
 
-> One-page summary · verified **2026-08-09**, the scaling manager's column **2026-10-25** (v0.10.0) · the scaling manager (an advanced fork of llm-d's workload-variant-autoscaler) shown as baseline · full detail: [autoscaling-nvidia-mooncake-sglang-vs-wva.md](./autoscaling-nvidia-mooncake-sglang-vs-wva.md)
+> One-page summary · verified **2026-08-09**, the scaling manager's column **2026-10-25** (v0.10.0) · the scaling manager shown as baseline · full detail: [autoscaling-nvidia-mooncake-sglang-vs-wva.md](./autoscaling-nvidia-mooncake-sglang-vs-wva.md)
 
 **Two categories, not three competitors.** NVIDIA **Dynamo** is deployable software and the scaling manager's only true peer. **Fireworks** and **Together** are managed SaaS: they scale *one endpoint you rent*, and the fleet problem the scaling manager solves is the provider's, structurally invisible through their APIs. Compare Dynamo on scope; compare the SaaS pair on control law and signal choice.
 

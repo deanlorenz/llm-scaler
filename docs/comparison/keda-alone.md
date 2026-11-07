@@ -3,9 +3,8 @@
 llm-d autoscales with KEDA, mainly on the router's (EPP) metrics, one
 ScaledObject per Deployment, and leaves a shared GPU budget to Kueue
 ([autoscaling workflow](https://github.com/llm-d/llm-d-autoscaling/blob/e036371f7d04317920ef03a596fbe0c64745942a/docs/developer-guide/autoscaling-workflow.md)).
-llm-scaling-manager is an independently developed, advanced fork of llm-d's
-workload-variant-autoscaler. It plugs into the same KEDA, as an external
-scaler. It is not affiliated with or endorsed by llm-d.
+llm-scaling-manager plugs into the same KEDA, as an external scaler. It is
+not affiliated with or endorsed by llm-d.
 
 **KEDA scales your pods in both setups.** This page covers the one thing that
 differs: what computes the replica count KEDA applies.
