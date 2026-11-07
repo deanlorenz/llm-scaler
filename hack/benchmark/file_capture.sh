@@ -109,8 +109,9 @@ _file_recordings() {
         return 0
     fi
     for f in "$src"/*/*; do
+        # `*` skips dot-directories, so the copier's .incoming.* temporaries
+        # are never counted or filed.
         [ -f "$f" ] || continue
-        case "$f" in */.incoming.*) continue ;; esac
         n=$((n + 1))
     done
     if [ "$n" -eq 0 ]; then
@@ -124,7 +125,6 @@ _file_recordings() {
     mkdir -p "$dst" 2>/dev/null || true
     for d in "$src"/*/; do
         d="${d%/}"
-        case "$(basename "$d")" in .incoming.*) continue ;; esac
         cp -R "$d" "$dst/" 2>/dev/null || {
             echo "  not filing the learner recordings: could not copy $d to $dst"
             skipped=$((skipped + 1))

@@ -18,7 +18,7 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BENCH="$ROOT/hack/benchmark"
 LR="$BENCH/learner_recordings.sh"
-EXPECTED_CASES=59
+EXPECTED_CASES=68
 
 command -v python3 >/dev/null 2>&1 || {
     echo "FATAL: python3 is required by this check and is missing. Nothing below would be about the code."
@@ -34,8 +34,14 @@ done
 WORK="$(mktemp -d)"
 STARTED=""
 cleanup() {
+    # TERM, then KILL: a mutant whose loop ignores TERM must not outlive the
+    # check (one ran on in the background for hours).
     for p in $STARTED; do
         kill -TERM "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null || true
+    done
+    sleep 0.3
+    for p in $STARTED; do
+        kill -KILL "-$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null || true
     done
     rm -rf "$WORK"
 }
@@ -374,12 +380,78 @@ bash "$LR" stop demo-ns "$D7" > "$WORK/o" 2> "$WORK/e"
 grep -q "was started with --context c1, and this stop names none" "$WORK/e" \
     && ok "a stop that names no context warns when the copy was started with one" \
     || bad "no warning for a stop without the copy's context: $(cat "$WORK/e")"
+# A new directory: D7 now holds copies, and start would refuse it.
+D7="$WORK/run/ctx2"
+reset_calls
 RECORDINGS_INTERVAL=60 bash "$LR" --context c1 start demo-ns "$D7" > /dev/null 2>&1
 STARTED="$STARTED $(cat "$D7/collection.tsv.pid" 2>/dev/null)"
+waited=0
+while ! grep -q . "$KEXEC" && [ "$waited" -lt 50 ]; do sleep 0.2; waited=$((waited + 1)); done
 bash "$LR" --context c1 stop demo-ns "$D7" > "$WORK/o" 2> "$WORK/e"
 grep -q "warning" "$WORK/e" \
     && bad "a stop that names the same context warned: $(cat "$WORK/e")" \
     || ok "a stop that names the copy's context does not warn"
+# Every call, the background copy's and the final one's, names the cluster.
+n_exec="$(grep -c '^--context c1 .*exec ' "$KCALLS")"
+n_list="$(grep -c '^--context c1 .*get pods' "$KCALLS")"
+n_bare="$(grep -E 'exec |get pods' "$KCALLS" | grep -vc -- '--context c1')"
+[ "$n_exec" -ge 2 ] && [ "$n_list" -ge 2 ] && [ "$n_bare" -eq 0 ] \
+    && ok "the background copy and the final one both pass --context to kubectl ($n_list lists, $n_exec execs)" \
+    || bad "a call went without --context c1: $n_list lists and $n_exec execs with it, $n_bare without: $(cat "$KCALLS")"
+
+# ---- the background copy ends itself at RECORDINGS_MAX_SECONDS ------------
+D8="$WORK/run/deadline"
+RECORDINGS_MAX_SECONDS=1 RECORDINGS_INTERVAL=1 bash "$LR" start demo-ns "$D8" > /dev/null 2>&1
+P8="$(cat "$D8/collection.tsv.pid" 2>/dev/null || true)"; STARTED="$STARTED $P8"
+waited=0
+while [ -n "$P8" ] && kill -0 "$P8" 2>/dev/null && [ "$waited" -lt 50 ]; do sleep 0.2; waited=$((waited + 1)); done
+if [ -n "$P8" ] && ! kill -0 "$P8" 2>/dev/null && grep -q "ran for 1s and stopped" "$D8/capture.log"; then
+    ok "the background copy stops itself after RECORDINGS_MAX_SECONDS and says so"
+else
+    bad "the background copy outlived RECORDINGS_MAX_SECONDS=1: $(cat "$D8/capture.log" 2>/dev/null | tail -2)"
+fi
+bash "$LR" stop demo-ns "$D8" > /dev/null 2>&1
+
+# ---- a missing tool is a WARNING, once, not a silent downgrade ------------
+printf '#!/usr/bin/env bash\n[ "$1" = --foreground ] && exit 125\nexec timeout "$@"\n' > "$STUB/oldtimeout"
+chmod +x "$STUB/oldtimeout"
+RECORDINGS_TIMEOUT_CMD="$STUB/oldtimeout" snap "$WORK/tools1"
+[ "$(grep -c "WARNING: .*has no --foreground" "$WORK/e")" -eq 1 ] \
+    && ok "a timeout without --foreground is one WARNING" \
+    || bad "no single --foreground WARNING: $(cat "$WORK/e")"
+RECORDINGS_TIMEOUT_CMD=no-such-timeout snap "$WORK/tools2"
+[ "$(grep -c "WARNING: .*no no-such-timeout command; a copy is not bounded" "$WORK/e")" -eq 1 ] \
+    && ok "no timeout at all is one WARNING" \
+    || bad "no single missing-timeout WARNING: $(cat "$WORK/e")"
+# Two files in the Pod, so a per-file warning would print twice.
+cp "$STUB_SRC/$A/$REC" "$STUB_SRC/$A/learnrec-20261101T100000.000000000Z.jsonl"
+RECORDINGS_FLOCK_CMD=no-such-flock snap "$WORK/tools3"
+rm -f "$STUB_SRC/$A/learnrec-20261101T100000.000000000Z.jsonl"
+[ "$(grep -c "WARNING: .*no no-such-flock command; two copies of one Pod run unlocked" "$WORK/e")" -eq 1 ] \
+    && [ -s "$WORK/tools3/$A/$REC" ] \
+    && ok "no flock is one WARNING, and the copy is still taken" \
+    || bad "no single missing-flock WARNING: $(cat "$WORK/e")"
+snap "$WORK/tools4"
+grep -q WARNING "$WORK/e" && bad "a WARNING with every tool present: $(cat "$WORK/e")" || ok "no WARNING with every tool present"
+
+# ---- a lock that cannot be taken installs nothing, and says so -------------
+DLF="$WORK/lockfail"; mkdir -p "$DLF/.$A.lock"
+snap "$DLF"; rc=$?
+[ ! -e "$DLF/$A/$REC" ] && [ "$rc" -eq 1 ] && grep -q "lock-failed (.*1 not installed" "$WORK/o" \
+    && awk -F'\t' -v p="$A" '$2 == p && $4 == "lock-failed"' "$DLF/collection.tsv" | grep -q . \
+    && ok "a lock that cannot be opened is reported as lock-failed, not as unchanged" \
+    || bad "a failed lock: exit $rc, $(cat "$WORK/o")"
+
+# ---- usage errors exit 2 ---------------------------------------------------
+u=0
+bash "$LR" snapshot demo-ns > /dev/null 2>&1; [ $? -eq 2 ] && u=$((u + 1))
+bash "$LR" frobnicate demo-ns "$WORK/x" > /dev/null 2>&1; [ $? -eq 2 ] && u=$((u + 1))
+bash "$LR" --bogus snapshot demo-ns "$WORK/x" > /dev/null 2>&1; [ $? -eq 2 ] && u=$((u + 1))
+RECORDINGS_INTERVAL=00 bash "$LR" snapshot demo-ns "$WORK/x" > /dev/null 2>&1; [ $? -eq 2 ] && u=$((u + 1))
+RECORDINGS_COPY_TIMEOUT=1x bash "$LR" snapshot demo-ns "$WORK/x" > /dev/null 2>&1; [ $? -eq 2 ] && u=$((u + 1))
+[ "$u" -eq 5 ] \
+    && ok "a missing argument, an unknown command, an unknown flag, 00 and 1x each exit 2" \
+    || bad "only $u of 5 usage errors exited 2"
 
 # ---- an interrupted run: teardown finds its copy and finishes it ----------
 # The second capture's namespace, demo-ns-2, shares the demo-ns- prefix, so
@@ -390,9 +462,19 @@ RECORDINGS_INTERVAL=60 bash "$LR" start demo-ns "$D4" > /dev/null 2>&1
 P4="$(cat "$D4/collection.tsv.pid" 2>/dev/null || true)"; STARTED="$STARTED $P4"
 RECORDINGS_INTERVAL=60 bash "$LR" start demo-ns-2 "$D5" > /dev/null 2>&1
 P5="$(cat "$D5/collection.tsv.pid" 2>/dev/null || true)"; STARTED="$STARTED $P5"
-sleep 1
+# Both background copies have taken their first copy before the calls are
+# reset, so what follows is stop-all's own.
+waited=0
+while { ! grep -q "held in" "$D4/capture.log" 2>/dev/null || ! grep -q "held in" "$D5/capture.log" 2>/dev/null; } \
+    && [ "$waited" -lt 50 ]; do sleep 0.2; waited=$((waited + 1)); done
 grow "$A" 11
-bash "$LR" stop-all demo-ns "$WORK/run/wva_learner_recordings-demo-ns-" > "$WORK/o" 2>&1; rc=$?
+reset_calls
+bash "$LR" --context c9 stop-all demo-ns "$WORK/run/wva_learner_recordings-demo-ns-" > "$WORK/o" 2>&1; rc=$?
+n_list="$(grep -c '^--context c9 .*get pods' "$KCALLS")"
+n_bare="$(grep -E 'exec |get pods' "$KCALLS" | grep -vc -- '--context c9')"
+[ "$n_list" -ge 1 ] && [ "$n_bare" -eq 0 ] \
+    && ok "stop-all passes its --context to the stop it runs" \
+    || bad "stop-all dropped --context c9: $n_list lists with it, $n_bare calls without: $(cat "$KCALLS")"
 [ "$rc" -eq 0 ] && [ "$(lines "$D4/$A/$REC")" = 11 ] \
     && ok "stop-all takes the final copy of an interrupted run's capture" \
     || bad "stop-all: exit $rc, $(lines "$D4/$A/$REC") lines, $(head -3 "$WORK/o")"

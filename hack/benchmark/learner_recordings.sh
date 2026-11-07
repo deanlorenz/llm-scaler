@@ -74,10 +74,17 @@ INTERVAL="${RECORDINGS_INTERVAL:-300}"
 MAX_SECONDS="${RECORDINGS_MAX_SECONDS:-21600}"
 COPY_TIMEOUT="${RECORDINGS_COPY_TIMEOUT:-300}"
 REQUEST_TIMEOUT="${RECORDINGS_REQUEST_TIMEOUT:-30s}"
+# The tools the copy leans on, by name, so a check can take one away.
+TIMEOUT_CMD="${RECORDINGS_TIMEOUT_CMD:-timeout}"
+FLOCK_CMD="${RECORDINGS_FLOCK_CMD:-flock}"
 for v in INTERVAL MAX_SECONDS COPY_TIMEOUT; do
+    # 10# so a leading zero is not octal; 0, 00 and 000 are all zero.
     case "${!v}" in
-        ''|*[!0-9]*|0) echo "RECORDINGS_$v must be a whole number of seconds above 0 (got '${!v}')" >&2; exit 2 ;;
+        ''|*[!0-9]*) echo "RECORDINGS_$v must be a whole number of seconds above 0 (got '${!v}')" >&2; exit 2 ;;
     esac
+    if [ "$((10#${!v}))" -lt 1 ]; then
+        echo "RECORDINGS_$v must be a whole number of seconds above 0 (got '${!v}')" >&2; exit 2
+    fi
 done
 
 usage() {
@@ -98,8 +105,8 @@ _size() { wc -c < "$1" 2>/dev/null | tr -d ' ' || echo 0; }
 _held() {
     local files=0 bytes=0 f s
     for f in "$1"/*/*; do
+        # `*` skips dot-directories, so the .incoming.* temporaries never count.
         [ -f "$f" ] || continue
-        case "$f" in */.incoming.*) continue ;; esac
         s="$(_size "$f")"
         files=$((files + 1)); bytes=$((bytes + ${s:-0}))
     done
@@ -112,14 +119,35 @@ _held() {
 # timeout puts its child in a group of its own, so the group signal a stop
 # sends missed the copy in flight: the stop reported success, dropped the
 # ownership record, and the exec ran on for up to COPY_TIMEOUT seconds.
-_bounded() {
-    if timeout --foreground 1 true >/dev/null 2>&1; then
-        timeout --foreground "$COPY_TIMEOUT" "$@"
-    elif command -v timeout >/dev/null 2>&1; then
-        timeout "$COPY_TIMEOUT" "$@"
+#
+# A missing tool is said once per process, on stderr (in a background copy
+# that is capture.log), rather than silently copying with less protection.
+# The tools are probed once, by _check_tools, before any copy: _bounded's
+# stderr is the exec's, captured into the copy's error file, so a warning
+# printed there was never seen.
+TIMEOUT_MODE=""
+_check_tools() {
+    [ -n "$TIMEOUT_MODE" ] && return 0
+    if "$TIMEOUT_CMD" --foreground 1 true >/dev/null 2>&1; then
+        TIMEOUT_MODE=foreground
+    elif command -v "$TIMEOUT_CMD" >/dev/null 2>&1; then
+        TIMEOUT_MODE=plain
+        echo "WARNING: learner recordings: $TIMEOUT_CMD has no --foreground; a stop may miss a copy in flight, which then runs for up to ${COPY_TIMEOUT}s" >&2
     else
-        "$@"
+        TIMEOUT_MODE=none
+        echo "WARNING: learner recordings: no $TIMEOUT_CMD command; a copy is not bounded and can hang" >&2
     fi
+    if ! command -v "$FLOCK_CMD" >/dev/null 2>&1; then
+        HAVE_FLOCK=0
+        echo "WARNING: learner recordings: no $FLOCK_CMD command; two copies of one Pod run unlocked and can shrink a copy" >&2
+    fi
+}
+_bounded() {
+    case "$TIMEOUT_MODE" in
+        foreground) "$TIMEOUT_CMD" --foreground "$COPY_TIMEOUT" "$@" ;;
+        plain) "$TIMEOUT_CMD" "$COPY_TIMEOUT" "$@" ;;
+        *) "$@" ;;
+    esac
 }
 
 # _locked <lockfile> <cmd...> -- run a command holding an exclusive lock, so
@@ -129,12 +157,13 @@ _bounded() {
 # missing the command runs unlocked.
 _locked() {
     local lock="$1"; shift
-    if command -v flock >/dev/null 2>&1; then
-        ( flock 9 && "$@" ) 9>"$lock"
+    if [ "$HAVE_FLOCK" -eq 1 ]; then
+        ( "$FLOCK_CMD" 9 && "$@" ) 9>"$lock"
     else
         "$@"
     fi
 }
+HAVE_FLOCK=1
 
 # _install <new-file> <stored-file> -- replace the stored copy only when the
 # new one is larger. Prints grown, kept or same. Run under _locked.
@@ -168,7 +197,7 @@ _record() {
 # line; sets COPY_OUTCOME.
 _copy_pod() {
     local dir="$1" ns="$2" pod="$3" recdir="$4" ctr="$5"
-    local tmp rc err f base new old replaced=0 kept=0 same=0
+    local tmp rc err f base res replaced=0 kept=0 same=0 lockfail=0
     tmp="$(mktemp -d "$dir/.incoming.XXXXXX")" || { COPY_OUTCOME="no-temp-dir"; return 1; }
     _kubectl_argv
     _bounded "${KARGV[@]}" exec -n "$ns" "$pod" -c "$ctr" -- tar cf - -C "$recdir" . \
@@ -190,18 +219,28 @@ _copy_pod() {
         COPY_DETAIL="the stream did not unpack${err:+: $err}; the previous copy is kept"
         return 1
     fi
-    for f in "$tmp/x"/* "$tmp/x"/.[!.]*; do
+    # The recorder writes learnrec-*.jsonl, never a dotfile.
+    for f in "$tmp/x"/*; do
         [ -f "$f" ] || continue
         base="$(basename "$f")"
-        case "$(_locked "$dir/.$pod.lock" _install "$f" "$dir/$pod/$base")" in
+        # A lock that cannot be opened or taken installs nothing, and says so:
+        # it used to print nothing and be counted as unchanged.
+        res="$(_locked "$dir/.$pod.lock" _install "$f" "$dir/$pod/$base")" || res="${res:-lock-failed}"
+        case "$res" in
             grown) replaced=$((replaced + 1)) ;;
             kept) kept=$((kept + 1)) ;;
-            *) same=$((same + 1)) ;;
+            same) same=$((same + 1)) ;;
+            *) lockfail=$((lockfail + 1)) ;;
         esac
     done
     rm -rf "$tmp"
-    COPY_OUTCOME="copied"
     COPY_DETAIL="$replaced grown, $same unchanged, $kept smaller copy refused"
+    if [ "$lockfail" -gt 0 ]; then
+        COPY_OUTCOME="lock-failed"
+        COPY_DETAIL="$COPY_DETAIL, $lockfail not installed: the lock $dir/.$pod.lock could not be taken, or the rename failed"
+        return 1
+    fi
+    COPY_OUTCOME="copied"
     return 0
 }
 
@@ -209,6 +248,7 @@ _copy_pod() {
 snapshot_once() {
     local ns="$1" dir="$2" list rows rc line pod phase recdir ctr held files bytes
     local reasons=""
+    _check_tools
     mkdir -p "$dir" || { echo "learner recordings: cannot create $dir" >&2; return 1; }
     [ -f "$(_index "$dir")" ] || printf 'time\tpod\tphase\toutcome\tfiles\tbytes\tdetail\n' > "$(_index "$dir")"
     list="$(capture_kube --request-timeout="$REQUEST_TIMEOUT" get pods -n "$ns" \
