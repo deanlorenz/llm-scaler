@@ -121,8 +121,7 @@ registration.
   Kueue's quotas (**experimental**). Sharing needs one of them.
 - **Cost-aware variant choice**: it grows the variant with the lowest cost per
   unit of capacity (`variantCost`). Unit-tested; an end-to-end proof and a
-  two-GPU-type benchmark are on the roadmap
-  ([#142](https://github.com/ev-shindin/llm-scaling-manager/issues/142)).
+  two-GPU-type benchmark are on the roadmap.
 - **Scale to zero and back**: KEDA's own scale to zero. The controller polls
   the router queue every 100 ms and pushes activation without waiting for
   KEDA's poll.
