@@ -385,6 +385,7 @@ TooFewImbalanceMinutes
 TooFewLowLoadMinutes
 TooFewPromptClusters
 TooManySlots
+TransferHeld
 TransferOmitted
 TriggeredScaleUp
 UP
