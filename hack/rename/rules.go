@@ -103,18 +103,6 @@ var binaryExtensions = []string{
 // scalerTLS mints the external scaler's certificates.
 var scalerTLS = []string{"deploy/lib/scaler_tls.sh"}
 
-// manualFiles are not rewritten: each is replaced by the file of that name under
-// overlayDir, written by hand. A guide about moving from the other product uses
-// both sets of names in one sentence, and no rule can tell them apart. The
-// overlay is in the pre-move form; the held rows run over it, so --code-moved
-// still reaches its links.
-var manualFiles = []string{
-	"docs/guides/from-upstream-wva/README.md",
-	"docs/guides/from-upstream-wva/guide.yaml",
-}
-
-const overlayDir = "hack/rename/overlay/"
-
 // keepWholeFiles keep every old name except the module path. The page about the
 // rename has to name what it renames.
 var keepWholeFiles = []string{
@@ -187,10 +175,6 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		kept("keep-warmpool-proxy", "image", `ghcr\.io/ev-shindin/(?:llm-scaler/)?warmpool-proxy`, "pinned by digest; no image exists under the new owner (see the report)"),
 		kept("keep-fma-image", "image", `ghcr\.io/ev-shindin/(?:dual-pods-controller|fma-launcher)|ev-shindin/llm-d-fast-model-actuation|ev-shindin/vllm-conf`, "another project's image or fork"),
 		kept("keep-old-repo-name", "repo-link", `github\.com/ev-shindin/llm-scaler/[^\s)\]"'`+"`"+`>]*`, "a numbered link on the repository's earlier name"),
-		{Name: "keep-manual-file", Class: "manual", Pattern: residualPattern, Action: Keep, Paths: manualFiles,
-			Why: "rewritten by hand: laid down from hack/rename/overlay"},
-		{Name: "keep-other-product-paths", Class: "external", Pattern: `from-upstream-wva`, Action: Keep,
-			Contexts: []string{CtxText, CtxComment, CtxString, CtxPath}, Why: "this guide is about the other product, so its name stays"},
 
 		// A market comparison: its WVA is the other product, by the repository it
 		// links and beside ig-wva, not this project under an earlier name.

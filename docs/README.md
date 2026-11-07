@@ -120,8 +120,7 @@ what they document. Index and conventions: **[guides/](guides/)**.
 
 **Installing** — [in a namespace](guides/install-in-namespace/) (the common
 case) · [cluster-wide](guides/install-cluster-wide/) · [a small llm-d model
-first](guides/install-small-model/), if nothing is serving yet ·
-[coming from llm-d's workload-variant-autoscaler](guides/from-upstream-wva/)
+first](guides/install-small-model/), if nothing is serving yet
 
 **Administering** — [cluster-admin setup for a
 namespace](guides/admin-cluster-setup/) · [bound every install by real
