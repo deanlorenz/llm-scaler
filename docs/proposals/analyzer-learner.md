@@ -2239,9 +2239,9 @@ band (`T2-above-band`) inside that wait. Before the review it priced 4.
   `observe`, after the model analyzed first that cycle has observed. So
   after a gap past an hour that model read the gap as an absence and
   settled, and every later model, evicted meanwhile, was first-seen and
-  did not: the result depended on the order. `observeOwnSettle` now makes a
-  model last seen more than `ownSettleTimeout` ago first-seen whatever the
-  order: it forgets the model's observations, observes it backdated, and
+  did not: the settle read depended on the order. `observeOwnSettle` now
+  makes a model last seen more than `ownSettleTimeout` ago first-seen to its
+  settle reading whatever the order: it forgets the model's observations, observes it backdated, and
   drops its line keys' replica traces (`itl.Tracker.ForgetTraces`), keeping
   their windows and held slope, as the eviction keeps them for that model.
   Part of the move: off, the line reads no tracker. Test:
@@ -2250,15 +2250,19 @@ band (`T2-above-band`) inside that wait. Before the review it priced 4.
   cycles 8 to 15 (`pinned-B` for 11 cycles) and the second never. A no-op
   `observeOwnSettle` fails it and four other `TestITLSettle_` tests. The
   goldens came back to main's (above).
-- **The slo analyzer has the same logic, not fixed here** (`slo/settle.go`:
+- **The slo analyzer had the same logic, fixed by issue #459** (`slo/settle.go`:
   first-seen only on a model's first sight, forgotten after `stateTimeout`).
   Its eviction runs only from `EvictStale`, which the engine and the replay
   call at the top of the cycle, so there every model reads a long gap
   alike. A caller that never calls it, or calls it between two models'
-  `Analyze` calls, gets the order or the gap read as an absence. Its
-  switches and goldens are 4a's, so a follow-up issue carries it: make a
-  model last seen past the timeout first-seen in its `observeOwnSettle`, as
-  here.
+  `Analyze` calls, got the order or the gap read as an absence. Its
+  `observeOwnSettle` now makes a model last seen past the timeout
+  first-seen, as here, behind its own switch
+  (`slo-itl-own-settle-reads-a-long-gap-as-first-seen`, read with the move
+  on), since 4a's switches and goldens are already merged. It moves no
+  golden. Only the settle reading is order-independent: the line's
+  windows, intercepts and held slope are still swept by `EvictStale`, so
+  the fit after a long gap still depends on whether and when it ran.
 - **N1: the restart wait reads the tracker only.** `WaitsAfterRestart` was
   set with an engine view whatever the move said, and on the key's own
   trace it made every replica of a key made anew wait `steadyFor`, not only

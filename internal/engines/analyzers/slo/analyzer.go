@@ -122,6 +122,10 @@ type Analyzer struct {
 	itlFiniteOnly        bool
 	itlRestartUnderName  bool
 	itlIdleOnEvidence    bool
+	// itlLongGapFirstSeen is SwitchITLLongGapFirstSeen (issue #459,
+	// settle.go): on from the constructor; a replay turns it off
+	// (SetSwitchesForReplay).
+	itlLongGapFirstSeen bool
 	// itlForgetReachesLine is SwitchITLForgetReachesTheLine (forget.go): on
 	// from the constructor; a replay turns it off (SetSwitchesForReplay).
 	itlForgetReachesLine bool
@@ -237,6 +241,7 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		learnerReports:       make(map[string][]learn.Report),
 		itlRestartUnderName:  true,
 		itlIdleOnEvidence:    true,
+		itlLongGapFirstSeen:  true,
 		itlForgetReachesLine: true,
 		itlOneSidedAtCap:     true,
 		itlTierHysteresis:    true,

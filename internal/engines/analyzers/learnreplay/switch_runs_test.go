@@ -150,6 +150,15 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// which has no switch, moves its own goldens.
 	slo.SwitchKVPerRequestOutputDispersion: nil,
 
+	// Issue #459: on the slo analyzer's own settle tracker, a model last
+	// analyzed more than the state timeout ago is first-seen whether or not
+	// EvictStale ran first. It moves no golden: a replay calls EvictStale at
+	// the top of every cycle, as the engine does, so a model past the
+	// timeout was evicted before its Analyze on either side; and a recording
+	// with start.ThroughputConfig hands the analyzer the engine's view. Its
+	// unit tests hold it (heldBy).
+	slo.SwitchITLLongGapFirstSeen: nil,
+
 	saturation.SwitchPrefillCapacityObserve: nil,
 
 	// #481: the throughput and slo lines take no rows in a rollout, and the
@@ -869,6 +878,13 @@ var heldBy = map[string][]heldTest{
 		{"../throughput", "TestForget_TakesTheAboveBandFallback"},
 		{"../throughput", "TestForget_AtTheCapALineIsPricedOneSidedAgain"},
 		{"../throughput", "TestForget_ReportsEachForgottenKey"},
+	},
+	// Issue #459's long gap on the slo analyzer's own tracker: it runs the
+	// switch on and off through Analyze, with EvictStale first, between the
+	// two models, and never, and asserts both.
+	slo.SwitchITLLongGapFirstSeen: {
+		{"../slo", "TestSettle_AfterALongGapTheAnalyzerAloneReadsEveryModelAlike"},
+		{"../slo", "TestSettle_AfterALongGapWithTheSwitchOffEvictionOrderStillMatters"},
 	},
 	// Issue #431's forget of the slo line.
 	slo.SwitchITLForgetReachesTheLine: {

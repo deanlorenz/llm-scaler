@@ -131,6 +131,10 @@ func (a *Analyzer) switchFields() map[string]*bool {
 		SwitchITLRestartUnderName:             &a.itlRestartUnderName,
 		SwitchITLIdleOnEvidence:               &a.itlIdleOnEvidence,
 
+		// Issue #459: a long gap on the analyzer's own tracker is
+		// first-seen, whenever EvictStale ran (settle.go).
+		SwitchITLLongGapFirstSeen: &a.itlLongGapFirstSeen,
+
 		// Issue #495: the line's reports and learner-write (learner.go).
 		SwitchITLFilesReports: &a.itlFilesReports,
 
