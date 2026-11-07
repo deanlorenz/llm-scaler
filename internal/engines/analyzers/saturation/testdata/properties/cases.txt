@@ -25,6 +25,8 @@ edges/decode-memory/queue-threshold
 edges/floor/backlog-grew
 edges/floor/growth-band
 edges/floor/growth-band-nondefault
+edges/floor/standing-queue-cap
+edges/floor/standing-queue-cap-start
 edges/floor/trust-blend
 edges/floor/trust-blend-nondefault
 edges/idle/gap-1-min
@@ -52,11 +54,14 @@ edges/itl/ols-min-spread
 edges/itl/ols-spread-reversals-bounded
 edges/itl/steady-for
 edges/itl/steady-for-nondefault
+edges/itl/steady-window-40-rows
 edges/itl/tier-dwell
 edges/itl/tier-safe-margin
 edges/itl/window-20-rows
 edges/itl/window-30-min
 edges/k2/episode-gap-24h
+edges/k2/eviction-7d
+edges/k2/eviction-nondefault
 edges/k2/joined-1-min
 edges/k2/key-follows-output-length
 edges/k2/key-near-output-boundary

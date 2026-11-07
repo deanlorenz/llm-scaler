@@ -11,6 +11,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/floor"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
@@ -108,6 +109,7 @@ func edgeCases() []propCase {
 			edge3("a capped reading at preemption rate", probeCap(capped), 0.049, 0.05, 0.051, [3]bool{true, true, false})),
 		edgeCase("itl", "window-20-rows", tunedDefault, nil, edge3("window holds every reading of", probeWindowRows, 19, 20, 21, [3]bool{true, true, false})),
 		edgeCase("itl", "window-30-min", tunedDefault, nil, edge3("a reading kept at age min", probeWindowAge, 29.75, 30, 30.25, [3]bool{true, true, false})),
+		edgeCase("itl", "steady-window-40-rows", tunedDefault, nil, edge3("steady window holds every reading of", probeSteadyRows, 39, 40, 41, [3]bool{true, true, false})),
 		// k2.
 		edgeCase("k2", "queue-threshold", tunedDefault, nil, edge3("k2 learned at queue", probeK2Queue(0), 4, 5, 6, [3]bool{false, true, true})),
 		edgeCase("k2", "queue-threshold-nondefault", tunedPolicy, queuePol,
@@ -121,6 +123,12 @@ func edgeCases() []propCase {
 			edge3("a suspect reading admitted after a rise of", probeMaxRise(rise), 0.39, 0.40, 0.41, [3]bool{true, true, false})),
 		edgeCase("k2", "window-10", tunedDefault, nil, edge3("k2 window holds every reading of", probeK2Window, 9, 10, 11, [3]bool{true, true, false})),
 		edgeCase("k2", "episode-gap-24h", tunedDefault, nil, edge3("k2 window continues after a gap of h", probeEpisodeGap, 23.9, 24, 24.1, [3]bool{true, true, false})),
+		edgeCase("k2", "eviction-7d", tunedDefault, nil,
+			edge3("k2 window kept by the sweep at min from 7 d unused", probeK2Eviction(7*24*time.Hour, false), -1, 0, 1, [3]bool{true, true, false})),
+		// The retention is an environment knob (LEARNED_STATE_BUCKET_RETENTION),
+		// not a policy key, so this case runs the default policy.
+		edgeCase("k2", "eviction-nondefault", tunedDefault, nil,
+			edge3("k2 window kept by the sweep at min from 24 h unused", probeK2Eviction(24*time.Hour, true), -1, 0, 1, [3]bool{true, true, false})),
 		// Borrowed k2.
 		edgeCase("borrowed-k2", "kv-total-3pct", tunedDefault, nil, edge3("borrowed across a KV total gap of", probeBorrowKv, 0.029, 0.03, 0.031, [3]bool{true, true, false})),
 		edgeCase("borrowed-k2", "hold-30-min", tunedDefault, nil, edge3("still at full strength after min", probeBorrowHold, 29, 30, 31, [3]bool{true, true, false})),
@@ -160,6 +168,10 @@ func edgeCases() []propCase {
 		edgeCase("floor", "growth-band", tunedDefault, nil, func(seed uint64) error { return checkGrowth(tuningDefault, 2, 0.10) }),
 		edgeCase("floor", "growth-band-nondefault", tunedPolicy, polOf(growth),
 			func(seed uint64) error { return checkGrowth(growth, 5, 0.2) }),
+		edgeCase("floor", "standing-queue-cap", tunedDefault, nil,
+			edge3("a queue counted whole at requests over what its replica drains in the 60 s drain time", probeStandingQueue(30, 60), -1, 0, 1, [3]bool{true, true, false})),
+		edgeCase("floor", "standing-queue-cap-start", tunedDefault, nil,
+			edge3("a queue counted whole at requests over what its replica drains in the 70 s default start", probeStandingQueue(DefaultReplicaStartSeconds, 70), -1, 0, 1, [3]bool{true, true, false})),
 		// Idle room and the decode memory.
 		edgeCase("idle", "settled-2-min", tunedDefault, nil, edge3("idle room settled after s", probeIdleSettled, 105, 120, 135, [3]bool{false, true, true})),
 		edgeCase("idle", "gap-1-min", tunedDefault, nil, edge3("an idle run survives a gap of s", probeIdleGap, 45, 60, 75, [3]bool{true, true, false})),
@@ -816,5 +828,92 @@ func probePricingK(center float64) probe {
 		measured := 0.5 * derived(center)
 		t := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
 		return t.throughputRefusal(1, measured, whatif.DerivedMu{Rate: d, OK: true}, 0, false) == "", nil
+	}
+}
+
+// --- thresholds with no edge of their own until #495 ---
+
+// probeSteadyRows: n replicas spread over 0.40 of k on one cycle, every
+// reading steady: the steady window holds all of them up to its 40
+// (itl.DefaultSteadyWindowMaxSize, twice the main window's 20). One cycle,
+// so the carry past the main window plays no part.
+func probeSteadyRows(_ *rand.Rand, n float64) (bool, error) {
+	ks := make([]float64, int(n))
+	for i := range ks {
+		ks[i] = 0.25 + 0.40*float64(i)/float64(len(ks)-1)
+	}
+	r := observeOnce(tuningDefault, fleetAt(ks))
+	if r.Unsteady != 0 || r.Offered != int(n) {
+		return false, fmt.Errorf("precondition: %d readings offered, %d unsteady, want %d and 0", r.Offered, r.Unsteady, int(n))
+	}
+	return r.SteadyHeld == int(n), nil
+}
+
+// probeK2Eviction: a k2 window last used at T, then the sweep
+// (EvictStaleHistory) at T + retention + m minutes: kept up to the retention
+// and dropped past it: 7 d by default (capacity.HistoryRetention), or the
+// retention set when set is true.
+func probeK2Eviction(retention time.Duration, set bool) probe {
+	return func(r *rand.Rand, m float64) (bool, error) {
+		rig := newPropRig()
+		if set {
+			h := capacity.DefaultHorizons()
+			h.BucketRetention = retention
+			if _, replaced := rig.a.WithHorizons(h); len(replaced) > 0 {
+				return false, fmt.Errorf("precondition: retention %s replaced (%v)", retention, replaced)
+			}
+		}
+		tok := int64(float64(propKv) * (0.88 + 0.05*r.Float64()))
+		// The second reading writes both (k2_confirm.go); the clock stays at
+		// its cycle, the window's last use.
+		if err := rig.runK2(k2Reading{tok, 10, 6, propCycle}, k2Reading{tok, 10, 6, 0}); err != nil {
+			return false, err
+		}
+		used := rig.clock
+		window := func() (*capacity.RollingAverage, error) {
+			rig.a.mu.Lock()
+			defer rig.a.mu.Unlock()
+			if len(rig.a.computeCapacityHistory) > 1 {
+				return nil, fmt.Errorf("%d k2 windows, want one", len(rig.a.computeCapacityHistory))
+			}
+			for _, ra := range rig.a.computeCapacityHistory {
+				return ra, nil
+			}
+			return nil, nil
+		}
+		ra, err := window()
+		if err != nil || ra == nil {
+			return false, fmt.Errorf("precondition: no k2 window (%v)", err)
+		}
+		if ra.StaleAt(used, 0) || !ra.StaleAt(used.Add(time.Nanosecond), 0) {
+			return false, errors.New("precondition: the window was not last used on the last cycle")
+		}
+		rig.clock = used.Add(retention + time.Duration(m*float64(time.Minute)))
+		rig.a.EvictStaleHistory()
+		ra, err = window()
+		return ra != nil, err
+	}
+}
+
+// probeStandingQueue: replicas at mu 1, 2 and 3, each with its queue d
+// requests over what it drains in horizon seconds, the drain horizon the
+// floor takes at start: its whole queue is backlog up to the cap, and the cap
+// past it (localQueueBacklog). Under BacklogDrainSeconds the 60 s drain time
+// binds; over it the start does (DrainHorizon). horizon is literal, so a
+// threshold moved by a second fails. Held at the function, not through
+// Analyze: on the drain-bound case's fleet (checkFloorDrainBound) another
+// bound holds the order under the cap's, flat at 4.12 replicas for a queue
+// of 69 to 300 at lambda 2.5, so the order does not show which side of the
+// cap a queue is on.
+func probeStandingQueue(start, horizon float64) probe {
+	return func(_ *rand.Rand, d float64) (bool, error) {
+		h := floor.DrainHorizon(floor.BacklogDrainSeconds, start)
+		whole := true
+		for _, mu := range []float64{1, 2, 3} {
+			q := mu*horizon + d
+			got := localQueueBacklog(capacity.ReplicaCapacity{QueueLength: int(q), SaturatedThroughput: mu}, h)
+			whole = whole && got == q
+		}
+		return whole, nil
 	}
 }
