@@ -243,7 +243,7 @@ func TestDwellTier_ARolloutEndsTheLatch(t *testing.T) {
 	run := func(rollout bool) (during, after Reading, l *latchRig) {
 		l = atOLS(t)
 		l.adm.Rollout = rollout
-		during = l.after(15*time.Second, spread, 1)
+		l.after(15*time.Second, spread, 1)
 		during = l.after(30*time.Second, spread, 1)
 		l.adm.Rollout = false
 		after = l.after(45*time.Second, spread, 1)

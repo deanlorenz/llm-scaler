@@ -713,7 +713,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		prefillAQuadratic:      true,
 		itlOneSidedAtCap:       true,
 		itlTierHysteresis:      true,
-		itlTierRolloutReset: true,
+		itlTierRolloutReset:    true,
 		itlOneSidedLast:        make(map[string]itlOneSidedRecord),
 		prefillObserver:        prefill.NewObserver(),
 		prefillBounds:          make(map[string]stashedBound),

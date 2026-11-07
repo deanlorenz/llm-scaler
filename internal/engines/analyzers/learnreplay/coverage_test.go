@@ -97,7 +97,9 @@ var reviewed = map[reflect.Type]buckets{
 		recorded: []string{"Analyze", "EvictStale", "BeginCycle", "NoteVariantsPresent", "ForgetVariant"},
 		// PathCounts reads the per-path counters of the slo line's fits
 		// (2.5), which only a replay reads and nothing restores.
-		readers: []string{"Name", "StateTimeout", "SlopeHoldFor", "Judging", "PathCounts"},
+		// TakeLearnerReports hands the line's reports to the engine's metrics
+		// and keeps none, as the saturation analyzer's does.
+		readers: []string{"Name", "StateTimeout", "SlopeHoldFor", "Judging", "PathCounts", "TakeLearnerReports"},
 		// WithSettleView hands the slo line the engine's settle tracker; the
 		// replay hands it its own, as it does k2's (settle.go).
 		// WithPrefillEstimates hands it the saturation analyzer's prefill
@@ -111,7 +113,9 @@ var reviewed = map[reflect.Type]buckets{
 		// StartConfig states what the builders set, for the recording's
 		// first line; it changes nothing. PathCounts reads the per-path
 		// counters of the ITL line's fits (2.5), which only a replay reads.
-		readers: []string{"Name", "VariantState", "StartConfig", "PathCounts"},
+		// TakeLearnerReports hands the line's reports to the engine's metrics
+		// and keeps none, as the saturation analyzer's does.
+		readers: []string{"Name", "VariantState", "StartConfig", "PathCounts", "TakeLearnerReports"},
 		// WithSettleView and WithCapacityStore hand the ITL line's admission
 		// the engine's settle tracker and store, read-only; the replay hands
 		// it its own (start.ThroughputConfig).
