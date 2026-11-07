@@ -30,6 +30,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
@@ -139,6 +140,19 @@ type Analyzer struct {
 	// judges an absence by (settle.Tolerance), as the saturation analyzer's.
 	settleInterval time.Duration
 
+	// itlFilesReports is SwitchITLFilesReports (learner.go): on from the
+	// constructor; a replay turns it off (SetSwitchesForReplay). lineLogged is
+	// what learner-write last logged per key, learnerReports each model's
+	// reports of its last cycle, by namespace|model, and forgottenReports what
+	// was forgotten since the engine last took them. Under mu.
+	itlFilesReports  bool
+	lineLogged       map[string]lineLogged
+	learnerReports   map[string][]learn.Report
+	forgottenReports []learn.Report
+	// itlRolloutGuard is SwitchITLRolloutGuard (rollout.go): on from the
+	// constructor; a replay turns it off (SetSwitchesForReplay).
+	itlRolloutGuard bool
+
 	// prefillEstimates is where P1's prefill estimates are read
 	// (WithPrefillEstimates, prefill_estimates.go); nil when none was given.
 	prefillEstimates PrefillEstimates
@@ -218,6 +232,10 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		itlWaitsAfterRestart: true,
 		itlKeepsSettle:       true,
 		itlFiniteOnly:        true,
+		itlRolloutGuard:      true,
+		itlFilesReports:      true,
+		lineLogged:           make(map[string]lineLogged),
+		learnerReports:       make(map[string][]learn.Report),
 		itlRestartUnderName:  true,
 		itlIdleOnEvidence:    true,
 		itlLongGapFirstSeen:  true,
@@ -296,6 +314,9 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 		AnalyzedAt:   now,
 	}
 	snap := metrics.SLOModelSnapshot{Namespace: input.Namespace, ModelName: input.ModelID}
+	a.mu.Lock()
+	delete(a.learnerReports, reportModel(input.Namespace, input.ModelID))
+	a.mu.Unlock()
 	// Without the engine's settle tracker, the analyzer observes its own
 	// first, as the engine does before any analyzer runs (settle.go).
 	a.observeOwnSettle(input, now)
@@ -327,6 +348,7 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 	for _, vs := range fleet.variants {
 		key := a.variantKey(input.Namespace, input.ModelID, vs)
 		vc, reading, d := a.priceVariant(input, vs, key, fleet, tpotTarget, scaleUp, now)
+		a.noteLineLearner(logger, input.Namespace, input.ModelID, vs, key, d, now)
 		if domain.CanonicalRole(vs.Role) == domain.RoleDecode {
 			decodeLines = append(decodeLines, ttftDecodeLine{state: vs, detail: d})
 		}
@@ -358,6 +380,7 @@ func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 				// A held slope reads pinned or pinned-default on the metric
 				// like a fit made this cycle; these say it is an old one.
 				"lineSlopeHeld", d.line.SlopeHeld, "lineSlopeAge", d.line.SlopeAge(now),
+				"lineRolloutHeld", d.rolloutHeld,
 				// Priced one-sided at the cap (SwitchITLOneSidedAtCap): no
 				// learned B, and the prior's line (its intercept the prior on
 				// B, capped at the window's least ITL, through the mean of the
@@ -463,6 +486,9 @@ type pricingDetail struct {
 	// nothing is declared.
 	lineBatchCap       int64
 	lineBatchCapSource string
+	// rolloutHeld is the line held on the old pods: the variant rolls out and
+	// no new pod serves (itl.RolloutSight.Held).
+	rolloutHeld bool
 }
 
 // Where the batch cap a replica is priced at came from (pricingDetail), as
@@ -511,7 +537,13 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	// (itl.Admission), and a change of arguments forgets the window first, so
 	// the old engine's readings are neither refitted nor held as the new one's.
 	args := params.ArgsTag()
-	a.linesUnderArgs(key, args, now)
+	rows, held := a.lineRows(input, fleet, key, vs.VariantName)
+	d.rolloutHeld = held
+	if held {
+		args = a.heldArgs(key, args)
+	} else {
+		a.linesUnderArgs(key, args, input.Namespace, input.ModelID, vs.VariantName, now)
+	}
 	adm.SlopeHoldFor, adm.Args = a.slopeHoldFor, args
 	// When each replica's settle began: the engine's settle tracker
 	// (settle.go).
@@ -524,7 +556,7 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 		kvPerRequest: fleet.shape.KVreq, ranks: fleet.engineRanks(vs.VariantName)}, params)
 	// The fill is clamped to the band the line is fitted over.
 	band := whatif.FillBand{Lo: adm.MinK, Hi: adm.MaxK}
-	line, source, r := a.fitLine(key, input.ReplicaMetrics, vs.VariantName, adm, now)
+	line, source, r := a.fitLine(key, rows, vs.VariantName, adm, now)
 	d.line, d.source, d.band = r, source, band
 	if !(tpotTarget > 0) {
 		return vc, nil, d
@@ -739,7 +771,7 @@ func (a *Analyzer) judge(ctx context.Context, input domain.AnalyzerInput, slo *c
 // and stamped it with the new arguments, and the old engine's slope was then
 // held as the new one's for the whole slope hold (issue #284). Unknown
 // arguments change nothing. There is no stash: a rollback relearns its line.
-func (a *Analyzer) linesUnderArgs(key, args string, now time.Time) {
+func (a *Analyzer) linesUnderArgs(key, args, namespace, modelID, variant string, now time.Time) {
 	if args == "" {
 		return
 	}
@@ -751,7 +783,8 @@ func (a *Analyzer) linesUnderArgs(key, args string, now time.Time) {
 		return
 	}
 	// The tracker's lock is taken under a.mu, as EvictStale takes it.
-	a.lines.Sweep(now, func(k string) bool { return k == key })
+	_, _, forgotten := a.lines.ForgetKeys(now, learn.ByArguments, func(k string) bool { return k == key })
+	a.noteForgottenLocked(namespace, modelID, variant, forgotten)
 }
 
 func (a *Analyzer) engineParams(namespace, modelID, variant string) *capacity.EngineParams {
@@ -779,7 +812,9 @@ func (a *Analyzer) evictStale(now time.Time) Evicted {
 		return !ok || now.Sub(at) > a.stateTimeout
 	}
 	var ev Evicted
-	ev.Lines, ev.Baselines = a.lines.Sweep(now, stale)
+	var evicted []learn.Forgotten
+	ev.Lines, ev.Baselines, evicted = a.lines.ForgetKeys(now, learn.ByEvicted, stale)
+	a.noteEvictedLocked(evicted)
 	for key := range a.seen {
 		if stale(key) {
 			delete(a.seen, key)
@@ -952,10 +987,14 @@ type fleetReading struct {
 	// fallback when the router reports no arrival rate.
 	requestRate float64
 	rows        []domain.ReplicaMetrics
+	// mixed names the variants whose replicas report more than one revision
+	// (domain.RevisionsMixed).
+	mixed map[string]bool
 }
 
 func readFleet(input domain.AnalyzerInput) fleetReading {
-	f := fleetReading{ready: make(map[string]int), rows: input.ReplicaMetrics}
+	f := fleetReading{ready: make(map[string]int), rows: input.ReplicaMetrics,
+		mixed: domain.RevisionsMixed(input.ReplicaMetrics)}
 	f.variants = append(f.variants, input.VariantStates...)
 	sort.Slice(f.variants, func(i, j int) bool { return f.variants[i].VariantName < f.variants[j].VariantName })
 	roles := make(map[string]string, len(f.variants))

@@ -371,7 +371,9 @@ Two blocks:
    it is folded into the same function of `I` rather than convolved as an
    independent part. The wait is independent of the request's own work for
    first-come service with Poisson arrivals, so the two are convolved exactly.
-   That fails for `edf` or `slo` ordering, which the tool flags.
+   That fails for `edf` or `slo` ordering. The tool does not flag it: no recording
+   says which ordering the router runs
+   ([cut](slo-capacity-planner.md#ttft-as-built)).
 2. **The decode side**: `W_decode`, driven by the same arrivals, so not
    independent of block 1.
 
@@ -1542,6 +1544,8 @@ derives these tables are outside the repository.
    misses by more than 15%.
 5. **Burstiness.** *Recommend:* estimate `Ca²` from the arrival rate's variance,
    cap that estimate at 4; the sticky-routing term is not capped.
-6. **Several priority bands.** *Recommend:* the highest band only, flagged.
+6. **Several priority bands.** *Recommend:* the highest band only, flagged. Cut
+   from the CLI: the collector sums over priority, so a recording cannot say
+   ([as built](slo-capacity-planner.md#ttft-as-built)).
 7. **Which imbalance signal for `f`?** *Recommend:* the computed-token share in
    busy minutes, de-biased; queue length when no busy minute exists.

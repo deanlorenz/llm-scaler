@@ -36,7 +36,22 @@
           "fromCycle": 197,
           "toCycle": 220,
           "resamples": 200,
-          "tierChanges": 10
+          "tierChanges": 10,
+          "check": {
+            "status": "ok-at-another-shape",
+            "compared": 10,
+            "onRamp": 20,
+            "aboveBand": 0,
+            "tooOld": 10,
+            "past": 0,
+            "medianErrorPct": 3.0095802156512965,
+            "worstErrorPct": 4.353289520922821,
+            "signedErrorPct": -3.0095802156512965,
+            "fromCycle": 122,
+            "toCycle": 131,
+            "rowKVPerRequest": 6501.878012338539,
+            "otherShape": true
+          }
         },
         "fillBand": {
           "lo": 0.15,
@@ -160,7 +175,12 @@
               "AssumedShape",
               "OutputSpreadUnread",
               "AssumedPoissonArrivals"
-            ]
+            ],
+            "sensitivity": {
+              "lo": 0.25063609988609226,
+              "hi": 1.6396930872300244,
+              "refused": "TargetBelowFloor"
+            }
           }
         }
       }
@@ -195,7 +215,12 @@
               "AssumedShape",
               "OutputSpreadUnread",
               "AssumedPoissonArrivals"
-            ]
+            ],
+            "sensitivity": {
+              "lo": 0.25063609988609226,
+              "hi": 1.6396930872300244,
+              "refused": "TargetBelowFloor"
+            }
           }
         }
       }

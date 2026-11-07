@@ -1193,18 +1193,19 @@ the series, reason and flag names, and the no-act list above.
 
 ###### The P2 recordings
 
-P2's goldens are three prefill-stress runs, all with a learner recording on a
+P2's goldens are four prefill-stress runs, all with a learner recording on a
 build with the R1 fields:
 
 | Run | Fleet | What it is for |
 | --- | --- | --- |
 | 1 | 3 prefill + 3 decode | R1 coverage: every TTFT recorder field, on several prefill pods; the source for `f` and for the first measured prompt spread |
 | 2 | 1 prefill + 2 decode | Prefill-bound, so busy minutes fire. `V_P` read 135k tok/s at 30k-token prompts and 118k at 37k. `AvgKVTransferTime` on 374 of 386 decode rows |
-| 3 | open loop, for `a` (running now) | Low-load minutes with spread prompts, which a prefill-bound run lacks, so P1 fits `a` |
+| 3 | 1 prefill + 1 decode, open loop at 8k, 30k and 37k | Low-load minutes with spread prompts, which a prefill-bound run lacks. P1 refuses `a` here: its shortest prompts are 8k (`NoShortPrompts`) |
+| 4 | 1 prefill + 1 decode, open loop at 1k, 2k, 4k and 16k | The same with short prompts, so P1 fits `a` |
 
 Before S1 leaves shadow, replayed with `slo-ttft-price` on, they must show:
 
-1. **The inputs learned.** `a` is fitted on run 3, which needs low-load
+1. **The inputs learned.** `a` is fitted on run 4, which needs low-load
    minutes with prompts spanning 1.5x (P1's rule); a prefill-bound run reads
    `no-fixed-latency` throughout. On run 2, `V_P` comes from busy minutes,
    below P1's `slopeBound`, with `VPPromptTokens` tracking the prompt.
@@ -1232,11 +1233,11 @@ Before S1 leaves shadow, replayed with `slo-ttft-price` on, they must show:
    inside `a`, at least 2.5 ms on `ols-sweep`
    ([what is derivable](slo-capacity-planner-ttft.md#what-is-derivable-today)),
    which is already in the parts. 10 ms is a stated budget, four times that.
-   Run 3 measures the real figure at low load (router mean TTFT less the
+   Runs 3 and 4 measure the real figure at low load (router mean TTFT less the
    engine's `AvgTTFT`), and the budget is replaced by it.
 6. **`f` on run 1**: the per-count `f` at 3 pods, against the busiest pod's
    measured share, and whether the floor 1.5 holds.
-7. **The goldens.** The three runs are committed as P2's goldens; run 2's
+7. **The goldens.** The four runs are committed as P2's goldens; run 2's
    `slo-published.csv` prices the prefill variant from `busy-minutes`.
 
 **What they cannot show:** the flow-control onsets, bursty arrivals, and a

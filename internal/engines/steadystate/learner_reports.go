@@ -42,8 +42,9 @@ type learnerVariantID struct {
 // The learners' reports reach the metrics here (analyzer-learner.md, 6.2 and
 // 6.3): the analyzer logs, the engine publishes.
 
-// learnerReporter is the part of the saturation analyzer that hands over the
-// learners' reports, by namespace|model.
+// learnerReporter is the part of a built-in analyzer that hands over its
+// learners' reports, by namespace|model: the saturation analyzer's, and the
+// slo and throughput analyzers' own lines.
 type learnerReporter interface {
 	TakeLearnerReports() map[string][]learn.Report
 }
@@ -51,13 +52,15 @@ type learnerReporter interface {
 // publishLearnerReports publishes what the cycle's Analyze calls reported, at
 // the end of the cycle.
 func (e *Engine) publishLearnerReports() {
-	reporter := e.analyzers.saturationCaps().reporter
-	if reporter == nil {
-		return
-	}
-	reports := reporter.TakeLearnerReports()
-	for _, model := range slices.Sorted(maps.Keys(reports)) {
-		e.metricsEmitter.RecordLearnerReports(reports[model], e.learnerTarget)
+	for _, entry := range e.analyzers.builtins() {
+		reporter, ok := entry.analyzer.(learnerReporter)
+		if !ok {
+			continue
+		}
+		reports := reporter.TakeLearnerReports()
+		for _, model := range slices.Sorted(maps.Keys(reports)) {
+			e.metricsEmitter.RecordLearnerReports(reports[model], e.learnerTarget)
+		}
 	}
 }
 

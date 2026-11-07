@@ -248,7 +248,7 @@ controller starts, or when a model first appears (or comes back after being
 unseen long enough to be forgotten). It says what the learners begin with:
 
 - `restoredKeys`: learned keys restored from the snapshot, per learner (`k2`,
-  `mu`).
+  `mu`, `itl`).
 - `coldVariants`: variants with none, per learner.
 - `startKeys`: replica start estimates restored from the snapshot.
 - `sightings`: replicas whose first sight came back from the snapshot, so
@@ -273,7 +273,7 @@ unseen long enough to be forgotten). It says what the learners begin with:
 
 ```text
 2026-11-01T09:00:00.020Z  INFO  learner-start  {"modelID": "my-model",
-  "namespace": "default", "restoredKeys": {"k2": 0, "mu": 0},
+  "namespace": "default", "restoredKeys": {"itl": 0, "k2": 0, "mu": 0},
   "coldVariants": {"k2": 1, "mu": 1}, "startKeys": 0, "sightings": 0,
   "oldestAdmittedAgeSeconds": -1, "settleUntil": "2026-11-01T09:01:00Z",
   "reason": "the analyzer's first cycle for this model, after a controller start or as the model first appears: each replica waits its settle, k2 and the mu written beside it a rate window from the controller's first sight of it, so by settleUntil at the latest"}
@@ -534,8 +534,9 @@ prior's line.
 | `no-healthy-rows` | no row of the variant was healthy this cycle, so nothing was read. Every count is 0 |
 | `fit-declined` | the window had enough readings, but they gave no usable slope (flat or falling) |
 | `shape-change` | the request shape changed. The window was emptied and the held slope dropped; the line waits for 10 readings at the new shape |
+| `rollout` | the variant is rolling out: its status says so, or its replicas report two revisions. The line takes only the newest revision's rows, and none while no new pod serves. It is silent when a new pod has brought new engine arguments and not yet taught 10 readings, or when no new pod serves and the hold has ended (`BucketRetention`, 7 days by default). `rolloutHeld` says the line is held on the old pods. While it is silent the analyzer gives no figure: another listed analyzer decides, and listed alone the role is held |
 | `all-above-band-below-ksat` | every row was above the band at k under 0.85. Neither the band nor the fallback may use them |
-| `restart` | the line has not been live since the controller started (a restart or a leader change), or since the variant appeared. Every replica waits its settle (`steadyFor`, 2 minutes by default) before the band may fit, then the window needs 10 readings, 3 of them settled. Measured in simulation at 15 s cycles with `steadyFor` 2 min: 2 to 2.5 minutes with 3 or 4 replicas in the band, 2.5 minutes with one. It grows with `steadyFor`, and with fewer replicas once 10 readings take longer than `steadyFor` to arrive. With 4 replicas all above the band, the above-band line does not wait, and this lasted about 45 seconds. If the first cycle after the restart has no healthy row, the line logs `no-healthy-rows` instead: the line is logged only when it goes silent or comes back, so `restart` does not appear for that silence. A rollout is not a restart: its new pods are joiners, and the line, if it goes silent, shows `too-few-readings` with a high `settling` count |
+| `restart` | the line has not been live since the controller started (a restart or a leader change), or since the variant appeared. Every replica waits its settle (`steadyFor`, 2 minutes by default) before the band may fit, then the window needs 10 readings, 3 of them settled. Measured in simulation at 15 s cycles with `steadyFor` 2 min: 2 to 2.5 minutes with 3 or 4 replicas in the band, 2.5 minutes with one. It grows with `steadyFor`, and with fewer replicas once 10 readings take longer than `steadyFor` to arrive. With 4 replicas all above the band, the above-band line does not wait, and this lasted about 45 seconds. If the first cycle after the restart has no healthy row, the line logs `no-healthy-rows` instead: the line is logged only when it goes silent or comes back, so `restart` does not appear for that silence. A rollout is not a restart: if it goes silent while it runs the line shows `rollout`, and after it, its new pods being joiners, `too-few-readings` with a high `settling` count |
 | `too-few-readings` | fewer than 10 readings, or fewer than 3 settled, and no slope to hold. Read `held`, `belowBand` and `settling` to see why |
 
 Other analyzers may set their own values or leave `reason` empty.

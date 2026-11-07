@@ -522,6 +522,11 @@ func wiCycle(t *testing.T, ctx context.Context, e *Engine, base *clocktesting.Fa
 			if e.sloAnalyzer != nil {
 				e.sloAnalyzer.NoteVariantsPresent(wiNS, m, names)
 			}
+			for _, entry := range e.analyzers.builtins() {
+				if a, ok := entry.analyzer.(*throughput.ThroughputAnalyzer); ok {
+					a.NoteVariantsPresent(wiNS, m, names)
+				}
+			}
 		}
 	}
 	e.evictStaleLearnedState(ctx)

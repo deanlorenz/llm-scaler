@@ -528,9 +528,9 @@ func (a *SaturationAnalyzer) restoredSightings(namespace, modelID string, rows [
 }
 
 // logLearnerStart logs the learner-start line for a model on the analyzer's
-// first cycle for it, at the default level, and only then: how many k2 keys
-// of the model were restored and how many of its variants start cold, how
-// many start keys and replica sightings came back with them, the oldest
+// first cycle for it, at the default level, and only then: how many k2, mu
+// and ITL keys of the model were restored, how many of its variants start
+// cold, how many start keys and replica sightings came back with them, the oldest
 // restored key's last admitted reading, and settleUntil, when the wait a
 // controller start begins with ends. It is the line that says which replicas
 // wait again.
@@ -575,6 +575,7 @@ func (a *SaturationAnalyzer) logLearnerStart(ctx context.Context, namespace, mod
 		}
 	}
 	a.mu.Unlock()
+	restoredITL := a.itlTracker.RestoredKeys(func(key string) bool { return strings.HasPrefix(key, startPrefix) })
 	cold, coldMu := 0, 0
 	for _, v := range variants {
 		if !warm[v] {
@@ -606,7 +607,7 @@ func (a *SaturationAnalyzer) logLearnerStart(ctx context.Context, namespace, mod
 	}
 	ctrl.LoggerFrom(ctx).V(logging.DEFAULT).Info("learner-start",
 		"modelID", modelID, "namespace", namespace,
-		"restoredKeys", map[string]int{learn.K2: restored, learn.Mu: restoredMu},
+		"restoredKeys", map[string]int{learn.K2: restored, learn.Mu: restoredMu, learn.ITL: restoredITL},
 		"coldVariants", map[string]int{learn.K2: cold, learn.Mu: coldMu},
 		"startKeys", startKeys, "sightings", sightings,
 		"oldestAdmittedAgeSeconds", oldestSeconds, "settleUntil", settleUntil.UTC().Format(time.RFC3339),

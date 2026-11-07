@@ -223,7 +223,7 @@ func TestMuLearner_LearnerStartCountsMu(t *testing.T) {
 	starts := logs.FilterMessage("learner-start").All()
 	require.Len(t, starts, 1)
 	f := starts[0].ContextMap()
-	assert.Equal(t, map[string]int{learn.K2: 0, learn.Mu: 1}, f["restoredKeys"])
+	assert.Equal(t, map[string]int{learn.K2: 0, learn.Mu: 1, learn.ITL: 0}, f["restoredKeys"])
 	assert.Equal(t, map[string]int{learn.K2: 2, learn.Mu: 1}, f["coldVariants"])
 	assert.InDelta(t, time.Hour.Seconds(), f["oldestAdmittedAgeSeconds"], 1e-9)
 }

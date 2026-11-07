@@ -2898,7 +2898,8 @@ not taken as the new engine's. The throughput line never had that guard,
 before 4b or since; with the cap read from the store, a rollout that
 changes `--max-num-seqs` can briefly judge old pods against the new cap.
 A small PR of its own. (The forget for this line has landed:
-[as built](#the-throughput-lines-forget-as-built). The rollout guard has not.)
+[as built](#the-throughput-lines-forget-as-built), and so has the guard:
+[as built](#rollouts-k2s-wait-and-the-lines-reports-as-built-481-495).)
 
 #### 4b-3 round-2 review
 
@@ -3238,7 +3239,8 @@ and 2 added:
 **Not in this PR: the throughput line's rollout guard.** Still true after
 4b-3: the saturation line empties a variant's rows while its scale target
 rolls out (`rec.InRollout()`, `D/analyze.go`), and the throughput line has
-no such guard. Left for an issue of its own, as the round-1 review planned.
+no such guard. Left for an issue of its own, as the round-1 review planned
+(#481, since [built](#rollouts-k2s-wait-and-the-lines-reports-as-built-481-495)).
 
 #### 5b as built
 
@@ -3652,8 +3654,8 @@ and the `restored` field have none, because no replay output reads either.
   6.2 plus `learner`, at most 4 per variant (k2, mu, itl, start), against the
   budget of about 60 per model. The `learner` label is bounded by
   `learn.Learners`, and a test holds a variant to one series through 1000 key
-  changes. Only the saturation analyzer files reports, so the throughput and slo
-  ITL lines publish nothing here.
+  changes. Only the saturation analyzer filed reports when this was built; the
+  slo and throughput lines [do now](#rollouts-k2s-wait-and-the-lines-reports-as-built-481-495).
 
   | overlapping series | kept or replaced |
   | --- | --- |
@@ -3696,9 +3698,134 @@ and the `restored` field have none, because no replay output reads either.
   `forgetMuLocked` clears it, and counts the entries the variant's forget counted
   before. The prefill bound shares mu's maps: its keys still go with the variant,
   and are not reported. Eviction reports too, as k2's does.
-- **Open.** `learner-write` and `learn.Report` for `slo` (6.1), left for after
-  #493 and #494. B's own last-admitted stamp (Deferred). `restoredKeys` for ITL on
-  `learner-start`. Not measured on a cluster: no run has read this series.
+- **Open.** B's own last-admitted stamp (Deferred). Not measured on a cluster: no
+  run has read this series.
+
+#### Rollouts, k2's wait and the lines' reports, as built (#481, #495)
+
+Eight replay switches, on from the constructors. None moves a replay golden: no
+recording holds a rollout, a change of arguments or a new revision under a key,
+and nothing priced reads a report. Their unit tests hold them. Nothing here has
+run on a cluster.
+
+| switch | what it changes |
+| --- | --- |
+| `throughput-itl-rollout-guard`, `slo-itl-rollout-guard` | mid-rollout (`Record.InRollout`, or two revisions in the rows, `domain.RevisionsMixed`) the line is offered the newest revision's rows alone, and the first of them clear the window. With no new pod serving it is offered none, and holds |
+| `throughput-itl-forgets-on-new-arguments` | the throughput line forgets on a change of `ArgsTag`, keeping the traces. While the guard holds, the forget waits for a new pod |
+| `saturation-itl-clears-on-a-new-revision` | the saturation line, which takes no rows mid-rollout, clears its window on the first rows of a new revision. The slo and throughput lines do it under their guards |
+| `k2-waits-after-a-rollout` | `settle.RolledOut` starts k2's joined wait |
+| `slo-itl-files-learner-reports` | the slo line's `learn.Report` and `learner-write` |
+| `throughput-itl-files-learner-reports` | the throughput line's `learn.Report`; its `learner-write` stands as 4b-1 built it |
+
+- **The guard (`itl.Tracker.RolloutRows`).** A key remembers the revision its
+  readings are of, and the rows decide, not the status, which a plain scale trips
+  too (`ObservedGeneration < Generation`). The pods cannot say which revision is
+  new, so `domain.NewestRevision` takes the one whose oldest Ready pod is youngest:
+  a rollout makes new pods, and an old pod restarted in place does not move its
+  revision's oldest. Two revisions that cannot be ordered are treated as no new pod.
+  With the guard off, a test holds the defect #481 names: an old pod above the
+  band counted as at the new cap (`TestRollout_AnOldPodIsNotJudgedAgainstTheNewCap`).
+- **A stalled rollout (round-one review).** As first built, an arguments change
+  forgot the line on the rollout's first cycle and the guard then offered no rows,
+  so both lines were silent for as long as the rollout ran: 720 of 720 cycles on a
+  3 h stall. Now a line is offered the new pods' rows once one serves. With none
+  serving, it holds what it has, whether or not the arguments changed, because the
+  old pods are what serves and the old line prices them. The forget waits for the
+  first new pod; the line stands under `Args` it was learned under meanwhile. It
+  logs `rolloutHeld` (`throughput analyzer: ITL line`, and `lineRolloutHeld` on
+  `slo-variant`). What prices is the window for 30 min, then the held slope.
+  Measured on the 3 h stall of `TestRollout_AStalledRolloutDoesNotSilenceTheLine`,
+  on both lines, at 15 s: no silent cycle with no new pod, none with a new pod and
+  the same arguments, and at most 16 (4 min) with a new pod and new arguments.
+
+  | rollout | what prices | silence |
+  | --- | --- | --- |
+  | no new pod, either way | the window, then the held slope | none until the hold ends: `steadyGate` window (30 min) plus `BucketRetention` (7 days by default) |
+  | a new pod, same arguments | the held slope until 10 new readings | none |
+  | a new pod, new arguments | nothing: B and the slope were the old engine's | until 10 settled readings: at most 16 cycles measured with one pod |
+
+  Past the hold the line is silent with `cause` `rollout`, and the composite does
+  not read that as no need. A silent line gives no capacity, so the analyzer is not
+  eligible (`allocation.Eligible`): it neither sizes the role nor votes it down.
+  With another analyzer listed that one decides. Listed alone, `CompositeHasSignal`
+  is false and the role is held: it neither grows nor shrinks. Tests on both lines
+  hold it (`TestRollout_PastTheHoldTheCompositeReadsNoNeed`).
+  A controller restart mid-rollout loses the revision: with one revision in the
+  rows the key cannot tell old from new, so it holds until the status clears or a
+  second revision shows.
+
+  A new pod that flaps does not move the key (round two). While it is not Ready
+  the old revision is the only one Ready, and a key already on the new revision
+  holds: no clear, no old rows, and the new pod's readings build up across the flap
+  (`TestRollout_AFlappingNewPodMovesNothing`). Before, each flap cleared the window
+  twice, so a crash-looping rollout never reached 10 readings.
+
+  **Limits.** Each of these can mislabel the newest revision. Each is read from
+  the code, not measured, and each is bounded by the window clearing again, so no
+  fit spans two engines for longer than the next move:
+
+  - a rollback mid-rollout;
+  - a restarted pod that is the last Ready pod of its revision, since it makes that
+    revision's oldest Ready pod young;
+  - a worker flap in the last LeaderWorkerSet group, for the same reason.
+
+  A stuck rollout's hold is log-only: `rolloutHeld` is on the summary line and
+  `lineRolloutHeld` on `slo-variant`, and no metric or alert carries it.
+- **The tier latch and B (#498, round-one review).** Resetting the latch alone kept
+  nothing out: a full fit over both engines' readings rewrote the stored B for
+  good. On an image-only rollout B went from .0100 to .0027 with one new pod, about
+  47 % too much capacity with three. So the first rows of a real change of revision
+  clear the window (`clearWindowLocked`), which keeps B and the held slope and puts
+  the latch at the pinned tier: the line holds its slope until 10 new readings
+  arrive, and a fit never spans two engines. The clear comes at the first new rows,
+  not at the rollout's end: the review asked for the end, but on the slo and
+  throughput lines the new pods teach during the rollout, and a clear at the end
+  would drop what they taught. The saturation line takes no rows mid-rollout, so
+  its first new rows are at the end. A cleared window also stops an idle fleet
+  re-stamping the slope's `fittedAt`, so the hold ends on time. The tier stands
+  through a hold, the window being frozen. A status with no change of revision
+  clears nothing.
+- **"Forget the line".** #481 lists it without saying when. Read here as the
+  arguments rule the saturation and slo lines have, and the table in
+  [PR 4b](#pr-4b-the-throughput-analyzers-itl-line) records this line lacking
+  ("no args rule; no rollout rule"). Not a forget on every rollout: that would
+  silence an image-only rollout, which the saturation line does not do. There is
+  no B stash: a rollback relearns, as on the slo line. The saturation line's own
+  arguments rule still forgets on the rollout's first cycle: it has k2 to price
+  from, and this round leaves it. A forget files `learn.ByArguments`, so its series
+  goes until the new line prices.
+- **k2's wait.** Only a new revision that arrives with the Ready time unchanged
+  or unread: a new Ready time waited already, and a new Pod is a join. Only
+  `r.Reason == settle.RolledOut` is read, not `Since` for every reason, so
+  `Rejoined` and load returning after idle keep what k2 does with them today.
+  Mu's write sits behind the same joined test. A sighting in the snapshot carries
+  no reason, so a controller restart that restores it ends the wait, and one with
+  no snapshot starts every replica's wait anyway.
+- **A parked variant.** The throughput analyzer now takes `NoteVariantsPresent`, as
+  the slo analyzer does, or a parked variant lost its state and its series after
+  1 h (`throughput-itl-keeps-present-variants`). The call is recorded, which moves
+  `engine-run-event-counts.txt`: one more `throughput.NoteVariantsPresent` per
+  noted model. A state kept across a long gap also holds its slope after it: in the
+  recorded engine run, 2 more cycles price from pd-d's held slope after a day's
+  clock jump.
+- **The series.** The label is the report's `learner`, so the three lines need
+  three names: `learn.SLO` (`slo`) and `learn.Throughput` (`throughput`), bounded
+  by `learn.Reporters`. Neither is on `learn.Learners`: the annotation forgets both
+  under `itl`. That takes the series to at most 6 per variant. `learner-write`
+  keeps `learner` `itl` on all three lines, as the throughput line already
+  logged it, and `analyzer` says which. The engine takes reports from every
+  built-in analyzer with `TakeLearnerReports`, not the saturation analyzer alone.
+- **Forgotten and evicted keys** go out as reports of their own ahead of the
+  cycle's, so a key refilled on the same cycle stays published. They are held
+  until the engine takes them, not until the model next reports, since a swept
+  model reports again never. The slo line evicts through `ForgetKeys` to learn
+  which keys went; the counts are `Sweep`'s.
+- **A line above the band** has an empty main window. `Tracker.Report` stamps it
+  with the newest reading there, or the throughput line's series would read 0.
+- **`restoredKeys`** on `learner-start` gains `itl`: lines whose intercept or held
+  slope came from the snapshot and have kept no reading (`Tracker.RestoredKeys`).
+  One field on one log line, which no output reads, so it has no switch, as
+  `restored` has none.
 
 ## 8. Risks and limits
 
