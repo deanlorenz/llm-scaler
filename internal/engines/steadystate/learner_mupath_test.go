@@ -164,7 +164,10 @@ func TestLearnerRecording_TheMuPathsRunReachesEveryLearnerPath(t *testing.T) {
 		t.Logf("wrote the raw mu-paths recording to %s", out)
 	}
 	t.Logf("path counts: %v", counted)
-	for _, p := range saturation.PathNames() {
+	// The paths a run at the constructor defaults can reach: the sibling
+	// yield's cap keeps the yield from pricing, so the cap's own path stands
+	// for it (saturation.RequiredPathNames).
+	for _, p := range saturation.RequiredPathNames() {
 		if p == saturation.PathK2UnsettledWindow {
 			// Reached only with EPP flow control off, by the pd-restart
 			// cluster golden; the unit tests drive it (k2_settle_test.go).
