@@ -11,6 +11,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/aggregation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/floor"
@@ -458,6 +459,15 @@ func bucketOf(key string) string {
 	return bucket
 }
 
+// SwitchThroughputFloorRaisesVariants is the replay switch for the variants
+// following a role the throughput floor raises (issue #495). On, each variant
+// of a raised role is lifted to its share of the role's floored demand by
+// supply (raiseVariantsToRoles), so its Utilization -- what the warm pool's
+// pressure reads -- agrees with the role. Off, the floor raises the role and
+// the model total only, and each variant keeps its occupancy figure, reading
+// more spare than the role it serves.
+const SwitchThroughputFloorRaisesVariants = "saturation-throughput-floor-raises-variants"
+
 // applyThroughputFloor raises roleDemand (in place) and returns the raised
 // totalDemand wherever the throughput model exceeds what occupancy measured,
 // after taking the queues' residency charge out of the measurement for every
@@ -472,6 +482,17 @@ func bucketOf(key string) string {
 // every role but prefill, whose scheduler-queue share the total never carried
 // (contributionToTotal). On a non-disaggregated fleet there is no RoleDemand
 // and the single "both" floor lands on the total directly.
+//
+// The variants of a role the floor RAISES follow it (variants, in place;
+// SwitchThroughputFloorRaisesVariants): each is lifted to its share of the
+// floored figure by supply, as holdFleetFloor lifts them, so a variant reads
+// as spare as its role and no sparer. Left at its occupancy figure, a decode
+// variant of six replicas floored to 1.11 replicas' worth read 99.7 % spare
+// to the warm pool's pressure (1 - Utilization) against the role's 81.5 %
+// (TestFloorRaisesVariants_TheDecodeVariantReadsTheRolesSpare). A role the swap
+// LOWERS is not followed: its variants keep their figures, as no step here
+// lowers a variant. Nor is the prefill share dropped below: it was added to
+// the role's demand only (aggregateRoleDemand), never to a variant's.
 //
 // eppByRole is the residency charge estimateSchedulerQueueDemand put on the
 // scheduler queue per role, and eppQueued the requests in it. For a role with
@@ -695,6 +716,8 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	// Roles in a stable order, so a two-role fleet logs the same way each cycle.
 	roles := slices.Sorted(maps.Keys(tf.ByRole))
 	modelTotalBefore := totalDemand
+	// Each role the floor raised, at its floored figure: its variants follow.
+	raised := make(map[string]float64)
 
 	for _, role := range roles {
 		tokens := tf.ByRole[role]
@@ -806,7 +829,13 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 		if roleDemand != nil {
 			roleDemand[role] = want
 		}
+		if want > measured {
+			raised[role] = want
+		}
 		totalDemand += want - measured
+	}
+	if a.floorRaisesVariants && len(raised) > 0 {
+		raiseVariantsToRoles(variants, aggregation.AggregateByRole(variants), raised)
 	}
 
 	// What the floor did to the MODEL total, which is otherwise emitted

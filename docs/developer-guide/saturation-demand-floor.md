@@ -139,6 +139,25 @@ so each must keep up with all of it), and on the total otherwise.
   prefill time plus the hand-off. Only a saturated decode makes it hold longer,
   and more prefill replicas do not fix that.
 
+The floor writes the role's figure (`RoleDemand`) and the model total. A role
+it raises also lifts that role's variants (`raiseVariantsToRoles`, the same
+step `holdFleetFloor` takes): each variant's `TotalDemand` becomes its share
+of the raised role demand, by supply, and its `Utilization` moves with it. A
+variant at its share then reads `1 - role demand / role supply` spare, which
+is what the warm pool's pressure reads (`steadystate.variantPressure`,
+`SpareFraction = 1 - Utilization`). A variant already above its share keeps
+its own figure. A role the floor lowers (the swap above) or leaves alone is
+not touched, and neither is prefill's dropped scheduler-queue share: that
+share was added to the role only, never to a variant.
+
+Before this, a variant kept its occupancy figure under a raised role. On a
+P/D fleet floored to 1.11 decode replicas out of six, the decode variant read
+99.7 % spare against the role's 81.5 %
+(`TestFloorRaisesVariants_TheDecodeVariantReadsTheRolesSpare`). The step is
+behind the replay switch `SwitchThroughputFloorRaisesVariants`. It moves only
+per-variant outputs (`variant-capacities`, `composite-variants`,
+`warm-pool-pressure`), never a role or model figure.
+
 Properties, each with a spec in `throughput_floor_test.go`:
 
 - **Invariant to fleet size.** `mu` is a per-replica constant, so the floor is

@@ -283,6 +283,56 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// hold the restore (itl_baseline_stamp_test.go).
 	saturation.SwitchITLBaselineStamped: {"acceptance/learned-state.csv", "mu-paths/learned-state.csv"},
 
+	// #495: the variants follow a role the throughput floor raises
+	// (saturation.SwitchThroughputFloorRaisesVariants). Measured alone
+	// against all off at main 01049df61, it moves the per-variant outputs
+	// only, on the cycles the floor raised a role: each raised variant's
+	// TotalDemand and Utilization rise to its share of the floored figure by
+	// supply (variant-capacities, composite-variants; up to 35x on a variant
+	// whose occupancy read near zero), and its warm-pool SpareFraction falls
+	// by the same amount (warm-pool-pressure; NeedsScaleUp turns true on one
+	// cycle each of ols-sweep, ols-sweep-slo-restart and throughput-sweep).
+	// No role-level or model-level figure moves: results, composite-roles,
+	// composite-results, composite-holds and composite-release are unchanged
+	// in every fixture, as the floor's role demand is.
+	saturation.SwitchThroughputFloorRaisesVariants: {
+		"e1-tuned/variant-capacities.csv",
+		"e1/variant-capacities.csv",
+		"ols-sweep-slo-restart/composite-variants.csv",
+		"ols-sweep-slo-restart/variant-capacities.csv",
+		"ols-sweep-slo-restart/warm-pool-pressure.csv",
+		"ols-sweep-slo/composite-variants.csv",
+		"ols-sweep-slo/variant-capacities.csv",
+		"ols-sweep-slo/warm-pool-pressure.csv",
+		"ols-sweep/composite-variants.csv",
+		"ols-sweep/variant-capacities.csv",
+		"ols-sweep/warm-pool-pressure.csv",
+		"pd-restart/composite-variants.csv",
+		"pd-restart/variant-capacities.csv",
+		"pd-restart/warm-pool-pressure.csv",
+		"throughput-sweep-restart/composite-variants.csv",
+		"throughput-sweep-restart/variant-capacities.csv",
+		"throughput-sweep-restart/warm-pool-pressure.csv",
+		"throughput-sweep/composite-variants.csv",
+		"throughput-sweep/variant-capacities.csv",
+		"throughput-sweep/warm-pool-pressure.csv",
+		"ttft-saturated/composite-variants.csv",
+		"ttft-saturated/variant-capacities.csv",
+		"ttft-saturated/warm-pool-pressure.csv",
+		"ttft-staircase-b-off/composite-variants.csv",
+		"ttft-staircase-b-off/variant-capacities.csv",
+		"ttft-staircase-b-off/warm-pool-pressure.csv",
+		"ttft-staircase-b-on/composite-variants.csv",
+		"ttft-staircase-b-on/variant-capacities.csv",
+		"ttft-staircase-b-on/warm-pool-pressure.csv",
+		"ttft-staircase-c-on/composite-variants.csv",
+		"ttft-staircase-c-on/variant-capacities.csv",
+		"ttft-staircase-c-on/warm-pool-pressure.csv",
+		"ttft-three-pods/composite-variants.csv",
+		"ttft-three-pods/variant-capacities.csv",
+		"ttft-three-pods/warm-pool-pressure.csv",
+	},
+
 	throughput.SwitchITLAdmitsAtSequenceCap: {
 		"throughput-sweep-restart/composite-holds.csv",
 		"throughput-sweep-restart/composite-release.csv",
@@ -637,7 +687,7 @@ func switchPackage(name string) string {
 // in the PR, or cleanup PR, that deletes it with zero golden diff. Learner
 // PR 4a's rows are learner4aSeams, 4b-1's learner4b1Seams and 4b-2's
 // learner4b2Seams, merged in.
-var earlierSeams = withMoves(staircaseSeamMoves, withMoves(startSeedSeamMoves, withSeams(learner4b2Seams, withSeams(learner4b1Seams, withSeams(learner4aSeams, map[string][]string{
+var earlierSeams = withMoves(floorVariantsSeamMoves, withMoves(staircaseSeamMoves, withMoves(startSeedSeamMoves, withSeams(learner4b2Seams, withSeams(learner4b1Seams, withSeams(learner4aSeams, map[string][]string{
 	// #275 (two switches) and #438, this file's own rows before learner PR
 	// 4b-1 (see replaySwitches).
 	saturation.SwitchZeroReplicaDataParallel: nil,
@@ -759,7 +809,27 @@ var earlierSeams = withMoves(staircaseSeamMoves, withMoves(startSeedSeamMoves, w
 		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
 		"engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
 	},
-})))))
+}))))))
+
+// floorVariantsSeamMoves is what each earlier seam, off alone from all on,
+// moves since #495's SwitchThroughputFloorRaisesVariants is on in all on:
+// a seam that moves a role's demand on a cycle the floor raises it now moves
+// that role's variants too. Measured at main 01049df61.
+var floorVariantsSeamMoves = map[string][]string{
+	// #276 already moves these fixtures' role demand; on the cycles the
+	// floor raises a role, its variants now follow.
+	saturation.SwitchKVPerRequestOutputDispersion: {
+		"ttft-staircase-b-off/warm-pool-pressure.csv",
+		"ttft-staircase-b-on/composite-variants.csv", "ttft-staircase-b-on/warm-pool-pressure.csv",
+		"ttft-staircase-c-on/composite-variants.csv", "ttft-staircase-c-on/warm-pool-pressure.csv",
+		"ttft-three-pods/composite-variants.csv", "ttft-three-pods/warm-pool-pressure.csv",
+	},
+	// #415's held mu bucket already moves throughput-sweep-restart's role
+	// demand (earlierSeams); where the floor raises a role, its variants follow.
+	saturation.SwitchMuKeyBucketHeld: {
+		"throughput-sweep-restart/composite-variants.csv", "throughput-sweep-restart/warm-pool-pressure.csv",
+	},
+}
 
 // startSeedSeamMoves is what each earlier seam, off alone from all on, moves
 // in the start-seed goldens, and in start-restored. Measured at 59772fce2, the
@@ -861,6 +931,13 @@ var heldBy = map[string][]heldTest{
 	saturation.SwitchMuMinorityFigureExpires: {
 		{"../saturation", "TestMuSlowPod_AMinorityFigureExpiresOnlyPastTheHold"},
 		{"../saturation", "TestMuSlowPod_OneReplicasFigureExpiresAfterTheHold"},
+	},
+	// #495: the first two run the switch on and off and assert both (the
+	// variants read the role's spare on; their occupancy, sparer, off).
+	saturation.SwitchThroughputFloorRaisesVariants: {
+		{"../saturation", "TestFloorRaisesVariants_TheDecodeVariantReadsTheRolesSpare"},
+		{"../saturation", "TestFloorRaisesVariants_TheSwitchOffLeavesTheVariants"},
+		{"../saturation", "TestFloorRaisesVariants_TwoDecodeVariantsSplitBySupply"},
 	},
 	// Runs the switch on and off and asserts both.
 	slo.SwitchTTFTQuietTransfer: {{"../slo", "TestTTFT_TheQuietTransferSwitch"}, {"../slo", "TestTTFT_TheHeldTransferAgesOut"}},
@@ -1381,6 +1458,30 @@ var switchBase = withDigests(staircaseBase, map[string]string{
 	"ttft-staircase-b-on/lines.csv":              "38728de29b3e63458dfdb0c7293dfeef385402fb353ce28cd88df33ba232d22d",
 	"ttft-staircase-b-on/results.csv":            "6d9d32f9a37f382e0693cd42b2993bf3ad6c82e180243094a767c98689ccb373",
 	"ttft-staircase-b-on/variant-capacities.csv": "69cbc99387df181e10a4f3bfb3e8c80e1f2f761716a6129847946d2d53b60755",
+
+	// #495's floor-raises-variants outputs not named above, at main
+	// 01049df61: no other switch of replaySwitches moves them, so all off is
+	// the committed golden.
+	"ols-sweep-slo/composite-variants.csv":        "e4d0005a54633b56c8064c28ade5fb7d9b952be307b2ff747f04c29827f5b831",
+	"ols-sweep-slo/warm-pool-pressure.csv":        "78a110a8111a300386c666c3b0a870638cd2bb2953f6682d0e28375da8f654b6",
+	"ols-sweep/composite-variants.csv":            "898e278939cf6750f52e87640e70b5129caf563766f7fec0fa75f9c434510d67",
+	"ols-sweep/warm-pool-pressure.csv":            "c8ccafc83dac49c19f6dd30c22369fda2f12fc8a48dc2435729e0e9304cbc52a",
+	"pd-restart/composite-variants.csv":           "bc0cc61c7979745d5b92ce167c4f2e4c3db6021b5ca51ceb39ea7c16c542e69a",
+	"pd-restart/variant-capacities.csv":           "f09dacf3f464643a688dea5b6fb57b7834e59477319d7d6de7e107908f06faf1",
+	"pd-restart/warm-pool-pressure.csv":           "1a7b144dcae1121ea79eefc28932afcd101191c54bc6c05ace5af390ddd2b764",
+	"ttft-saturated/composite-variants.csv":       "30ecdac39ae64326dee977a6c6a59f28165416afabdc8d1646b903bd52cfacde",
+	"ttft-saturated/variant-capacities.csv":       "7dec1b8fd2a4f2e3d01a76bb772b34220349ab1697fc0bfe8f02ca1bd679b073",
+	"ttft-saturated/warm-pool-pressure.csv":       "898b79cde97f32f60d385ae95f8232b5b92a714f4bb9d2ddb259ccbd53982044",
+	"ttft-staircase-b-off/composite-variants.csv": "fb172da3352f27f0c15756e41b50b10d8e853b6d0bff85059ccb5229b692634c",
+	"ttft-staircase-b-off/warm-pool-pressure.csv": "d1e703b66b486a31265fb632b749b091ec1301fd170e1b1bc79b2c12d3218875",
+	"ttft-staircase-b-on/composite-variants.csv":  "9fd199551ef54c5f6a5ca85a79eb6aaca86936ff542f29bb360fd3f08c2b45b3",
+	"ttft-staircase-b-on/warm-pool-pressure.csv":  "21f247e097916027c392ef2924c6d74fe7bf4b585b068a976e5a4533a3d7f7f0",
+	"ttft-staircase-c-on/composite-variants.csv":  "f59f1d700c197f22351d81102272675a2508d75d6be1d93bef5d9a185c5154aa",
+	"ttft-staircase-c-on/variant-capacities.csv":  "6f0a3ac167ec7977653d41ddf2dc19d6f3cf7cc7caa2f2835f7c755cc088a37c",
+	"ttft-staircase-c-on/warm-pool-pressure.csv":  "f35be0c77ac63d282561676bc6e0fa61afafee83515fb8345277a450ef47fb10",
+	"ttft-three-pods/composite-variants.csv":      "0c7aca65a555d5a39de684ee7db853956f386fb214f9c026113d437ec197db83",
+	"ttft-three-pods/variant-capacities.csv":      "7d68c9e1678b68410d5bf6a0915a37203e12ef265a14a0d742c5bb4dff78cf0a",
+	"ttft-three-pods/warm-pool-pressure.csv":      "56504bb5742a691393ebb6b33642a5d29fb3518f2bc70588376baee370a90fb4",
 })
 
 // The slow tests of this package run in parallel with each other (each

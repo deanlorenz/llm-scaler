@@ -639,23 +639,39 @@ func holdFleetFloor(roleDemand map[string]float64, variants []domain.VariantCapa
 	// holdPrefillDemand gives: the optimizer prices each variant by its share
 	// of the role demand, and a raw variant figure would leave the hold to be
 	// split by the measurement the hold has just declared stale.
+	raiseVariantsToRoles(variants, byRole, raised)
+	return moved, raised
+}
+
+// raiseVariantsToRoles lifts each variant of a role in raised to its share of
+// the role's raised demand, by supply: raised[role] x the variant's supply /
+// the role's supply (byRole, aggregation.AggregateByRole of the same
+// variants). Utilization moves with TotalDemand, so a variant at its share
+// reads 1 - raised[role] / role supply spare -- the figure the warm pool's
+// pressure reads (steadystate.variantPressure). Only ever a raise: a variant
+// already above its share keeps its own figure, and a role not in raised, or
+// a variant with no supply, is left as it was.
+//
+// holdFleetFloor raises the variants with it, and so does the throughput
+// floor (applyThroughputFloor, SwitchThroughputFloorRaisesVariants).
+func raiseVariantsToRoles(variants []domain.VariantCapacity, byRole map[string]aggregation.ScopeTotals, raised map[string]float64) {
 	for i := range variants {
 		vc := &variants[i]
-		held, ok := raised[domain.CanonicalRole(vc.Role)]
+		role := domain.CanonicalRole(vc.Role)
+		want, ok := raised[role]
 		if !ok {
 			continue
 		}
-		rc := byRole[domain.CanonicalRole(vc.Role)]
+		rc := byRole[role]
 		supply := float64(vc.ReplicaCount) * vc.PerReplicaCapacity
 		if supply <= 0 || rc.TotalSupply <= 0 {
 			continue
 		}
-		if share := held * supply / rc.TotalSupply; share > vc.TotalDemand {
+		if share := want * supply / rc.TotalSupply; share > vc.TotalDemand {
 			vc.TotalDemand = share
 			vc.Utilization = share / supply
 		}
 	}
-	return moved, raised
 }
 
 // logShapeHold reports a hold that changed a decision. Silent when it did not:
