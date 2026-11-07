@@ -373,8 +373,11 @@ is newer than the view's snapshot.
   it pending). Until then a scale-from-zero wake under the physical limiter
   is not judged (`awaitInFlightRestore` in `wake_tick.go`, before the node
   view is built, outcome `awaiting-in-flight`), a share-claim wake included,
-  for at most `inFlightRestoreWait` (1 minute) from `ExpectRestore`'s time;
-  past it wakes go without the holds, logged once.
+  for at most `inFlightRestoreWait` (1 minute) from when this replica became
+  leader: `scalefromzero.Engine.StartOptimizeLoop`, a leader-only runnable,
+  calls `RestartRestoreClock` before its first tick. Past it wakes go
+  without the holds, logged once, and do not wait again
+  (`inFlightGaveUp`).
   `MarshalInFlight` encodes each entry under the lock. On shutdown the
   publisher writes once more, bounded by 2s (`flushOnShutdown`), so the last
   cycle's ledger reaches the next leader. A restored partial

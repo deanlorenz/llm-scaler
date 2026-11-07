@@ -82,6 +82,7 @@ type InFlightLedger struct {
 type ScaleTargetRef struct {
 	// Kind is constants.DeploymentKind or constants.LeaderWorkerSetKind.
 	Kind string
+	// Name is the scale target's name, in the variant's namespace.
 	Name string
 }
 
@@ -402,7 +403,8 @@ func (l *InFlightLedger) Reset() {
 // MarkRestored, RestorePending reports true, and a decision that builds a
 // node view from the ledger would miss the holds a restart carries. Called
 // once at start, before either engine runs, with the time of the start:
-// how long a wake has waited is measured from it (RestorePendingSince).
+// how long a wake has waited is measured from it (RestorePendingSince), or
+// from a later RestartRestoreClock (when the replica becomes leader).
 func (l *InFlightLedger) ExpectRestore(now time.Time) {
 	if l == nil {
 		return
@@ -410,6 +412,21 @@ func (l *InFlightLedger) ExpectRestore(now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.restorePending, l.restoreExpected = true, now
+}
+
+// RestartRestoreClock moves the time a pending restore is measured from to
+// now: the engines run only while this replica leads, so a standby that
+// waited for the lease measures from when it won it, not from its start.
+// No-op once nothing is pending.
+func (l *InFlightLedger) RestartRestoreClock(now time.Time) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.restorePending {
+		l.restoreExpected = now
+	}
 }
 
 // MarkRestored records that the persisted ledger was read back, or found

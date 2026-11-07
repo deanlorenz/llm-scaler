@@ -397,11 +397,13 @@ Limits:
   least 5 minutes), whatever the saved value says. Holds saved by an earlier
   release do not name their workload, so they count their pods only from
   the first steady-state cycle that decides their model.
-- For up to a minute after a start, wakes that are fitted to nodes wait
-  until the controller has read the holds back. This normally takes
-  milliseconds. The minute counts from the start, not from the first wake.
+- For up to a minute after a controller replica becomes the leader, wakes
+  that are fitted to nodes wait until it has read the holds back. This
+  normally takes milliseconds. The minute counts from when the replica
+  became leader, not from when it started or from the first wake, so a
+  standby that takes over after a long wait still reads the holds first.
   If the holds cannot be read within that minute, wakes go ahead without
-  them, and the controller logs a warning. While the physical limiter
+  them for as long as the replica leads, and the controller logs a warning. While the physical limiter
   bounds the wake, a wake funded by claiming a share transfer waits too,
   although it is not fitted to nodes itself.
 - A wake funded by claiming a share transfer, or checked against a remembered

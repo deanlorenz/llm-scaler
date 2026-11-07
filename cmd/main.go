@@ -833,7 +833,9 @@ func main() {
 	// The two engine loops below start together. The saturation engine reads
 	// the persisted in-flight holds back before its first cycle; until it has,
 	// a scale-from-zero wake fitted to nodes waits, so it cannot take the hole
-	// of a replica ordered before the restart. Set here, before either starts.
+	// of a replica ordered before the restart. Set here, before either starts;
+	// the scale-from-zero loop restarts the wait's clock when it starts, once
+	// this replica leads.
 	allocation.DefaultInFlight.ExpectRestore(time.Now())
 
 	// Register optimization engine loops with the manager. Only start when leader.

@@ -182,10 +182,10 @@ func (e *Engine) debitTick(namespace string, demand map[string]int) {
 }
 
 // inFlightRestoreWait bounds how long wakes wait for the in-flight holds to be
-// read back after a start (awaitInFlightRestore). The steady-state engine
-// reads them before its first cycle, within milliseconds of this engine's
-// first tick; a read that fails is tried again each cycle (every 15 seconds
-// by default). A ledger that cannot be read for this long is given up on
+// read back after this replica becomes leader (awaitInFlightRestore). The
+// steady-state engine reads them before its first cycle, within milliseconds
+// of this engine's first tick; a read that fails is tried again each cycle
+// (every 15 seconds by default). A ledger that cannot be read for this long is given up on
 // for wakes: a parked model kept from waking costs more than the holes the
 // holds would keep, which expire within minutes anyway.
 const inFlightRestoreWait = time.Minute
@@ -197,9 +197,10 @@ const inFlightRestoreWait = time.Minute
 // before the restart -- Unschedulable, or a LeaderWorkerSet group waiting
 // for its workers. A wake the physical limiter does not bound reads no hold
 // and does not wait; one funded by a share claim under it waits too, since
-// the check comes before the claim. Past inFlightRestoreWait from the start (ExpectRestore's time, not
-// the first wake's), wakes go without the holds, logged once. Caller holds
-// wakeMu.
+// the check comes before the claim. Past inFlightRestoreWait from when this
+// replica became leader (StartOptimizeLoop restarts the clock), not from the
+// first wake, wakes go without the holds, logged once, for good. Caller
+// holds wakeMu.
 func (e *Engine) awaitInFlightRestore(ctx context.Context, constraints []*allocation.ResourceConstraints, now time.Time) bool {
 	if e.inFlightGaveUp || !allocation.PhysicalBounds(constraints) {
 		return false

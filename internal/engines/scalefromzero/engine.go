@@ -301,7 +301,13 @@ func NewEngine(client client.Client, recorder record.EventRecorder, ds datastore
 
 // StartOptimizeLoop starts the optimization loop for the scale-from-zero engine.
 // It runs until the context is cancelled.
+//
+// It runs only while this replica leads: the wait for the in-flight holds to
+// be read back (awaitInFlightRestore) is measured from here, before the first
+// tick, so a standby that waited for the lease longer than
+// inFlightRestoreWait still waits for them.
 func (e *Engine) StartOptimizeLoop(ctx context.Context) {
+	allocation.DefaultInFlight.RestartRestoreClock(time.Now())
 	e.executor.Start(ctx)
 }
 
