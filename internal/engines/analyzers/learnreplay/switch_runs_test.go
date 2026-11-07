@@ -159,6 +159,16 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// unit tests hold it (heldBy).
 	slo.SwitchITLLongGapFirstSeen: nil,
 
+	// Issue #511: the slo and throughput analyzers' own trackers take a
+	// model's first rows as one observation, Joined itl.DefaultSteadyFor
+	// before the cycle, not two whose gap reads as an absence. Neither moves
+	// a golden: a replay hands the slo analyzer the engine's view, and the
+	// throughput analyzer too whenever start.ThroughputConfig asks; with no
+	// view the throughput line reads the backdated start only as its keys'
+	// first sight, which is no settle. Their unit tests hold them (heldBy).
+	slo.SwitchITLOwnSettleBackdates:        nil,
+	throughput.SwitchITLOwnSettleBackdates: nil,
+
 	saturation.SwitchPrefillCapacityObserve: nil,
 
 	// #481: the throughput and slo lines take no rows in a rollout, and the
@@ -885,6 +895,16 @@ var heldBy = map[string][]heldTest{
 	slo.SwitchITLLongGapFirstSeen: {
 		{"../slo", "TestSettle_AfterALongGapTheAnalyzerAloneReadsEveryModelAlike"},
 		{"../slo", "TestSettle_AfterALongGapWithTheSwitchOffEvictionOrderStillMatters"},
+	},
+	// Issue #511's backdate on the own trackers: each runs the switch on and
+	// off through Analyze and reads the tracker, and the slo one the prefill
+	// share it feeds.
+	slo.SwitchITLOwnSettleBackdates: {
+		{"../slo", "TestSettle_TheOwnTrackerBackdatesAFirstSighting"},
+		{"../slo", "TestTTFT_TheAnalyzerAloneReadsItsFirstCycleSettled"},
+	},
+	throughput.SwitchITLOwnSettleBackdates: {
+		{"../throughput", "TestITLSettle_TheOwnTrackerBackdatesAFirstSighting"},
 	},
 	// Issue #431's forget of the slo line.
 	slo.SwitchITLForgetReachesTheLine: {

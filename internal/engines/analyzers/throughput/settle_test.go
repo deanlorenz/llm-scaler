@@ -255,6 +255,58 @@ func (r *ownRig) run(n, gapAt int, order func(i int) []string,
 
 func ownFleet(string, int) []domain.ReplicaMetrics { return settleFleet() }
 
+// Issue #511: the analyzer alone takes a model's replicas on its first
+// Analyze, and on its first after a gap past ownSettleTimeout, as long
+// joined: its own tracker holds each settle.Joined itl.DefaultSteadyFor
+// before the cycle, its Ready time first seen then too. Observed at the
+// backdate and again at the cycle, the 2 min gap was past the tracker's
+// absence tolerance at a 15 s interval (1 min), and every replica read
+// settle.Rejoined at the cycle. The line keeps no reading out as a settle
+// either way: its keys' first sight is that cycle too.
+func TestITLSettle_TheOwnTrackerBackdatesAFirstSighting(t *testing.T) {
+	r := newOwnRig(t, nil)
+	require.Less(t, settle.Tolerance(settleCycle), ownSettleBackdate, "premise: the backdate is past the tolerance")
+	held := func(at time.Time) {
+		t.Helper()
+		since := at.Add(-itl.DefaultSteadyFor)
+		for _, rm := range settleFleet() {
+			got, ok := r.a.ownSettle.Replica("ns/m", settlerow.Key(rm))
+			require.True(t, ok, "%s is not held", rm.PodName)
+			assert.Equal(t, settle.Joined, got.Reason, "%s at %v: the first sighting's settle", rm.PodName, at)
+			assert.Equal(t, since, got.Since, "%s at %v: the first sighting's settle began at the cycle, not backdated", rm.PodName, at)
+			assert.Equal(t, since, got.FirstSeen, "%s at %v: first seen", rm.PodName, at)
+			assert.Equal(t, since, got.ReadySeen, "%s at %v: its Ready time first seen", rm.PodName, at)
+			assert.Equal(t, at, got.LastSeen, "%s at %v: last seen", rm.PodName, at)
+		}
+	}
+	var settling []int
+	for i := range 2*settleCycles + 4 {
+		if i == settleCycles {
+			r.now = r.now.Add(2 * time.Hour)
+		}
+		if r.analyze("m", settleFleet())["v1"].Settling > 0 {
+			settling = append(settling, i)
+		}
+		if i == 0 || i == settleCycles {
+			held(r.now)
+		}
+		r.now = r.now.Add(settleCycle)
+	}
+	assert.Empty(t, settling, "the line kept a first sighting's readings out as a settle")
+	assert.Equal(t, int64(0), r.a.ownSettle.Verdicts()[settle.Rejoined], "a replica of a first sighting rejoined")
+
+	// Off, as before: two observations, the gap read as an absence; the
+	// line reads the same.
+	off := newOwnRig(t, map[string]bool{SwitchITLOwnSettleBackdates: false})
+	assert.Zero(t, off.analyze("m", settleFleet())["v1"].Settling, "switch off: the line kept a first sighting's readings out")
+	for _, rm := range settleFleet() {
+		got, ok := off.a.ownSettle.Replica("ns/m", settlerow.Key(rm))
+		require.True(t, ok, "switch off: %s is not held", rm.PodName)
+		assert.Equal(t, settle.Rejoined, got.Reason, "switch off: %s", rm.PodName)
+		assert.Equal(t, off.now, got.Since, "switch off: %s", rm.PodName)
+	}
+}
+
 // Three identical models across a gap past ownSettleTimeout, analyzed in
 // two orders: every model reads alike in both, and none settles. A guard:
 // before the review's round 2 only the first model analyzed after the gap

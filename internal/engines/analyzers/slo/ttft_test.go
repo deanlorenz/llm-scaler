@@ -25,7 +25,10 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/prefill"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 )
 
 var ttftNow = time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
@@ -271,13 +274,34 @@ func TestTTFT_AnalyzeReadsTheRawShare(t *testing.T) {
 	}
 }
 
-// A pod still inside its settle gives no share: the first cycle reads the
-// floor, however lopsided the rows.
+// A pod still inside its settle gives no share: a cycle of pods the engine's
+// tracker first saw on it reads the floor, however lopsided the rows.
 func TestTTFT_AnUnsettledPodGivesNoShare(t *testing.T) {
 	r := newTTFTRig(ttftEstimate(), prefillRows("pre", 12000, 2000, 2000))
+	tr := settle.NewTracker()
+	tr.Observe(utils.GetNamespacedKey("ns", "m"), settlerow.Of(r.in.ReplicaMetrics, map[string]string{"pre": domain.RolePrefill}), r.now)
+	r.a.WithSettleView(tr)
 	r.analyze(t)
 	require.Contains(t, r.a.imbalance, "ns|m|pre")
 	assert.Empty(t, r.a.imbalance["ns|m|pre"].shares)
+}
+
+// Issue #511: the analyzer alone takes the pods of its first cycle as long
+// joined (SwitchITLOwnSettleBackdates), so they give a share on that cycle.
+// With the switch off, as before, its own tracker read them as rejoined at
+// the cycle, and the first cycle read the floor.
+func TestTTFT_TheAnalyzerAloneReadsItsFirstCycleSettled(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		r := newTTFTRig(ttftEstimate(), prefillRows("pre", 12000, 2000, 2000))
+		require.NoError(t, r.a.SetSwitchesForReplay(map[string]bool{SwitchITLOwnSettleBackdates: on}))
+		r.analyze(t)
+		require.Contains(t, r.a.imbalance, "ns|m|pre")
+		if on {
+			assert.NotEmpty(t, r.a.imbalance["ns|m|pre"].shares, "switch on: the first cycle's pods gave no share")
+		} else {
+			assert.Empty(t, r.a.imbalance["ns|m|pre"].shares, "switch off: the first cycle's pods gave a share")
+		}
+	}
 }
 
 // Test 7: routing-bound at f / N_p >= 0.8: the prediction stays, the

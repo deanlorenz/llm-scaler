@@ -112,7 +112,11 @@ The engine holds the analyzer as `sloAnalyzer`, an interface
   tracker does not wait for it: `observeOwnSettle` reads a model last analyzed
   more than `StateTimeout` ago as first-seen, backdated, with its line keys'
   replica traces dropped, whether `EvictStale` ran first, between two models,
-  or not at all (issue #459). That is the settle reading only: the line's
+  or not at all (issue #459). Backdated means one observation, at the cycle,
+  of replicas `settle.Joined` `itl.DefaultSteadyFor` earlier
+  (`settlerow.ObserveOwnSince`, issue #511); two observations that far apart
+  would read the gap as an absence (`settle.Rejoined` at the cycle). That is
+  the settle reading only: the line's
   windows, intercepts and held slope still go when `EvictStale` sweeps them.
   Replay switch
   `slo-itl-own-settle-reads-a-long-gap-as-first-seen`; off, a model

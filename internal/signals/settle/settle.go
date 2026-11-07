@@ -371,6 +371,30 @@ func (t *Tracker) replicaOf(name string, key Key) *replica {
 // (Rejoined). One absent for longer than the forget horizon (forgetAfter:
 // TraceHorizon, or the tolerance if longer) is forgotten.
 func (t *Tracker) Observe(name string, rows []Row, now time.Time) {
+	t.observe(name, rows, now, now)
+}
+
+// ObserveSince is Observe, except that a replica the tracker first sees in
+// rows -- one it does not hold, whose row no restored sighting claims -- is
+// taken as seen since since, not since now: its sighting and its settle
+// (Joined, or Lent for a bridge) begin at since, and so does the first
+// sight of its Ready time and its lend. Only the rows read at now are in its
+// trace and its idle run: nothing was read at since. A replica the tracker
+// already holds is observed as by Observe. A since after now is now.
+//
+// It stands for a tracker that has watched the model since since, however
+// much longer that is than the absence tolerance: observing the same rows
+// at since and again at now would read the gap between the two as an
+// absence, and every replica would settle again at now (Rejoined).
+func (t *Tracker) ObserveSince(name string, rows []Row, since, now time.Time) {
+	if since.After(now) {
+		since = now
+	}
+	t.observe(name, rows, since, now)
+}
+
+// observe is Observe, a replica first seen begun at since.
+func (t *Tracker) observe(name string, rows []Row, since, now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	m := t.models[name]
@@ -387,7 +411,7 @@ func (t *Tracker) Observe(name string, rows []Row, now time.Time) {
 			r = &replica{}
 			m.replicas[row.Key] = r
 			if !t.installRestored(r, name, row) {
-				t.start(r, row, firstReason(row, Joined), now)
+				t.start(r, row, firstReason(row, Joined), since)
 			}
 		case !now.After(r.LastSeen):
 			continue

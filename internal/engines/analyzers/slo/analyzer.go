@@ -126,6 +126,10 @@ type Analyzer struct {
 	// settle.go): on from the constructor; a replay turns it off
 	// (SetSwitchesForReplay).
 	itlLongGapFirstSeen bool
+	// itlOwnBackdate is SwitchITLOwnSettleBackdates (issue #511,
+	// settle.go): on from the constructor; a replay turns it off
+	// (SetSwitchesForReplay).
+	itlOwnBackdate bool
 	// itlForgetReachesLine is SwitchITLForgetReachesTheLine (forget.go): on
 	// from the constructor; a replay turns it off (SetSwitchesForReplay).
 	itlForgetReachesLine bool
@@ -242,6 +246,7 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		itlRestartUnderName:  true,
 		itlIdleOnEvidence:    true,
 		itlLongGapFirstSeen:  true,
+		itlOwnBackdate:       true,
 		itlForgetReachesLine: true,
 		itlOneSidedAtCap:     true,
 		itlTierHysteresis:    true,

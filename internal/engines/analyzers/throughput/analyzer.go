@@ -67,6 +67,9 @@ type ThroughputAnalyzer struct {
 	// changes. On by the constructor.
 	itlReadsSettle, itlWaitsAfterRestart, itlKeepsSettle  bool
 	itlRestartUnderName, itlIdleOnEvidence, itlFiniteOnly bool
+	// itlOwnBackdate is SwitchITLOwnSettleBackdates (issue
+	// #511, settle.go). On by the constructor.
+	itlOwnBackdate bool
 	// itlAdmitsAtCap is the replay switch of learner PR 4b-3 (admission.go):
 	// SwitchITLAdmitsAtSequenceCap. On by the constructor.
 	itlAdmitsAtCap bool
@@ -193,6 +196,7 @@ func NewThroughputAnalyzer() *ThroughputAnalyzer {
 		itlRestartUnderName:   true,
 		itlIdleOnEvidence:     true,
 		itlFiniteOnly:         true,
+		itlOwnBackdate:        true,
 		itlRolloutGuard:       true,
 		itlFilesReports:       true,
 		itlKeepsPresent:       true,

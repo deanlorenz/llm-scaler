@@ -254,7 +254,7 @@ func TestITLLine_AGPSMismatchKeepsTheWindow(t *testing.T) {
 func TestITLLine_TheReplaySwitches(t *testing.T) {
 	require.ElementsMatch(t, append([]string{SwitchITLKeepsWindowOnGPSMismatch, SwitchITLSteadyGate, SwitchITLAdmitsAtSequenceCap,
 		SwitchITLForgetReachesTheLine, SwitchITLRolloutGuard, SwitchITLForgetsOnNewArguments, SwitchITLFilesReports,
-		SwitchITLKeepsPresentVariants, SwitchITLTierHysteresis}, settleSwitches...),
+		SwitchITLKeepsPresentVariants, SwitchITLTierHysteresis, SwitchITLOwnSettleBackdates}, settleSwitches...),
 		ReplaySwitchNames())
 	a := NewThroughputAnalyzer()
 	for name, on := range a.switchFields() {
