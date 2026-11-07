@@ -155,7 +155,7 @@ the report says whether it did.
 | --- | --- | --- | --- |
 | Decode's TTFT rises with step time at about 7 steps | Slope of the decode engine's TTFT on the client's TPOT, per bucket | 5.5 to 9 | 6.36 to 7.79, read by the report's code on all six phases |
 | The hop grows with the prompt | Fit of the hop, ms per 1000 prompt tokens, over the bucket lengths | 0.5 to 1.5 | 1.02 |
-| Bursts cost less than `Ca²` prices | Client p90, C over B, median over the steps | 1.0 to 2.1 | 1.33 off and on. The model said 2.40 then, and says 2.09 at the operating rate since the `Ca²` tail changed (#501) |
+| Bursts cost less than `Ca²` prices | Client p90, C over B, median over the steps | 1.0 to 1.8 | 1.33 off and on, each step 1.14 to 1.80. The model said 2.40 then, and says 2.09 at the operating rate since the `Ca²` tail changed (#501) |
 
 The gate buckets' `Ca²` and a void step are read strictly at the gate: a crossing on a
 void step is no reading, so it stops the run as `no valid crossing`, like a fail. At
@@ -163,9 +163,9 @@ the end, the report gives it as a bound.
 
 **The tail moved after this band was set.** On M2's fleet, with the warm-up's term and
 quiet transfer, C over B now prices 2.09 at p90 and 2.28 at p95 at the operating rate
-(B 229.2 and 254.5 ms, C 479.6 and 580.4 ms), and 1.68 at p90 at 17.6 r/s. So the band's
-top, 2.1, no longer separates the claim from the model at the operating rate: **a
-decision below.** Knees, onsets, ladders and hours do not move: `C`'s prefill onset stays
+(B 229.2 and 254.5 ms, C 479.6 and 580.4 ms), and 1.68 at p90 at 17.6 r/s. So the old top,
+2.1, no longer separated the claim from the model at the operating rate. The top is now
+1.8, M2's highest step, set before the freeze. Knees, onsets, ladders and hours do not move: `C`'s prefill onset stays
 48.0 r/s.
 
 A slope out of band means the term's form is wrong, not its coefficient. A hop flat in
@@ -268,9 +268,8 @@ stays, as it did after M2.
    none at 3. *Recommend:* keep it and read the flag, or cut `H-pods`. A second `busy`
    stage at `N_p` 3 might teach it, for about 3 GPU-hours. That is not checked, and not
    in the spec.
-3. **Does the burst band stay 1.0 to 2.1?** It was set when the model said 2.40. A
-   ratio just under 2.1 now agrees with the model rather than showing it overprices.
-   *Recommend:* lower the top to 1.8, which M2 read as its highest step, before the
-   freeze; it has to be set before results.
+3. **Does the burst band stay 1.0 to 2.1?** *Decided:* no, the top is 1.8, M2's highest
+   step. It was set when the model said 2.40, and a ratio just under 2.1 now agrees with
+   the model rather than showing it overprices.
 4. **Is 1.2 the right floor margin?** *Recommend:* yes, as proposed. It did not bind on
    M2's warm-up, and it only needs to keep a target off the flat part of the curve.
