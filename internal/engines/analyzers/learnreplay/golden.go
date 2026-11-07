@@ -688,12 +688,9 @@ func requiredPaths() []string {
 }
 
 // requiredSaturationPaths is saturation's paths the goldens must keep
-// reaching: all but the sibling yield pricing (PathMuYieldSibling), which the
-// cap keeps from acting while SwitchMuYieldCappedAtMeasurement is on; the
-// cap refusing it (PathMuYieldCapped) is required instead.
-func requiredSaturationPaths() []string {
-	return slices.DeleteFunc(saturation.PathNames(), func(p string) bool { return p == saturation.PathMuYieldSibling })
-}
+// reaching (saturation.RequiredPathNames): all but the sibling yield pricing,
+// which the cap keeps from acting; the cap refusing it is required instead.
+func requiredSaturationPaths() []string { return saturation.RequiredPathNames() }
 
 // requiredThroughputPaths is the throughput line's fits the goldens must
 // keep reaching: full, pinned and held (learner PR 4b-1; the in-process
