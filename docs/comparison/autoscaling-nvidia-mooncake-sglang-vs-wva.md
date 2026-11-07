@@ -173,7 +173,7 @@ Two consequences. First, a **~2-minute** provisioning latency is the real-world 
 **the scaling manager (baseline)**
 - Repo: https://github.com/ev-shindin/llm-scaling-manager · releases (v0.10.0): https://github.com/ev-shindin/llm-scaling-manager/releases
 - What it does and how mature each part is: [why.md](../why.md); measured runs and known limits: [KEDA alone](keda-alone.md#what-was-measured-and-what-failed)
-- KEDA integration: [docs/proposals/wva-external-scaler-proposal.md](../proposals/wva-external-scaler-proposal.md)
+- How it plugs into KEDA: [how the scaling manager fits together](../concepts/architecture.md)
 
 **NVIDIA Dynamo Planner**
 - Autoscaling overview (HPA/KEDA/Planner + scaling adapter): https://docs.nvidia.com/dynamo/kubernetes-deployment/operate/autoscaling.md

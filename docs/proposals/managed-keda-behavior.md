@@ -1,9 +1,8 @@
 # A release the swap can survive
 
 **Status:** design. Nothing here is built. It completes one clause of
-[WVA as a KEDA external scaler](wva-keda-external-scaler.md) §6 — the
-`wvaOwnership` flag — and introduces no configuration surface that proposal has
-not already reserved.
+the external-scaler design — the `wvaOwnership` flag — and introduces no new
+configuration surface.
 
 **Read §2 before §3.** The release latency this proposal shortens is measured.
 The *swap* it is motivated by has never been observed firing, and the staging in

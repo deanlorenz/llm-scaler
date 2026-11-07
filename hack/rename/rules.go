@@ -176,11 +176,6 @@ func RulesFor(t Targets, metrics []string) []Rule {
 		kept("keep-fma-image", "image", `ghcr\.io/ev-shindin/(?:dual-pods-controller|fma-launcher)|ev-shindin/llm-d-fast-model-actuation|ev-shindin/vllm-conf`, "another project's image or fork"),
 		kept("keep-old-repo-name", "repo-link", `github\.com/ev-shindin/llm-scaler/[^\s)\]"'`+"`"+`>]*`, "a numbered link on the repository's earlier name"),
 
-		// A market comparison: its WVA is the other product, by the repository it
-		// links and beside ig-wva, not this project under an earlier name.
-		{Name: "keep-positioning-doc", Class: "external", Pattern: `\bWVA\b`, Action: Keep,
-			Paths: []string{"docs/proposals/capacity-planner-positioning.md"}, Why: "names the other product"},
-
 		{Name: "keep-owners", Class: "person", Pattern: `ev-shindin`, Action: Keep, Paths: []string{"OWNERS"}, Why: "a GitHub login"},
 
 		// Links that record something on the old repository: the new one does
