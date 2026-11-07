@@ -29,6 +29,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/fleet"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
@@ -1015,8 +1016,7 @@ func readFleet(input domain.AnalyzerInput) fleetReading {
 	}
 	// Request-rate weighted, so a replica serving most of the traffic decides
 	// the shape; equal weights when no replica reports a rate.
-	var in, out, squared, hit, weight float64
-	spreadRead := true
+	var in, out, hit, weight float64
 	for _, rm := range input.ReplicaMetrics {
 		if !rm.Ready || rm.FromWarmPool {
 			continue
@@ -1030,34 +1030,37 @@ func readFleet(input domain.AnalyzerInput) fleetReading {
 			f.requestRate += rm.RequestRate
 		}
 	}
-	for _, rm := range input.ReplicaMetrics {
-		if !rm.Ready || rm.FromWarmPool || !isGenerating(roles[rm.VariantName]) {
-			continue
-		}
-		w := 1.0
+	weightOf := func(rm domain.ReplicaMetrics) float64 {
 		if f.requestRate > 0 {
-			w = rm.RequestRate
+			return rm.RequestRate
 		}
-		// A row with any non-finite shape figure is no reading of the shape: one
-		// NaN summed in would turn the whole fleet's shape into NaN.
-		if !(w > 0) || !whatif.Finite(w) || !whatif.Finite(rm.AvgOutputTokens) || !(rm.AvgOutputTokens > 0) ||
-			!whatif.Finite(rm.AvgInputTokens) || !whatif.Finite(rm.PrefixCacheHitRate) {
+		return 1
+	}
+	// counted is a row the shape counts. A row with any non-finite shape
+	// figure is no reading of the shape: one NaN summed in would turn the
+	// whole fleet's shape into NaN.
+	counted := func(rm domain.ReplicaMetrics) bool {
+		w := weightOf(rm)
+		return rm.Ready && !rm.FromWarmPool && isGenerating(roles[rm.VariantName]) &&
+			w > 0 && whatif.Finite(w) && whatif.Finite(rm.AvgOutputTokens) && rm.AvgOutputTokens > 0 &&
+			whatif.Finite(rm.AvgInputTokens) && whatif.Finite(rm.PrefixCacheHitRate)
+	}
+	for _, rm := range input.ReplicaMetrics {
+		if !counted(rm) {
 			continue
 		}
+		w := weightOf(rm)
 		in += w * rm.AvgInputTokens
 		out += w * rm.AvgOutputTokens
 		hit += w * rm.PrefixCacheHitRate
 		weight += w
-		if rm.AvgOutputTokensSquaredKnown && rm.AvgOutputTokensSquared > 0 {
-			squared += w * rm.AvgOutputTokensSquared
-		} else {
-			spreadRead = false
-		}
 	}
 	if weight > 0 {
 		f.shape = shape.New(in/weight, out/weight, hit/weight)
-		if spreadRead {
-			f.outputDispersion = shape.Dispersion(out/weight, squared/weight)
+		// Over the same rows with the same weights (fleet.OutputDispersion):
+		// 0, no reading, unless every one of them read the bound.
+		if d, ok := fleet.OutputDispersion(input.ReplicaMetrics, counted, fleet.WeightedBy(weightOf)); ok {
+			f.outputDispersion = d
 		}
 	}
 	return f

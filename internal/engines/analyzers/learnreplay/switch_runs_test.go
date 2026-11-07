@@ -138,6 +138,44 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// line is priced. Its unit tests hold it
 	// (heldBy); the CLI, which has no switch, moves its own goldens.
 	slo.SwitchTTFTDecodeTerm: nil,
+	// #495's one slow pod (mu_slow_pod.go), four switches, measured each
+	// alone against all off:
+	//
+	//   - SwitchMuWeighsFleet: a reading the served bound refused is now a
+	//     sample (mu-paths: a window holds 6 samples, was 5), and samples
+	//     whose readers sat under the tolerance of the unread replicas count
+	//     them (start-seed-restart-2: a sample of 0.304 against 0.351, so the
+	//     priced mu falls 5.7 % on 14 cycles; ttft-staircase-b-off: 15.06
+	//     against 15.62 on 12 rows). Demand moves through the floor: its
+	//     tokens rise as mu falls, so b-off's decode demand is up on 4
+	//     cycles (to +7.7 %), but its trust blend (flooredDemand) reads
+	//     lambda x P / mu against the resident KV, which a lower mu raises,
+	//     and swaps out more of the queues' residency charge, so demand is
+	//     down on 4 others (to -4.2 %) and start-seed-restart-2's total
+	//     falls on 14 cycles (21:22:34: 1527 to 699) with occupancy's
+	//     per-variant demand unchanged. The queue cap (localQueueBacklog)
+	//     is not the term; TestMuSlowPod_TheFloorTrustIsHowALowerMuLowersDemand
+	//     pins it.
+	//   - SwitchMuYieldCappedAtMeasurement: a sibling yield never prices
+	//     above the measurement (mu-paths: variant-02 at 09:01 priced at its
+	//     measured 8.08 where it yielded to its siblings' 12.12, on 44 rows).
+	//   - SwitchMuUnreadAtTarget and SwitchMuMinorityFigureExpires move
+	//     nothing: no recording has an unread replica under the KV line
+	//     beside readers under the tolerance of it, nor a minority's figure
+	//     stale past lowHoldFor with no line. The unit tests and the
+	//     closed-loop probe hold them (heldBy).
+	saturation.SwitchMuWeighsFleet: {
+		"mu-paths/learned-state.csv", "mu-paths/variant-capacities.csv",
+		"start-seed-restart-2/composite-results.csv", "start-seed-restart-2/learned-state.csv",
+		"start-seed-restart-2/results.csv", "start-seed-restart-2/variant-capacities.csv",
+		"ttft-staircase-b-off/composite-results.csv", "ttft-staircase-b-off/composite-roles.csv",
+		"ttft-staircase-b-off/results.csv", "ttft-staircase-b-off/variant-capacities.csv",
+	},
+	saturation.SwitchMuYieldCappedAtMeasurement: {
+		"mu-paths/variant-capacities.csv",
+	},
+	saturation.SwitchMuUnreadAtTarget:        nil,
+	saturation.SwitchMuMinorityFigureExpires: nil,
 
 	// Which rows the transfer is read from. It moves no golden: no committed
 	// recording prices a line (the decode term's reason, above). Its unit test
@@ -149,6 +187,31 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// output histogram, at D 1.000. Its unit test holds it (heldBy); the CLI,
 	// which has no switch, moves its own goldens.
 	slo.SwitchKVPerRequestOutputDispersion: nil,
+
+	// #433, #276 on the throughput analyzer: KVreq with the spread of output
+	// lengths, in its supply, local demand and GPS check. It moves the two
+	// throughput-sweep recordings, the only ones that run the throughput
+	// analyzer on rows whose output histogram spreads: the variant's
+	// per-replica supply falls (KVreq rises), and the composite's release
+	// bound and decode frames move with it. Measured alone against all off,
+	// 8 outputs: throughput-sweep's variant-capacities (1 of 193 rows,
+	// PerReplicaCapacity -2.14%) and composite-release (1 of 27, a decode
+	// frame's demand +2.18%); throughput-sweep-restart's variant-capacities
+	// (10 of 649), composite-release (1 of 14, ReleaseBound -1.52%) and
+	// four composite outputs (9 rows each, a few parts in 10 million). The
+	// spread is held at 1 for the shape-change window after the restart
+	// recording's shape change (22:16:50 to 22:22:36), so those 13 cycles
+	// price as before. With this PR's other switches on, as committed, it
+	// moves four more of throughput-sweep (composite-results,
+	// composite-roles, composite-variants, warm-pool-pressure) in their last
+	// bits only (TotalDemand 82477.83086446974 -> ...977): float
+	// reassociation on the cycles those switches already moved.
+	throughput.SwitchKVPerRequestOutputDispersion: {
+		"throughput-sweep-restart/composite-release.csv", "throughput-sweep-restart/composite-results.csv",
+		"throughput-sweep-restart/composite-roles.csv", "throughput-sweep-restart/composite-variants.csv",
+		"throughput-sweep-restart/variant-capacities.csv", "throughput-sweep-restart/warm-pool-pressure.csv",
+		"throughput-sweep/composite-release.csv", "throughput-sweep/variant-capacities.csv",
+	},
 
 	// Issue #459: on the slo analyzer's own settle tracker, a model last
 	// analyzed more than the state timeout ago is first-seen whether or not
@@ -771,6 +834,24 @@ func withSeams(more, rows map[string][]string) map[string][]string {
 // test that holds the same on either side is a control, not a hold, and is
 // not listed here.
 var heldBy = map[string][]heldTest{
+	// #495's one slow pod: each test runs its switch on and off and asserts
+	// both (the ledger cases fail off, as on the parent; the credit and the
+	// expiry move the sample, the expiry and the probe's fleet).
+	saturation.SwitchMuWeighsFleet: {
+		{"../saturation", "TestMuSlowPod_TheClearedLedgerCasesFailWithTheirSwitchOff"},
+	},
+	saturation.SwitchMuYieldCappedAtMeasurement: {
+		{"../saturation", "TestMuSlowPod_TheClearedLedgerCasesFailWithTheirSwitchOff"},
+		{"../saturation", "TestMuSlowPod_TheYieldNeverPricesAboveTheMeasurement"},
+	},
+	saturation.SwitchMuUnreadAtTarget: {
+		{"../saturation", "TestMuSlowPod_TheCreditReachesTheSample"},
+		{"../saturation", "TestClosedLoopProbe_ASlowReplicaInsideTheServedBoundStaysUnderTheBound"},
+	},
+	saturation.SwitchMuMinorityFigureExpires: {
+		{"../saturation", "TestMuSlowPod_AMinorityFigureExpiresOnlyPastTheHold"},
+		{"../saturation", "TestMuSlowPod_OneReplicasFigureExpiresAfterTheHold"},
+	},
 	// Runs the switch on and off and asserts both.
 	slo.SwitchTTFTQuietTransfer: {{"../slo", "TestTTFT_TheQuietTransferSwitch"}, {"../slo", "TestTTFT_TheHeldTransferAgesOut"}},
 	// #276 on the slo line: it runs the switch on and off through Analyze and
@@ -1229,6 +1310,14 @@ var switchBase = withDigests(staircaseBase, map[string]string{
 	// S1's outputs (slo.SwitchTTFTPrice), at main 59772fce2.
 	"ols-sweep-slo/slo-published.csv":         "24b0954e3b5811850a2fcc460cf46b7790d478081cb9bee49db1e38847bb3446",
 	"ols-sweep-slo-restart/slo-published.csv": "e9b48abe22e4d484e861290c5f417edb5f28b652ceeb21c89d8aaeb2dd516008",
+
+	// #495's slow-pod outputs not named above, at main 2f02cdbbe, the same
+	// bytes as the all-off replay.
+	"start-seed-restart-2/composite-results.csv":  "f480bd7e4261f38c4bdeef64fb03b0162dd85c42c56b00a4d3bc51b014f13247",
+	"start-seed-restart-2/results.csv":            "fb1768ede3cb1665c71f5574054132c4e7cbe1086833cfbaa10bff676203bfe0",
+	"start-seed-restart-2/variant-capacities.csv": "adaec2e4376b0aa6b6b769a71cf3b01d1085dbe72b90ab3718e6bb0a345d33d0",
+	"ttft-staircase-b-off/composite-roles.csv":    "24e843f4e3662d587f5b0f6e7d7411562399800eab0a37387b0281c4c8e7bf36",
+	"ttft-staircase-b-off/variant-capacities.csv": "686fe4129bda89bb1edd369d15400443b36897fce34047acecda2059d80bd027",
 
 	// The start-seed goldens have no base commit: each digest is the output
 	// replayed with every switch of replaySwitches off, at 59772fce2.

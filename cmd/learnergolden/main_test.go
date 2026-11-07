@@ -183,7 +183,7 @@ func TestRun_AddCheckUpdate(t *testing.T) {
 	rep, err := learnreplay.Replay(context.Background(), raw, learnreplay.Options{Mode: learnreplay.Normal})
 	require.NoError(t, err)
 	var unrun []string
-	for _, p := range saturation.PathNames() {
+	for _, p := range saturation.RequiredPathNames() {
 		if rep.Paths[p] == 0 {
 			unrun = append(unrun, p)
 		}

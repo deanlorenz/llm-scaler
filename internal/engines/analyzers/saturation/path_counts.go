@@ -1,6 +1,7 @@
 package saturation
 
 import (
+	"slices"
 	"sync/atomic"
 )
 
@@ -24,8 +25,15 @@ const PathMuSampleWritten = "mu-sample-written"
 const PathMuYieldServed = "mu-yield-served"
 
 // PathMuYieldSibling counts cycles a measured mu gave way to what its full
-// siblings serve (siblingYield).
+// siblings serve (siblingYield). With SwitchMuYieldCappedAtMeasurement on no
+// yield prices, so no run reaches it, and RequiredPathNames leaves it out:
+// PathMuYieldCapped is the path that acts instead.
 const PathMuYieldSibling = "mu-yield-sibling"
+
+// PathMuYieldCapped counts cycles the cap refused a sibling yield: the
+// measurement sat under the tolerance of its full siblings, and the yield
+// would have priced above it (yieldCapped).
+const PathMuYieldCapped = "mu-yield-capped"
 
 // PathMuYieldStale counts cycles a stale measured mu gave way to the derived
 // one.
@@ -74,6 +82,7 @@ const (
 	pathMuWritten
 	pathYieldServed
 	pathYieldSibling
+	pathYieldCapped
 	pathYieldStale
 	pathITLOLS
 	pathITLPinned
@@ -91,6 +100,7 @@ var pathNames = [numPaths]string{
 	pathMuWritten:    PathMuSampleWritten,
 	pathYieldServed:  PathMuYieldServed,
 	pathYieldSibling: PathMuYieldSibling,
+	pathYieldCapped:  PathMuYieldCapped,
 	pathYieldStale:   PathMuYieldStale,
 	pathITLOLS:       PathITLOLS,
 	pathITLPinned:    PathITLPinned,
@@ -104,6 +114,16 @@ var pathNames = [numPaths]string{
 
 // PathNames is every per-path counter PathCounts reports, in order.
 func PathNames() []string { return append([]string(nil), pathNames[:]...) }
+
+// RequiredPathNames is the paths a run with every replay switch at its
+// constructor default can reach, in order: PathNames without
+// PathMuYieldSibling, which the yield's cap (SwitchMuYieldCappedAtMeasurement)
+// keeps from acting, so PathMuYieldCapped stands for the yield instead. The
+// one list the golden check (learnreplay), the recorded runs that feed it
+// (steadystate) and the golden command's tests require.
+func RequiredPathNames() []string {
+	return slices.DeleteFunc(PathNames(), func(p string) bool { return p == PathMuYieldSibling })
+}
 
 // pathCounters is the analyzer's per-path counts. Atomic, so a path counts
 // without taking a.mu.

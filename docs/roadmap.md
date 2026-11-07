@@ -41,10 +41,6 @@ state. The gaps themselves are summarized in [known gaps](why.md#known-gaps).
   token since
   [#274](https://github.com/ev-shindin/llm-scaling-manager/issues/274)), mixed
   prefill and decode pods ([#275](https://github.com/ev-shindin/llm-scaling-manager/issues/275)),
-  output length in the throughput and slo analyzers
-  ([#433](https://github.com/ev-shindin/llm-scaling-manager/issues/433); the
-  saturation and slo analyzers price the spread of output lengths since
-  [#276](https://github.com/ev-shindin/llm-scaling-manager/issues/276)),
   prefix-cache hits in the throughput and slo analyzers (the saturation
   analyzer measures the KV a running request holds since
   [#277](https://github.com/ev-shindin/llm-scaling-manager/issues/277)),
