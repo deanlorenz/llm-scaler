@@ -68,6 +68,30 @@ func TestCollectModelArrivalRate_RefreshErrorCountedPerCall(t *testing.T) {
 	assert.Equal(t, 2.0, errorsOfType(t, registry, constants.QueryTypeArrivalRate))
 }
 
+// The shape the Prometheus source returns when the arrival query, the only
+// query in its refresh, fails: the failed result and an error, since no query
+// succeeded. The first model counts the failed refresh; the result is
+// memoized, so the second model reads it from the memo, sends nothing, and
+// does not count it again.
+func TestCollectModelArrivalRate_FailedRefreshWithResultsCountedOnce(t *testing.T) {
+	registry := promclient.NewRegistry()
+	require.NoError(t, metrics.InitMetrics(registry))
+	refreshes := 0
+	src := &mockMetricsSource{refreshFunc: func(context.Context, source.RefreshSpec) (map[string]*source.MetricResult, error) {
+		refreshes++
+		return map[string]*source.MetricResult{
+			registration.QueryModelArrivalRate: {Error: errors.New("query timed out")},
+		}, errors.New("all 1 Prometheus queries failed: query timed out")
+	}}
+	c := NewReplicaMetricsCollector(src, nil, nil, nil, nil)
+	c.BeginCycle()
+	defer c.EndCycle()
+	assert.Zero(t, c.CollectModelArrivalRate(context.Background(), "model-a", "ns"))
+	assert.Zero(t, c.CollectModelArrivalRate(context.Background(), "model-b", "ns"))
+	assert.Equal(t, 1, refreshes, "the second model reads the memo")
+	assert.Equal(t, 1.0, errorsOfType(t, registry, constants.QueryTypeArrivalRate))
+}
+
 // arrivalSeriesLogged runs CollectModelArrivalRate for model-a and returns
 // the rate and the series count its debug line reports.
 func arrivalSeriesLogged(t *testing.T, c *ReplicaMetricsCollector) (float64, float64) {
