@@ -2,8 +2,8 @@ package saturation
 
 import (
 	"fmt"
+	"math"
 	"runtime"
-	"testing"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/internal/learnertest"
@@ -11,18 +11,28 @@ import (
 
 // The closed-loop probe at the measured range of a replica's start
 // (analyzer-learner.md, PR 5 design: "the closed-loop probe runs C for true
-// starts of 15 s and 463 s"), as liveness property cases: the load step, the
-// controller restart before a step, the restored snapshot through it, and
-// the two slow-pod cases, each at 15 s (a snapshot restore), 90 s (the
-// simulator's default) and 463 s (a cold JIT cache). Every row reports the
-// true start as its measured one, so the start learner prices the truth.
+// starts of 15 s and 463 s"), as liveness property cases: the load step, a
+// decode step with no restart, the controller restart before that step, the
+// restored snapshot through it, and the two slow-pod cases, each at 15 s (a
+// snapshot restore), 90 s (the simulator's default) and 463 s (a cold JIT
+// cache). Every row reports the true start as its measured one.
 //
-// Each must settle within tolerance of need by its horizon, and sit below
-// need no longer than underBound: the time the default case allows, with its
-// start replaced by the case's. A case that fails is a ledger row
-// (testdata/properties/known-failures.yaml), not a wider bound.
+// Each case must, in this order:
 //
-// The probe draws nothing from its seed, so each case runs on one.
+//   - publish the true start: the start learner's figure
+//     (AnalyzerResult.RoleStartSeconds) within a second of S on the last
+//     cycle, else kindBiased. This is what makes the case about its start:
+//     without it a run that ignored the start could fail the same way;
+//   - never order more than peakCeiling, and end within tolerance of need by
+//     its horizon, else kindOverPriced;
+//   - end no more than a replica under need, and sit below need no longer
+//     than underBound, else kindStale;
+//   - for the restored snapshot, sit below need exactly as long as the same
+//     step with no restart, else kindMoved.
+//
+// A case that fails is a ledger row (testdata/properties/known-failures.yaml)
+// with the kind it fails with, not a wider bound. The probe draws nothing from
+// its seed, so each case runs on one.
 
 // probeStarts is the measured range of a replica's start (docs/reference/
 // start-time.md): 15 s a snapshot restore, 90 s the simulator's default,
@@ -37,19 +47,18 @@ func underBound(start time.Duration) time.Duration {
 	return learnertest.UnderFor - probeStart + start
 }
 
-// verdictWithin is verdict with the mid-run bound at under in place of the
-// default start's.
-func (r probeResult) verdictWithin(under time.Duration) string {
-	end := r.fleet
-	end.UnderFor = 0
-	if v := end.Verdict(); v != "" {
-		return v
-	}
-	if r.underFor > under {
-		return fmt.Sprintf("under-ordered mid-run: below need for %s, over the %s a start and a settle take", r.underFor, under)
-	}
-	return ""
-}
+// peakCeilingFactor bounds the fleet at its largest: half again over need,
+// plus a replica of rounding. A step may order over need while it drains what
+// queued during the start, but the fleet the 15 s cases reach (at most 22
+// for a need of 17, 1.29x) shows a start-aware order needs no more. It is a
+// declared ceiling, not derived from the floor's arithmetic.
+const peakCeilingFactor = 1.5
+
+// peakCeiling is the most replicas a case may order for need.
+func peakCeiling(need int) float64 { return peakCeilingFactor*float64(need) + 1 }
+
+// overBound is learnertest.Result.Verdict's: the most a fleet may end at.
+func overBound(need int) float64 { return float64(need)*(1+learnertest.OverTolerance) + 1 }
 
 // traceSummary is a fleet trace as runs: "2 from 0s, 3 from 2m0s, ...".
 func traceSummary(trace []int) string {
@@ -81,6 +90,7 @@ func startProbes() []startProbe {
 			name: "step", pods: []float64{1, 1}, addedMu: 1, meanMu: 1,
 			lambda: stepTo(1.2, 6, 2*time.Minute), horizon: 40 * time.Minute,
 		}},
+		{name: "decode-step", learner: "floor", pc: restartStepCase(0, false, 0)},
 		{name: "restart-before-step", learner: "floor", pc: restartStepCase(15*time.Minute, false, 0)},
 		{name: "restored-snapshot", learner: "floor", pc: restartStepCase(15*time.Minute, true, 0), sameAsUnrestarted: true},
 		{name: "slow-pod-030", learner: "mu", pc: slowReplicaCase(0.3)},
@@ -111,10 +121,19 @@ func checkStartProbe(sp startProbe, start time.Duration) func(uint64) error {
 		if err != nil {
 			return err
 		}
-		summary := fmt.Sprintf("start %s: need %d, final %d, peak %d, under need for %s (bound %s); fleet %s",
-			start, r.need, r.final, r.peak, r.underFor, underBound(start), traceSummary(r.trace))
-		if v := r.verdictWithin(underBound(start)); v != "" {
-			return violation(kindStale, "%s; %s", v, summary)
+		summary := fmt.Sprintf("start %s (published %.1f s): need %d, final %d (bound %.1f), peak %d (ceiling %.1f), under need for %s (bound %s); fleet %s",
+			start, r.startSeconds, r.need, r.final, overBound(r.need), r.peak, peakCeiling(r.need), r.underFor, underBound(start), traceSummary(r.trace))
+		if math.Abs(r.startSeconds-start.Seconds()) > 1 {
+			return violation(kindBiased, "the start learner publishes %.1f s against a true start of %s; %s", r.startSeconds, start, summary)
+		}
+		if float64(r.peak) > peakCeiling(r.need) {
+			return violation(kindOverPriced, "peak %d over the ceiling %.1f; %s", r.peak, peakCeiling(r.need), summary)
+		}
+		if float64(r.final) > overBound(r.need) {
+			return violation(kindOverPriced, "over-ordered at the horizon: %d against %.1f; %s", r.final, overBound(r.need), summary)
+		}
+		if r.final < r.need-1 || r.underFor > underBound(start) {
+			return violation(kindStale, "under-ordered: final %d, under need for %s; %s", r.final, r.underFor, summary)
 		}
 		if sp.sameAsUnrestarted {
 			control := pc
@@ -148,10 +167,9 @@ func tryProbe(pc probeCase) (r probeResult, err error) {
 	return r, nil
 }
 
-// probeT is the testing.TB runProbe needs, recording a failure instead of
-// failing a test: FailNow ends the probe's goroutine.
+// probeT is the probeTB a property case runs the probe with: it records a
+// failure instead of failing a test, and FailNow ends the probe's goroutine.
 type probeT struct {
-	testing.TB
 	failed bool
 	msg    string
 }

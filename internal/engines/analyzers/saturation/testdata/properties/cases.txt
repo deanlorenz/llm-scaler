@@ -26,7 +26,7 @@ edges/floor/backlog-grew
 edges/floor/growth-band
 edges/floor/growth-band-nondefault
 edges/floor/standing-queue-cap
-edges/floor/standing-queue-cap-start
+edges/floor/standing-queue-cap-start-over-drain
 edges/floor/trust-blend
 edges/floor/trust-blend-nondefault
 edges/idle/gap-1-min
@@ -125,6 +125,9 @@ known-truth/mu/output-spread
 known-truth/shared-line/borrowed-is-the-lenders
 known-truth/slo-itl/line-at-kprice
 liveness/borrowed-k2/expires-to-own
+liveness/floor/closed-loop-decode-step-start-15s
+liveness/floor/closed-loop-decode-step-start-463s
+liveness/floor/closed-loop-decode-step-start-90s
 liveness/floor/closed-loop-load-step-start-15s
 liveness/floor/closed-loop-load-step-start-463s
 liveness/floor/closed-loop-load-step-start-90s

@@ -170,8 +170,8 @@ func edgeCases() []propCase {
 			func(seed uint64) error { return checkGrowth(growth, 5, 0.2) }),
 		edgeCase("floor", "standing-queue-cap", tunedDefault, nil,
 			edge3("a queue counted whole at requests over what its replica drains in the 60 s drain time", probeStandingQueue(30, 60), -1, 0, 1, [3]bool{true, true, false})),
-		edgeCase("floor", "standing-queue-cap-start", tunedDefault, nil,
-			edge3("a queue counted whole at requests over what its replica drains in the 70 s default start", probeStandingQueue(DefaultReplicaStartSeconds, 70), -1, 0, 1, [3]bool{true, true, false})),
+		edgeCase("floor", "standing-queue-cap-start-over-drain", tunedDefault, nil,
+			edge3("a queue counted whole at requests over what its replica drains in a 70 s start over the drain time", probeStandingQueue(DefaultReplicaStartSeconds, 70), -1, 0, 1, [3]bool{true, true, false})),
 		// Idle room and the decode memory.
 		edgeCase("idle", "settled-2-min", tunedDefault, nil, edge3("idle room settled after s", probeIdleSettled, 105, 120, 135, [3]bool{false, true, true})),
 		edgeCase("idle", "gap-1-min", tunedDefault, nil, edge3("an idle run survives a gap of s", probeIdleGap, 45, 60, 75, [3]bool{true, true, false})),
@@ -900,7 +900,10 @@ func probeK2Eviction(retention time.Duration, set bool) probe {
 // floor takes at start: its whole queue is backlog up to the cap, and the cap
 // past it (localQueueBacklog). Under BacklogDrainSeconds the 60 s drain time
 // binds; over it the start does (DrainHorizon). horizon is literal, so a
-// threshold moved by a second fails. Held at the function, not through
+// threshold moved by a second fails. These hold the two functions, not
+// the floor's wiring: which start applyThroughputFloor passes them is not
+// tested here, and dropping the start from its DrainHorizon call passes
+// both cases. Held at the functions, not through
 // Analyze: on the drain-bound case's fleet (checkFloorDrainBound) another
 // bound holds the order under the cap's, flat at 4.12 replicas for a queue
 // of 69 to 300 at lambda 2.5, so the order does not show which side of the

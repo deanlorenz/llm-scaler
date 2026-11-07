@@ -821,7 +821,7 @@ not cover a key.
 | k2 | queue threshold; joined 1 min; `rateFraction` of mu and of k2; `maxRise` at 1 min back; window 10; episode gap 24 h; eviction 7 d (`edges/k2/eviction-7d`, `eviction-nondefault`); the key boundaries |
 | borrowed k2 | 3 % KV; 30 min hold; 6 h relaxation; 20 % re-arm |
 | mu | half of served; `minMeasuredOfDerived`; 2 min confirm; `maxTokensOverCompletions`; `siblingMuTolerance`; the sibling yield's "full cache" line; the siblings' lower median's 50 % mass point; 2x stale agreement; `freshFor` / `lowHoldFor`; latch `maxRatio` / `returnRatio` |
-| floor | the trust blend between `floorTrust.lagFraction` (0.5) and `floorTrust.trustFraction` (0.8); growth band max(`backlogGrowth.minRequests` (2), `backlogGrowth.fraction` (0.10) of the backlog) over 1 min; the standing-queue cap (`edges/floor/standing-queue-cap`, `standing-queue-cap-start`) |
+| floor | the trust blend between `floorTrust.lagFraction` (0.5) and `floorTrust.trustFraction` (0.8); growth band max(`backlogGrowth.minRequests` (2), `backlogGrowth.fraction` (0.10) of the backlog) over 1 min; the standing-queue cap (`edges/floor/standing-queue-cap`, and `standing-queue-cap-start-over-drain` for `floor.DrainHorizon` taking a start over the drain time; the start `applyThroughputFloor` passes is not held) |
 | shape, idle, decode memory | shape tolerance band and 5 min hold; idle 2 min with 1 min gap; the 0.30 idle line (`loadImbalance.idleKvUsage`, saturation's idle test: `D/roles.go:123`, `D/idle_room.go:88`); `loadImbalance.idleAfterReady`; decode memory 1 min |
 | start time | 3x outlier, 3 confirmations, 0–3600 s (`collector.TestPodStartSecondsCeilingEdge`), α 0.3 |
 | share (#14, #15) | step spread 0.25; p90 at ≥ 3 releases (listed for later; see 2.7) |
@@ -2451,9 +2451,13 @@ at V(3) and `restored: true` until its first admitted sample after a restart
 `default`, `seed` and `measured` (A).
 The closed-loop probe runs C for true starts of 15 s and 463 s (the
 `liveness/*/closed-loop-*-start-{15,90,463}s` property cases,
-`closed_loop_probe_starts_test.go`): every case passes at 15 s and 90 s,
-and at 463 s the decode load step overshoots and is still over need at
-the horizon, two ledger rows owned by issue #520. It runs E through
+`closed_loop_probe_starts_test.go`), each held to the true start
+published, a peak ceiling of 1.5x need plus one, and need at the horizon.
+At 15 s every case passes. At 90 s the decode step, with or without the
+snapshot, overshoots to 31 for a need of 17 and recovers within 40 min.
+At 463 s both steps overshoot (16 for 9, 29-30 for 17) and the decode
+step is still over need at the horizon, with or without a restart. The
+six failing cases are ledger rows owned by issue #520. It runs E through
 a restart, and the PR pastes both.
 
 #### Persistence and back-compat

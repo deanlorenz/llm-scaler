@@ -97,7 +97,7 @@ func probeITL(k float64) float64 { return 0.119 + 0.6*k }
 // probeProcess is one controller process of a decode probe: its analyzer
 // over a store holding the variant's engine parameters, and its settle
 // tracker, with switches set.
-func probeProcess(t testing.TB, rig *propRig, switches map[string]bool) *settle.Tracker {
+func probeProcess(t probeTB, rig *propRig, switches map[string]bool) *settle.Tracker {
 	t.Helper()
 	store := capacity.NewStore()
 	store.Update("test-ns", "test-model", "v", capacity.Record{EngineParams: mtParams(1024, "vllm:v1")}, rig.clock)
@@ -127,10 +127,22 @@ type probeResult struct {
 	fleet learnertest.Result
 	// sightings is how many restored sightings the last process installed.
 	sightings int64
+	// startSeconds is the slowest role's published start
+	// (AnalyzerResult.RoleStartSeconds) on the last cycle, zero when no
+	// role published one.
+	startSeconds float64
+}
+
+// probeTB is what the probe needs of a test: *testing.T, or probeT when a
+// property case runs the probe (require.TestingT plus Helper).
+type probeTB interface {
+	Helper()
+	Errorf(format string, args ...any)
+	FailNow()
 }
 
 // runProbe drives the case to its horizon and returns what the fleet did.
-func runProbe(t testing.TB, pc probeCase) probeResult {
+func runProbe(t probeTB, pc probeCase) probeResult {
 	t.Helper()
 	rig := newPropRig()
 	res := probeResult{muCounts: map[learn.Reason]int64{}}
@@ -192,6 +204,10 @@ func runProbe(t testing.TB, pc probeCase) probeResult {
 		}
 		out, err := rig.analyze(rows, states, lambda, propCycle)
 		require.NoError(t, err)
+		res.startSeconds = 0
+		for _, s := range out.RoleStartSeconds {
+			res.startSeconds = max(res.startSeconds, s)
+		}
 		for _, r := range rig.a.LearnerReports()["test-ns|test-model"] {
 			if r.Learner != learn.Mu {
 				continue
