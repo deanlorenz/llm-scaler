@@ -399,8 +399,11 @@ Limits:
   the first steady-state cycle that decides their model.
 - For up to a minute after a start, wakes that are fitted to nodes wait
   until the controller has read the holds back. This normally takes
-  milliseconds. If the holds cannot be read within that minute, wakes go
-  ahead without them, and the controller logs a warning.
+  milliseconds. The minute counts from the start, not from the first wake.
+  If the holds cannot be read within that minute, wakes go ahead without
+  them, and the controller logs a warning. While the physical limiter
+  bounds the wake, a wake funded by claiming a share transfer waits too,
+  although it is not fitted to nodes itself.
 - A wake funded by claiming a share transfer, or checked against a remembered
   snapshot because every limiter was unreadable, is not fitted to nodes and
   holds no hole.

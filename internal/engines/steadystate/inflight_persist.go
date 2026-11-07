@@ -94,6 +94,11 @@ func (e *Engine) restoreInFlight(ctx context.Context, now time.Time) {
 	// status publisher.
 }
 
+// restoredCountTimeout bounds one count of a restored entry's pods
+// (restoredPlaced): the scale target read and the pod list. A count that
+// times out counts nothing, and the hold stays until the next.
+const restoredCountTimeout = 5 * time.Second
+
 // restoredPlaced counts a restored entry's placed replicas from its persisted
 // scale target (allocation.InFlightLedger.RestoreInFlightWith), as
 // inFlightAdmissions' count does for a live one: the hold ends once its pods
@@ -111,7 +116,10 @@ func (e *Engine) restoredPlaced(key string, target allocation.ScaleTargetRef) fu
 		acc scaletarget.ScaleTargetAccessor
 	)
 	return func() (allocation.Placed, bool) {
-		ctx := context.Background()
+		// Bounded: the count runs while a node view is built, the
+		// scale-from-zero engine's under its wake lock.
+		ctx, cancel := context.WithTimeout(context.Background(), restoredCountTimeout)
+		defer cancel()
 		mu.Lock()
 		a := acc
 		mu.Unlock()

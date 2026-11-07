@@ -61,8 +61,14 @@ func (e *Engine) admitInFlight(requests []allocation.ModelScalingRequest, decisi
 	for k := range e.cycleVariants {
 		keep[k] = true
 	}
+	// Decided means a resolved accelerator and a state the cycle read: a
+	// decision without either says nothing about the variant's replicas.
+	stated := createdReplicas(requests)
 	for i := range decisions {
-		delete(keep, utils.GetNamespacedKey(decisions[i].Namespace, decisions[i].VariantName))
+		key := utils.GetNamespacedKey(decisions[i].Namespace, decisions[i].VariantName)
+		if _, ok := stated[key]; ok && constants.IsAcceleratorResolved(decisions[i].AcceleratorName) {
+			delete(keep, key)
+		}
 	}
 	for _, a := range adms {
 		keep[a.Key] = true

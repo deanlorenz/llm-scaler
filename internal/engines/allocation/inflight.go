@@ -70,8 +70,10 @@ type InFlightLedger struct {
 	restored map[string]bool
 	// restorePending is set while the persisted ledger is still to be read
 	// back (ExpectRestore, MarkRestored): a wake decided meanwhile would not
-	// see the holds it carries.
-	restorePending bool
+	// see the holds it carries. restoreExpected is when ExpectRestore was
+	// called.
+	restorePending  bool
+	restoreExpected time.Time
 }
 
 // ScaleTargetRef names a variant's scale target, as the ledger persists it:
@@ -393,20 +395,21 @@ func (l *InFlightLedger) Reset() {
 	clear(l.entries)
 	clear(l.sighted)
 	clear(l.restored)
-	l.restorePending = false
+	l.restorePending, l.restoreExpected = false, time.Time{}
 }
 
 // ExpectRestore marks the persisted ledger as still to be read back: until
 // MarkRestored, RestorePending reports true, and a decision that builds a
 // node view from the ledger would miss the holds a restart carries. Called
-// once at start, before either engine runs.
-func (l *InFlightLedger) ExpectRestore() {
+// once at start, before either engine runs, with the time of the start:
+// how long a wake has waited is measured from it (RestorePendingSince).
+func (l *InFlightLedger) ExpectRestore(now time.Time) {
 	if l == nil {
 		return
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.restorePending = true
+	l.restorePending, l.restoreExpected = true, now
 }
 
 // MarkRestored records that the persisted ledger was read back, or found
@@ -417,18 +420,25 @@ func (l *InFlightLedger) MarkRestored() {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.restorePending = false
+	l.restorePending, l.restoreExpected = false, time.Time{}
 }
 
 // RestorePending reports whether the persisted ledger is still to be read
 // back (ExpectRestore).
 func (l *InFlightLedger) RestorePending() bool {
+	_, pending := l.RestorePendingSince()
+	return pending
+}
+
+// RestorePendingSince is RestorePending with when the restore was expected
+// (ExpectRestore's time).
+func (l *InFlightLedger) RestorePendingSince() (time.Time, bool) {
 	if l == nil {
-		return false
+		return time.Time{}, false
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.restorePending
+	return l.restoreExpected, l.restorePending
 }
 
 // settle counts each entry's placed replicas: an entry whose variant has

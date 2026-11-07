@@ -18,7 +18,7 @@ import (
 func TestAWakeWaitsForTheRestoredInFlightHolds(t *testing.T) {
 	publishUsage(t)
 	publishNodes(t, 8)
-	allocation.DefaultInFlight.ExpectRestore()
+	allocation.DefaultInFlight.ExpectRestore(time.Now())
 	e := physicalEngine(8)
 	e.beginTick()
 	if got := wakeOnce(t, e, "a", "cold", cand("cold-decode", "decode", wakeHBM3, 8, 1)); got != OutcomeAwaitingInFlight {
@@ -52,15 +52,30 @@ func TestAWakeWaitsForTheRestoredInFlightHolds(t *testing.T) {
 func TestAWakeStopsWaitingForAnUnreadLedger(t *testing.T) {
 	publishUsage(t)
 	publishNodes(t, 8)
-	allocation.DefaultInFlight.ExpectRestore()
+	start := time.Now()
+	allocation.DefaultInFlight.ExpectRestore(start)
 	e := physicalEngine(8)
 	e.beginTick()
 	if got := wakeOnce(t, e, "a", "cold", cand("cold-decode", "decode", wakeHBM3, 8, 1)); got != OutcomeAwaitingInFlight {
 		t.Fatalf("setup: the wake did not wait (%s)", got)
 	}
-	e.inFlightWait = time.Now().Add(-inFlightRestoreWait)
+	allocation.DefaultInFlight.ExpectRestore(start.Add(-inFlightRestoreWait))
 	e.beginTick()
 	if got := wakeOnce(t, e, "a", "cold", cand("cold-decode", "decode", wakeHBM3, 8, 1)); got == OutcomeAwaitingInFlight || got == OutcomeNoCapacity {
 		t.Fatalf("a wake still waited, or was refused, past inFlightRestoreWait: %s", got)
+	}
+}
+
+// The wait is measured from the start, not from the first wake: a model's
+// first wake long after a start whose ledger read keeps failing does not
+// wait at all.
+func TestTheRestoreWaitIsMeasuredFromTheStart(t *testing.T) {
+	publishUsage(t)
+	publishNodes(t, 8)
+	allocation.DefaultInFlight.ExpectRestore(time.Now().Add(-30 * time.Minute))
+	e := physicalEngine(8)
+	e.beginTick()
+	if got := wakeOnce(t, e, "a", "cold", cand("cold-decode", "decode", wakeHBM3, 8, 1)); got == OutcomeAwaitingInFlight || got == OutcomeNoCapacity {
+		t.Fatalf("the first wake 30 minutes after the start waited, or was refused: %s", got)
 	}
 }

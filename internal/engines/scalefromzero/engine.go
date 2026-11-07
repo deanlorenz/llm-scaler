@@ -187,11 +187,11 @@ type Engine struct {
 	// tickReclaimed is, per namespace and type, the lent-out nominal this
 	// tick's wakes grew into without a node hole (placement.reclaimable).
 	tickReclaimed map[string]map[string]allocation.Reclaim
-	// inFlightWait is when a wake first waited for the in-flight holds to be
-	// read back (awaitInFlightRestore), zero before; inFlightGaveUp is set
-	// once wakes stopped waiting. Guarded by wakeMu.
-	inFlightWait   time.Time
-	inFlightGaveUp bool
+	// inFlightWaitLogged is set once a wake waited for the in-flight holds to
+	// be read back (awaitInFlightRestore), inFlightGaveUp once wakes stopped
+	// waiting. Guarded by wakeMu.
+	inFlightWaitLogged bool
+	inFlightGaveUp     bool
 	// wakeBlocked is the models (modelGroup.key) this loop set a refused-wake
 	// reason on wva_model_scaling_blocked for (reportWakeBlocked), each as
 	// the modelGroup it was set for, so pruneRefusals can clear it.

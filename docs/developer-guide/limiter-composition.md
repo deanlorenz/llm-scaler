@@ -361,14 +361,20 @@ is newer than the view's snapshot.
   in `optimizeV2`): a model skipped for missing metrics keeps its restored
   holds, on their own clock, and they stay on `restored` for the next cycle
   to judge. A variant gone, or decided without an admission (passive,
-  planned by the share), loses them. A committed admission, a wake's
-  included, takes the entry off `restored`.
-  `main` marks the ledger `ExpectRestore` before either engine starts and
-  `restoreInFlight` marks it `MarkRestored` once a read succeeds (found or
-  not, readable or not). Until then a scale-from-zero wake fitted to nodes
-  is not judged (`awaitInFlightRestore` in `wake_tick.go`, outcome
-  `awaiting-in-flight`), for at most `inFlightRestoreWait` (1 minute) from the
-  first wait; past it wakes go without the holds, logged once.
+  planned by the share), loses them. A decision counts only with a resolved
+  accelerator and a state the cycle read; one without either keeps the
+  hold. A committed admission, a wake's included, takes the entry off
+  `restored`. The count (`restoredPlaced`) runs under a 5 s context
+  (`restoredCountTimeout`), since the scale-from-zero engine builds its node
+  view under `wakeMu`.
+  `main` marks the ledger `ExpectRestore(time.Now())` before either engine
+  starts and `restoreInFlight` marks it `MarkRestored` once a read succeeds
+  (found or not, readable or not; a failed read, Forbidden included, leaves
+  it pending). Until then a scale-from-zero wake under the physical limiter
+  is not judged (`awaitInFlightRestore` in `wake_tick.go`, before the node
+  view is built, outcome `awaiting-in-flight`), a share-claim wake included,
+  for at most `inFlightRestoreWait` (1 minute) from `ExpectRestore`'s time;
+  past it wakes go without the holds, logged once.
   `MarshalInFlight` encodes each entry under the lock. On shutdown the
   publisher writes once more, bounded by 2s (`flushOnShutdown`), so the last
   cycle's ledger reaches the next leader. A restored partial

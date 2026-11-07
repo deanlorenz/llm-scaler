@@ -195,19 +195,25 @@ const inFlightRestoreWait = time.Minute
 // (allocation.InFlightLedger.RestorePending): the node view built now would
 // not hold them, and the wake could take the hole of a replica ordered
 // before the restart -- Unschedulable, or a LeaderWorkerSet group waiting
-// for its workers. A wake not fitted to nodes reads no hold and does not
-// wait. Past inFlightRestoreWait from the first wait, wakes go without the
-// holds, logged once. Caller holds wakeMu.
+// for its workers. A wake the physical limiter does not bound reads no hold
+// and does not wait; one funded by a share claim under it waits too, since
+// the check comes before the claim. Past inFlightRestoreWait from the start (ExpectRestore's time, not
+// the first wake's), wakes go without the holds, logged once. Caller holds
+// wakeMu.
 func (e *Engine) awaitInFlightRestore(ctx context.Context, constraints []*allocation.ResourceConstraints, now time.Time) bool {
-	if e.inFlightGaveUp || !allocation.PhysicalBounds(constraints) || !allocation.DefaultInFlight.RestorePending() {
+	if e.inFlightGaveUp || !allocation.PhysicalBounds(constraints) {
 		return false
 	}
-	if e.inFlightWait.IsZero() {
-		e.inFlightWait = now
-		log.FromContext(ctx).Info("Scale-from-zero: wakes wait for the in-flight node holds to be read back after the start",
-			"maxWait", inFlightRestoreWait.String())
+	since, pending := allocation.DefaultInFlight.RestorePendingSince()
+	if !pending {
+		return false
 	}
-	if now.Sub(e.inFlightWait) < inFlightRestoreWait {
+	if now.Sub(since) < inFlightRestoreWait {
+		if !e.inFlightWaitLogged {
+			e.inFlightWaitLogged = true
+			log.FromContext(ctx).Info("Scale-from-zero: wakes wait for the in-flight node holds to be read back after the start",
+				"maxWait", inFlightRestoreWait.String(), "left", (inFlightRestoreWait - now.Sub(since)).String())
+		}
 		return true
 	}
 	e.inFlightGaveUp = true

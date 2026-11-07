@@ -834,7 +834,7 @@ func main() {
 	// the persisted in-flight holds back before its first cycle; until it has,
 	// a scale-from-zero wake fitted to nodes waits, so it cannot take the hole
 	// of a replica ordered before the restart. Set here, before either starts.
-	allocation.DefaultInFlight.ExpectRestore()
+	allocation.DefaultInFlight.ExpectRestore(time.Now())
 
 	// Register optimization engine loops with the manager. Only start when leader.
 	err = mgr.Add(optimizeLoopRunnable(func(ctx context.Context) (optimizeLooper, error) {
