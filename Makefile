@@ -2973,6 +2973,56 @@ benchmark-two-model-status: ## Two-model pool run: what exists, and what holds a
 benchmark-two-model-teardown: ## Two-model pool run: remove everything it created (shared cluster -- do not skip)
 	@$(TWO_MODEL) teardown
 
+# ---------------------------------------------------------------------------
+# The TTFT staircase. Plan: docs/plans/analyzers/ttft-staircase-repeat.md. How to run
+# it: docs/developer-guide/testing.md, "The TTFT staircase".
+# ---------------------------------------------------------------------------
+STAIRCASE_RUN ?=
+STAIRCASE_SPEC ?= $(CURDIR)/hack/benchmark/staircase_spec.yaml
+STAIRCASE := BENCHMARK_NAMESPACE=$(BENCHMARK_NAMESPACE) STAIRCASE_RUN=$(STAIRCASE_RUN) STAIRCASE_SPEC=$(STAIRCASE_SPEC) \
+	BENCHMARK_PROMETHEUS_URL=$(BENCHMARK_PROMETHEUS_URL) bash $(CURDIR)/hack/benchmark/staircase.sh
+
+.PHONY: benchmark-staircase-smoke
+benchmark-staircase-smoke: ## TTFT staircase: before the big run, a short one on 3 GPUs at most: label, lease, Job rights, two fleets, a deliberate abort, a teardown check (about 1.5 GPU-hours)
+	@$(STAIRCASE) smoke $(IMG)
+
+.PHONY: benchmark-staircase-lapse
+benchmark-staircase-lapse: ## TTFT staircase: the deadline Job on its own: a 1+1 fleet, the runner killed with -9, the workloads freed with nobody there (about 1 GPU-hour)
+	@$(STAIRCASE) lapse $(IMG)
+
+.PHONY: benchmark-staircase-run
+benchmark-staircase-run: ## TTFT staircase: stand up, warm up, wait for the freeze, run every phase, tear down on every exit (BENCHMARK_NAMESPACE=<fresh ns> STAIRCASE_RUN=<abs dir> IMG=<build>)
+	@$(STAIRCASE) run $(IMG)
+
+.PHONY: benchmark-staircase-predict
+benchmark-staircase-predict: whatif ## TTFT staircase: print the frozen prediction of RECORDING=<warm-up recording>, touching no cluster
+	@test -n "$(RECORDING)" || { echo "set RECORDING=<learner recording>"; exit 1; }
+	@bin/whatif freeze --recording $(RECORDING) --spec $(STAIRCASE_SPEC)
+
+.PHONY: benchmark-staircase-freeze
+benchmark-staircase-freeze: whatif ## TTFT staircase: freeze the prediction and write the ladder, once, after the warm-up and before any step
+	@$(STAIRCASE) freeze
+
+.PHONY: benchmark-staircase-redo
+benchmark-staircase-redo: whatif ## TTFT staircase: re-price each bursty bucket at its measured Ca2, targets held; analyze then reads it
+	@$(STAIRCASE) redo
+
+.PHONY: benchmark-staircase-analyze
+benchmark-staircase-analyze: ## TTFT staircase: per-step analysis of every phase, then report.md
+	@$(STAIRCASE) analyze
+
+.PHONY: benchmark-staircase-status
+benchmark-staircase-status: ## TTFT staircase: what the run has done, and what holds GPUs
+	@$(STAIRCASE) status
+
+.PHONY: benchmark-staircase-abort
+benchmark-staircase-abort: ## TTFT staircase: stop a run; its own exit path tears down
+	@$(STAIRCASE) abort
+
+.PHONY: benchmark-staircase-teardown
+benchmark-staircase-teardown: ## TTFT staircase: free everything this run owns, from any state; fails unless confirmed (shared cluster -- do not skip)
+	@$(STAIRCASE) teardown
+
 # Stub for llm-d nightly reusable workflows (test_target=nightly-test-llm-d)
 # No-op; temporarily satisfies nightly CI make invocation
 # TODO: add nightly guide tests here
@@ -3022,6 +3072,8 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n hack/benchmark/sample_replicas.sh
 	@bash -n hack/benchmark/tail_wva_logs.sh
 	@bash -n hack/benchmark/file_capture.sh
+	@bash -n hack/benchmark/staircase.sh
+	@bash -n hack/check-staircase.sh
 	@bash -n hack/check-install-flow.sh
 	@bash -n hack/check-cluster-namespace-checks.sh
 	@bash -n hack/check-watch-namespace-list.sh
@@ -3196,6 +3248,10 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# pays a model load into the pool on the first burst and reports it as the
 	@# pool's cost. All of them are 26 minutes of GPU each.
 	@bash hack/check-two-model-scenario.sh
+	@echo "Checking the TTFT staircase's exit paths and arithmetic..."
+	@# Executes it against a stub kubectl. What protects a shared cluster for a
+	@# multi-day run is its exit paths, and bash -n sees none of them.
+	@bash hack/check-staircase.sh
 	@echo "Checking each benchmark profile names a harness that will accept it..."
 	@# guidellm and inference-perf take mutually invalid profile schemas, and a
 	@# profile that matches neither can never run. The pre-run gate in

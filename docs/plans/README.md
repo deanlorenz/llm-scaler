@@ -24,6 +24,10 @@ behaviour. For that, use the [reference](../reference/) and
   proposed, not scheduled. The correctness defects around the field were fixed
   separately; this is about the field itself.
 
+- **[The next TTFT staircase](analyzers/ttft-staircase-repeat.md)** — proposed, not
+  run. What the fresh frozen run must hold out and freeze, what it costs, and what
+  to cut first.
+
 ## engine
 
 - **[KEDA-driven discovery](engine/keda-driven-discovery.md)** — replacing

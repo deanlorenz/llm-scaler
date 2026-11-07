@@ -8,7 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
 
 // InFlightTTL is how long a replica admitted onto a node hole holds that hole
@@ -66,6 +68,35 @@ type InFlightLedger struct {
 	// restored is the entries RestoreInFlight restored that no committed
 	// admission has updated since (DropRestoredExcept).
 	restored map[string]bool
+	// restorePending is set while the persisted ledger is still to be read
+	// back (ExpectRestore, MarkRestored): a wake decided meanwhile would not
+	// see the holds it carries. restoreExpected is when ExpectRestore was
+	// called.
+	restorePending  bool
+	restoreExpected time.Time
+}
+
+// ScaleTargetRef names a variant's scale target, as the ledger persists it:
+// a restored entry counts the target's pods from the moment it is restored
+// (RestoreInFlightWith).
+type ScaleTargetRef struct {
+	// Kind is constants.DeploymentKind or constants.LeaderWorkerSetKind.
+	Kind string
+	// Name is the scale target's name, in the variant's namespace.
+	Name string
+}
+
+// ScaleTargetRefOf names acc for the ledger (InFlightAdmission.Target); zero
+// for a nil acc.
+func ScaleTargetRefOf(acc scaletarget.ScaleTargetAccessor) ScaleTargetRef {
+	if acc == nil {
+		return ScaleTargetRef{}
+	}
+	kind := constants.DeploymentKind
+	if scaletarget.IsLeaderWorkerSet(acc) {
+		kind = constants.LeaderWorkerSetKind
+	}
+	return ScaleTargetRef{Kind: kind, Name: acc.GetName()}
 }
 
 // sightedFor is how long a variant stays sighted with no committed admission
@@ -91,6 +122,9 @@ type inFlightEntry struct {
 	// placed counts the variant's replicas holding a node, ok false when it
 	// cannot tell.
 	placed func() (Placed, bool)
+	// target is the variant's scale target, persisted so a restored entry
+	// can count its pods; zero when no admission named one.
+	target ScaleTargetRef
 	// partial is the replicas part of whose pods hold a node, as last
 	// counted, each placed pod with when it was first seen.
 	partial []partialSeen
@@ -184,6 +218,10 @@ type InFlightAdmission struct {
 	Want      int
 	PlacedNow int
 	Placed    func() (Placed, bool)
+	// Target is the variant's scale target, whose pods Placed counts. It is
+	// persisted with the entry, so the entry counts them again from the
+	// moment a restart restores it (RestoreInFlightWith).
+	Target ScaleTargetRef
 	// TTL is how long the replicas a rise of Want admits are held, at least
 	// InFlightTTL: the steady-state engine holds a replica on a Kueue flavor
 	// for the borrowing placement timeout when that is longer, since the
@@ -299,8 +337,11 @@ func (l *InFlightLedger) admitLocked(a InFlightAdmission, now time.Time, sight b
 		return
 	case !ok:
 		l.entries[key] = &inFlightEntry{shape: shape, want: want, base: placedNow,
-			expires: now.Add(ttl), ttl: ttl, placed: placed}
+			expires: now.Add(ttl), ttl: ttl, placed: placed, target: a.Target}
 		return
+	}
+	if a.Target.Name != "" {
+		e.target = a.Target
 	}
 	if shape.Flavor == nil && e.shape.Flavor != nil && want <= e.want {
 		// The replicas admitted on a borrowed flavor's nodes are the same
@@ -355,6 +396,66 @@ func (l *InFlightLedger) Reset() {
 	clear(l.entries)
 	clear(l.sighted)
 	clear(l.restored)
+	l.restorePending, l.restoreExpected = false, time.Time{}
+}
+
+// ExpectRestore marks the persisted ledger as still to be read back: until
+// MarkRestored, RestorePending reports true, and a decision that builds a
+// node view from the ledger would miss the holds a restart carries. Called
+// once at start, before either engine runs, with the time of the start:
+// how long a wake has waited is measured from it (RestorePendingSince), or
+// from a later RestartRestoreClock (when the replica becomes leader).
+func (l *InFlightLedger) ExpectRestore(now time.Time) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.restorePending, l.restoreExpected = true, now
+}
+
+// RestartRestoreClock moves the time a pending restore is measured from to
+// now: the engines run only while this replica leads, so a standby that
+// waited for the lease measures from when it won it, not from its start.
+// No-op once nothing is pending.
+func (l *InFlightLedger) RestartRestoreClock(now time.Time) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.restorePending {
+		l.restoreExpected = now
+	}
+}
+
+// MarkRestored records that the persisted ledger was read back, or found
+// absent or unusable: nothing more is to be restored.
+func (l *InFlightLedger) MarkRestored() {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.restorePending, l.restoreExpected = false, time.Time{}
+}
+
+// RestorePending reports whether the persisted ledger is still to be read
+// back (ExpectRestore).
+func (l *InFlightLedger) RestorePending() bool {
+	_, pending := l.RestorePendingSince()
+	return pending
+}
+
+// RestorePendingSince is RestorePending with when the restore was expected
+// (ExpectRestore's time).
+func (l *InFlightLedger) RestorePendingSince() (time.Time, bool) {
+	if l == nil {
+		return time.Time{}, false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.restoreExpected, l.restorePending
 }
 
 // settle counts each entry's placed replicas: an entry whose variant has

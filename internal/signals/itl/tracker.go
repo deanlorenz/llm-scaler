@@ -57,6 +57,8 @@ type Tracker struct {
 	// latches holds, per key, the tier its line stands at under
 	// Admission.TierHysteresis, and since when.
 	latches map[string]tierLatch
+	// revisions holds, per key, the revision its readings are of (rollout.go).
+	revisions map[string]revisionState
 }
 
 // heldSlope is a key's last fitted A, when it was fitted, and the engine
@@ -79,6 +81,7 @@ func NewTracker() *Tracker {
 		above:       map[string]*Window{},
 		aboveSteady: map[string]*Window{},
 		latches:     map[string]tierLatch{},
+		revisions:   map[string]revisionState{},
 	}
 }
 
@@ -965,7 +968,9 @@ func pinnedReadings(obs, steady []Observation) (pinned []Observation, ok bool) {
 // into the tracker. What it reads of the caller's state is the caller's to
 // guard -- both analyzers call Sweep holding their own lock.
 func (t *Tracker) Sweep(now time.Time, stale func(key string) bool) (windows, baselines int) {
-	return t.sweep(now, stale, false)
+	windows, baselines = t.sweep(now, stale, false)
+	t.dropRevisions(stale)
+	return windows, baselines
 }
 
 // sweep is Sweep, keeping the replicas' traces when keepTraces is set.
@@ -1067,6 +1072,9 @@ func (t *Tracker) forgetKeys(now time.Time, by learn.By, match func(key string) 
 	for _, k := range slices.Sorted(maps.Keys(keys)) {
 		forgotten = append(forgotten, learn.Forgotten{Key: k, By: by})
 	}
+	if by == learn.ByEvicted {
+		t.dropRevisions(match)
+	}
 	return windows, baselines, forgotten
 }
 
@@ -1079,6 +1087,11 @@ func (t *Tracker) forgetKeys(now time.Time, by learn.By, match func(key string) 
 func (t *Tracker) ClearWindow(key string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.clearWindowLocked(key)
+}
+
+// clearWindowLocked is ClearWindow. Called with t.mu held.
+func (t *Tracker) clearWindowLocked(key string) bool {
 	t.unlatch(key)
 	had := false
 	for _, m := range []map[string]*Window{t.windows, t.steady, t.above, t.aboveSteady} {

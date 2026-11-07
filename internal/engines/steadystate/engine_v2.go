@@ -527,6 +527,11 @@ func (e *Engine) notePresentVariants(
 	if e.sloAnalyzer != nil {
 		noters = append(noters, e.sloAnalyzer)
 	}
+	for _, entry := range e.analyzers.builtins() {
+		if a, ok := entry.analyzer.(*throughput.ThroughputAnalyzer); ok {
+			noters = append(noters, a)
+		}
+	}
 	if len(noters) == 0 {
 		return
 	}

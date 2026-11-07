@@ -7,7 +7,8 @@
 # the exit code AND a line of the output, so a gate that exits 0 having looked at
 # nothing does not pass. The workflow itself runs only on a pull_request event,
 # which nothing here can raise: what this file proves is the script, and that
-# the workflow hands it the body as data.
+# the workflow reads the live body and hands it over as data. The real API is
+# not called: a stub stands in for gh.
 
 set -u
 
@@ -68,7 +69,7 @@ pr_with() {
 expect() {
     local name="$1" want_rc="$2" want="$3" body="$4" rev_a="${5:-$BASE_SHA}" rev_b="${6:-HEAD}" out rc=0
     CASES=$((CASES + 1))
-    out="$(cd "$BASE" && PR_BODY="$body" bash "$GATE" "$rev_a" "$rev_b" 2>&1)" || rc=$?
+    out="$(cd "$BASE" && PR_BODY="$body" PR_BODY_FILE="${BODY_FILE:-}" bash "$GATE" "$rev_a" "$rev_b" 2>&1)" || rc=$?
     if [ "$rc" -ne "$want_rc" ]; then
         FAIL=$((FAIL + 1)); echo "FAIL $name: exit $rc, want $want_rc: $(printf '%s' "$out" | tr '\n' ' ')"
     elif [ "${out#*"$want"}" = "$out" ]; then
@@ -303,6 +304,25 @@ else
     PASS=$((PASS + 1)); echo "ok   nothing of the body reaches the job's output"
 fi
 
+# The body in a file, as the workflow hands it over.
+BODY_FILE="$WORK/body-in-a-file.md"
+pr_with "$A_RESULTS"
+section "$R" >"$BODY_FILE"
+expect "a body in a file is read" 0 "names each" "no section"
+printf '## goldens:\r\n\r\n- `acceptance/results.csv`' >"$BODY_FILE"
+expect "a file with CRLF and no last newline is read" 0 "names each" "no section"
+section none >"$BODY_FILE"
+expect "the file wins over the env var" 1 "none, and a golden moved" "$(section "$R")"
+: >"$BODY_FILE"
+expect "an empty file is an empty body" 1 "no goldens: section" "$(section "$R")"
+BODY_FILE="$WORK/no-such-file.md"
+expect "a missing file fails, not an empty body" 2 "read no body" "$(section "$R")"
+pr_with "$DOC"
+expect "a missing file fails with no golden moved" 2 "read no body" ""
+BODY_FILE="$WORK"
+expect "a directory is not a body" 2 "read no body" ""
+BODY_FILE=""
+
 # An unread diff is not "no golden moved".
 pr_with "$A_RESULTS"
 expect "an unknown base fails" 2 "could not diff" "" 0000000000000000000000000000000000000000 HEAD
@@ -338,15 +358,66 @@ refuse() {
 hold "it runs on a pull request" '^  pull_request:$'
 hold "correcting the section re-runs it" '^    types: \[.*\bedited\b.*\]'
 hold "a new commit re-runs it" '^    types: \[.*\bsynchronize\b.*\]'
-hold "the body arrives in an env var" '^ +PR_BODY: \$\{\{ github\.event\.pull_request\.body \}\}$'
-hold "the token reads and no more" '^  contents: read$'
+hold "the body is read live, from the API" '^ +run: gh api "repos/\$GITHUB_REPOSITORY/pulls/\$PR_NUMBER" --jq .*>"\$PR_BODY_FILE"$'
+hold "the number comes from the event" '^ +PR_NUMBER: \$\{\{ github\.event\.pull_request\.number \}\}$'
+hold "the body arrives in a file outside the checkout" '^ +PR_BODY_FILE: \$\{\{ runner\.temp \}\}/pr-body\.md$'
+hold "the token reads the code" '^  contents: read$'
+hold "the token reads the pull request" '^  pull-requests: read$'
 hold "it runs the script, on the merge and its base" '^ +run: bash deploy/ci-pr-checks/goldens-section\.sh HEAD\^1 HEAD$'
 hold "the checkout keeps the merge's parent" '^ +fetch-depth: 2$'
 hold "the checkout leaves no token behind" '^ +persist-credentials: false$'
 refuse "no pull_request_target" 'pull_request_target'
 refuse "nothing writes" ':[[:space:]]*write\b'
-refuse "no permission beyond contents" '^ +(actions|checks|deployments|issues|packages|pull-requests|security-events|statuses|id-token):'
+refuse "no other permission" '^ +(actions|checks|deployments|issues|packages|security-events|statuses|id-token):'
+refuse "the saved payload is not the body" 'github\.event\.pull_request\.body|GITHUB_EVENT_PATH'
+refuse "the body is not held in an env var" '^ +PR_BODY:'
 refuse "the event never reaches a shell" '^ +run:.*\$\{\{'
+
+# The token is on the one step that reads the body, and that step is over before
+# anything of the PR is on disk.
+CASES=$((CASES + 1))
+TOKEN_LINES="$(grep -Ec 'GH_TOKEN|GITHUB_TOKEN|github\.token' "$WF_CODE")"
+TOKEN_AT="$(grep -En '^ +GH_TOKEN: \$\{\{ github\.token \}\}$' "$WF_CODE" | cut -d: -f1)"
+CHECKOUT_AT="$(grep -En 'uses: actions/checkout@' "$WF_CODE" | cut -d: -f1)"
+if [ "$TOKEN_LINES" = 1 ] && [ -n "$TOKEN_AT" ] && [ -n "$CHECKOUT_AT" ] && [ "$TOKEN_AT" -lt "$CHECKOUT_AT" ]; then
+    PASS=$((PASS + 1)); echo "ok   workflow: the token is gone before the checkout"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL workflow: the token: $TOKEN_LINES lines, at line ${TOKEN_AT:-none}, checkout at ${CHECKOUT_AT:-none}"
+fi
+
+# The workflow's read itself, run the way a runner runs it, against a stub gh that
+# stands in for the API: what it asks for, and that a failure stops the job.
+FETCH="$(sed -n 's/^ *run: \(gh api .*\)$/\1/p' "$WF_CODE")"
+STUB="$WORK/stub"
+mkdir -p "$STUB"
+printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$1" "$2" "$3" "$4" >"$STUB_ARGS"' \
+    '[ -z "${STUB_FAIL:-}" ] || exit 1' 'cat "$STUB_BODY"' >"$STUB/gh"
+chmod +x "$STUB/gh"
+section "$R" >"$WORK/live-body.md"
+fetch() {
+    GITHUB_REPOSITORY=owner/repo PR_NUMBER=7 PR_BODY_FILE="$WORK/fetched.md" PATH="$STUB:$PATH" \
+        STUB_ARGS="$WORK/stub-args" STUB_BODY="$WORK/live-body.md" bash -e -c "$FETCH"
+}
+CASES=$((CASES + 1))
+if ! fetch; then
+    FAIL=$((FAIL + 1)); echo "FAIL workflow: the read failed against the stub: $FETCH"
+elif ! cmp -s "$WORK/live-body.md" "$WORK/fetched.md"; then
+    FAIL=$((FAIL + 1)); echo "FAIL workflow: the read did not write the body to the file"
+elif [ "$(sed -n 2p "$WORK/stub-args")" != repos/owner/repo/pulls/7 ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL workflow: the read asked for $(sed -n 2p "$WORK/stub-args")"
+else
+    PASS=$((PASS + 1)); echo "ok   workflow: the read writes the live body to the file"
+fi
+pr_with "$A_RESULTS"
+BODY_FILE="$WORK/fetched.md"
+expect "the script reads what the read wrote" 0 "names each" "no section"
+BODY_FILE=""
+CASES=$((CASES + 1))
+if STUB_FAIL=1 fetch; then
+    FAIL=$((FAIL + 1)); echo "FAIL workflow: a failed read did not stop the job"
+else
+    PASS=$((PASS + 1)); echo "ok   workflow: a failed read stops the job"
+fi
 
 # A multi-line run block would hide an expression from the one-line check above.
 CASES=$((CASES + 1))

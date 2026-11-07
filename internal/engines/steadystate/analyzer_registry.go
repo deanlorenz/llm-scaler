@@ -9,6 +9,8 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 )
@@ -230,8 +232,6 @@ type saturationCapabilities struct {
 	// recorded takes the learner recorder and states the horizons the
 	// recording starts with (learner_recording.go).
 	recorded saturationRecorded
-	// reporter hands over the learners' reports (learner_reports.go).
-	reporter learnerReporter
 }
 
 // saturationCapabilitiesOf resolves a's capabilities. The one place the
@@ -244,7 +244,6 @@ func saturationCapabilitiesOf(a domain.Analyzer) saturationCapabilities {
 	c.noter, _ = a.(presenceNoter)
 	c.learned, _ = a.(learnedStater)
 	c.recorded, _ = a.(saturationRecorded)
-	c.reporter, _ = a.(learnerReporter)
 	return c
 }
 
@@ -305,4 +304,7 @@ var (
 	_ learnedStater         = (*saturation.SaturationAnalyzer)(nil)
 	_ saturationRecorded    = (*saturation.SaturationAnalyzer)(nil)
 	_ learnerReporter       = (*saturation.SaturationAnalyzer)(nil)
+	_ learnerReporter       = (*slo.Analyzer)(nil)
+	_ learnerReporter       = (*throughput.ThroughputAnalyzer)(nil)
+	_ presenceNoter         = (*throughput.ThroughputAnalyzer)(nil)
 )

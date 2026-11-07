@@ -125,10 +125,10 @@ func TestGenerate_PlaysEachStepInTheEnginesOrder(t *testing.T) {
 		slo.KindBeginCycle,
 		// 2. the settle tracker keeps the models with a variant that has
 		// replicas (no event); 3. presence: the active variants model by
-		// model, saturation then slo, then the parked ones
-		saturation.KindNoteVariantsPresent, slo.KindNoteVariantsPresent, // idle: i
-		saturation.KindNoteVariantsPresent, slo.KindNoteVariantsPresent, // m: a
-		saturation.KindNoteVariantsPresent, slo.KindNoteVariantsPresent, // m: b, parked
+		// model, saturation, slo, then throughput, then the parked ones
+		saturation.KindNoteVariantsPresent, slo.KindNoteVariantsPresent, throughput.KindNoteVariantsPresent, // idle: i
+		saturation.KindNoteVariantsPresent, slo.KindNoteVariantsPresent, throughput.KindNoteVariantsPresent, // m: a
+		saturation.KindNoteVariantsPresent, slo.KindNoteVariantsPresent, throughput.KindNoteVariantsPresent, // m: b, parked
 		// 4. the sweeps
 		saturation.KindEvictStaleHistory, capacity.KindEvictStale, slo.KindEvictStale,
 		// 5. idle has no rows: held, and nothing more

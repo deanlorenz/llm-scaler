@@ -66,26 +66,6 @@ func admissionOf(rm domain.ReplicaMetrics) admission {
 	return admission{idle: rm.TokensInUse <= 0 && rm.QueueLength <= 0 && rm.RequestRate <= 0}
 }
 
-// revisionsMixed names the variants whose own replicas -- warm-pool bridges
-// aside, which run the pool's template -- report more than one pod template
-// revision (domain.ReplicaMetrics.Revision). A replica that reports none is
-// not counted: an unknown is not a second revision.
-func revisionsMixed(rows []domain.ReplicaMetrics) map[string]bool {
-	first := map[string]string{}
-	mixed := map[string]bool{}
-	for _, rm := range rows {
-		if rm.FromWarmPool || rm.Revision == "" {
-			continue
-		}
-		if seen, ok := first[rm.VariantName]; !ok {
-			first[rm.VariantName] = rm.Revision
-		} else if seen != rm.Revision {
-			mixed[rm.VariantName] = true
-		}
-	}
-	return mixed
-}
-
 // k2ReasonObsImplausible labels the diagnostic emitted when an observation is
 // discarded for exceeding the KV cache's physical ceiling. It is deliberately
 // not a capacity.K2Source: no capacity comes from it -- the analyzer falls

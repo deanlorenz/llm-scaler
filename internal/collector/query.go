@@ -3,7 +3,6 @@ package collector
 import (
 	"context"
 	"fmt"
-	"math"
 	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -284,9 +283,16 @@ func (c *ReplicaMetricsCollector) CollectSchedulerQueueMetrics(
 				elsewhere++
 				continue
 			}
-			if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) {
+			// Presence does not depend on finiteness. A non-nil result is
+			// what AnalyzerInput.FlowControlSeries reads as "the router
+			// publishes its flow-control queue series", which is how the
+			// slo analyzer infers the gate is on; a NaN series is still a
+			// published series. Only the sum skips it, by Finite rather
+			// than the raw value, since the Prometheus source stores a NaN
+			// as 0 with a flag set.
+			hasData = true
+			if value.Finite() {
 				*into += int64(value.Value)
-				hasData = true
 			}
 		}
 	}
@@ -328,7 +334,8 @@ func (c *ReplicaMetricsCollector) CollectModelArrivalRate(
 		source.ParamNamespace: namespace,
 	}
 
-	results, err := c.refreshShared(ctx, []string{registration.QueryModelArrivalRate}, params)
+	arrivalType := func(string) string { return constants.QueryTypeArrivalRate }
+	results, issued, err := c.refreshSharedIssued(ctx, []string{registration.QueryModelArrivalRate}, params)
 	if err != nil {
 		// Categorize rather than swallow: a broken or misconfigured arrival query and
 		// genuine zero traffic both surface here as a zero rate, but only the former is a
@@ -336,40 +343,46 @@ func (c *ReplicaMetricsCollector) CollectModelArrivalRate(
 		// tell the two apart (a nonzero arrival_rate error counter means a query problem,
 		// not idle traffic). Demand still falls back to 0 — zero only ever permits
 		// scale-down, gated by the multi-analyzer live-consensus veto.
-		reason := prometheus.CategorizePrometheusError(err)
-		metrics.IncMetricsCollectionErrors(constants.QueryTypeArrivalRate, reason)
+		reason := countRefreshFailure(issued, err, arrivalType)
 		logger.V(logging.DEBUG).Info("Model arrival rate unavailable",
 			"modelID", modelID, "namespace", namespace, "reason", reason, "error", err)
 		return 0
 	}
 
+	// A failed result is counted by the call that sent the query, not again
+	// by every model in the namespace that reads it from the cycle's memo:
+	// counted per model, one failure read as N.
+	countFailedIssued(issued, results, arrivalType)
 	result := results[registration.QueryModelArrivalRate]
 	if result == nil {
 		return 0
 	}
 	if result.HasError() {
-		reason := prometheus.CategorizePrometheusError(result.Error)
-		metrics.IncMetricsCollectionErrors(constants.QueryTypeArrivalRate, reason)
 		logger.V(logging.DEBUG).Info("Model arrival rate result carried an error",
-			"modelID", modelID, "namespace", namespace, "reason", reason)
+			"modelID", modelID, "namespace", namespace,
+			"reason", prometheus.CategorizePrometheusError(result.Error))
 		return 0
 	}
 
 	// Strictly target_model_name, with no model_name fallback — see the note on
 	// QueryModelArrivalRate. The series for other models in this namespace are
-	// skipped here rather than in PromQL.
+	// skipped here rather than in PromQL. A NaN or infinite series is skipped
+	// by Finite: the Prometheus source stores it as 0 with a flag set, so a
+	// check of the raw value read it as a series of rate 0.
 	var arrivalRate float64
+	series := 0
 	for _, value := range result.Values {
 		if value.Labels[seriesTargetModelLabel] != modelID {
 			continue
 		}
-		if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value >= 0 {
+		if value.Finite() && value.Value >= 0 {
 			arrivalRate += value.Value
+			series++
 		}
 	}
 
 	logger.V(logging.DEBUG).Info("Collected model arrival rate",
-		"modelID", modelID, "namespace", namespace, "arrivalRate", arrivalRate)
+		"modelID", modelID, "namespace", namespace, "arrivalRate", arrivalRate, "series", series)
 
 	return arrivalRate
 }

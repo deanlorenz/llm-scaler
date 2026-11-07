@@ -36,7 +36,22 @@
           "fromCycle": 197,
           "toCycle": 220,
           "resamples": 200,
-          "tierChanges": 10
+          "tierChanges": 10,
+          "check": {
+            "status": "ok-at-another-shape",
+            "compared": 10,
+            "onRamp": 20,
+            "aboveBand": 0,
+            "tooOld": 10,
+            "past": 0,
+            "medianErrorPct": 3.0095802156512965,
+            "worstErrorPct": 4.353289520922821,
+            "signedErrorPct": -3.0095802156512965,
+            "fromCycle": 122,
+            "toCycle": 131,
+            "rowKVPerRequest": 6501.878012338539,
+            "otherShape": true
+          }
         },
         "fillBand": {
           "lo": 0.15,
@@ -197,7 +212,11 @@
               "AssumedVP",
               "AssumedPromptSpread",
               "TransferOmitted"
-            ]
+            ],
+            "sensitivity": {
+              "lo": 25.5,
+              "hi": 34.5
+            }
           }
         },
         "ttft": {
@@ -242,6 +261,10 @@
               "decodeWaitProbability": 0.03177493097709786,
               "prefillKnee": 30,
               "decodeKnee": 13.313632625239457
+            },
+            "sensitivity": {
+              "lo": 0.16369753411483565,
+              "hi": 0.25261570216897244
             }
           }
         }

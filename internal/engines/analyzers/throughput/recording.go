@@ -26,7 +26,15 @@ const (
 	KindAnalyze       = "throughput.Analyze"
 	KindObserve       = "throughput.Observe"
 	KindForgetVariant = "throughput.ForgetVariant"
+	// KindNoteVariantsPresent is NoteVariantsPresent.
+	KindNoteVariantsPresent = "throughput.NoteVariantsPresent"
 )
+
+// PresentEvent is NoteVariantsPresent's arguments.
+type PresentEvent struct {
+	Namespace, ModelID string
+	Variants           []string
+}
 
 // AnalyzeEvent is one Analyze: its input and what it returned. Written
 // whether or not it erred. The analyzer reads no capacity store.
@@ -107,6 +115,34 @@ func (a *ThroughputAnalyzer) Observe(
 	a.rec.Record(KindObserve, a.clock.Now(), ObserveEvent{Now: now, ModelID: modelID, Namespace: namespace,
 		Metrics: rows, Reports: sortedReports(reports)})
 	return reports
+}
+
+// NoteVariantsPresent stamps a model's variants as present (noteVariantsPresent),
+// and records the call. The engine calls it for every variant that exists,
+// parked ones included.
+func (a *ThroughputAnalyzer) NoteVariantsPresent(namespace, modelID string, variantNames []string) {
+	if a.rec.Active() {
+		a.rec.Record(KindNoteVariantsPresent, a.clock.Now(), PresentEvent{Namespace: namespace, ModelID: modelID, Variants: variantNames})
+	}
+	a.noteVariantsPresent(namespace, modelID, variantNames)
+}
+
+// noteVariantsPresent stamps the state of a model's variants, so a parked
+// variant, which no Analyze reaches, keeps its line and its series
+// (SwitchITLKeepsPresentVariants). What is never seen again is evicted as
+// before.
+func (a *ThroughputAnalyzer) noteVariantsPresent(namespace, modelID string, variantNames []string) {
+	now := a.clock.Now()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.itlKeepsPresent {
+		return
+	}
+	for _, name := range variantNames {
+		if state, ok := a.variantStates[variantKey(namespace, modelID, name)]; ok {
+			state.lastObservedAt = now
+		}
+	}
 }
 
 // ForgetVariant forgets one variant's ITL line on an operator's request

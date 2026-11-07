@@ -34,6 +34,22 @@ const ITL = "itl"
 // distinct Pods it is from.
 const Start = "start"
 
+// SLO is the slo analyzer's ITL line, and Throughput the throughput analyzer's:
+// each an instance of ITL's rules, an itl.Tracker of the analyzer's own. Each
+// has a Report of its own, so its series is not the saturation line's, and is
+// not on Learners: the annotation forgets both under ITL.
+const (
+	SLO        = "slo"
+	Throughput = "throughput"
+)
+
+// Reporters is every name a Report may carry: Learners, and the two lines
+// forgotten under ITL. It bounds the learner label of the series the Reports
+// set.
+func Reporters() []string {
+	return append(Learners(), SLO, Throughput)
+}
+
 // Learners is every learner the forget-learned-state annotation reaches, by
 // name, in the order Forget reaches them. A plain list, not a registry: each
 // analyzer forgets a name on it with code of its own, and a test holds every
@@ -52,6 +68,9 @@ const (
 	// ByEvicted is the learner's own sweep: the key went unused past its
 	// horizon.
 	ByEvicted By = "evicted"
+	// ByArguments is a change of the variant's engine arguments: the key's
+	// line was the old engine's.
+	ByArguments By = "arguments"
 )
 
 // Forgotten is one key a learner forgot, and what forgot it.

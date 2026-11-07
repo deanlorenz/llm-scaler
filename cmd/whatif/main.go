@@ -7,14 +7,15 @@
 //	whatif capture         --prometheus URL --namespace NS (--kube-state-metrics | --role-of ROLE=SELECTOR ...)
 //	                       --from T0 --to T1 [--step 15s] [--policy FILE] -o run.capture.jsonl.gz
 //	whatif generate        -in run.capture.jsonl.gz -o run.jsonl
+//	whatif freeze          --recording FILE --spec FILE [-o FILE] [--targets FILE] [--ca2 BUCKET=CA2]
 //	whatif replicas-to-slo --recording FILE [--cycle N|last] [--model M] [--decode N]
 //	                       [--headroom H | --rate R] [--tpot-percentile P [--assume-tpot-ratio R]]
 //	                       [--ttft-percentile P] [--prefill N] [--prefill-variant V] [--assume-vp TOKENS]
-//	                       [--assume-prompt-cv CV] [--arrival-cv2 C] [--assume-router-hop D] [-o json]
+//	                       [--assume-a D] [--assume-prompt-cv CV] [--arrival-cv2 C] [--assume-router-hop D] [-o json]
 //	whatif slo-to-rate     --recording FILE [--cycle N|last] [--model M] [--decode N]
 //	                       --tpot 4ms[@p90] [--assume-tpot-ratio R] [--headroom H]
 //	                       [--ttft 200ms[@p95]] [--prefill N] [--prefill-variant V] [--assume-vp TOKENS]
-//	                       [--assume-prompt-cv CV] [--arrival-cv2 C] [--assume-router-hop D] [-o json]
+//	                       [--assume-a D] [--assume-prompt-cv CV] [--arrival-cv2 C] [--assume-router-hop D] [-o json]
 //	whatif replicas-to-slo|slo-to-rate --prometheus URL --namespace NS (--kube-state-metrics | --role-of ROLE=SELECTOR ...)
 //	                       --from T0 --to T1 [capture's flags] [the question's flags]
 //
@@ -91,7 +92,7 @@ func exitCode(err error) int {
 	return 1
 }
 
-const usage = "usage: whatif capture|generate|replicas-to-slo|slo-to-rate [flags]; -h after a command lists its flags"
+const usage = "usage: whatif capture|freeze|generate|replicas-to-slo|slo-to-rate [flags]; -h after a command lists its flags"
 
 // command is one subcommand: it parses its own flags from args and writes
 // what it reports to out, and its warnings to warn (stderr).
@@ -100,6 +101,7 @@ type command func(ctx context.Context, args []string, out, warn io.Writer) error
 // commands is every subcommand, by name.
 var commands = map[string]command{
 	"capture":         runCapture,
+	"freeze":          runFreeze,
 	"generate":        runGenerate,
 	"replicas-to-slo": runReplicasToSLO,
 	"slo-to-rate":     runSLOToRate,

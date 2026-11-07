@@ -48,8 +48,9 @@ import (
 //     prune): a model parked whole is in no model group, and its record is
 //     forgotten. A step with no such model stops here, as the engine's
 //     cycle with no active variant returns before anything below;
-//  3. NoteVariantsPresent on saturation and then slo, model by model in key
-//     order, for the variants with replicas and then for the parked ones;
+//  3. NoteVariantsPresent on saturation, slo and then throughput, model by
+//     model in key order, for the variants with replicas and then for the
+//     parked ones;
 //  4. the three sweeps: saturation's EvictStaleHistory, the store's
 //     EvictStale and slo's EvictStale;
 //
@@ -311,6 +312,9 @@ func (r *replayer) generateStep(ctx context.Context, now time.Time, models []gen
 		r.sat.NoteVariantsPresent(ns, model, names)
 		if r.slo != nil {
 			r.slo.NoteVariantsPresent(ns, model, names)
+		}
+		if r.tp != nil {
+			r.tp.NoteVariantsPresent(ns, model, names)
 		}
 	}
 	for _, m := range models {

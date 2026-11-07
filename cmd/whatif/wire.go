@@ -107,7 +107,8 @@ type wireTTFT struct {
 	ReplicasFrom  string   `json:"replicasFrom,omitempty"`
 	// VP is V_P, tokens/s, as learned or assumed (VPSource); VPOrigin is P1's
 	// source, and VPPromptTokens the prompt it was read at. VPLearned is P1's
-	// figure an --assume-vp stands in place of.
+	// figure an --assume-vp stands in place of, and FixedLatencyLearned the
+	// one an --assume-a does.
 	VP                  float64  `json:"vp,omitempty"`
 	VPSource            string   `json:"vpSource,omitempty"`
 	VPOrigin            string   `json:"vpOrigin,omitempty"`
@@ -115,6 +116,7 @@ type wireTTFT struct {
 	VPLearned           *float64 `json:"vpLearned,omitempty"`
 	FixedLatencySeconds float64  `json:"fixedLatencySeconds,omitempty"`
 	FixedLatencySource  string   `json:"fixedLatencySource,omitempty"`
+	FixedLatencyLearned *float64 `json:"fixedLatencyLearned,omitempty"`
 	Imbalance           float64  `json:"imbalance,omitempty"`
 	ImbalanceSource     string   `json:"imbalanceSource,omitempty"`
 	PromptTokens        float64  `json:"promptTokens,omitempty"`
@@ -220,6 +222,56 @@ type wireLine struct {
 	// another tier (TierUnstable above a tenth).
 	Resamples   int `json:"resamples"`
 	TierChanges int `json:"tierChanges"`
+	// Check is the line against the recording's rows, absent with no line.
+	Check *wireLineCheck `json:"check,omitempty"`
+}
+
+// wireLineCheck is whatif.LineCheck on the wire. Status is ok,
+// ok-at-another-shape, mismatch, or not-run under whatif.MinLineRows rows.
+// OtherShape says the same of a mismatch.
+type wireLineCheck struct {
+	Status         string  `json:"status"`
+	Compared       int     `json:"compared"`
+	OnRamp         int     `json:"onRamp"`
+	AboveBand      int     `json:"aboveBand"`
+	TooOld         int     `json:"tooOld"`
+	Past           int     `json:"past"`
+	MedianErrorPct float64 `json:"medianErrorPct"`
+	WorstErrorPct  float64 `json:"worstErrorPct"`
+	SignedErrorPct float64 `json:"signedErrorPct"`
+	FromCycle      int     `json:"fromCycle"`
+	ToCycle        int     `json:"toCycle"`
+	// RowKVPerRequest is the median KV a request held on the rows compared.
+	RowKVPerRequest float64 `json:"rowKVPerRequest"`
+	OtherShape      bool    `json:"otherShape"`
+}
+
+// The statuses of a line check.
+const (
+	checkOK         = "ok"
+	checkOtherShape = "ok-at-another-shape"
+	checkMismatch   = "mismatch"
+	checkNotRun     = "not-run"
+)
+
+// wireCheck is the line check on the wire, nil with no line.
+func wireCheck(pv pricedVariant) *wireLineCheck {
+	if pv.state.Line.IsZero() {
+		return nil
+	}
+	c := pv.check
+	w := &wireLineCheck{Status: checkOK, Compared: c.Compared, OnRamp: c.OnRamp, AboveBand: c.AboveBand, TooOld: c.TooOld, Past: c.Past,
+		MedianErrorPct: c.MedianErrorPct, WorstErrorPct: c.WorstErrorPct, SignedErrorPct: c.SignedErrorPct, FromCycle: c.FromCycle,
+		ToCycle: c.ToCycle, RowKVPerRequest: c.RowKVPerRequest, OtherShape: c.OtherShape}
+	switch {
+	case !c.Ran():
+		w.Status = checkNotRun
+	case c.Mismatch():
+		w.Status = checkMismatch
+	case c.OtherShape:
+		w.Status = checkOtherShape
+	}
+	return w
 }
 
 // wireTPOT is the TPOT question: the target (question 1 only), the
@@ -256,6 +308,25 @@ type wireAnswer struct {
 	Band  *wireInterval `json:"band,omitempty"`
 	Basis wireBasis     `json:"basis"`
 	Flags []string      `json:"flags"`
+	// Sensitivity is the figure's span at V_P and f either way, absent on a
+	// figure that does not rest on them.
+	Sensitivity *wireSensitivity `json:"sensitivity,omitempty"`
+}
+
+// wireSensitivity is whatif.Sensitivity on the wire: Refused is a corner's
+// reason, and then the worse side of the span says nothing.
+type wireSensitivity struct {
+	Lo      float64 `json:"lo"`
+	Hi      float64 `json:"hi"`
+	Refused string  `json:"refused,omitempty"`
+}
+
+// toWireSensitivity is a span on the wire.
+func toWireSensitivity(s *whatif.Sensitivity) *wireSensitivity {
+	if s == nil {
+		return nil
+	}
+	return &wireSensitivity{Lo: s.Lo, Hi: s.Hi, Refused: string(s.Refused)}
 }
 
 // wireTTFTResult is a priced TTFT or a refusal, never both.
@@ -272,6 +343,8 @@ type wireTTFTAnswer struct {
 	Basis wireBasis     `json:"basis"`
 	Flags []string      `json:"flags"`
 	Parts wireTTFTParts `json:"parts"`
+	// Sensitivity is as on wireAnswer.
+	Sensitivity *wireSensitivity `json:"sensitivity,omitempty"`
 }
 
 // wireTTFTParts is the figures beside the union bound, and its parts' means,
@@ -351,7 +424,7 @@ const (
 func toWire(r whatif.Result, unit string) *wireResult {
 	switch v := r.(type) {
 	case whatif.Answer:
-		a := &wireAnswer{Value: v.Value, Unit: unit, Flags: []string{}, Basis: wireBasis{
+		a := &wireAnswer{Value: v.Value, Unit: unit, Flags: []string{}, Sensitivity: toWireSensitivity(v.Sensitivity), Basis: wireBasis{
 			Fill: v.Basis.Fill, KneeRate: v.Basis.KneeRate, Floor: v.Basis.Floor, Uncapped: v.Basis.Uncapped,
 			BoundBy: []string{}, Tier: v.Basis.Tier,
 		}}
@@ -378,7 +451,7 @@ func toWire(r whatif.Result, unit string) *wireResult {
 func toWireTTFT(r whatif.Result) *wireTTFTResult {
 	switch v := r.(type) {
 	case whatif.TTFT:
-		a := &wireTTFTAnswer{Value: v.Seconds, Unit: unitSeconds, Flags: []string{}, Basis: wireBasis{
+		a := &wireTTFTAnswer{Value: v.Seconds, Unit: unitSeconds, Flags: []string{}, Sensitivity: toWireSensitivity(v.Sensitivity), Basis: wireBasis{
 			Floor: v.Floor, KneeRate: v.PrefillKnee, BoundBy: []string{}, Tier: v.Tier,
 		}, Parts: wireTTFTParts{
 			Independent: v.Independent, Pooled: v.Pooled, DecodeShare: v.DecodeShare,
@@ -446,7 +519,7 @@ func inputsOf(f *answerFlags, pv pricedVariant) *wireInputs {
 		Line: wireLine{A: pv.decode.Line.A, B: pv.decode.Line.B, Tier: pv.state.Tier,
 			BorrowedFrom: pv.state.BorrowedFrom, Readings: len(pv.state.LineReadings),
 			Resamples: pv.lines.Drawn, TierChanges: pv.lines.TierChanges(),
-			FromCycle: pv.state.ReadingsFrom, ToCycle: pv.state.ReadingsTo},
+			FromCycle: pv.state.ReadingsFrom, ToCycle: pv.state.ReadingsTo, Check: wireCheck(pv)},
 		FillBand:       wireInterval{Lo: pv.decode.Band.Lo, Hi: pv.decode.Band.Hi},
 		CapacityTokens: pv.decode.CapacityTokens, KVPerRequest: pv.decode.KVPerRequest,
 		Shape: wireShape{InputTokens: pv.shape.AvgInputTokens, InputSource: shapeMeasured,

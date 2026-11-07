@@ -136,6 +136,7 @@ E1-const
 EPP
 EffectiveMaxBatchedTokens
 EngineParams
+EngineTPOTHistogram
 ErrImagePull
 Error
 Events
@@ -370,6 +371,7 @@ T2-failed
 T2-held
 T2-pinned
 TPOT
+TPOTBucketTooWide
 TPOTQuantileUnbounded
 TTFT
 Target
@@ -385,6 +387,7 @@ TooFewImbalanceMinutes
 TooFewLowLoadMinutes
 TooFewPromptClusters
 TooManySlots
+TransferHeld
 TransferOmitted
 TriggeredScaleUp
 UP
@@ -571,6 +574,7 @@ averages
 avgITLObs
 avgInputTokens
 avgOutputTokens
+awaiting-in-flight
 awaiting-return
 b
 back
@@ -1145,6 +1149,7 @@ given
 gives
 giving
 global
+go
 goes
 going
 gone
@@ -1367,6 +1372,7 @@ k2-obs-admitted
 k2-reads-the-settle-tracker
 k2-unsettled-joined
 k2-unsettled-window
+k2-waits-after-a-rollout
 k2-waits-after-controller-restart
 k2Borrows
 k2ComputeBound
@@ -1512,6 +1518,7 @@ lineHeld
 lineKey
 linePinnedAtBPrior
 linePriorBeyondReadings
+lineRolloutHeld
 lineShapeG
 lineSlopeAge
 lineSlopeHeld
@@ -1578,6 +1585,7 @@ maxNumSeqs
 maxRatio
 maxReplicas
 maxRoles
+maxWait
 max_model_len
 max_num_active_seqs
 max_num_batched_tokens
@@ -2255,6 +2263,7 @@ rolesKnownNow
 rolled-out
 rolling
 rollout
+rolloutHeld
 rollouts
 room
 rose
@@ -2290,6 +2299,7 @@ saturatedThroughput
 saturatedThroughputBucket
 saturation
 saturation-holds-role
+saturation-itl-clears-on-a-new-revision
 saturation-itl-one-sided-at-cap
 saturation-itl-tier-hysteresis
 saturation-only
@@ -2436,15 +2446,18 @@ slo
 slo-
 slo-batch-cap-admission
 slo-batch-cap-per-rank
+slo-itl-files-learner-reports
 slo-itl-forget-reaches-the-line
 slo-itl-idle-needs-evidence
 slo-itl-keeps-the-settle-through-a-missing-row
 slo-itl-ols
 slo-itl-one-sided-at-cap
+slo-itl-own-settle-reads-a-long-gap-as-first-seen
 slo-itl-pinned
 slo-itl-reads-the-finite-pod-mean
 slo-itl-reads-the-settle-tracker
 slo-itl-restart-under-its-name-settles
+slo-itl-rollout-guard
 slo-itl-tier-hysteresis
 slo-itl-waits-after-controller-restart
 slo-kv-per-request-output-dispersion
@@ -2454,6 +2467,7 @@ slo-ttft-decode-term
 slo-ttft-measured-spread
 slo-ttft-measured-transfer
 slo-ttft-price
+slo-ttft-quiet-transfer
 slo-ttft-variant
 slo-variant
 slo.Analyze
@@ -2630,9 +2644,12 @@ throughput-demand-floor-total
 throughput-itl-above-band
 throughput-itl-admits-at-sequence-cap
 throughput-itl-at-cap
+throughput-itl-files-learner-reports
 throughput-itl-forget-reaches-the-line
+throughput-itl-forgets-on-new-arguments
 throughput-itl-held
 throughput-itl-idle-needs-evidence
+throughput-itl-keeps-present-variants
 throughput-itl-keeps-the-settle-through-a-missing-row
 throughput-itl-keeps-the-window-on-gps-mismatch
 throughput-itl-ols
@@ -2640,6 +2657,7 @@ throughput-itl-pinned
 throughput-itl-reads-the-finite-pod-mean
 throughput-itl-reads-the-settle-tracker
 throughput-itl-restart-under-its-name-settles
+throughput-itl-rollout-guard
 throughput-itl-settling
 throughput-itl-steady-gate
 throughput-itl-tier-hysteresis
@@ -2647,6 +2665,7 @@ throughput-itl-waits-after-controller-restart
 throughput-kv-per-request-output-dispersion
 throughput.Analyze
 throughput.ForgetVariant
+throughput.NoteVariantsPresent
 throughput.Observe
 throughputEntries
 throughputHeld
@@ -2838,6 +2857,7 @@ vpSamples
 vpSource
 wait
 waitBeforeReverseMove
+waited
 waiting
 waits
 wake

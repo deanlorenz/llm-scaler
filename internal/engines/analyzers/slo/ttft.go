@@ -66,6 +66,19 @@ const SwitchTTFTMeasuredSpread = "slo-ttft-measured-spread"
 // golden.
 const SwitchTTFTMeasuredTransfer = "slo-ttft-measured-transfer"
 
+// SwitchTTFTQuietTransfer is the replay switch for which rows the transfer is
+// read from: on, prefill.TransferWindow: the fleet's quiet cycles, held through a
+// busy stretch for at most prefill.HeldDecodeAge and flagged whatif.TransferHeld
+// meanwhile, then every row's figure, and past that none. Off, every row of the
+// cycle, as before. A pod behind on its pulls read 0.34 s at 8000 tokens where it
+// read about 0.03 s quiet, and through the old sum that floored the priced TTFT at
+// 414 ms (docs/proposals/slo-capacity-planner-ttft.md, "As built: the staircase
+// tooling"). The floor returns once the quiet figure ages out, and it should: a
+// fleet saturated that long has no quiet figure to speak of. A change of
+// accelerator or of engine arguments sweeps the window. It moves no golden, since
+// no committed recording prices a line; its unit tests hold it.
+const SwitchTTFTQuietTransfer = "slo-ttft-quiet-transfer"
+
 const (
 	// decodeBoundRatio is how far the prefill side's own rate must exceed
 	// the full rate for decode to count as setting it: any decode wait lowers
@@ -326,20 +339,25 @@ func (a *Analyzer) priceTTFTVariants(logger logr.Logger, input domain.AnalyzerIn
 		}
 		measured = a.noteDecodeTTFT(ttftWindowKey(input.Namespace, input.ModelID, decodes[0]), cycle, now)
 	}
-	var term *whatif.DecodeTerm
-	if len(decodes) == 1 && a.ttftDecodeTerm {
-		accelerator := ""
+	// With several decode variants no one window holds the transfer.
+	decodeKey, accelerator, engineArgs := "", "", ""
+	if len(decodes) == 1 {
+		decodeKey = ttftWindowKey(input.Namespace, input.ModelID, decodes[0])
+		engineArgs = a.engineParams(input.Namespace, input.ModelID, decodes[0]).ArgsTag()
 		for _, vs := range fleet.variants {
 			if vs.VariantName == decodes[0] {
 				accelerator = vs.AcceleratorName
 			}
 		}
-		est := a.noteDecodeTerm(ttftWindowKey(input.Namespace, input.ModelID, decodes[0]), accelerator,
-			a.engineParams(input.Namespace, input.ModelID, decodes[0]).ArgsTag(), prefill.DecodeTermCycle{
-				Now: now, Prefill: prefillRows, Decode: decodeRows, PromptTokens: modelPrompt, Router: router,
-				Settled:    &prefill.Settle{View: a.settleView(), Model: utils.GetNamespacedKey(input.Namespace, input.ModelID)},
-				RouterHeld: input.SchedulerQueue != nil && input.SchedulerQueue.QueueSize > 0,
-			})
+	}
+	transfer := a.noteTransfer(decodeKey, accelerator, engineArgs, decodeRows, now)
+	var term *whatif.DecodeTerm
+	if len(decodes) == 1 && a.ttftDecodeTerm {
+		est := a.noteDecodeTerm(decodeKey, accelerator, engineArgs, prefill.DecodeTermCycle{
+			Now: now, Prefill: prefillRows, Decode: decodeRows, PromptTokens: modelPrompt, Router: router,
+			Settled:    &prefill.Settle{View: a.settleView(), Model: utils.GetNamespacedKey(input.Namespace, input.ModelID)},
+			RouterHeld: input.SchedulerQueue != nil && input.SchedulerQueue.QueueSize > 0,
+		})
 		t := whatif.TermFromEstimate(est)
 		term = &t
 	}
@@ -364,8 +382,9 @@ func (a *Analyzer) priceTTFTVariants(logger logr.Logger, input domain.AnalyzerIn
 			est: est, estimateAt: estimateAt, pods: pods, otherPods: readyPrefill - pods, percent: cfg.SLO.TTFTPercentile(),
 			prompt: prompt, spread: a.promptSpread(ttftWindowKey(input.Namespace, input.ModelID, v), rows, now),
 			shares:   a.noteShare(ttftWindowKey(input.Namespace, input.ModelID, v), pods, share, shareOK, now),
-			transfer: a.transferPerToken(decodeRows, prompt), decode: decode, decodeVariant: decodeVariant,
-			decodeTTFT: measured, term: term, legacyDecodeSum: !a.ttftDecodeTerm, flow: flow, mismatch: mismatch,
+			transfer: a.transferPerToken(transfer, decodeRows, prompt), decode: decode, decodeVariant: decodeVariant,
+			transferHeld: a.ttftMeasuredTransfer && a.ttftQuietTransfer && transfer.Held,
+			decodeTTFT:   measured, term: term, legacyDecodeSum: !a.ttftDecodeTerm, flow: flow, mismatch: mismatch,
 		}
 		in.outputSpreadUnread = a.outputSpreadUnread(fleet)
 		p := gateOrPrice(&in, fresh, arrival, target)
@@ -409,13 +428,19 @@ func (a *Analyzer) promptSpread(key string, rows []domain.ReplicaMetrics, now ti
 	return w.window.Spread()
 }
 
-// transferPerToken is transferPerToken of the rows, or 0 with
-// SwitchTTFTMeasuredTransfer off.
-func (a *Analyzer) transferPerToken(rows []domain.ReplicaMetrics, prompt float64) float64 {
-	if !a.ttftMeasuredTransfer {
+// transferPerToken is the transfer the pricing reads: 0 with
+// SwitchTTFTMeasuredTransfer off, the window's figure with SwitchTTFTQuietTransfer
+// on, and the cycle's rows with it off.
+func (a *Analyzer) transferPerToken(r prefill.TransferReading, rows []domain.ReplicaMetrics, prompt float64) float64 {
+	switch {
+	case !a.ttftMeasuredTransfer:
+		return 0
+	case !a.ttftQuietTransfer:
+		return transferPerToken(rows, prompt)
+	case !(prompt > 0):
 		return 0
 	}
-	return transferPerToken(rows, prompt)
+	return r.Figure() / prompt
 }
 
 // currentRefusal is the model's refusal of the current rate because the rate

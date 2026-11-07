@@ -71,6 +71,11 @@ const (
 	// nixl_xfer_time_seconds is not collected, so T_xfer is left out, and
 	// the answer over-promises by it.
 	TransferOmitted Flag = "TransferOmitted"
+	// TransferHeld is a transfer read on earlier cycles: the latest had a queue or
+	// no reading, and the quiet figure stands inside its age
+	// (prefill.HeldDecodeAge). It sets the old sum's floor, so a held figure is a
+	// floor that has not been read at this load.
+	TransferHeld Flag = "TransferHeld"
 	// DecodeSideOmitted is a TTFT priced with no decode line and no measured
 	// decode-engine TTFT: neither the decode admission wait nor any part of
 	// decode's TTFT is in it. It is raised with DecodeTTFTUnmeasured, and the
@@ -229,6 +234,9 @@ type TTFT struct {
 	// decode side.
 	Tier  string
 	Flags []Flag
+	// Sensitivity is the figure's span over V_P and f either way, set by the
+	// caller that swept them (SensitivityFleets); nil when none did.
+	Sensitivity *Sensitivity
 }
 
 func (TTFT) result() {}

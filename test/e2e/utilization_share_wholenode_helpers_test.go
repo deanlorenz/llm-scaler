@@ -605,7 +605,7 @@ func describeShare(lines []shareLine, limit int) string {
 			l.At.Format(time.TimeOnly), l.Msg, l.ID, l.Set, l.Donor, l.Receiver, l.Outcome, l.Reason, l.Planned, l.Returned, l.Pods)
 	}
 	if b.Len() == 0 {
-		return "no utilization-share lines for the group"
+		return "no matching utilization-share lines for the group"
 	}
 	return b.String()
 }

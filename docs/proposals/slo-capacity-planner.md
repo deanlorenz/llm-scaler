@@ -1,6 +1,9 @@
 # What-if capacity: from an SLO to a rate, and from replicas to an SLO
 
-**Status:** proposal, 2026-11-02. Nothing here is built. The decode half reuses
+**Status:** proposal, 2026-11-02. `cmd/whatif` is built, both questions from a
+recording or from Prometheus: see [the CLI reference](#cli-reference) and
+[what is measured](#measured-on-the-goldens). Per-bucket answers, aggregated TTFT
+(M1) and the controller's handler are not. The decode half reuses
 arithmetic the controller runs today. The TTFT model is on its own page,
 [end-to-end TTFT](slo-capacity-planner-ttft.md). The recorder fields this work
 needs are in [the learner rules](analyzer-learner.md#29-recorder-fields-for-ttft-and-capture),
@@ -38,7 +41,7 @@ from a recording, from a live Prometheus with no controller installed, or
 | **Decode** | Reuses the ITL line and the SLO analyzer's TPOT pricing unchanged, moved to a `signals` package so a CLI can call them. A per-request TPOT percentile is the mean times a ratio `R_q` learned from the router's per-request TPOT histogram. Decode admission is a birth-death chain over the batch cap's slots. |
 | **TTFT** | Per-pod queue with the measured imbalance; the router's flow-control queue only above the rate where it starts holding requests; prefill capacity as a token throughput from sources that cannot over-state it; parts combined by convolution and an optimised union bound. See [end-to-end TTFT](slo-capacity-planner-ttft.md). |
 | **Packaging** | `internal/signals/whatif` and `internal/signals/prefill`, an adapter `internal/whatifsource`, a CLI `cmd/whatif`. |
-| **Validated** | Decode against the goldens; TTFT on a fixed-replica staircase, flow control off and on. TTFT prints UNVALIDATED until then. |
+| **Validated** | TPOT is measured against the goldens: [the table](#measured-on-the-goldens), 6 of 8 lines the planner answers on in bound. The decode knee and prefill's own latency are not validated: no golden has the data. TTFT on a fixed-replica staircase, flow control off and on, prints UNVALIDATED until a run passes. |
 | **Refuses** | With no evidence for a term, rather than guessing. |
 
 ## A session
@@ -192,6 +195,29 @@ the router's own streaming path and exists for vLLM only. It is used, flagged,
 when the router histogram is empty or its resolution is flagged. The SLO
 analyzer's percentile ([SLO tiers](slo-tiers.md#later-a-tpot-percentile)) uses
 the same rule and the same library.
+
+As built in the CLI, with three choices the page left open. The engine's replaces a
+coarse router only when it is not coarse itself: swapping one grid for another
+buys nothing, and the router's is what the client sees. A router histogram that is
+malformed, or whose quantile is unbounded, stands as its refusal: that is a reading,
+not an absence. And with no router to fall back to, the engine's histogram answers
+only where it resolves the percentile. A `q` bucket wider than the window's mean
+(`whatif.MaxEngineBucketWidth`, four times the coarse flag's width, read at `R_q`'s
+own rank) refuses `TPOTBucketTooWide`, and names `--assume-tpot-ratio`. That line is
+stated, not measured. It is what `throughput-sweep-restart` needs: it has no router
+latency, and vLLM's edges of 10, then 25 ms sit around a 3 ms mean, so p90, p99 and
+p99.9 each read the same bucket's edge, 21.79 ms, and the window's bucket is 6.78
+times the mean. No figure there answers the percentile asked. A refusal of the
+engine's own, such as `TPOTQuantileUnbounded`, is returned as it is.
+
+The collector reads the engine's buckets and not its `_sum`, so the window's mean is
+each row's `AvgITL`, weighted by its requests, the assumption the mean TPOT target
+already makes. An answer from it is flagged `EngineTPOTHistogram`, and the row says
+`R_q 1.2 from 40 engine TPOT windows, not the router's`, with
+`inputs.tpot.ratioSource` `engine histogram`. No committed recording answers from it:
+the case is held on built windows (`TestEngineTPOT_TheOrder`). A refusal priced on
+`R_q` keeps what it rests on, `EngineTPOTHistogram`, `CoarseTPOTBucket` or
+`AssumedTPOTRatio`, as an answer does.
 
 **Without a histogram**, a percentile TPOT is refused (`NoTPOTHistogram`).
 `--assume-tpot-ratio R` gives a flagged answer instead. Recommendation: refuse
@@ -379,10 +405,11 @@ age. **Bands**: a block bootstrap, blocks of 4 cycles (15 s cycles over 1-minute
 rates overlap by three quarters), admission and tier rerun per resample, 200
 resamples, a fixed printed seed; "tier unstable" when more than 10% of resamples
 change tier. `V_P` from a peak and `f` are extreme statistics, so they get a
-±15% sensitivity sweep instead. **Extrapolation**: a fill or prompt length
+[±15% sensitivity sweep](#ttft-as-built) instead. **Extrapolation**: a fill or prompt length
 outside the window's range is flagged with the distance; outside the band the
 tool clamps, as `whatif.PricingK` and `whatif.PriceTPOT` do. **The line check** runs on every
-answer and a mismatch above 15% away from a ramp is printed.
+answer and a mismatch above 15% away from a ramp is printed
+([as built](#the-line-check-as-built)).
 
 ## Where decode is most wrong
 
@@ -440,6 +467,73 @@ pass mark (goldens scale out):
 
 A check with no data is **SKIPPED with a reason**, never passed. TTFT's pass mark
 is [the staircase](slo-capacity-planner-ttft.md#ground-truth-and-the-staircase).
+
+### Measured on the goldens
+
+`TestDecodeValidation_OnTheGoldens` does this over all 23 goldens, the four staircase
+ones among them, and freezes every line in
+`cmd/whatif/testdata/decode-validation.golden`: 56 lines, one per variant. Green means
+the figures did not move. It is not a pass, and a row past its bound stays in the file
+as `OUT`. The file sits there so that the goldens gate makes a PR name it.
+
+Nothing here tunes the model. The error is predicted minus measured, so above 0 the
+line reads slow on TPOT and fast on the knee. A figure needs at least 5 rows. The bound
+reads the figure clamped to the band, as an answer is; the unclamped one is the line
+read at the row's own fill, and "rows clamped" is how many the clamp moved.
+
+| Golden | Tier at the freeze | Mean TPOT error | Unclamped | Rows | Rows clamped | Against ±10% | Knee error | Windows | Against ±15% |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `ols-sweep` | pinned-B | -3.9% | -3.9% | 87 | 7 | in | SKIPPED: 2 windows | | |
+| `ols-sweep-slo` | held | +10.5% | +10.5% | 33 | 0 | **out** | +70.1% | 7 | **out** |
+| `ols-sweep-slo-restart` | pinned-B | -8.5% | -8.5% | 54 | 3 | in | +103.4% | 5 | **out** |
+| `throughput-sweep` | held | +3.5% | +3.5% | 33 | 0 | in | SKIPPED: none off a ramp | | |
+| `throughput-sweep-restart` | held | +50.1% | +32.6% | 124 | 124, all below | **out** | SKIPPED: none off a ramp | | |
+| `mu-paths` variant-01 (synthetic) | ols | -4.9% | 0.0% | 76 | 38 above | in | +76.3% | 38 | **out** |
+| `mu-paths` variant-02 (synthetic) | ols | -9.8% | 0.0% | 95 | 57 above | in | +44.4% | 19 | **out** |
+| `mu-paths` variant-03 (synthetic) | ols | 0.0% | 0.0% | 57 | 0 | in | SKIPPED: none off a ramp | | |
+
+**On a line the planner refuses** (`PinnedDefaultB`, or held from one), so the tool
+prints no TPOT there and this is the line's error, not an answer's. All knees here
+are SKIPPED for that refusal, or for no saturated window off a ramp:
+
+| Golden | Mean TPOT error | Unclamped | Rows | Rows clamped | Against ±10% |
+| --- | --- | --- | --- | --- | --- |
+| `e1` model-02, model-03 | -3.0%, +59.9% | -39.1%, -36.6% | 327, 244 | 295, 226 | in, **out** |
+| `e1-tuned` model-02, model-03 | -4.8%, +75.2% | -39.1%, -33.8% | 311, 244 | 276, 223 | in, **out** |
+| `mu-paths` variant-04 (synthetic) | 0.0% | 0.0% | 57 | 19 | in |
+| `start-seed-restart-2` variant-01, variant-02 | +101.5%, +99.4% | +150.4%, +147.7% | 65, 23 | 65, 18 | **out**, **out** |
+| `ttft-staircase-b-off` | -18.7% | -18.7% | 210 | 23 | **out** |
+| `ttft-staircase-b-on` | -22.1% | -22.1% | 227 | 1 | **out** |
+| `ttft-staircase-c-on` | -21.2% | -21.2% | 227 | 2 | **out** |
+| `ttft-three-pods` | -9.4% | -9.4% | 237 | 44 | in |
+
+**What it says.**
+
+- **Mean TPOT:** 6 of the 8 lines the planner answers on are in bound, of 19 lines
+  with a figure. Three of the six are synthetic, so the real runs are 3 of 5.
+  `throughput-sweep-restart` reads 50.1% slow, and that is a low-fill tail: all 124
+  held-out rows sit below the band, so each is priced at the band's bottom. Unclamped it
+  still reads 32.6% slow. `e1` model-02 and `e1-tuned` model-02 are in bound only through
+  the clamp: unclamped both read 39.1% fast. Those are lines the planner refuses.
+- **Decode knee:** four figures, all out, from 44.4% to 103.4% high. Two are
+  synthetic. The other two are `ols-sweep-slo` runs, recorded before `QueueMin`, so
+  a "saturated window" is a queue seen at one instant, not a busy minute. Treat the
+  knee as not validated: no golden saturates a line the planner answers on, off a
+  ramp, for 5 windows or more with `QueueMin` read.
+- **Prefill's own latency:** no figure. All 16 prefill variants are SKIPPED: P1
+  refuses `V_P` on 14 (`NoPrefillCapacity`) and `a` on 2 (`TooFewLowLoadMinutes`) at
+  the freeze. `TestDecodeValidation_ThePrefillArithmetic` holds the check's arithmetic
+  on built rows; that is arithmetic, not validation.
+- **The staircase** has no line the planner answers on at the freeze. `-a-off` has no
+  line at all, and the other three are on the default intercept, reading 18.7% to
+  22.1% fast. So the four staircase goldens validate nothing of decode.
+
+The rules the page leaves open, chosen here: the row is the unit, as `AvgITL` and
+`generation_tokens` are per pod; a line is asked at the row's fill, clamped to the
+band as an answer is; the knee is read at the row's own shape, on one replica, against
+that replica's tokens, off a ramp by [the line check's rule](#the-line-check-as-built);
+a saturated window is `QueueMin` above 0, or on a recording without it a queue above 0
+at the cycle. No committed recording speculates, so `AvgITL` is per token on all of them.
 
 **Property cases**, in `internal/signals/whatif` (`property_test.go`, in the
 package so the chain's Erlang C case reaches its solver), each
@@ -651,8 +745,9 @@ Every answer is an `Answer{Value, Band, Basis, Flags}` or an
 | `NoImbalance` | More than one prefill pod and no `f`, learned or assumed (`f` = 1 is never assumed silently: it over-promises) |
 | `NoPrefillReplicas` | A TTFT question with no prefill pod to price |
 | `TokenGapPercentile` | A percentile over token gaps (ITL); per-request TPOT percentiles are supported |
-| `NoTPOTHistogram` | A per-request TPOT percentile with no router or engine TPOT histogram (the router's needs `usage` on responses) and no `--assume-tpot-ratio` |
+| `NoTPOTHistogram` | A per-request TPOT percentile with no router or engine TPOT histogram holding an observation (the router's needs `usage` on responses) and no `--assume-tpot-ratio` |
 | `TPOTQuantileUnbounded` | The TPOT `q` quantile falls in the histogram's `+Inf` bucket |
+| `TPOTBucketTooWide` | A TPOT percentile the engine's histogram was asked for, the router's holding no observation, with a `q` bucket wider than the window's mean (`whatif.MaxEngineBucketWidth`): the bucket's edge, whatever `q` was asked. It names `--assume-tpot-ratio`, and keeps `EngineTPOTHistogram` and `CoarseTPOTBucket` |
 | `TargetBelowFloor` | The target is below what any number of replicas reaches |
 | `FlowControlUnknown` | Flow control on and the detector's thresholds unknown |
 | `AboveDecodeOnset` | A TTFT asked at or above the decode gate's onset with flow control on, where the gate is not work conserving and TTFT is not priced |
@@ -665,9 +760,10 @@ Every answer is an `Answer{Value, Band, Basis, Flags}` or an
 **Flags**, never refusals: extrapolation (with its distance), a borrowed, held
 or snapshot line, a lower-bound or assumed `V_P`, no readiness, an unstable
 tier, an assumed `R_q`, a pooled `R_q` on a bucket, a coarse TPOT bucket, the
-engine TPOT histogram used in place of the router's, a rate held down by decode
+engine TPOT histogram used in place of the router's, a line the recording's rows
+do not support (`LineMismatch`), a rate held down by decode
 admission, flow control inferred off, above a
-flow-control onset, several priority bands, and UNVALIDATED on TTFT. The decode
+flow-control onset, and UNVALIDATED on TTFT ([several priority bands is cut](#ttft-as-built)). The decode
 library's flags today: `AssumedTPOTRatio`, `CoarseTPOTBucket`,
 `BelowFittedBand` (a fill, or the knee, read at the band's bottom because it
 sits below the band the line was fitted over) and `KVBoundSlots` (admission
@@ -833,13 +929,14 @@ TTFT: the decode answers are as they were.
 | `--assume-router-hop 8ms` | The hop between the router and the engines, in place of the learned or default one, flagged `RouterHopAssumed` |
 | `--prefill N` | Prefill pods to price; 0 takes the serving pods at the cycle |
 | `--prefill-variant V` | The prefill variant to price, when the model has several: the CLI prices one fleet, and a usage error says so otherwise. It gets the whole rate, named as assumed |
+| `--assume-a 11ms` | `a`, the fixed latency one request pays on a prefill pod, in place of the learned one, flagged `AssumedA` and printed `a ASSUMED`, with any learned figure beside it (`a 8.00 ms ASSUMED, learned 11.04 ms`, and `fixedLatencyLearned` in the JSON). For a fleet of one prompt length, which gives P1 no fit |
 
 **Where each input comes from.**
 
 | Input | Source | With no source |
 | --- | --- | --- |
 | `V_P` | `--assume-vp`, flagged `AssumedVP` and printed `V_P ASSUMED`, with any learned figure beside it (`V_P 130000 ASSUMED, learned 115621`, and `vpLearned` in the JSON); else P1's estimate at the cycle, read through the replay | `NoPrefillCapacity`. It never defaults |
-| `a` | P1's estimate at the cycle | `NoFixedLatency`. There is no `--assume-a`, and S1 has no assumption for it |
+| `a` | `--assume-a`, flagged `AssumedA` (CLI only: S1 has no assumption for it); else P1's estimate at the cycle | `NoFixedLatency`, which names `--assume-a`. It never defaults |
 | `f` | P1's own at the pod count, `--prefill N` included: a reading of that count, so unflagged, where S1 clamps at any other count | One pod: none, exactly 1. Otherwise `min(N_p, max(1.5, f))`, `f` the learned figure at the recorded count or the raw share, flagged `AssumedImbalance` (S1, decision 1). The raw share is the largest over the last 5 cycles that read one, at the current pod count: a pod with no rate counts as one that computed nothing, and an idle tail forgets nothing, as in S1. It reads serving rows, not S1's settled ones: a pod warming up reads low, which raises the share, the permitted side |
 | Prompt | `--assume-input-tokens`, else computed tokens over requests on the prefill rows, over the last 20 cycles with traffic | The decode variant's `IL·(1 − hit)`, named. Neither is `NoTraffic` |
 | `cv` | The computed-token histogram (Q1), pooled over the prompt's cycles and pods, through the window S1 keeps too (`whatif.PromptWindow`). Held at 3 and named `clamped` past the histogram's last bound. A recording made before Q1 has none. `--assume-prompt-cv` overrides all of it | 2, flagged `AssumedPromptSpread` (S1) |
@@ -867,20 +964,34 @@ Two more flags are S1's (#486):
   p92 2.56, p93 2.78, p94 and up 3. Above it a larger `cv` can price a shorter
   floor and a higher rate. At the assumed 2 it is raised at p88 and below.
 
+**Cut: several priority bands, and `edf` or `slo` ordering.** The spec prices the
+highest band, flagged, and flags an ordering that breaks the first-come wait. Neither
+is built, because no recording can say either. The collector sums the router's
+flow-control wait over priority (`QueryFlowControlWaitBuckets`), the queue series
+drop the label (`flow_control_pool_models`), and nothing reads the router's bands or
+its ordering from its configuration: there is no such field in `domain` or `config`.
+A flag raised from a stated `--priority-bands` would only repeat the flag it was
+given. To build it, the collector needs the queue split by `priority` and the
+ordering read from the router, and the recorder needs both. Until then TTFT prices one
+band, first come, whatever the router runs, and the page's
+[limit](slo-capacity-planner-ttft.md#where-it-is-most-wrong) stands.
+
 **Reading the output.** Question 2 adds the rows below. The operating rate is the
 headroom times the lower knee, so the prefill knee can set it. The TPOT is then
 read at that rate, and a figure read there rests on `V_P`: the rate and TPOT
 rows carry the knee's flags and print the verdict, and the decode role's JSON
 gives `inputs.rate` and `inputs.rateSource`. On `ols-sweep` at `--assume-vp 8000`
 the rate is 6.80 r/s and the mean TPOT 2.38 ms, against 11.32 and 3.66 with the
-decode knee the lower. That rate has no band: `V_P` has no resamples. Question 1
+decode knee the lower. That rate has a sweep's band and no bootstrap: `V_P` has no
+resamples. Question 1
 adds a `prefill` row, the rate at the target alone, and a `fleet` row, the
 smallest of the roles' rates and the operating point of the lower knee, each
 named under `bound by`.
 
 ```
-prefill knee    30.00 r/s   N_p 1 x V_P 30000 / (f 1 x 1000 tokens); UNVALIDATED; V_P ASSUMED
-TTFT p90        373.4 ms                     end to end; UNVALIDATED; V_P ASSUMED
+prefill knee    30.00 r/s   [25.50 .. 34.50] N_p 1 x V_P 30000 / (f 1 x 1000 tokens); UNVALIDATED; V_P ASSUMED
+TTFT p90        373.4 ms    [302.6 .. 489.1] end to end; UNVALIDATED; V_P ASSUMED
+                (bands: V_P +-15%, a sweep, not a confidence interval)
                 (343.4 ms if prefill and decode waits were independent)
                 (floor 133.3 ms, pooled 331.4 ms, worst pod utilization 0.377)
 ttft inputs     V_P 30000 ASSUMED; a 11.04 ms learned; f 1 (one pod); N_p 1 (--prefill); prompt 1000 tokens (assumed); decode by its line, term omitted, hop assumed
@@ -900,8 +1011,8 @@ to a calculation that reads no Go: 4.752942 s on run 4 at `--assume-vp 130000`.
 Both check the arithmetic. Neither validates the model. The `ttft-*.golden`
 files are regression pins, read back from the code.
 
-**Every TTFT output says what it is.** Each figure prints `UNVALIDATED`, and
-`V_P ASSUMED` when `--assume-vp` supplied it. The closing line, and the JSON's
+**Every TTFT output says what it is.** Each figure prints `UNVALIDATED`, with
+`V_P ASSUMED` when `--assume-vp` supplied it and `a ASSUMED` when `--assume-a` did. The closing line, and the JSON's
 `note`, give the direction for what the CLI can print: "at the assumed prompt
 cv 2 it read 1.1x to 4.1x the router's percentile on the P2 recordings; at the
 sent spread (cv 0.06) up to 34% under it". At `cv` 2 the frozen table in
@@ -912,16 +1023,30 @@ a measured `cv` (Q1) the note keeps only the sent spread's half.
 **Refusals.** A refusal is a row, not a number, and exit `3`, with the rest of
 the output printed. A rate at or above the knee is `Saturated`. Aggregated TTFT
 is `NoPrefillReplicas`, with a detail that names M1. `--input-bucket` is a usage
-error that names M1. A bad flag is exit `2`, whatever the recording holds. TTFT
-has no band: `V_P`, `a` and `f` have no resamples, and a band on the ITL line
-alone would read narrower than the truth. A rate the prefill knee sets has none
-either.
+error that names M1. A bad flag is exit `2`, whatever the recording holds.
+
+**The sweep.** TTFT has no bootstrap: `V_P`, `a` and `f` have no resamples, and a band
+on the ITL line alone would read narrower than the truth. So the prefill knee, each
+TTFT and each TTFT rate, the fleet row, and an operating rate the prefill knee sets
+print a span instead: the figure at `V_P` and `f` each 15% either way, in the corners
+(`whatif.SensitivityFleets`), `f` held between 1 and `N_p`. One pod has one `f`, so
+only `V_P` moves there. An operating rate's span stops at the headroom on the decode
+knee: past it a better `V_P` raises nothing. The rate of question 2 is held while
+`V_P` moves: an operator
+who believes the figure runs at that rate. So at a headroom of 0.85, where the prefill
+knee sets the rate, `V_P` 15% down is the knee, and the span prints `Saturated` on its
+worse side (`[2384.1 .. Saturated]`). That is the point of it: such an operating rate has
+no 15% to spare. The JSON gives `sensitivity` beside `value`, with `refused` set.
+It is a sweep, not a confidence interval, and it does not widen a decode figure read
+at a rate `V_P` set: mean TPOT there keeps its line's band. `a` is not swept: it is
+measured at low load, not a peak.
 
 **What the committed recordings answer.** None of the four prefill-stress
 goldens has both `V_P` and `a`, so none answers from learned figures alone:
 `ttft-open-loop-short` learns `a` and answers with `--assume-vp`;
 `ttft-saturated` learns `V_P`, and `ttft-three-pods` a lower bound on it, and
-both refuse `NoFixedLatency`; `ttft-open-loop-long` refuses `V_P` and `a`. On
+both refuse `NoFixedLatency`, or answer with `--assume-a`; `ttft-open-loop-long`
+refuses `V_P` and `a`. On
 all four the decode side is the decode engine's TTFT, or the refusal comes first:
 none prices a decode line. A fleet with both figures is tested on a built
 state (`TestTTFT_VPOrder`), not on a recording.
@@ -939,6 +1064,45 @@ spread, with no flag asking, so `schemaVersion` is `2`.
 variant's `DecodeTTFT` (`state_ttft.go`). They are read from the cycles' rows and
 the saturation analyzer's stash, and nothing is fed back: no switch, no golden
 moves.
+
+### The line check, as built
+
+Every answer on a line prints a `line check` row, and the JSON gives
+`inputs.line.check`. It is the analyzers' GPS check over a window: the token rate
+the line predicts against the `generation_tokens` rate each decode row reported,
+at the row's own fill and shape, not the shape asked (`whatif.CheckLine`). A
+median error above 15% prints `MISMATCH`, says which way the line reads, and
+flags every answer on that line `LineMismatch`. The answer still stands: it is a
+flag, not a refusal. When the rows' KV a request is more than 20%
+(`shape.DefaultChangeTolerance`) from the KV priced, the verdict says `at another
+shape` and gives both, and the JSON's status is `ok-at-another-shape`, or `mismatch`
+with `otherShape`. That is not an ok for the traffic asked about.
+
+| What | Rule |
+| --- | --- |
+| The rows | The variant's serving rows, on the replay up to the cycle asked, at fill 0.30 (`itl.DefaultGPSMinKForVerification`) or above, with a token rate |
+| Off a ramp | The pod read for the steady gate's time (2 minutes), its fill within the gate's drift (0.10) and the KV a request holds within 20% (`shape.DefaultChangeTolerance`) over it. The last 20 cycles with such a row are compared, so a recording that ends on a ramp is checked where it last held still. Rows on a ramp are counted and left out |
+| Above the band | Counted and left out: no answer reads the line there |
+| Too old | A row older than 30 minutes at the cycle asked (`whatif.MaxLineRowAge`, the age the tracker's window drops a reading at) is counted and left out: a line says nothing of a load it can no longer have read |
+| The figure | The median of the rows' errors, so one noisy minute decides nothing; the worst and the count past 15% print beside it |
+| The price | Sequences capped at the batch cap, as every price is. `itl.GPSErrorPct` does not cap, and a replica at its cap would read as a mismatch |
+| Too few | Under 5 rows (`whatif.MinLineRows`, the decode validation's floor) prints `not run`, and how many rows went where. It is not a pass, and raises no flag |
+
+**Measured on the goldens, at the last cycle.** Of the 23 lines the goldens price,
+three pass: `ols-sweep` (3.0%), `ttft-staircase-b-on` (8.0%) and `ttft-three-pods`
+(2.0%). Three pass at another shape: `ols-sweep-slo` (8.3%, rows at KV 2992, priced at
+1300), `ols-sweep-slo-restart` (0.9%, 6492 and 5382) and `throughput-sweep` (14.3%, 2992
+and 1393). Eleven are `not run`: `e1` and `e1-tuned`, which rest on a ramp or above the
+band, the six `start-*` lines, on a ramp or above the band, and `throughput-sweep-restart`,
+whose 53 rows are all older than 30 minutes.
+Six mismatch: the four lines of `mu-paths`, a synthetic run, up to 974%, and
+`ttft-staircase-b-off` and `ttft-staircase-c-on`, 49.8% and 61.7% low. Those two
+are pinned-B lines on the default intercept, which the planner refuses
+(`PinnedDefaultB`), so no answer rests on them and the row prints beside the
+refusal. `TestLineCheck_OnTheGoldens` freezes four of these. A row whose lengths lag a change
+of shape reads as a false mismatch: without the KV rule `ols-sweep` reads 39.8% high,
+its worst row 237%, against 3.0% with it. The check says the line and the
+shape disagree with the tokens read. It cannot say which is wrong.
 
 ### JSON output
 
@@ -1055,6 +1219,7 @@ four results only `meanTPOT` is kept here):
 | `source` | The recording, the model, `firstCycle` (1), `lastCycle` (the cycle answered at) and `totalCycles` (the recording's), with their clocks. With `--prometheus`, `recording` is empty and `window` names the window: `prometheus` (the URL's scheme and host alone), `from`, `to`, `stepSeconds`, and `roles` (`kube-state-metrics` or `role-of`); absent in recording mode. Absent on an error object. |
 | `bands` | How the bands were drawn: block bootstrap, `blockCycles`, `resamples`, `seed`, the percentiles. Absent on an error object. |
 | `roles[]` | One per decode variant priced: `inputs` (what it was priced from) and `results`. |
+| `inputs.line.check` | The [line check](#the-line-check-as-built): `status` `ok`, `ok-at-another-shape`, `mismatch` or `not-run`, the rows `compared`, `onRamp`, `aboveBand`, `tooOld` and `past` 15%, the median, worst and signed errors in percent, the median `rowKVPerRequest` and `otherShape`. |
 | `inputs.line` | The ITL line (`a` in seconds per unit of fill, `b` in seconds), its `tier`, the `readings` it was fitted from, their `observedFill` range and `fromCycle`-`toCycle`, and of the bootstrap's `resamples` how many (`tierChanges`) landed at another tier. |
 | `inputs.shape` | Lengths in tokens, each with its source, `measured` (over `fromCycle`-`toCycle`) or `assumed`, and `outputDispersion`, `D` as read: absent with no reading, flagged `OutputSpreadUnread`. |
 | `results` | `knee`, `operatingRate`, `meanTPOT`, `percentileTPOT` for question 2; `rate` for question 1. A question not asked has no key. |
@@ -1103,6 +1268,20 @@ roles[].inputs.line object
 roles[].inputs.line.a number
 roles[].inputs.line.b number
 roles[].inputs.line.borrowedFrom string
+roles[].inputs.line.check object
+roles[].inputs.line.check.aboveBand number
+roles[].inputs.line.check.compared number
+roles[].inputs.line.check.fromCycle number
+roles[].inputs.line.check.medianErrorPct number
+roles[].inputs.line.check.onRamp number
+roles[].inputs.line.check.otherShape boolean
+roles[].inputs.line.check.past number
+roles[].inputs.line.check.rowKVPerRequest number
+roles[].inputs.line.check.signedErrorPct number
+roles[].inputs.line.check.status string
+roles[].inputs.line.check.toCycle number
+roles[].inputs.line.check.tooOld number
+roles[].inputs.line.check.worstErrorPct number
 roles[].inputs.line.fromCycle number
 roles[].inputs.line.observedFill object
 roles[].inputs.line.observedFill.hi number
@@ -1150,6 +1329,10 @@ roles[].results.knee.answer.basis.tier string
 roles[].results.knee.answer.basis.uncapped number
 roles[].results.knee.answer.flags array
 roles[].results.knee.answer.flags[] string
+roles[].results.knee.answer.sensitivity object
+roles[].results.knee.answer.sensitivity.hi number
+roles[].results.knee.answer.sensitivity.lo number
+roles[].results.knee.answer.sensitivity.refused string
 roles[].results.knee.answer.unit string
 roles[].results.knee.answer.value number
 roles[].results.knee.refused object
@@ -1174,6 +1357,10 @@ roles[].results.meanTPOT.answer.basis.tier string
 roles[].results.meanTPOT.answer.basis.uncapped number
 roles[].results.meanTPOT.answer.flags array
 roles[].results.meanTPOT.answer.flags[] string
+roles[].results.meanTPOT.answer.sensitivity object
+roles[].results.meanTPOT.answer.sensitivity.hi number
+roles[].results.meanTPOT.answer.sensitivity.lo number
+roles[].results.meanTPOT.answer.sensitivity.refused string
 roles[].results.meanTPOT.answer.unit string
 roles[].results.meanTPOT.answer.value number
 roles[].results.meanTPOT.refused object
@@ -1198,6 +1385,10 @@ roles[].results.operatingRate.answer.basis.tier string
 roles[].results.operatingRate.answer.basis.uncapped number
 roles[].results.operatingRate.answer.flags array
 roles[].results.operatingRate.answer.flags[] string
+roles[].results.operatingRate.answer.sensitivity object
+roles[].results.operatingRate.answer.sensitivity.hi number
+roles[].results.operatingRate.answer.sensitivity.lo number
+roles[].results.operatingRate.answer.sensitivity.refused string
 roles[].results.operatingRate.answer.unit string
 roles[].results.operatingRate.answer.value number
 roles[].results.operatingRate.refused object
@@ -1222,6 +1413,10 @@ roles[].results.percentileTPOT.answer.basis.tier string
 roles[].results.percentileTPOT.answer.basis.uncapped number
 roles[].results.percentileTPOT.answer.flags array
 roles[].results.percentileTPOT.answer.flags[] string
+roles[].results.percentileTPOT.answer.sensitivity object
+roles[].results.percentileTPOT.answer.sensitivity.hi number
+roles[].results.percentileTPOT.answer.sensitivity.lo number
+roles[].results.percentileTPOT.answer.sensitivity.refused string
 roles[].results.percentileTPOT.answer.unit string
 roles[].results.percentileTPOT.answer.value number
 roles[].results.percentileTPOT.refused object
@@ -1246,6 +1441,10 @@ roles[].results.rate.answer.basis.tier string
 roles[].results.rate.answer.basis.uncapped number
 roles[].results.rate.answer.flags array
 roles[].results.rate.answer.flags[] string
+roles[].results.rate.answer.sensitivity object
+roles[].results.rate.answer.sensitivity.hi number
+roles[].results.rate.answer.sensitivity.lo number
+roles[].results.rate.answer.sensitivity.refused string
 roles[].results.rate.answer.unit string
 roles[].results.rate.answer.value number
 roles[].results.rate.refused object
@@ -1287,6 +1486,10 @@ roles[].results.ttft.answer.parts.routerHop number
 roles[].results.ttft.answer.parts.vpMarginApplied number
 roles[].results.ttft.answer.parts.waitOffset number
 roles[].results.ttft.answer.parts.waitScale number
+roles[].results.ttft.answer.sensitivity object
+roles[].results.ttft.answer.sensitivity.hi number
+roles[].results.ttft.answer.sensitivity.lo number
+roles[].results.ttft.answer.sensitivity.refused string
 roles[].results.ttft.answer.unit string
 roles[].results.ttft.answer.value number
 roles[].results.ttft.refused object
@@ -1312,6 +1515,7 @@ roles[].ttft.decodeTTFTSeconds number
 roles[].ttft.decodeTermRefused string
 roles[].ttft.decodeTermSource string
 roles[].ttft.decodeVariant string
+roles[].ttft.fixedLatencyLearned number
 roles[].ttft.fixedLatencySeconds number
 roles[].ttft.fixedLatencySource string
 roles[].ttft.flowControl string

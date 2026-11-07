@@ -67,6 +67,10 @@ type State struct {
 	// input to whatif.TPOTRatioFromWindows. Empty in a recording made before
 	// the recorder carried it.
 	TPOTWindows []whatif.TPOTWindow
+	// EngineTPOTWindows is the decode engines' per-request TPOT histogram of
+	// every cycle up to Cycle that recorded one, pooled over the rows, oldest
+	// first (engineTPOTWindow): the fall-back for TPOTWindows.
+	EngineTPOTWindows []whatif.TPOTWindow
 	// Prefill is each prefill variant at the cycle, by name, as a TTFT
 	// question reads it (state_ttft.go).
 	Prefill []PrefillState
@@ -131,6 +135,9 @@ type VariantState struct {
 	// DecodeTTFT is what the variant's rows say of a TTFT's decode side; the
 	// zero value on a variant that is not decode (state_ttft.go).
 	DecodeTTFT DecodeTTFTState
+	// LineRows is the variant's rows of its latest cycles that have one, off
+	// a ramp and on one, for the line check (state_line.go).
+	LineRows []whatif.LineRow
 }
 
 // MeasuredShape is the shape a variant served over the cycles it had
@@ -192,8 +199,10 @@ func StateAt(ctx context.Context, recording []byte, opts Options, q StateQuery) 
 		n        int
 		firstAt  time.Time
 		windows  []whatif.TPOTWindow
+		engine   []whatif.TPOTWindow
 		shapes   = map[string][]shapeSample{}
 		ttft     = newTTFTSamples()
+		lines    = newLineSamples()
 		cycleAt  = map[time.Time]int{}
 	)
 	opts.stop = func(r *replayer, ev learnrec.RawEvent) bool {
@@ -221,8 +230,12 @@ func StateAt(ctx context.Context, recording []byte, opts Options, q StateQuery) 
 		if w, ok := tpotWindow(in.RouterLatency); ok {
 			windows = append(windows, w)
 		}
+		if w, ok := engineTPOTWindow(in.ReplicaMetrics, rolesOf(in)); ok {
+			engine = append(engine, w)
+		}
 		noteShapes(shapes, in.ReplicaMetrics, n)
 		ttft.note(in, n, ev.Now)
+		lines.note(in, n, ev.Now)
 		ttft.noteTerm(in, ev.Now, func(variant string) string {
 			if rec := r.store.Get(in.Namespace, in.ModelID, variant); rec != nil {
 				return rec.EngineParams.ArgsTag()
@@ -245,9 +258,10 @@ func StateAt(ctx context.Context, recording []byte, opts Options, q StateQuery) 
 	if st == nil {
 		return nil, fmt.Errorf("learnreplay: the replay ended after %d of the %d cycles of %s/%s", n, cycle, ns, model)
 	}
-	st.FirstAt, st.TPOTWindows, st.Cycles = firstAt, windows, total
+	st.FirstAt, st.TPOTWindows, st.EngineTPOTWindows, st.Cycles = firstAt, windows, engine, total
 	for i := range st.Variants {
 		st.Variants[i].ReadingsFrom, st.Variants[i].ReadingsTo = cyclesSpanned(st.Variants[i].LineReadings, cycleAt)
+		st.Variants[i].LineRows = lines.rows(st.Variants[i].Variant)
 	}
 	return st, nil
 }

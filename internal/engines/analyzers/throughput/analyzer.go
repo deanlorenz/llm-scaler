@@ -17,6 +17,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/fleet"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
@@ -69,6 +70,20 @@ type ThroughputAnalyzer struct {
 	// itlAdmitsAtCap is the replay switch of learner PR 4b-3 (admission.go):
 	// SwitchITLAdmitsAtSequenceCap. On by the constructor.
 	itlAdmitsAtCap bool
+	// itlKeepsPresent is SwitchITLKeepsPresentVariants (learner_reports.go).
+	// On by the constructor.
+	itlKeepsPresent bool
+	// itlFilesReports is SwitchITLFilesReports (learner_reports.go). On by
+	// the constructor. learnerReports is each model's reports of its last
+	// cycle, by namespace|model, and forgottenReports what was forgotten
+	// since the engine last took them.
+	itlFilesReports  bool
+	learnerReports   map[string][]learn.Report
+	forgottenReports []learn.Report
+	// itlRolloutGuard is SwitchITLRolloutGuard and itlForgetsOnNewArgs
+	// SwitchITLForgetsOnNewArguments (itl_line.go). On by the constructor.
+	itlRolloutGuard     bool
+	itlForgetsOnNewArgs bool
 	// itlForgetReachesLine is the replay switch of the forget (forget.go):
 	// SwitchITLForgetReachesTheLine. On by the constructor.
 	itlForgetReachesLine bool
@@ -133,6 +148,14 @@ type variantState struct {
 	// nothing: such a cycle has no line, not the last cycle's.
 	reading    itl.Reading
 	hasReading bool
+	// lineArgs is the engine arguments the line was learned under, "" when
+	// unknown (lineUnderArgsLocked). rollout is the variant rolling out, which
+	// names a silence (silenceCause); rolloutHeld is the line held on the old
+	// pods, no new pod serving (itl.RolloutSight.Held), and loggedRolloutHeld
+	// what the summary last said of it.
+	lineArgs                       string
+	rollout                        bool
+	rolloutHeld, loggedRolloutHeld bool
 	// shapeChanged is set by a shape change and cleared when the line is
 	// next live, and everLive once the line has been live: what names the
 	// cause of a silent line (silenceCause). SwitchITLSteadyGate only.
@@ -174,6 +197,11 @@ func NewThroughputAnalyzer() *ThroughputAnalyzer {
 		itlRestartUnderName:   true,
 		itlIdleOnEvidence:     true,
 		itlFiniteOnly:         true,
+		itlRolloutGuard:       true,
+		itlFilesReports:       true,
+		itlKeepsPresent:       true,
+		learnerReports:        make(map[string][]learn.Report),
+		itlForgetsOnNewArgs:   true,
 		itlAdmitsAtCap:        true,
 		itlForgetReachesLine:  true,
 		itlTierHysteresis:     true,
@@ -212,24 +240,25 @@ func (a *ThroughputAnalyzer) observeDefaultBand(
 	modelID, namespace string,
 	metrics []domain.ReplicaMetrics,
 ) map[string]SanityReport {
-	return a.observe(ctx, now, modelID, namespace, metrics, func(string) itl.Admission {
-		return itl.Admission{MinK: itl.DefaultMinObservableK, MaxK: itl.DefaultMaxObservableK}
+	return a.observe(ctx, now, modelID, namespace, metrics, func(string) (itl.Admission, bool) {
+		return itl.Admission{MinK: itl.DefaultMinObservableK, MaxK: itl.DefaultMaxObservableK}, false
 	})
 }
 
-// observe is Observe with each variant's admission (admissionFor): the KV
-// band [MinK, MaxK] a reading must fall in is the policy band
-// (analyzerTuning.itlBand), which Analyze passes, as the saturation and slo
-// analyzers read them. The parent's window (SwitchITLSteadyGate off) reads
+// observe is Observe with each variant's admission and whether it is rolling
+// out (lineFor): the KV band [MinK, MaxK] a reading must fall in is the policy
+// band (analyzerTuning.itlBand), which Analyze passes, as the saturation and
+// slo analyzers read them. The parent's window (SwitchITLSteadyGate off) reads
 // only the band, and takes no capped replica above it; the line on
 // itl.Tracker reads the whole admission, the sequence cap included
-// (SwitchITLAdmitsAtSequenceCap).
+// (SwitchITLAdmitsAtSequenceCap), under the arguments the variant runs, and
+// is offered no rows mid-rollout (SwitchITLRolloutGuard).
 func (a *ThroughputAnalyzer) observe(
 	ctx context.Context,
 	now time.Time,
 	modelID, namespace string,
 	metrics []domain.ReplicaMetrics,
-	admissionFor func(variant string) itl.Admission,
+	lineFor func(variant string) (itl.Admission, bool),
 ) map[string]SanityReport {
 	if err := ctx.Err(); err != nil {
 		return nil
@@ -305,12 +334,23 @@ func (a *ThroughputAnalyzer) observe(
 			}
 		}
 
-		adm := admissionFor(variantName)
+		adm, rolling := lineFor(variantName)
 		state.batchCap, state.batchCapSource = adm.MaxNumSeqs, adm.MaxNumSeqsSource
 		// On the shared tracker (SwitchITLSteadyGate, itl_line.go) the
 		// tracker judges each row; the window below is left as it was.
 		if a.itlSteadyGate {
-			state.reading = a.lines.Observe(key, variantName, freshRows(variantMetrics), adm, now)
+			rows := freshRows(variantMetrics)
+			state.rollout, state.rolloutHeld = rolling && a.itlRolloutGuard, false
+			if a.itlRolloutGuard {
+				sight := a.lines.RolloutRows(key, variantName, rows, rolling)
+				rows, state.rolloutHeld = sight.Rows, sight.Held
+			}
+			if state.rolloutHeld && state.lineArgs != "" {
+				adm.Args = state.lineArgs
+			} else {
+				a.lineUnderArgsLocked(key, state, adm.Args, namespace, modelID, variantName, now)
+			}
+			state.reading = a.lines.Observe(key, variantName, rows, adm, now)
 			a.paths.count(state.reading)
 			state.hasReading = true
 			continue
@@ -343,6 +383,7 @@ func (a *ThroughputAnalyzer) observe(
 		if now.Sub(state.lastObservedAt) > 2*itl.DefaultObservationMaxAge {
 			delete(a.variantStates, key)
 			delete(a.itlLogged, key)
+			a.noteEvictedLocked(key)
 		}
 	}
 	a.evictOwnSettleLocked(now)
@@ -415,6 +456,7 @@ func (a *ThroughputAnalyzer) analyze(
 	// may observe partial state across the lock gaps below.
 	// Update variant roles so state.role is current when observe runs.
 	a.mu.Lock()
+	delete(a.learnerReports, reportModel(input.Namespace, input.ModelID))
 	for _, vs := range input.VariantStates {
 		key := variantKey(input.Namespace, input.ModelID, vs.VariantName)
 		state := a.getOrCreateVariantState(key)
@@ -451,8 +493,8 @@ func (a *ThroughputAnalyzer) analyze(
 	// store here, before observe takes a.mu (engineOf).
 	adm := a.admission(itlPolicyOf(input.Config), input.Namespace, input.ModelID)
 	engines := a.engineOf(input.Namespace, input.ModelID, ownMetrics)
-	a.observe(ctx, now, input.ModelID, input.Namespace, ownMetrics, func(variant string) itl.Admission {
-		return a.lineAdmission(adm, input.Namespace, input.ModelID, engines[variant])
+	a.observe(ctx, now, input.ModelID, input.Namespace, ownMetrics, func(variant string) (itl.Admission, bool) {
+		return a.lineAdmission(adm, input.Namespace, input.ModelID, engines[variant]), engines[variant].rollout
 	})
 
 	byVariant := groupByVariant(ownMetrics)

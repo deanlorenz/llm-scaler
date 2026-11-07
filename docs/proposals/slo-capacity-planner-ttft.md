@@ -371,7 +371,9 @@ Two blocks:
    it is folded into the same function of `I` rather than convolved as an
    independent part. The wait is independent of the request's own work for
    first-come service with Poisson arrivals, so the two are convolved exactly.
-   That fails for `edf` or `slo` ordering, which the tool flags.
+   That fails for `edf` or `slo` ordering. The tool does not flag it: no recording
+   says which ordering the router runs
+   ([cut](slo-capacity-planner.md#ttft-as-built)).
 2. **The decode side**: `W_decode`, driven by the same arrivals, so not
    independent of block 1.
 
@@ -437,13 +439,13 @@ The staircase is the TTFT pass mark (decode is validated against the goldens).
 | Item | Specification |
 | --- | --- |
 | Fleet | Fixed `N_p` = 2, `N_d` = 2; ScaledObjects paused (`autoscaling.keda.sh/paused`) |
-| Load | guidellm, constant rate, streamed, from `test/benchmark` behind a make target |
-| Buckets | A: prompts 1000, answers 1000 (decode-bound). B: prompts 8000, answers 200 (prefill-bound). C (bursty): B's shape with arrivals at an interarrival `Ca²` of 4, the squared coefficient of variation P3's `ArrivalCV2` takes. The arrivals are a renewal process: i.i.d. gaps from a balanced two-phase hyperexponential with mean `1/λ` and SCV 4, which is on/off traffic with exponential phase lengths. The fallback is batches at Poisson epochs: a batch of `k` simultaneous requests gives gaps of SCV `2k − 1`, so `k` = 2 (3) and `k` = 3 (5) bracket 4. The harness measures `Ca²` per step from the request send times and records it; a step outside 3 to 5 is rerun. guidellm's built-in rate profiles are constant or Poisson, so bucket C needs a driver of its own in `test/benchmark` (not yet written) |
+| Load | [`hack/benchmark/staircase_load.py`](../../hack/benchmark/staircase_load.py), behind `make benchmark-staircase-run` ([as built](#as-built-the-staircase-tooling)). Streamed, Poisson on A and B: guidellm has no bucket C |
+| Buckets | A: prompts 1000, answers 1000 (decode-bound). B: prompts 8000, answers 200 (prefill-bound). C (bursty): B's shape with arrivals at an interarrival `Ca²` of 4, the squared coefficient of variation P3's `ArrivalCV2` takes. The arrivals are a renewal process: i.i.d. gaps from a balanced two-phase hyperexponential with mean `1/λ` and SCV 4, which is on/off traffic with exponential phase lengths. The fallback is batches at Poisson epochs: a batch of `k` simultaneous requests gives gaps of SCV `2k − 1`, so `k` = 2 (3) and `k` = 3 (5) bracket 4. The harness measures `Ca²` per step from the request send times and records it; a step outside 3 to 5 is rerun. guidellm's built-in rate profiles are constant or Poisson, which is why bucket C has a driver of its own |
 | Flow control | Each bucket twice: off, then on (utilization detector, one band, static ceiling). Bucket C is predicted with the measured `Ca²`, not Poisson |
 | Start | 40% of the predicted knee |
 | Steps | +10% to 70% of the knee, then +3% to 110% |
 | Hold | 10 minutes per step; the first 3 discarded |
-| Measured | Router TTFT p90 and p95, mean TPOT and per-request TPOT p90 (router TPOT histogram, and guidellm per request) over the last 7 minutes; with flow control on, `pool_saturation` per stage, the direct test of the onset |
+| Measured | Router TTFT p90 and p95, mean TPOT and per-request TPOT p90 (router TPOT histogram, and the driver per request) over the last 7 minutes; with flow control on, `pool_saturation` per stage, the direct test of the onset |
 | Runs away | TTFT p90 above twice the target for the whole window |
 | Repeats | 3; the statistic is the median over runs, per bucket |
 | Recorded | A learner recording on a build with the [TTFT recorder fields](analyzer-learner.md#29-recorder-fields-for-ttft-and-capture); per-pod `num_requests_waiting` |
@@ -1188,14 +1190,15 @@ Four phases have a committed golden: `ttft-staircase-a-off`, `-b-off`, `-b-on` a
 C off are in this section's tables only. Their figures rest on the run's own
 request logs, Prometheus captures and raw recordings, which are outside the
 repository, and no test here replays them. Every figure below was derived the same
-way for all six phases.
+way for all six phases, and [the tooling](#as-built-the-staircase-tooling) now derives
+them from the tree.
 
 Where it departs from [the specification](#ground-truth-and-the-staircase):
 
 | Item | As run | Why |
 | --- | --- | --- |
 | Replicas | Pinned by ScaledObject min = max = 2, not `paused`. 911 samples per role, all 2 | The earlier runs' pin |
-| Load | One driver for all buckets, streamed, Poisson on A and B. It is not in the repository | guidellm has no bucket C. Poisson is what A and B are predicted at |
+| Load | One driver for all buckets, streamed, Poisson on A and B | guidellm has no bucket C. Poisson is what A and B are predicted at |
 | Steps | 0.40, 0.55, 0.70, then +0.06 to 1.12 of the predicted knee: 10 steps | 100 minutes a phase, not 3 hours |
 | Warm-up | One, flow control off | The model's inputs do not depend on the gate |
 | Stop | A, B on and C on stopped on the frozen client p90 rule. B off and C off stopped on the driver's own cap, `--max-inflight 4000`, at 4535 and 4157 in flight, 330 s into step 7 and 150 s into its 420 s window | The frozen criteria do not name the cap. It ended the two runs before the p90 rule could read a full window |
@@ -1517,8 +1520,62 @@ with a gauge and no decode line, a reason only the on state reaches.
 
 The onsets (check 8), the mean residual against its 10 ms budget, the union bound
 and the domain check per step are report-only, and are not in this section: they
-were not derived from this run. The run's files, its driver and the script that
-derives these tables are outside the repository.
+were not derived from this run. The run's files are outside the repository. Its
+driver and the derivation of these tables are not:
+[as built](#as-built-the-staircase-tooling).
+
+### As built: the staircase tooling
+
+The run is reproducible from the tree. How to run it is in
+[Testing](../developer-guide/testing.md#the-ttft-staircase), and what the next run
+must hold out and freeze is in
+[the plan](../plans/analyzers/ttft-staircase-repeat.md).
+
+| Piece | What it does |
+| --- | --- |
+| `whatif freeze` | The prediction: a warm-up recording and a spec in, one JSON file out, the same bytes for the same inputs. It reads the fleet as `slo-to-rate` does. It refuses to replace a file, and exits 3 when a bucket refuses |
+| `staircase_spec.yaml` | The buckets, steps, warm-up, stop rule and falsifiers, hashed into the frozen file |
+| `staircase_freeze.py` | The ladder, with each step's hold lengthened until its window holds 4 relaxation times, and the GPU-hours. It refuses a warm-up that fails S2's gate |
+| `staircase_load.py` | The open-loop driver. A `RUNAWAY` line names its rule, `client-p90` or `max-inflight` |
+| `staircase_analyze.py` | One row a step, then `report.md`. The judged window is cut at the stop, and each row carries `stopped_by`. A void step reads as a bound, and a phase that did not finish is excluded and named, so a bucket with a repeat missing cannot pass |
+| `staircase.sh` | The run: deadline, standup, warm-up, phases, the gate check after repeat 1, captures, teardown |
+| `hack/check-staircase.sh` | From `make lint-deploy-scripts`: the exit paths it lists against a stub kubectl, on a PATH with no other kubectl, and the arithmetic against hand-worked figures |
+
+**Checked against M2.** Run over M2's files, the analysis gives every mark of the
+tables above, and the knee table's holds and collapses. A step's window now starts at
+its first request, not at the log's stamp, and is cut at the stop, so five client
+figures move in their last digit (B off p95 1.74 to 1.73, B on p95 19.8 to 19.9 r/s,
+and three mean TPOT rates by 0.1 r/s). No mark moves. The two steps the in-flight cap
+cut short, step 7 of B off and C off, used to be read over a window past the stop. On
+M2's warm-up `whatif freeze` gives the knees, onsets, `R_q` and mean TPOT of the frozen
+file. Its targets differ, as they should: the frozen file predates the decode term.
+
+**A saturated transfer floors the price only once it is the truth.** S1 and the CLI
+read `T_xfer` through one window (`prefill.TransferWindow`, `slo.SwitchTTFTQuietTransfer`),
+the same 20-cycle mean in both. A cycle is quiet when every row with a reading has an
+empty queue, so one quiet pod beside busy ones says nothing. What S1 does at each edge:
+
+| The fleet | `T_xfer` priced | Flag |
+| --- | --- | --- |
+| Quiet this cycle | The mean of the quiet cycles of the last 5 minutes | |
+| Busy, or no reading, for up to 5 minutes (`HeldDecodeAge`) | The same, held | `TransferHeld` |
+| Busy past 5 minutes | Every row's mean: the #494 floor rises again | |
+| No reading past 5 minutes | None | `TransferOmitted` |
+| Accelerator or engine arguments changed | The window starts over | |
+
+Before this, M2's warm-up, which ends saturated, read 0.34 s at 8000 tokens, which
+floored the priced figure at 414 ms through `DecodeTermFloored`, and it still does on
+that recording: 11 saturated minutes is past the age. So the next warm-up ends on a
+quiet stage. The frozen file stores the priced figure and every row's. It moves no
+golden.
+
+**Where a freeze departs from the CLI.** Each is recorded in the file: the prompt's
+spread, the arrivals and the flow-control state are the spec's, and the prefix hit
+rate is 0, since the driver's prompts share no prefix.
+
+**Not checked.** `staircase.sh` has run only against stubs and a local fake API: no
+cluster has run this tree. M2 ran its scratch form, and changing replicas between phases, which M2 never
+did, has not run at all.
 
 ## Open questions
 
@@ -1542,6 +1599,8 @@ derives these tables are outside the repository.
    misses by more than 15%.
 5. **Burstiness.** *Recommend:* estimate `Ca²` from the arrival rate's variance,
    cap that estimate at 4; the sticky-routing term is not capped.
-6. **Several priority bands.** *Recommend:* the highest band only, flagged.
+6. **Several priority bands.** *Recommend:* the highest band only, flagged. Cut
+   from the CLI: the collector sums over priority, so a recording cannot say
+   ([as built](slo-capacity-planner.md#ttft-as-built)).
 7. **Which imbalance signal for `f`?** *Recommend:* the computed-token share in
    busy minutes, de-biased; queue length when no busy minute exists.
