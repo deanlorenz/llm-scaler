@@ -42,21 +42,25 @@ func noTermCases() []noTermCase {
 func describe(r Result) string {
 	switch v := r.(type) {
 	case Answer:
-		ttft, band := "nil", "nil"
-		if v.Basis.TTFT != nil {
-			ttft = fmt.Sprintf("%+v", *v.Basis.TTFT)
-		}
-		if v.Band != nil {
-			band = fmt.Sprintf("%+v", *v.Band)
-		}
 		basis := v.Basis
 		basis.TTFT = nil
-		return fmt.Sprintf("answer %v flags %v band %s basis %+v ttft %s", v.Value, v.Flags, band, basis, ttft)
+		return fmt.Sprintf("answer %v flags %v band %s basis %+v ttft %s sensitivity %s",
+			v.Value, v.Flags, followed(v.Band), basis, followed(v.Basis.TTFT), followed(v.Sensitivity))
 	case TTFT:
-		return fmt.Sprintf("ttft %+v", v)
+		s := v.Sensitivity
+		v.Sensitivity = nil
+		return fmt.Sprintf("ttft %+v sensitivity %s", v, followed(s))
 	default:
 		return fmt.Sprintf("%T %+v", r, r)
 	}
+}
+
+// followed is *p, or nil.
+func followed[T any](p *T) string {
+	if p == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("%+v", *p)
 }
 
 // noTermFigures pins every no-term figure as the price gave it while it still
@@ -64,24 +68,24 @@ func describe(r Result) string {
 // skipping that floor must move no figure, at any bit.
 var noTermFigures = map[string][2]string{
 	"prefill only, cv 1, p90": {
-		`answer 3.654632803270488 flags [UnvalidatedTTFT AssumedVP AssumedPromptSpread TransferOmitted DecodeTTFTUnmeasured DecodeSideOmitted] band nil basis {Fill:0 KneeRate:0 Floor:0 Uncapped:0 BoundBy:[TTFT] Tier: TTFT:<nil>} ttft {Floor:0.0893528364331349 KneeRate:30 PrefillOnlyRate:3.654632803270488}`,
-		`ttft {Seconds:0.1405213940552308 Independent:0.1405213940552308 Pooled:0.1405213940552306 Floor:0.0893528364331349 DecodeShare:0 Parts:{EngineWait:0.022222222222222227 OwnPrefill:0.04593333333333333 DecodeWait:0 FirstStep:0 DecodeEngine:0 RouterHop:0} PrefillUtilization:0.4 VPMarginApplied:0 WaitScale:0.055555555555555754 WaitOffset:0 DecodeWaitProbability:0 PrefillKnee:30 DecodeKnee:0 Onsets:{Prefill:0 Decode:0} Tier: Flags:[UnvalidatedTTFT AssumedVP AssumedPromptSpread TransferOmitted DecodeTTFTUnmeasured DecodeSideOmitted]}`,
+		`answer 3.654632803270488 flags [UnvalidatedTTFT AssumedVP AssumedPromptSpread TransferOmitted DecodeTTFTUnmeasured DecodeSideOmitted] band nil basis {Fill:0 KneeRate:0 Floor:0 Uncapped:0 BoundBy:[TTFT] Tier: TTFT:<nil>} ttft {Floor:0.0893528364331349 KneeRate:30 PrefillOnlyRate:3.654632803270488} sensitivity nil`,
+		`ttft {Seconds:0.1405213940552308 Independent:0.1405213940552308 Pooled:0.1405213940552306 Floor:0.0893528364331349 DecodeShare:0 Parts:{EngineWait:0.022222222222222227 OwnPrefill:0.04593333333333333 DecodeWait:0 FirstStep:0 DecodeEngine:0 RouterHop:0} PrefillUtilization:0.4 VPMarginApplied:0 WaitScale:0.055555555555555754 WaitOffset:0 DecodeWaitProbability:0 PrefillKnee:30 DecodeKnee:0 Onsets:{Prefill:0 Decode:0} Tier: Flags:[UnvalidatedTTFT AssumedVP AssumedPromptSpread TransferOmitted DecodeTTFTUnmeasured DecodeSideOmitted] Sensitivity:<nil>} sensitivity nil`,
 	},
 	"prefill only, cv 0.5, p99": {
-		`answer 14.327862394038675 flags [UnvalidatedTTFT AssumedVP AssumedPromptSpread TransferOmitted DecodeTTFTUnmeasured DecodeSideOmitted] band nil basis {Fill:0 KneeRate:0 Floor:0 Uncapped:0 BoundBy:[TTFT] Tier: TTFT:<nil>} ttft {Floor:0.09630931262359675 KneeRate:30 PrefillOnlyRate:14.327862394038675}`,
-		`ttft {Seconds:0.30511240461331385 Independent:0.30511240461331385 Pooled:0.30511240461331385 Floor:0.09630931262359675 DecodeShare:0 Parts:{EngineWait:0.04166666666666666 OwnPrefill:0.04593333333333333 DecodeWait:0 FirstStep:0 DecodeEngine:0 RouterHop:0} PrefillUtilization:0.6666666666666666 VPMarginApplied:0 WaitScale:0.057654812897917726 WaitOffset:0.014376288549903788 DecodeWaitProbability:0 PrefillKnee:30 DecodeKnee:0 Onsets:{Prefill:0 Decode:0} Tier: Flags:[UnvalidatedTTFT AssumedVP AssumedPromptSpread TransferOmitted DecodeTTFTUnmeasured DecodeSideOmitted]}`,
+		`answer 14.327862394038675 flags [UnvalidatedTTFT AssumedVP AssumedPromptSpread TransferOmitted DecodeTTFTUnmeasured DecodeSideOmitted] band nil basis {Fill:0 KneeRate:0 Floor:0 Uncapped:0 BoundBy:[TTFT] Tier: TTFT:<nil>} ttft {Floor:0.09630931262359675 KneeRate:30 PrefillOnlyRate:14.327862394038675} sensitivity nil`,
+		`ttft {Seconds:0.30511240461331385 Independent:0.30511240461331385 Pooled:0.30511240461331385 Floor:0.09630931262359675 DecodeShare:0 Parts:{EngineWait:0.04166666666666666 OwnPrefill:0.04593333333333333 DecodeWait:0 FirstStep:0 DecodeEngine:0 RouterHop:0} PrefillUtilization:0.6666666666666666 VPMarginApplied:0 WaitScale:0.057654812897917726 WaitOffset:0.014376288549903788 DecodeWaitProbability:0 PrefillKnee:30 DecodeKnee:0 Onsets:{Prefill:0 Decode:0} Tier: Flags:[UnvalidatedTTFT AssumedVP AssumedPromptSpread TransferOmitted DecodeTTFTUnmeasured DecodeSideOmitted] Sensitivity:<nil>} sensitivity nil`,
 	},
 	"prefill only, cv 1, mean": {
-		`answer 15.163204747764212 flags [UnvalidatedTTFT AssumedVP AssumedPromptSpread TransferOmitted DecodeTTFTUnmeasured DecodeSideOmitted] band nil basis {Fill:0 KneeRate:0 Floor:0 Uncapped:0 BoundBy:[TTFT] Tier: TTFT:<nil>} ttft {Floor:0.04593333333333333 KneeRate:30 PrefillOnlyRate:15.163204747764212}`,
-		`ttft {Seconds:0.06815555555555555 Independent:0.06815555555555555 Pooled:0.06815555555555555 Floor:0.04593333333333333 DecodeShare:0 Parts:{EngineWait:0.022222222222222227 OwnPrefill:0.04593333333333333 DecodeWait:0 FirstStep:0 DecodeEngine:0 RouterHop:0} PrefillUtilization:0.4 VPMarginApplied:0 WaitScale:0.055555555555555754 WaitOffset:0 DecodeWaitProbability:0 PrefillKnee:30 DecodeKnee:0 Onsets:{Prefill:0 Decode:0} Tier: Flags:[UnvalidatedTTFT AssumedVP AssumedPromptSpread TransferOmitted DecodeTTFTUnmeasured DecodeSideOmitted]}`,
+		`answer 15.163204747764212 flags [UnvalidatedTTFT AssumedVP AssumedPromptSpread TransferOmitted DecodeTTFTUnmeasured DecodeSideOmitted] band nil basis {Fill:0 KneeRate:0 Floor:0 Uncapped:0 BoundBy:[TTFT] Tier: TTFT:<nil>} ttft {Floor:0.04593333333333333 KneeRate:30 PrefillOnlyRate:15.163204747764212} sensitivity nil`,
+		`ttft {Seconds:0.06815555555555555 Independent:0.06815555555555555 Pooled:0.06815555555555555 Floor:0.04593333333333333 DecodeShare:0 Parts:{EngineWait:0.022222222222222227 OwnPrefill:0.04593333333333333 DecodeWait:0 FirstStep:0 DecodeEngine:0 RouterHop:0} PrefillUtilization:0.4 VPMarginApplied:0 WaitScale:0.055555555555555754 WaitOffset:0 DecodeWaitProbability:0 PrefillKnee:30 DecodeKnee:0 Onsets:{Prefill:0 Decode:0} Tier: Flags:[UnvalidatedTTFT AssumedVP AssumedPromptSpread TransferOmitted DecodeTTFTUnmeasured DecodeSideOmitted] Sensitivity:<nil>} sensitivity nil`,
 	},
 	"decode TTFT measured, cv 2, p95": {
-		`answer 11.90767915572053 flags [UnvalidatedTTFT AssumedVP AssumedPromptSpread DecodeEngineMeasured] band nil basis {Fill:0 KneeRate:0 Floor:0 Uncapped:0 BoundBy:[TTFT] Tier: TTFT:<nil>} ttft {Floor:0.20394881832596726 KneeRate:75 PrefillOnlyRate:11.90767915572053}`,
-		`ttft {Seconds:0.448735842528878 Independent:0.448735842528878 Pooled:0.21294591189852957 Floor:0.20394881832596726 DecodeShare:0 Parts:{EngineWait:0.055555555555555546 OwnPrefill:0.04593333333333333 DecodeWait:0 FirstStep:0 DecodeEngine:0.03 RouterHop:0} PrefillUtilization:0.39999999999999997 VPMarginApplied:0 WaitScale:0.16590472818875196 WaitOffset:0 DecodeWaitProbability:0 PrefillKnee:75 DecodeKnee:0 Onsets:{Prefill:0 Decode:0} Tier: Flags:[UnvalidatedTTFT AssumedVP AssumedPromptSpread DecodeEngineMeasured]}`,
+		`answer 11.90767915572053 flags [UnvalidatedTTFT AssumedVP AssumedPromptSpread DecodeEngineMeasured] band nil basis {Fill:0 KneeRate:0 Floor:0 Uncapped:0 BoundBy:[TTFT] Tier: TTFT:<nil>} ttft {Floor:0.20394881832596726 KneeRate:75 PrefillOnlyRate:11.90767915572053} sensitivity nil`,
+		`ttft {Seconds:0.448735842528878 Independent:0.448735842528878 Pooled:0.21294591189852957 Floor:0.20394881832596726 DecodeShare:0 Parts:{EngineWait:0.055555555555555546 OwnPrefill:0.04593333333333333 DecodeWait:0 FirstStep:0 DecodeEngine:0.03 RouterHop:0} PrefillUtilization:0.39999999999999997 VPMarginApplied:0 WaitScale:0.16590472818875196 WaitOffset:0 DecodeWaitProbability:0 PrefillKnee:75 DecodeKnee:0 Onsets:{Prefill:0 Decode:0} Tier: Flags:[UnvalidatedTTFT AssumedVP AssumedPromptSpread DecodeEngineMeasured] Sensitivity:<nil>} sensitivity nil`,
 	},
 	"legacy decode sum, p90": {
-		`answer 11.638534256572129 flags [UnvalidatedTTFT AssumedVP AssumedPromptSpread TransferOmitted FlowControlInferredOff HeldByDecodeAdmission] band nil basis {Fill:0.5071772220374592 KneeRate:0 Floor:0 Uncapped:0 BoundBy:[TTFT decode admission] Tier: TTFT:<nil>} ttft {Floor:0.09157553643313489 KneeRate:13.312564951975148 PrefillOnlyRate:13.312564951975148}`,
-		`ttft {Seconds:0.11988559270651773 Independent:0.11988557446112186 Pooled:0.11988559270651751 Floor:0.09157553643313489 DecodeShare:1.0681688774185583e-07 Parts:{EngineWait:0.01212121212121212 OwnPrefill:0.04593333333333333 DecodeWait:2.010646245409999e-08 FirstStep:0.00262258538089853 DecodeEngine:0 RouterHop:0} PrefillUtilization:0.26666666666666666 VPMarginApplied:0 WaitScale:0.04545454545454584 WaitOffset:0 DecodeWaitProbability:1.0681688774185583e-07 PrefillKnee:30 DecodeKnee:13.312564951975148 Onsets:{Prefill:0 Decode:0} Tier: Flags:[UnvalidatedTTFT AssumedVP AssumedPromptSpread TransferOmitted FlowControlInferredOff]}`,
+		`answer 11.638534256572129 flags [UnvalidatedTTFT AssumedVP AssumedPromptSpread TransferOmitted FlowControlInferredOff HeldByDecodeAdmission] band nil basis {Fill:0.5071772220374592 KneeRate:0 Floor:0 Uncapped:0 BoundBy:[TTFT decode admission] Tier: TTFT:<nil>} ttft {Floor:0.09157553643313489 KneeRate:13.312564951975148 PrefillOnlyRate:13.312564951975148} sensitivity nil`,
+		`ttft {Seconds:0.11988559270651773 Independent:0.11988557446112186 Pooled:0.11988559270651751 Floor:0.09157553643313489 DecodeShare:1.0681688774185583e-07 Parts:{EngineWait:0.01212121212121212 OwnPrefill:0.04593333333333333 DecodeWait:2.010646245409999e-08 FirstStep:0.00262258538089853 DecodeEngine:0 RouterHop:0} PrefillUtilization:0.26666666666666666 VPMarginApplied:0 WaitScale:0.04545454545454584 WaitOffset:0 DecodeWaitProbability:1.0681688774185583e-07 PrefillKnee:30 DecodeKnee:13.312564951975148 Onsets:{Prefill:0 Decode:0} Tier: Flags:[UnvalidatedTTFT AssumedVP AssumedPromptSpread TransferOmitted FlowControlInferredOff] Sensitivity:<nil>} sensitivity nil`,
 	},
 }
 
