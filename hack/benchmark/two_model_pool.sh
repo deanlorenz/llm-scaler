@@ -3592,6 +3592,9 @@ PY
 RUN_JOB=""
 RUN_SAMPLER=""
 RUN_WORKER=""
+# Where this arm's learner recordings are copied; cleared once copied, so the
+# EXIT trap after a clean arm does not copy them twice.
+RUN_RECDIR=""
 run_cleanup() {
     # The JOB is the leak that matters: left behind it drives 12 rps at the
     # models' ceiling for the rest of the schedule, on a shared cluster, with
@@ -3602,6 +3605,14 @@ run_cleanup() {
     if [ -n "$RUN_JOB" ]; then
         kubectl ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} -n "$NS" \
             delete job "$RUN_JOB" --ignore-not-found >/dev/null 2>&1
+    fi
+    # After the Job, so the load stops first. On every exit of the arm, done,
+    # failed or interrupted: the recordings are in an emptyDir that the next
+    # controller restart or teardown deletes.
+    if [ -n "$RUN_RECDIR" ]; then
+        bash "$HERE/learner_recordings.sh" ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} \
+            snapshot "$WVA_NS" "$RUN_RECDIR" >&2 || true
+        RUN_RECDIR=""
     fi
 }
 run_interrupted() {
@@ -3773,6 +3784,7 @@ verb_run() {
     # ceiling for 37 minutes on a shared cluster, unwatched. Every one of `die`,
     # a closed terminal and a Ctrl-C has to take the Job with it. The handler is
     # a no-op once RUN_JOB is cleared on the success path.
+    RUN_RECDIR="$out_dir/learner-recordings"
     trap run_interrupted INT TERM HUP
     trap run_cleanup EXIT
     k delete job "$RUN_JOB" --ignore-not-found >/dev/null 2>&1

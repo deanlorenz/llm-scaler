@@ -279,6 +279,32 @@ kubectl -n "$NS" exec "${POD#pod/}" -c recordings -- ls -l /var/lib/wva/learner-
 kubectl -n "$NS" cp -c recordings "${POD#pod/}:/var/lib/wva/learner-recordings" ./learner-recordings
 ```
 
+`hack/benchmark/learner_recordings.sh` does the same for any harness, and
+the benchmark targets call it themselves:
+
+```bash
+bash hack/benchmark/learner_recordings.sh snapshot "$NS" ./learner-recordings
+```
+
+- `make benchmark-run` copies every 300 s during the run
+  (`BENCHMARK_RECORDINGS_INTERVAL`), once more when the run ends (passed,
+  failed or timed out), and files them under the run's results as
+  `learner-recordings/<pod>/learnrec-*.jsonl`.
+- After a Ctrl-C the copy keeps running on its own. `make benchmark-teardown`
+  takes its last copy and stops it before it removes anything; if no copy is
+  running, it takes one itself. Either way the copy stops itself an hour after
+  `BENCHMARK_WAIT_TIMEOUT`.
+- `make benchmark-restart-controller` copies before it scales the controller
+  down, `make benchmark-run-all` after each scenario, and the two-model arms
+  when each arm exits.
+- Each directory has a `collection.tsv`: one row per Pod per copy, with the
+  time, the Pod, its phase, what happened and what is held for it.
+- A copy never replaces a larger one. A Pod that is not Running is skipped
+  (`kubectl exec` needs a Running Pod), and its last copy is kept.
+- When nothing was copied, the output says `NONE held` and why: the recorder
+  is off, there is no `recordings` sidecar, there is no controller Pod, or the
+  Pod list was refused.
+
 ### Turn it off
 
 Copy the recordings out first: this replaces the pod, and the new one has a

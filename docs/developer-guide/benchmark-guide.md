@@ -190,8 +190,16 @@ Results are saved automatically in a timestamped directory at the repo root:
     └── guidellm-<id>/
         ├── benchmark_report_v0.2,_results.json_0.yaml   ← full metrics
         ├── results.json
-        └── run_metadata.yaml
+        ├── run_metadata.yaml
+        └── learner-recordings/                          ← only with the learner recorder on
+            ├── <controller-pod>/learnrec-*.jsonl
+            └── collection.tsv                           ← which Pod, when, what was copied
 ```
+
+The learner recordings are copied out of the controller during the run, at
+its end and at teardown, because they are deleted with the controller's Pod.
+The run says `learner recordings: NONE held` when there were none to copy. See
+[Learner Recordings](testing.md#learner-recordings).
 
 **3. Tear down when done:**
 

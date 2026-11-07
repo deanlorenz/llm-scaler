@@ -1,0 +1,383 @@
+#!/usr/bin/env bash
+# Executes hack/benchmark/learner_recordings.sh, and the harness paths that
+# call it, against a stub kubectl, and asserts the benchmark keeps the learner
+# recordings on every exit path.
+#
+# The recorder writes to an emptyDir. Before this, nothing in the harness
+# copied it, so every teardown deleted the run's recordings and learnreplay had
+# nothing to read unless someone ran `kubectl cp` by hand at the right moment.
+#
+# The stub serves controller Pods built from STUB_PODS
+# (name,phase,recording-dir,sidecar;...) plus a relay Pod that carries the
+# controller labels and must never be copied from, and answers `exec ... tar`
+# with a tar of $STUB_SRC/<pod>/. `bash -n` sees none of this.
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BENCH="$ROOT/hack/benchmark"
+LR="$BENCH/learner_recordings.sh"
+EXPECTED_CASES=47
+
+command -v python3 >/dev/null 2>&1 || {
+    echo "FATAL: python3 is required by this check and is missing. Nothing below would be about the code."
+    exit 2
+}
+command -v timeout >/dev/null 2>&1 || {
+    echo "FATAL: timeout (coreutils) is required by this check; the hang case needs it."
+    exit 2
+}
+
+WORK="$(mktemp -d)"
+STARTED=""
+cleanup() {
+    for p in $STARTED; do
+        kill -TERM "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null || true
+    done
+    rm -rf "$WORK"
+}
+trap cleanup EXIT INT TERM
+
+fails=0
+cases=0
+ok()  { cases=$((cases + 1)); echo "  ok: $1"; }
+bad() { cases=$((cases + 1)); fails=$((fails + 1)); echo "  FAIL: $1" >&2; }
+
+STUB="$WORK/bin"
+mkdir -p "$STUB"
+cat > "$STUB/kubectl" <<'STUBEOF'
+#!/usr/bin/env python3
+import io, json, os, sys, tarfile, time
+
+args = sys.argv[1:]
+with open(os.environ.get("KCALLS", os.devnull), "a") as f:
+    f.write(" ".join(args) + "\n")
+# --context and --request-timeout may come anywhere; drop them.
+clean, i = [], 0
+while i < len(args):
+    a = args[i]
+    if a == "--context":
+        i += 2; continue
+    if a.startswith("--request-timeout"):
+        i += 1; continue
+    clean.append(a); i += 1
+
+def pods():
+    items = [{"metadata": {"name": "relay", "labels": {"control-plane": "controller-manager"}},
+              "spec": {"containers": [{"name": "manager", "env": [
+                  {"name": "LEARNER_RECORDING_DIR", "value": "/rec"}]},
+                  {"name": "recordings"}]},
+              "status": {"phase": "Running"}}]
+    spec = os.environ.get("STUB_PODS", "")
+    for n, entry in enumerate(filter(None, spec.split(";"))):
+        name, phase, recdir, sidecar = entry.split(",")
+        h = "h%d" % n
+        mgr = {"name": "manager"}
+        if recdir != "-":
+            mgr["env"] = [{"name": "LEARNER_RECORDING_DIR", "value": recdir}]
+        ctrs = [mgr] + ([{"name": "recordings"}] if sidecar == "yes" else [])
+        items.append({"metadata": {"name": name,
+                                   "labels": {"control-plane": "controller-manager", "pod-template-hash": h},
+                                   "ownerReferences": [{"kind": "ReplicaSet", "controller": True,
+                                                        "name": "wva-controller-manager-" + h}]},
+                      "spec": {"containers": ctrs}, "status": {"phase": phase}})
+    return {"items": items}
+
+if clean[:2] == ["get", "pods"]:
+    if os.environ.get("STUB_LIST_FAIL"):
+        print('Error from server (Forbidden): pods is forbidden: User "x" cannot list resource "pods"', file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(pods()))
+    sys.exit(0)
+
+if clean and clean[0] == "exec":
+    pod = [a for a in clean[1:] if not a.startswith("-") and a not in ("demo-ns", "other-ns")][0]
+    with open(os.environ.get("KEXEC", os.devnull), "a") as f:
+        f.write(pod + "\n")
+    if os.environ.get("STUB_EXEC_HANG"):
+        time.sleep(60)
+    if os.environ.get("STUB_EXEC_FAIL"):
+        print("error: unable to upgrade connection: container not found", file=sys.stderr)
+        sys.exit(1)
+    if "tar" not in clean:
+        sys.exit(2)
+    src = os.path.join(os.environ["STUB_SRC"], pod)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as t:
+        if os.path.isdir(src):
+            t.add(src, arcname=".")
+    sys.stdout.buffer.write(buf.getvalue())
+    sys.exit(0)
+
+print("stub: unexpected kubectl " + " ".join(args), file=sys.stderr)
+sys.exit(1)
+STUBEOF
+chmod +x "$STUB/kubectl"
+export KUBECTL_CMD="$STUB/kubectl"
+export KCALLS="$WORK/calls.log"
+export KEXEC="$WORK/exec.log"
+export STUB_SRC="$WORK/src"
+mkdir -p "$STUB_SRC"
+
+A="wva-controller-manager-h0-a1"
+REC="learnrec-20261101T090000.000000000Z.jsonl"
+
+# grow <pod> <lines> -- the recording in the Pod has that many lines.
+grow() {
+    mkdir -p "$STUB_SRC/$1"
+    : > "$STUB_SRC/$1/$REC"
+    local i=0
+    while [ "$i" -lt "$2" ]; do
+        printf '{"seq":%d,"kind":"Analyze"}\n' "$i" >> "$STUB_SRC/$1/$REC"
+        i=$((i + 1))
+    done
+}
+lines() { wc -l < "$1" 2>/dev/null | tr -d ' ' || echo 0; }
+reset_calls() { : > "$KCALLS"; : > "$KEXEC"; }
+
+snap() { bash "$LR" snapshot demo-ns "$1" > "$WORK/o" 2> "$WORK/e"; }
+
+echo "learner_recordings.sh snapshot"
+# ---- a Running Pod with the recorder on is copied, and only it ------------
+export STUB_PODS="$A,Running,/var/lib/wva/learner-recordings,yes"
+grow "$A" 5
+D="$WORK/rec1"
+reset_calls
+if snap "$D"; then ok "a snapshot of a recording Pod exits 0"; else bad "snapshot exited $?: $(cat "$WORK/o" "$WORK/e" | head -3)"; fi
+cmp -s "$STUB_SRC/$A/$REC" "$D/$A/$REC" \
+    && ok "the copy is byte for byte the Pod's recording" \
+    || bad "no faithful copy at $D/$A/$REC"
+grep -q relay "$KEXEC" \
+    && bad "the relay Pod, which only carries the controller labels, was copied from" \
+    || ok "only the controller's own Pod is copied from"
+grep 'get pods' "$KCALLS" | grep -q -- "--request-timeout=" \
+    && ok "the Pod list carries --request-timeout" \
+    || bad "the Pod list has no --request-timeout: $(grep 'get pods' "$KCALLS" | head -1)"
+grep -q -- "exec .*-c recordings -- tar cf - -C /var/lib/wva/learner-recordings ." "$KCALLS" \
+    && ok "it copies through the recordings sidecar, from the directory the manager was given" \
+    || bad "the exec was not through the sidecar: $(grep exec "$KCALLS" | head -1)"
+row="$(awk -F'\t' -v p="$A" '$2 == p' "$D/collection.tsv" | tail -1)"
+case "$row" in
+    20[0-9][0-9]-*T*Z"	$A	Running	copied	1	"*) ok "collection.tsv records when, which Pod, its phase and what was copied" ;;
+    *) bad "collection.tsv has no row for the copy: ${row:-$(cat "$D/collection.tsv")}" ;;
+esac
+grep -q "1 file(s), [0-9]* bytes held in $D" "$WORK/o" \
+    && ok "the output says how much is held and where" \
+    || bad "no summary line: $(cat "$WORK/o")"
+
+# ---- a copy never shrinks the stored one -----------------------------------
+before="$(cksum < "$D/$A/$REC")"
+grow "$A" 2
+snap "$D"
+[ "$(cksum < "$D/$A/$REC")" = "$before" ] \
+    && ok "a smaller copy (a truncated stream) does not replace the larger stored one" \
+    || bad "the stored copy shrank to $(lines "$D/$A/$REC") lines"
+grep -q "1 smaller copy refused" "$WORK/o" \
+    && ok "the refused smaller copy is reported" \
+    || bad "the refusal is silent: $(cat "$WORK/o")"
+grow "$A" 9
+snap "$D"
+[ "$(lines "$D/$A/$REC")" = 9 ] \
+    && ok "a grown recording replaces the stored copy" \
+    || bad "the grown recording was not taken: $(lines "$D/$A/$REC") lines"
+ls -a "$D" | grep -q '^\.incoming' \
+    && bad "a temporary directory was left behind: $(ls -a "$D")" \
+    || ok "no temporary copy is left behind"
+
+# ---- a Pod that is not Running keeps its last copy, and is not exec-ed ----
+export STUB_PODS="$A,Failed,/var/lib/wva/learner-recordings,yes"
+grow "$A" 1
+reset_calls
+snap "$D"; rc=$?
+[ -s "$KEXEC" ] && bad "kubectl exec was tried on a Failed Pod" || ok "no exec against a Pod that is not Running"
+[ "$(lines "$D/$A/$REC")" = 9 ] && ok "the previous copy of a Failed Pod is kept" || bad "the copy changed to $(lines "$D/$A/$REC") lines"
+grep -q "is Failed; kubectl exec needs a Running Pod" "$WORK/o" \
+    && ok "the output says why the Pod was not copied" \
+    || bad "no reason given: $(cat "$WORK/o")"
+[ "$rc" -eq 0 ] && ok "a snapshot that holds an earlier copy still exits 0" || bad "exit $rc with a copy held"
+
+# ---- a failed and a hung exec keep the previous copy ----------------------
+export STUB_PODS="$A,Running,/var/lib/wva/learner-recordings,yes"
+STUB_EXEC_FAIL=1 snap "$D"
+[ "$(lines "$D/$A/$REC")" = 9 ] && ok "a failed exec keeps the previous copy" || bad "a failed exec changed the copy"
+grep -q "copy-failed (exit 1: error: unable to upgrade connection" "$WORK/o" \
+    && ok "a failed exec is reported with its error" \
+    || bad "the failed exec is not reported: $(cat "$WORK/o")"
+t0="$(date +%s)"
+STUB_EXEC_HANG=1 RECORDINGS_COPY_TIMEOUT=2 snap "$D"
+t1="$(date +%s)"
+[ $((t1 - t0)) -lt 15 ] && ok "a hung exec is cut off by RECORDINGS_COPY_TIMEOUT ($((t1 - t0))s for a 2s bound)" || bad "a hung exec ran $((t1 - t0))s"
+grep -q "timed out after 2s" "$WORK/o" && ok "the timeout is named" || bad "the timeout is not named: $(cat "$WORK/o")"
+
+# ---- no recordings is said, never implied ----------------------------------
+E="$WORK/empty1"
+export STUB_PODS="$A,Running,-,no"
+snap "$E"; rc=$?
+[ "$rc" -eq 1 ] && ok "a recorder that is off exits 1" || bad "a recorder that is off exited $rc"
+grep -q "NONE held in $E .*recorder off" "$WORK/o" \
+    && ok "a recorder that is off is named in the NONE line" \
+    || bad "no NONE line naming the recorder: $(cat "$WORK/o")"
+export STUB_PODS="$A,Running,/var/lib/wva/learner-recordings,no"
+snap "$WORK/empty2"
+grep -q "no recordings sidecar" "$WORK/o" \
+    && ok "a recording Pod without the sidecar is named, not skipped" \
+    || bad "the missing sidecar is not named: $(cat "$WORK/o")"
+export STUB_PODS=""
+snap "$WORK/empty3"; rc=$?
+[ "$rc" -eq 1 ] && grep -q "NONE held .*no controller Pod in namespace demo-ns" "$WORK/o" \
+    && ok "no controller Pod is a NONE line and exit 1" \
+    || bad "no controller Pod: exit $rc, $(cat "$WORK/o")"
+export STUB_PODS="$A,Running,/var/lib/wva/learner-recordings,yes"
+mkdir -p "$STUB_SRC/emptypod"
+rm -rf "${STUB_SRC:?}/$A"; mkdir -p "$STUB_SRC/$A"
+snap "$WORK/empty4"; rc=$?
+[ "$rc" -eq 1 ] && grep -q "NONE held" "$WORK/o" \
+    && ok "an empty recording directory is a NONE line and exit 1" \
+    || bad "an empty recording directory: exit $rc, $(cat "$WORK/o")"
+STUB_LIST_FAIL=1 snap "$WORK/empty5"; rc=$?
+[ "$rc" -eq 1 ] && grep -q "could not list the controller Pods in demo-ns: Error from server (Forbidden)" "$WORK/o" \
+    && ok "a refused Pod list is reported as refused, not as no controller" \
+    || bad "a refused Pod list: exit $rc, $(cat "$WORK/o")"
+
+echo "learner_recordings.sh start/stop"
+# ---- the background copy runs during the run, stop takes the final one ----
+grow "$A" 3
+D2="$WORK/run/wva_learner_recordings-demo-ns-1"
+mkdir -p "$WORK/run"
+if RECORDINGS_INTERVAL=1 bash "$LR" start demo-ns "$D2" > "$WORK/o" 2>&1; then
+    ok "start exits 0"
+else
+    bad "start failed: $(cat "$WORK/o")"
+fi
+PID="$(cat "$D2/collection.tsv.pid" 2>/dev/null || true)"
+[ -n "$PID" ] && STARTED="$STARTED $PID"
+waited=0
+while [ ! -f "$D2/$A/$REC" ] && [ "$waited" -lt 50 ]; do sleep 0.2; waited=$((waited + 1)); done
+[ -f "$D2/$A/$REC" ] \
+    && ok "a copy is on disk while the run is still going" \
+    || bad "no copy during the run: $(cat "$D2/capture.log" 2>/dev/null | head -3)"
+if RECORDINGS_INTERVAL=1 bash "$LR" start demo-ns "$D2" > "$WORK/o" 2>&1; then
+    bad "a second start took a live capture"
+else
+    ok "a second start on a live capture is refused"
+fi
+grow "$A" 7
+bash "$LR" stop demo-ns "$D2" > "$WORK/o" 2>&1; rc=$?
+[ "$rc" -eq 0 ] && ok "stop exits 0" || bad "stop exited $rc: $(cat "$WORK/o")"
+[ "$(lines "$D2/$A/$REC")" = 7 ] \
+    && ok "stop takes the final copy, after the last periodic one" \
+    || bad "the final copy is missing: $(lines "$D2/$A/$REC") lines"
+sleep 0.5
+if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+    bad "the background copy (pid $PID) outlived its stop"
+else
+    ok "the background copy is gone after stop"
+fi
+[ ! -e "$D2/collection.tsv.owner" ] && ok "stop drops the ownership record" || bad "the record is left: $(cat "$D2/collection.tsv.owner")"
+
+# ---- a stop with no loop still takes the final copy -----------------------
+D3="$WORK/run/norun"
+bash "$LR" stop demo-ns "$D3" > "$WORK/o" 2>&1
+[ "$(lines "$D3/$A/$REC")" = 7 ] && grep -q "taking the final snapshot anyway" "$WORK/o" \
+    && ok "a stop whose start failed still takes the final copy" \
+    || bad "no final copy without a loop: $(cat "$WORK/o")"
+
+# ---- an interrupted run: teardown finds its copy and finishes it ----------
+D4="$WORK/run/wva_learner_recordings-demo-ns-2"
+D5="$WORK/run/wva_learner_recordings-other-ns-3"
+RECORDINGS_INTERVAL=60 bash "$LR" start demo-ns "$D4" > /dev/null 2>&1
+P4="$(cat "$D4/collection.tsv.pid" 2>/dev/null || true)"; STARTED="$STARTED $P4"
+RECORDINGS_INTERVAL=60 bash "$LR" start other-ns "$D5" > /dev/null 2>&1
+P5="$(cat "$D5/collection.tsv.pid" 2>/dev/null || true)"; STARTED="$STARTED $P5"
+sleep 1
+grow "$A" 11
+bash "$LR" stop-all demo-ns "$WORK/run/wva_learner_recordings-demo-ns-" > "$WORK/o" 2>&1; rc=$?
+[ "$rc" -eq 0 ] && [ "$(lines "$D4/$A/$REC")" = 11 ] \
+    && ok "stop-all takes the final copy of an interrupted run's capture" \
+    || bad "stop-all: exit $rc, $(lines "$D4/$A/$REC") lines, $(head -3 "$WORK/o")"
+kill -0 "$P4" 2>/dev/null && bad "stop-all left the interrupted run's copy running" || ok "stop-all stops the interrupted run's copy"
+kill -0 "$P5" 2>/dev/null && ok "stop-all leaves another namespace's copy alone" || bad "stop-all stopped another namespace's copy"
+bash "$LR" stop other-ns "$D5" > /dev/null 2>&1
+bash "$LR" stop-all demo-ns "$WORK/run/wva_learner_recordings-demo-ns-" > "$WORK/o" 2>&1; rc=$?
+[ "$rc" -eq 1 ] && grep -q "no background copy of namespace demo-ns" "$WORK/o" \
+    && ok "stop-all with nothing running says so and exits 1, so the teardown copies itself" \
+    || bad "stop-all with nothing running: exit $rc, $(cat "$WORK/o")"
+
+echo "file_capture.sh"
+# ---- the recordings are filed with the results -----------------------------
+R="$WORK/results/guidellm-1_1"; mkdir -p "$R"
+bash "$BENCH/file_capture.sh" "$R" "$WORK/none.json" "$WORK/none.log" "$D2" > "$WORK/o" 2>&1
+cmp -s "$D2/$A/$REC" "$R/learner-recordings/$A/$REC" && [ -s "$R/learner-recordings/collection.tsv" ] \
+    && ok "the recordings and collection.tsv are filed under results/learner-recordings" \
+    || bad "the recordings were not filed: $(cat "$WORK/o")"
+R2="$WORK/results/guidellm-2_2"; mkdir -p "$R2"
+bash "$BENCH/file_capture.sh" "$R2" "$WORK/none.json" "$WORK/none.log" "$WORK/empty1" > "$WORK/o" 2>&1
+grep -q "NO learner recordings to file" "$WORK/o" \
+    && ok "a run with no recordings says so when filing" \
+    || bad "filing no recordings is silent: $(cat "$WORK/o")"
+
+echo "harness wiring"
+# ---- every exit path of the harness calls it -------------------------------
+MK="$(tr -d '\r' < "$ROOT/Makefile")"
+# body <target> -- the recipe of one target.
+body() { printf '%s\n' "$MK" | awk -v t="$1:" 'index($0, t) == 1 { on = 1; next } on && /^[^\t]/ { on = 0 } on { print }'; }
+run="$(body benchmark-run)"
+order="$(printf '%s\n' "$run" | grep -n -e 'learner_recordings.sh.* start ' -e 'LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) run' -e 'learner_recordings.sh.* stop ' -e 'file_capture.sh' | cut -d: -f2- | sed -e 's/.*learner_recordings.sh.* start .*/start/' -e 's/.*LLMDBENCHMARK.*/run/' -e 's/.*learner_recordings.sh.* stop .*/stop/' -e 's/.*file_capture.sh.*/file/' | tr '\n' ' ')"
+[ "$order" = "start run stop file " ] \
+    && ok "benchmark-run starts the copy before the run, stops it after, then files it" \
+    || bad "benchmark-run order is [$order]"
+printf '%s\n' "$run" | grep -q -- '^	-$(LLMDBENCHMARK)' \
+    && ok "the run keeps its '-', so a failed or timed-out run still reaches the stop" \
+    || bad "the run lost its '-': a failure would skip the final copy"
+printf '%s\n' "$run" | grep -q 'file_capture.sh .*"$(BENCHMARK_RECORDINGS)"' \
+    && ok "benchmark-run hands the recordings to file_capture.sh" \
+    || bad "file_capture.sh is not given the recordings"
+td="$(body benchmark-teardown)"
+order="$(printf '%s\n' "$td" | grep -n -e 'learner_recordings.sh.* stop-all ' -e 'BENCHMARK_WVA_UNDEPLOY_TARGET' -e 'LLMDBENCHMARK).*teardown' | cut -d: -f1 | tr '\n' ' ')"
+set -- $order
+[ "$#" -eq 3 ] && [ "$1" -lt "$2" ] && [ "$2" -lt "$3" ] \
+    && ok "benchmark-teardown copies (stop-all, else a snapshot) before anything is removed" \
+    || bad "benchmark-teardown: no copy ahead of the undeploy and teardown (lines: $order)"
+rs="$(body benchmark-restart-controller)"
+order="$(printf '%s\n' "$rs" | grep -n -e 'learner_recordings.sh.* snapshot ' -e 'scale $(WVA_CONTROLLER_DEPLOY) --replicas=0' | cut -d: -f1 | tr '\n' ' ')"
+set -- $order
+[ "$#" -eq 2 ] && [ "$1" -lt "$2" ] \
+    && ok "benchmark-restart-controller copies before it scales the controller to 0" \
+    || bad "benchmark-restart-controller: no copy before the scale to 0 (lines: $order)"
+ra="$(body benchmark-run-all)"
+printf '%s\n' "$ra" | grep -q "trap 'rec .*exit 130' INT TERM" \
+    && [ "$(printf '%s\n' "$ra" | grep -c 'rec "$$scenario_name"')" -eq 3 ] \
+    && ok "benchmark-run-all copies after each run, on a failed standup or run, and on an interrupt (which exits)" \
+    || bad "benchmark-run-all is missing a copy: $(printf '%s\n' "$ra" | grep -c 'rec "$$scenario_name"') per-scenario copies"
+
+# ---- the two-model arm copies on its cleanup, once ------------------------
+reset_calls
+# The script reads its verb from $1 when sourced, as when run: clear what the
+# wiring checks above left there.
+set --
+out="$(
+    # shellcheck disable=SC1091
+    . "$BENCH/two_model_pool.sh" >/dev/null 2>&1
+    NS=demo-ns; WVA_NS=demo-ns; KUBE_CONTEXT=""
+    PATH="$STUB:$PATH"; unset KUBECTL_CMD
+    RUN_RECDIR="$WORK/arm/learner-recordings"
+    run_cleanup 2>&1
+    run_cleanup 2>&1
+    echo "RECDIR=[$RUN_RECDIR]"
+)"
+[ "$(lines "$WORK/arm/learner-recordings/$A/$REC")" = 11 ] \
+    && ok "the two-model arm cleanup (every exit: done, die, interrupt) copies the recordings" \
+    || bad "the two-model arm cleanup copied nothing: $out"
+[ "$(grep -c . "$KEXEC")" -eq 1 ] \
+    && ok "a second cleanup (the EXIT trap after a clean arm) does not copy again" \
+    || bad "the arm cleanup copied $(grep -c . "$KEXEC") times"
+
+# ---- the count itself ------------------------------------------------------
+if [ "$cases" -eq "$EXPECTED_CASES" ]; then
+    echo "  ok: all $EXPECTED_CASES cases ran"
+else
+    echo "  FAIL: expected $EXPECTED_CASES cases, ran $cases -- a block stopped running" >&2
+    fails=$((fails + 1))
+fi
+
+echo "learner recordings checks: $cases run, $fails failed"
+[ "$fails" -eq 0 ] || exit 1
