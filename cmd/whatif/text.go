@@ -52,7 +52,7 @@ func (pv pricedVariant) checkText() string {
 	if c.Mismatch() {
 		verdict = "MISMATCH"
 	}
-	return fmt.Sprintf("%s: median %.1f%% off the tokens read, line %s; %d of %d rows past %.0f%%, worst %.1f%%, fill %.2f-%.2f, cycles %d-%d, %d on a ramp left out",
+	return fmt.Sprintf("%s: median %.1f%% off the rate read, line %s; %d of %d rows past %.0f%%, worst %.1f%%, fill %.2f-%.2f, cycles %d-%d, %d on a ramp left out",
 		verdict, c.MedianErrorPct, directionText(c.SignedErrorPct), c.Past, c.Compared, itl.DefaultGPSMismatchThresholdPct,
 		c.WorstErrorPct, c.FillLo, c.FillHi, c.FromCycle, c.ToCycle, c.OnRamp)
 }

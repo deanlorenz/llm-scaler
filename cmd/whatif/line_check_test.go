@@ -53,7 +53,7 @@ func TestLineCheck_ABadLineIsPrintedAndFlagged(t *testing.T) {
 	assert.True(t, bad.check.Mismatch())
 	assert.Contains(t, bad.flags, lineMismatch)
 	text := bad.checkText()
-	assert.Contains(t, text, "MISMATCH: median 100.0% off the tokens read, line high")
+	assert.Contains(t, text, "MISMATCH: median 100.0% off the rate read, line high")
 	assert.Contains(t, text, "3 of 3 rows past 15%")
 	a, ok := bad.qualify(whatif.Answer{Value: 1}).(whatif.Answer)
 	require.True(t, ok)
@@ -146,5 +146,5 @@ func TestLineCheck_AMismatchReachesEveryAnswer(t *testing.T) {
 	}
 	text, code := runCmd(t, q...)
 	assert.Equal(t, 0, code, "a flag, not a refusal")
-	assert.Contains(t, text, "line check      MISMATCH: median 974.3% off the tokens read, line high")
+	assert.Contains(t, text, "line check      MISMATCH: median 974.3% off the rate read, line high")
 }
