@@ -200,7 +200,7 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 		// the quota with an unplanned one: a set this spec does not wait for.
 		free, err := freeProductGPUs(key, product, gpuResName)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(free).To(BeEmpty(), "GPUs came free on the product's nodes after the fill, by node: the nodes are not full")
+		Expect(free).To(BeEmpty(), "the product's nodes are not full: GPUs came free after the fill, by node: %v", free)
 
 		By("Lowering A's floor to 1, so it has replicas to give")
 		Expect(fixtures.EnsureScaledObject(ctx, crClient, ns, soA, depA, depA, 1, 4, cfg.MonitoringNS,
@@ -210,10 +210,15 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 		By("Waiting for a planned donor set of two A pods funding B")
 		started := regexp.MustCompile(`"scope": "` + ns + `".*"set": "([^"]+)", "donor": "[^"]*/` + modelA +
 			`/both", "receiver": "([^"]*)".*"planned": true`)
-		var setID string
+		var (
+			setID   string
+			logs    string
+			members map[string]int
+		)
 		Eventually(func(g Gomega) {
-			logs := controllerLogsSince(start)
-			members, receivers := map[string]int{}, map[string]string{}
+			logs = controllerLogsSince(start)
+			var receivers map[string]string
+			members, receivers = map[string]int{}, map[string]string{}
 			for _, line := range strings.Split(logs, "\n") {
 				if !strings.Contains(line, "transfer started") {
 					continue
@@ -230,23 +235,21 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 					setID = id
 				}
 			}
-			if setID != "" {
-				return
-			}
-			// The members counted are only the planned ones; the started
-			// lines say what else began, and a free GPU is why a set would
-			// plan fewer than two (the premise check above). Read only on a
-			// miss, and a failed read is said, not fatal to the wait.
+			g.Expect(setID).NotTo(BeEmpty())
+		}, 12*time.Minute, 5*time.Second).Should(Succeed(), func() string {
+			// Built once, on the timeout. The members counted are only the
+			// planned ones; the started lines say what else began, and a free
+			// GPU is why a set would plan fewer than two (the premise check
+			// above). A failed read is said, not fatal.
 			freeRead := "unread"
-			if free, err := freeProductGPUs(key, product, gpuResName); err != nil {
-				freeRead += ": " + err.Error()
+			if gpus, readErr := freeProductGPUs(key, product, gpuResName); readErr != nil {
+				freeRead += ": " + readErr.Error()
 			} else {
-				freeRead = fmt.Sprint(free)
+				freeRead = fmt.Sprint(gpus)
 			}
-			g.Expect(setID).NotTo(BeEmpty(),
-				"no planned set of two A pods funding B has started: planned members by set %v\ntransfers started:\n%s\nfree GPUs on the product's nodes now: %s",
+			return fmt.Sprintf("no planned set of two A pods funding B has started: planned members by set %v\ntransfers started:\n%s\nfree GPUs on the product's nodes now: %s",
 				members, describeShare(withMsg(shareLines(logs, ns), "transfer started"), 20), freeRead)
-		}, 12*time.Minute, 5*time.Second).Should(Succeed())
+		})
 		GinkgoWriter.Printf("planned donor set: %s\n", setID)
 
 		By("Waiting for B's second pod to run and the set's transfer to complete")

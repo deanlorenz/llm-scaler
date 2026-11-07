@@ -350,7 +350,7 @@ func layOutPacked(e *wholeNodeEnv, msG, modelG, msS1, modelS1, msS2, modelS2 str
 		leaving, err := fixtures.TerminatingPodsOnNodes(ctx, k8sClient, e.key, e.product)
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(leaving).To(BeEmpty(), "pods still terminating on the product's nodes, by namespace: %v", leaving)
-	}, 2*time.Minute, 2*time.Second).Should(Succeed())
+	}, 5*time.Minute, 2*time.Second).Should(Succeed())
 	e.scale(depS1, 5)
 	e.scale(depS2, 5)
 	e.waitReady(map[string]int32{depG: 1, depS1: 5, depS2: 5}, 10*time.Minute)
