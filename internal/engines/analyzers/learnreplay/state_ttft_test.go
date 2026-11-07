@@ -339,9 +339,11 @@ func TestTTFTSamples_ZeroReadingsAreSkipped(t *testing.T) {
 	zero.AvgKVTransferTime, zero.AvgKVTransferTimeKnown = 0, true
 	d0 := decodeRow("d0", 0.1, 1)
 	d0.AvgKVTransferTime, d0.AvgKVTransferTimeKnown = 0.02, true
-	s.note(pdInput(prefillRow("p0", 2000, 1), d0, zero), 1, time.Time{})
+	in := pdInput(prefillRow("p0", 2000, 1), d0, zero)
+	s.note(in, 1, time.Time{})
+	s.noteTerm(in, time.Time{}, func(string) string { return "" })
 	assert.InDelta(t, 0.1, s.engineTTFT["dec"][0].Seconds, 1e-12)
-	assert.InDelta(t, 0.02, s.transfers["dec"][0], 1e-12)
+	assert.InDelta(t, 0.02, s.transfers["dec"].Reading().Quiet, 1e-12)
 }
 
 // The figures the CLI's closing note quotes, from the frozen table: the ratio
@@ -429,7 +431,6 @@ func TestTTFTSamples_Transfer(t *testing.T) {
 	d0 := decodeRow("d0", 0.1, 1)
 	d0.AvgKVTransferTime, d0.AvgKVTransferTimeKnown = 0.02, true
 	d1 := decodeRow("d1", 0.1, 1)
-	s.note(pdInput(prefillRow("p0", 2000, 1), d0, d1), 1, time.Time{})
-	require.Len(t, s.transfers["dec"], 1)
-	assert.InDelta(t, 0.02, s.transfers["dec"][0], 1e-12)
+	s.noteTerm(pdInput(prefillRow("p0", 2000, 1), d0, d1), time.Time{}, func(string) string { return "" })
+	assert.InDelta(t, 0.02, s.transfers["dec"].Reading().Figure(), 1e-12)
 }

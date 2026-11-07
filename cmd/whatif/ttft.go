@@ -495,6 +495,11 @@ func (pf *pricedFleet) decodeSide() {
 			d := pf.pv.decode
 			pf.fleet.Decode = &d
 			pf.in.DecodeSide = "line"
+			// Only a line prices the transfer: with the decode engine's TTFT it is
+			// held in that figure.
+			if pf.pv.state.DecodeTTFT.TransferHeld {
+				pf.flags = append(pf.flags, whatif.TransferHeld)
+			}
 			pf.decodeTerm()
 			return
 		}

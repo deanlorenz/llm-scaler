@@ -717,7 +717,7 @@ func withSeams(more, rows map[string][]string) map[string][]string {
 // not listed here.
 var heldBy = map[string][]heldTest{
 	// Runs the switch on and off and asserts both.
-	slo.SwitchTTFTQuietTransfer: {{"../slo", "TestTTFT_TheQuietTransferSwitch"}},
+	slo.SwitchTTFTQuietTransfer: {{"../slo", "TestTTFT_TheQuietTransferSwitch"}, {"../slo", "TestTTFT_TheHeldTransferAgesOut"}},
 	// The decode term: the first prices one fleet on and off and asserts both
 	// (the term and its flags on, the old sum unflagged off); the second runs
 	// the switch through Analyze (a window kept on, none off). The third has
