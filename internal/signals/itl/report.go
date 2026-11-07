@@ -64,7 +64,9 @@ func (t *Tracker) Report(rep learn.Report, key string, r Reading) learn.Report {
 		rep.LastAdmitted = t.Newest(key)
 	case r.SlopeHeld:
 		rep.LastAdmitted = r.SlopeFittedAt
-	case r.BaselineStored:
+	default:
+		// The intercept the key holds now, not the one Observe read before
+		// its fit: the first full fit that stores B is stamped on its cycle.
 		rep.LastAdmitted = t.BaselineAdmittedAt(key)
 	}
 	return rep

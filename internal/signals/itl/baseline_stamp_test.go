@@ -1,9 +1,11 @@
 package itl
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 )
 
@@ -51,6 +53,11 @@ func TestBaselineStamp_ReportAndLifecycle(t *testing.T) {
 		tr := NewTracker()
 		tr.RestoreBaselineAt("k", 0.01, at)
 		drop(tr)
+		// The map itself, not BaselineAdmittedAt: that reads through the
+		// intercept, so a stamp left behind would not show there.
+		if len(tr.baselineAt) != 0 {
+			t.Errorf("%s: the stamp outlived its intercept: %v", name, tr.baselineAt)
+		}
 		if got := tr.BaselineAdmittedAt("k"); !got.IsZero() {
 			t.Errorf("%s: the stamp outlived its intercept: %v", name, got)
 		}
@@ -64,16 +71,57 @@ func TestBaselineStamp_ReportAndLifecycle(t *testing.T) {
 	}
 }
 
-// A full fit from the readings the steady window carries past an empty main
-// window prices a line with no reading in the window: its report reads the
-// intercept's stamp, where it read zero.
-func TestBaselineStamp_AFullFitPastAnEmptyWindow(t *testing.T) {
+// A priced line with no reading in its window and no held slope reads the
+// intercept the key holds when it reports, not the one Observe read before
+// its fit: the reading's BaselineStored is false on the cycle whose full fit
+// first stores B, and that cycle reports B's stamp too. Observe cannot reach
+// such a reading today -- both windows age out on DefaultObservationMaxAge, so
+// an empty window leaves no steady reading to fit -- so it is held here, at
+// the Report.
+func TestBaselineStamp_TheFirstFitThatStoresBIsStamped(t *testing.T) {
 	at := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	for name, stored := range map[string]bool{"B stored before the fit": true, "B stored by this fit": false} {
+		tr := NewTracker()
+		tr.RestoreBaselineAt("k", 0.01, at)
+		got := tr.Report(learn.Report{}, "k", Reading{Tier: TierOLS, BaselineStored: stored, SteadyHeld: 10})
+		if got.PricingKey != "k" || !got.LastAdmitted.Equal(at) {
+			t.Errorf("%s: %+v, want key k at %v", name, got, at)
+		}
+	}
+}
+
+// Observe end to end: a full fit stamps B with the newest reading it was
+// fitted from, and a later cycle that refits the same readings, with nothing
+// new admitted, keeps that stamp rather than taking the cycle's clock.
+func TestBaselineStamp_ObserveStampsTheNewestFittedReading(t *testing.T) {
+	at := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	online := func(n int, lo, hi float64) []domain.ReplicaMetrics {
+		rows := make([]domain.ReplicaMetrics, n)
+		for i := range n {
+			k := lo + (hi-lo)*float64(i)/float64(n-1)
+			rows[i] = domain.ReplicaMetrics{PodName: fmt.Sprintf("p%d", i), VariantName: "v", Ready: true,
+				KvUsageInstant: k, AvgITL: 0.02*k + 0.01}
+		}
+		return rows
+	}
 	tr := NewTracker()
-	tr.RestoreBaselineAt("k", 0.01, at)
-	got := tr.Report(learn.Report{}, "k", Reading{Tier: TierOLS, BaselineStored: true, SteadyHeld: 10})
-	if got.PricingKey != "k" || !got.LastAdmitted.Equal(at) {
-		t.Errorf("a full fit with an empty window: %+v, want key k at %v", got, at)
+	first := tr.Observe("k", "v", online(10, 0.2, 0.7), Admission{}, at)
+	if first.Tier != TierOLS {
+		t.Fatalf("premise: a full fit, got %q", first.Tier)
+	}
+	if got := tr.BaselineAdmittedAt("k"); !got.Equal(at) {
+		t.Fatalf("the first full fit stamped B %v, want its readings' %v", got, at)
+	}
+
+	later := at.Add(time.Minute)
+	light := []domain.ReplicaMetrics{{PodName: "p0", VariantName: "v", Ready: true, KvUsageInstant: 0.06, AvgITL: 0.0112}}
+	again := tr.Observe("k", "v", light, Admission{}, later)
+	if again.Tier != TierOLS || again.Offered != 0 {
+		t.Fatalf("premise: a refit with nothing admitted, got tier %q, %d offered", again.Tier, again.Offered)
+	}
+	if got := tr.BaselineAdmittedAt("k"); !got.Equal(at) {
+		t.Errorf("a refit of the same readings stamped B %v, want the newest fitted reading %v, not the cycle %v",
+			got, at, later)
 	}
 }
 

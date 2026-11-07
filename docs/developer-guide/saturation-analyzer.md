@@ -941,9 +941,12 @@ from the readings the steady window carries does not make B younger. The
 snapshot carries it beside B as `itlBaselineAdmittedAt`
 (`LearnedState.ITLBaselineAdmittedAt`), and a restore installs it with B
 (`RestoreBaselineAt`): a B restored alone reports when it was fitted, not 0.
-`RecordLearnerReports` publishes a report only when it names a `PricingKey`, so
-the series shows the stamp only for a key that prices a line: a full fit from
-the steady window's carried readings past an empty main window.
+`RecordLearnerReports` publishes a report only when it names a `PricingKey`, and
+no line `Observe` prices reaches the stamp (both windows age out on
+`DefaultObservationMaxAge`, so a priced line with an empty window rests on a
+held slope), so the series does not show it today. `Report` reads the
+intercept the key holds when it reports, not the reading's `BaselineStored`
+from before the fit.
 It goes wherever B goes: the sweep, a forget, `dropVariant`, the size trim (with
 the variant's `seen` entry; a stamp left with no B is spare). A B with no
 stamp is of unknown age and reports 0: one from a document written before the

@@ -35,7 +35,7 @@ func decodeLearnedState(t *testing.T, raw string) saturation.LearnedState {
 }
 
 // Dropping the variant's liveness drops the baseline and its stamp together.
-func TestTheTrimDropsTheBaselineStampWithItsBaseline(t *testing.T) {
+func TestLearnedState_TheTrimDropsTheBaselineStampWithItsBaseline(t *testing.T) {
 	now := time.Now()
 	s := stampedState(now)
 	for _, e := range learnedStateEntries(s) {
@@ -72,7 +72,7 @@ func TestTheTrimDropsTheBaselineStampWithItsBaseline(t *testing.T) {
 
 // A stamp left with no baseline prices nothing: the size bound drops it
 // before anything that does, and a baseline keeps its own.
-func TestTheTrimDropsAnOrphanedBaselineStampFirst(t *testing.T) {
+func TestLearnedState_TheTrimDropsAnOrphanedBaselineStampFirst(t *testing.T) {
 	now := time.Now()
 	s := stampedState(now)
 	s.ITLBaselineAdmittedAt["orphan"] = now.Add(-time.Minute)
@@ -99,7 +99,7 @@ func TestTheTrimDropsAnOrphanedBaselineStampFirst(t *testing.T) {
 // A full fit restamps the baseline on every cycle it holds steady readings:
 // the digest leaves the stamp out, so a refit that moves only it does not
 // rewrite the document every minute.
-func TestTheDigestIgnoresTheBaselineStamp(t *testing.T) {
+func TestLearnedState_TheDigestIgnoresTheBaselineStamp(t *testing.T) {
 	now := time.Now()
 	base := stampedState(now)
 	moved := stampedState(now)
