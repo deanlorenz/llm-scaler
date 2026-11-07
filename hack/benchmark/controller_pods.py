@@ -126,6 +126,41 @@ def recording_dir(pod):
     return ""
 
 
+# SHIPPED_VERBOSITY is the -v the manager runs at when its args name none:
+# defaultLogVerbosity in cmd/main.go, which is logging.DEFAULT.
+SHIPPED_VERBOSITY = 2
+VERBOSITY_FLAGS = ("-v", "--v")
+
+
+def verbosity(pod):
+    """Returns the -v the pod's manager container runs at.
+
+    Reads the flag as Go's flag package does: -v=N, --v=N, -v N or --v N, the
+    last one winning, and SHIPPED_VERBOSITY when there is none. Raises
+    ValueError when the pod has no manager container or its -v is not an
+    integer: an unknown level is not the shipped one.
+    """
+    for c in (pod.get("spec") or {}).get("containers") or []:
+        if c.get("name") != MANAGER_CONTAINER:
+            continue
+        found = None
+        args = list(c.get("command") or []) + list(c.get("args") or [])
+        for i, a in enumerate(args):
+            name, eq, value = a.partition("=")
+            if name not in VERBOSITY_FLAGS:
+                continue
+            if not eq:
+                value = args[i + 1] if i + 1 < len(args) else ""
+            found = value
+        if found is None:
+            return SHIPPED_VERBOSITY
+        try:
+            return int(found)
+        except ValueError:
+            raise ValueError(f"the manager's -v is {found!r}, not an integer") from None
+    raise ValueError(f"no {MANAGER_CONTAINER} container")
+
+
 def pod_rows(pod_list, deployment=CONTROLLER_DEPLOYMENT):
     """Returns (name, phase, recording dir, reader container) per controller Pod."""
     rows = []
