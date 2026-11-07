@@ -321,7 +321,9 @@ Maintains the current workload shape bucket `(IL, OL, IL_eff, KVreq)`. Detects s
 (>20% shift in IL or OL) and triggers observation window reset.
 
 - `IL_eff = IL × (1 − PrefixCacheHitRate)` — effective input length after prefix cache
-- `KVreq = IL_eff + OL/2` — time-averaged KV footprint per decode request
+- `KVreq = IL_eff + OL/2` — time-averaged KV footprint per decode request when every
+  request generates the same number of tokens; the analyzer prices `IL_eff + D × OL/2`
+  (below)
 
 **ObservationWindow (`signals/itl/window.go`)**  
 Rolling window of `(k, ITL_obs)` pairs collected per replica per cycle, with
@@ -551,10 +553,21 @@ Per replica `r`:
 
 ```text
 IL_eff    = AvgInputTokens × (1 − PrefixCacheHitRate)
-KVreq     = IL_eff + AvgOutputTokens / 2      # time-averaged KV footprint per request
+KVreq     = IL_eff + D × AvgOutputTokens / 2  # time-averaged KV footprint per request
 N_dec_sat = DefaultKSat × KV_max / KVreq      # in-flight requests at k_sat
 μ_dec_sat = N_dec_sat / ITL(k_sat)            # decode tokens/sec at saturation operating point
 ```
+
+`D = E[O²] / E[O]²` is the spread of output lengths (issue #433, as the saturation and slo
+analyzers price it since #276): a long request stays resident longer, so the average
+resident request holds more than `OL/2` of generated KV. `E[O²]` is each replica's lower
+bound from `vllm:request_generation_tokens_bucket`
+(`domain.ReplicaMetrics.AvgOutputTokensSquared`), request-weighted over the rows the
+variant's shape averages (`variantOutputDispersion`, `kv_output_dispersion.go`). `D` is 1
+unless every one of them read a positive, finite bound, and with the replay switch
+`throughput-kv-per-request-output-dispersion` off. It is not held at 1 across a shape
+change. The same `KVreq` prices the local demand and the GPS check, so a larger `D`
+lowers supply, local demand and the predicted token rate by one factor.
 
 Per-variant totals: `totalSupply = Σ μ_dec_sat`, `perReplicaSupply = totalSupply / n`, where
 `n` is the count of KV-capable replicas (`nKV`) — replicas actually reporting KV metrics, not

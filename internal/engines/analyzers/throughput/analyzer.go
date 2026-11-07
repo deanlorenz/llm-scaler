@@ -75,6 +75,10 @@ type ThroughputAnalyzer struct {
 	// itlTierHysteresis is SwitchITLTierHysteresis (issue #495,
 	// itl_line.go): on, the line's tier is latched.
 	itlTierHysteresis bool
+	// kvOutputDispersion is SwitchKVPerRequestOutputDispersion (issue #433,
+	// kv_output_dispersion.go): on, KVreq prices the spread of output
+	// lengths. On by the constructor.
+	kvOutputDispersion bool
 	// capPinsDefaultB prices readings at the cap through the default B
 	// alone, as 4b-3 first built it (itl.Admission.OneSidedAboveKSat off),
 	// for the tests' negative controls only: set by withCapPinnedAtDefaultB,
@@ -173,6 +177,7 @@ func NewThroughputAnalyzer() *ThroughputAnalyzer {
 		itlAdmitsAtCap:        true,
 		itlForgetReachesLine:  true,
 		itlTierHysteresis:     true,
+		kvOutputDispersion:    true,
 		ownSettle:             settle.NewTracker(),
 		ownSettled:            make(map[string]time.Time),
 	}
@@ -513,6 +518,11 @@ func (a *ThroughputAnalyzer) analyze(
 		// upward → systematic under-provisioning. Supply counting (computeVariantSupply,
 		// computeDemand) uses the unfiltered variantMetrics to include booting replicas.
 		healthyMetrics := filterHealthyForShape(variantMetrics)
+		// The KV a resident request holds, with the spread of output lengths
+		// read from the rows the shape averages (kv_output_dispersion.go).
+		if a.kvOutputDispersion {
+			shape = shape.WithOutputDispersion(variantOutputDispersion(healthyMetrics))
+		}
 		var (
 			model  itl.Model
 			reason string
@@ -969,10 +979,7 @@ func averageShapeMetrics(metrics []domain.ReplicaMetrics) (il, ol, hitRate float
 	// One gate for all three, as before: a replica is in the mean only if it
 	// reports both a prompt and a generation length. Its hit rate then counts
 	// even at zero, which is why only that call admits a zero.
-	eligible := func(m domain.ReplicaMetrics) bool {
-		return m.AvgInputTokens > DefaultMinTokensPerRequest &&
-			m.AvgOutputTokens > DefaultMinTokensPerRequest
-	}
+	eligible := shapeEligible
 	il = fleet.Mean(metrics,
 		func(m domain.ReplicaMetrics) float64 { return m.AvgInputTokens }, eligible)
 	ol = fleet.Mean(metrics,
@@ -981,6 +988,14 @@ func averageShapeMetrics(metrics []domain.ReplicaMetrics) (il, ol, hitRate float
 		func(m domain.ReplicaMetrics) float64 { return m.PrefixCacheHitRate }, eligible,
 		fleet.ZeroIsAReading())
 	return il, ol, hitRate
+}
+
+// shapeEligible is whether a replica is in the variant's shape: it reports
+// both a prompt and a generation length (averageShapeMetrics,
+// variantOutputDispersion).
+func shapeEligible(m domain.ReplicaMetrics) bool {
+	return m.AvgInputTokens > DefaultMinTokensPerRequest &&
+		m.AvgOutputTokens > DefaultMinTokensPerRequest
 }
 
 // filterHealthyForShape returns only the replicas that pass all per-replica

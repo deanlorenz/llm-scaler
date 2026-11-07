@@ -145,6 +145,21 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// which has no switch, moves its own goldens.
 	slo.SwitchKVPerRequestOutputDispersion: nil,
 
+	// #433, #276 on the throughput analyzer: KVreq with the spread of output
+	// lengths, in its supply, local demand and GPS check. It moves the two
+	// throughput-sweep recordings, the only ones that run the throughput
+	// analyzer on rows whose output histogram spreads: the variant's
+	// per-replica supply falls (KVreq rises), and the composite's release
+	// bound and decode frames move with it.
+	throughput.SwitchKVPerRequestOutputDispersion: {
+		"throughput-sweep-restart/composite-release.csv", "throughput-sweep-restart/composite-results.csv",
+		"throughput-sweep-restart/composite-roles.csv", "throughput-sweep-restart/composite-variants.csv",
+		"throughput-sweep-restart/variant-capacities.csv", "throughput-sweep-restart/warm-pool-pressure.csv",
+		"throughput-sweep/composite-release.csv", "throughput-sweep/composite-results.csv",
+		"throughput-sweep/composite-roles.csv", "throughput-sweep/composite-variants.csv",
+		"throughput-sweep/variant-capacities.csv", "throughput-sweep/warm-pool-pressure.csv",
+	},
+
 	saturation.SwitchPrefillCapacityObserve: nil,
 
 	// #495: mu on learn's list of learners

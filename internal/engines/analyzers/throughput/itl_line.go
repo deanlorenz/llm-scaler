@@ -98,6 +98,7 @@ func (a *ThroughputAnalyzer) switchFields() map[string]*bool {
 		SwitchITLAdmitsAtSequenceCap:          &a.itlAdmitsAtCap,
 		SwitchITLForgetReachesTheLine:         &a.itlForgetReachesLine,
 		SwitchITLTierHysteresis:               &a.itlTierHysteresis,
+		SwitchKVPerRequestOutputDispersion:    &a.kvOutputDispersion,
 	}
 }
 

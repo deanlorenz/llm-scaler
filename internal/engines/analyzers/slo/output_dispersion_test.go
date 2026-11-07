@@ -78,6 +78,11 @@ func TestKVOutputDispersion_NoReadingIsNoSpread(t *testing.T) {
 		rm.AvgOutputTokensSquared, rm.AvgOutputTokensSquaredKnown = math.Inf(1), true
 	}
 	assert.InDelta(t, 120/0.044, dispersionRate(t, true, notANumber), 1e-6)
+	// NaN fails every comparison: a guard written x <= 0 would admit it.
+	nan := func(rm *domain.ReplicaMetrics) {
+		rm.AvgOutputTokensSquared, rm.AvgOutputTokensSquaredKnown = math.NaN(), true
+	}
+	assert.InDelta(t, 120/0.044, dispersionRate(t, true, nan), 1e-6)
 	knownButZero := func(rm *domain.ReplicaMetrics) {
 		wider(rm)
 		if rm.PodName == "agg-a" {

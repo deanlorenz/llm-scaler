@@ -2644,6 +2644,7 @@ throughput-itl-settling
 throughput-itl-steady-gate
 throughput-itl-tier-hysteresis
 throughput-itl-waits-after-controller-restart
+throughput-kv-per-request-output-dispersion
 throughput.Analyze
 throughput.ForgetVariant
 throughput.Observe

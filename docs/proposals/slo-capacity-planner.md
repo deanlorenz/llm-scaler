@@ -115,7 +115,8 @@ valid while the denominator is positive and `n` is under the cap.
 
 Corrections: `KVreq = ILeff + D·OL/2` with the output spread
 `D = E[O²]/E[O]²` (#276), read from the output-length histogram, in the saturation
-analyzer, the slo analyzer (switch `slo-kv-per-request-output-dispersion`) and
+analyzer, the slo analyzer (switch `slo-kv-per-request-output-dispersion`), the
+throughput analyzer (switch `throughput-kv-per-request-output-dispersion`, #433) and
 [the CLI](#recording-mode-as-built-d3). TPOT per accepted token under speculative
 decoding (#274, PR #430) is applied once, where the saturation analyzer fits its
 line (`domain.ReplicaMetrics.ITLPerToken`). `cmd/whatif` applies nothing of its
