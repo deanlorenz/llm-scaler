@@ -31,6 +31,16 @@ const coarseBucketWidth = 0.25
 // ratioPercentile is the percentile of the per-window ratios R_q is taken at.
 const ratioPercentile = 0.90
 
+// MaxEngineBucketWidth is the width of the q bucket, over the window's mean,
+// past which the engine's histogram answers no percentile: four times
+// coarseBucketWidth, a bucket wider than the mean itself. The quantile is then
+// the bucket's edge whatever q was asked: on throughput-sweep-restart, whose
+// vLLM buckets open at 10 ms around a mean of about 3 ms, p90, p99 and p99.9
+// all read the same 21.79 ms. Below it a coarse R_q is flagged and stands. A
+// stated line, not a measured one: read at the same rank as R_q, so one idle
+// window does not decide it.
+const MaxEngineBucketWidth = 4 * coarseBucketWidth
+
 // TPOTRatioFromWindows learns R_q, the q-th percentile of per-request TPOT over
 // its mean (docs/proposals/slo-capacity-planner.md, "Learning R_q").
 //
@@ -49,14 +59,40 @@ const ratioPercentile = 0.90
 // NoTPOTHistogram when no window holds an observation; MalformedHistogram for
 // data that cannot be read; and InvalidInput only for a q outside (0, 1).
 func TPOTRatioFromWindows(windows []TPOTWindow, q float64) (TPOTRatio, []Flag, *Unanswerable) {
-	fail := func(r Reason, detail string) (TPOTRatio, []Flag, *Unanswerable) {
-		u := refuse(r, detail)
+	r, flags, _, refused := ratioAndWidth(windows, q)
+	return r, flags, refused
+}
+
+// EngineTPOTRatio is TPOTRatioFromWindows on the engine's histogram, the
+// fall-back for the router's (docs/proposals/slo-capacity-planner.md,
+// "Sources"): every result carries EngineTPOTHistogram, and a q bucket past
+// MaxEngineBucketWidth is refused, TPOTBucketTooWide, with CoarseTPOTBucket.
+func EngineTPOTRatio(windows []TPOTWindow, q float64) (TPOTRatio, []Flag, *Unanswerable) {
+	r, flags, width, refused := ratioAndWidth(windows, q)
+	if refused != nil {
+		u := *refused
+		u.Flags = append(slices.Clone(u.Flags), EngineTPOTHistogram)
 		return TPOTRatio{}, nil, &u
+	}
+	if width > MaxEngineBucketWidth {
+		u := refuse(TPOTBucketTooWide, fmt.Sprintf("the engine's q bucket is %.3g times the mean, past %g: it reads the bucket's edge, not the percentile", width, float64(MaxEngineBucketWidth)))
+		u.Flags = []Flag{CoarseTPOTBucket, EngineTPOTHistogram}
+		return TPOTRatio{}, nil, &u
+	}
+	return r, append(flags, EngineTPOTHistogram), nil
+}
+
+// ratioAndWidth is R_q and its flags, and the width of the q bucket over the
+// window's mean at the rank R_q is read at.
+func ratioAndWidth(windows []TPOTWindow, q float64) (TPOTRatio, []Flag, float64, *Unanswerable) {
+	fail := func(r Reason, detail string) (TPOTRatio, []Flag, float64, *Unanswerable) {
+		u := refuse(r, detail)
+		return TPOTRatio{}, nil, 0, &u
 	}
 	if !(q > 0 && q < 1) {
 		return fail(InvalidInput, fmt.Sprintf("percentile %g, want 0 < q < 1", q))
 	}
-	var ratios []float64
+	var ratios, widths []float64
 	coarse := false
 	for i, w := range windows {
 		if !Finite(w.Count) || w.Count < 0 || !Finite(w.Sum) {
@@ -81,6 +117,7 @@ func TPOTRatioFromWindows(windows []TPOTWindow, q float64) (TPOTRatio, []Flag, *
 			continue
 		}
 		ratios = append(ratios, upper/mean)
+		widths = append(widths, (upper-lower)/mean)
 		if (upper-lower)/mean > coarseBucketWidth {
 			coarse = true
 		}
@@ -89,12 +126,13 @@ func TPOTRatioFromWindows(windows []TPOTWindow, q float64) (TPOTRatio, []Flag, *
 		return fail(NoTPOTHistogram, "no window holds a TPOT observation")
 	}
 	slices.Sort(ratios)
+	slices.Sort(widths)
 	rank := int(math.Ceil(ratioPercentile*float64(len(ratios)))) - 1
 	var flags []Flag
 	if coarse {
 		flags = []Flag{CoarseTPOTBucket}
 	}
-	return TPOTRatio{Value: max(1, ratios[rank])}, flags, nil
+	return TPOTRatio{Value: max(1, ratios[rank])}, flags, widths[rank], nil
 }
 
 // quantileBucket finds the bucket holding the q quantile and returns its lower

@@ -139,13 +139,57 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// (heldBy); the CLI, which has no switch, moves its own goldens.
 	slo.SwitchTTFTDecodeTerm: nil,
 
+	// Which rows the transfer is read from. It moves no golden: no committed
+	// recording prices a line (the decode term's reason, above). Its unit test
+	// holds it (heldBy).
+	slo.SwitchTTFTQuietTransfer: nil,
+
 	// #276 on the slo line: KVreq with the spread of output lengths. It moves
 	// no golden: of those that list slo, only the four staircases read the
 	// output histogram, at D 1.000. Its unit test holds it (heldBy); the CLI,
 	// which has no switch, moves its own goldens.
 	slo.SwitchKVPerRequestOutputDispersion: nil,
 
+	// Issue #459: on the slo analyzer's own settle tracker, a model last
+	// analyzed more than the state timeout ago is first-seen whether or not
+	// EvictStale ran first. It moves no golden: a replay calls EvictStale at
+	// the top of every cycle, as the engine does, so a model past the
+	// timeout was evicted before its Analyze on either side; and a recording
+	// with start.ThroughputConfig hands the analyzer the engine's view. Its
+	// unit tests hold it (heldBy).
+	slo.SwitchITLLongGapFirstSeen: nil,
+
 	saturation.SwitchPrefillCapacityObserve: nil,
+
+	// #481: the throughput and slo lines take no rows in a rollout, and the
+	// throughput line forgets under new arguments. None moves a golden: no
+	// recording holds a rollout or a change of arguments under one variant's
+	// rows. Their unit tests hold them (heldBy).
+	throughput.SwitchITLRolloutGuard:          nil,
+	throughput.SwitchITLForgetsOnNewArguments: nil,
+	slo.SwitchITLRolloutGuard:                 nil,
+
+	// #481 with #498: the saturation line clears its window on a new
+	// revision, as the slo and throughput lines do under their guards. It
+	// moves no golden: no recording changes a key's revision.
+	saturation.SwitchITLClearsOnNewRevision: nil,
+
+	// #495: the slo and throughput lines file reports, and the slo line logs
+	// learner-write. They move no golden: nothing the analyzers price reads a
+	// report, and no output reads the line. Their unit tests hold them
+	// (heldBy).
+	slo.SwitchITLFilesReports:        nil,
+	throughput.SwitchITLFilesReports: nil,
+
+	// #504: a variant the engine reports present keeps its throughput state.
+	// It moves no replay golden: no recording holds the event.
+	throughput.SwitchITLKeepsPresentVariants: nil,
+
+	// #495: k2 waits after a rollout under a key already seen
+	// (saturation.SwitchK2WaitsAfterRollout). It moves no golden: no recording
+	// changes a replica's revision under its name. Its unit test holds it
+	// (heldBy).
+	saturation.SwitchK2WaitsAfterRollout: nil,
 
 	// #495: mu on learn's list of learners
 	// (saturation.SwitchMuForgetReported). It moves no golden: a forget and
@@ -717,6 +761,8 @@ func withSeams(more, rows map[string][]string) map[string][]string {
 // test that holds the same on either side is a control, not a hold, and is
 // not listed here.
 var heldBy = map[string][]heldTest{
+	// Runs the switch on and off and asserts both.
+	slo.SwitchTTFTQuietTransfer: {{"../slo", "TestTTFT_TheQuietTransferSwitch"}, {"../slo", "TestTTFT_TheHeldTransferAgesOut"}},
 	// #276 on the slo line: it runs the switch on and off through Analyze and
 	// asserts both (the replica's rate halved at D 2 on, as it was off).
 	slo.SwitchKVPerRequestOutputDispersion: {
@@ -731,6 +777,41 @@ var heldBy = map[string][]heldTest{
 		{"../slo", "TestTTFT_TheDecodeTermWindow"},
 		{"../slo", "TestTTFT_TheDecodeTermSwitchOnALine"},
 		{"../slo", "TestTTFT_TheRouterMeanReachesTheWindow"},
+	},
+	// It runs the switch on and off through Analyze and asserts both.
+	saturation.SwitchITLClearsOnNewRevision: {
+		{"../saturation", "TestITLWindow_ANewRevisionClearsIt"},
+	},
+	// It runs the switch on and off and asserts both.
+	throughput.SwitchITLKeepsPresentVariants: {
+		{"../throughput", "TestRollout_APresentVariantKeepsItsState"},
+	},
+	// #495: each runs with the switch on, and the last with it off.
+	slo.SwitchITLFilesReports: {
+		{"../slo", "TestLearner_ALineFilesItsReport"},
+		{"../slo", "TestLearner_TheSwitchOffFilesNothing"},
+	},
+	throughput.SwitchITLFilesReports: {
+		{"../throughput", "TestLearnerReports_ALineFilesItsReport"},
+		{"../throughput", "TestLearnerReports_TheSwitchOffFilesNothing"},
+	},
+	// #495: it runs the switch on and off and asserts both (a window of
+	// refusals on, read at once off).
+	saturation.SwitchK2WaitsAfterRollout: {
+		{"../saturation", "TestK2Rollout_ANewRevisionWaitsAWindow"},
+	},
+	// #481: each runs the switch on and off through Analyze and asserts both.
+	throughput.SwitchITLRolloutGuard: {
+		{"../throughput", "TestRollout_ThePublishedRolloutOffersNoRows"},
+		{"../throughput", "TestRollout_MixedRevisionsOfferTheNewestOnly"},
+		{"../throughput", "TestRollout_AnOldPodIsNotJudgedAgainstTheNewCap"},
+	},
+	throughput.SwitchITLForgetsOnNewArguments: {
+		{"../throughput", "TestRollout_NewArgumentsForgetTheLine"},
+	},
+	slo.SwitchITLRolloutGuard: {
+		{"../slo", "TestRollout_ThePublishedRolloutOffersNoRows"},
+		{"../slo", "TestRollout_MixedRevisionsOfferTheNewestOnly"},
 	},
 	// #495: each runs the switch on and off and asserts both (the keys
 	// reported and the logged value gone on; neither off).
@@ -797,6 +878,13 @@ var heldBy = map[string][]heldTest{
 		{"../throughput", "TestForget_TakesTheAboveBandFallback"},
 		{"../throughput", "TestForget_AtTheCapALineIsPricedOneSidedAgain"},
 		{"../throughput", "TestForget_ReportsEachForgottenKey"},
+	},
+	// Issue #459's long gap on the slo analyzer's own tracker: it runs the
+	// switch on and off through Analyze, with EvictStale first, between the
+	// two models, and never, and asserts both.
+	slo.SwitchITLLongGapFirstSeen: {
+		{"../slo", "TestSettle_AfterALongGapTheAnalyzerAloneReadsEveryModelAlike"},
+		{"../slo", "TestSettle_AfterALongGapWithTheSwitchOffEvictionOrderStillMatters"},
 	},
 	// Issue #431's forget of the slo line.
 	slo.SwitchITLForgetReachesTheLine: {

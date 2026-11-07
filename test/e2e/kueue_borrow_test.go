@@ -235,9 +235,9 @@ var _ = Describe("Kueue cohort borrowing - applied against a live Kueue", Label(
 
 		By(fmt.Sprintf("Checking the product's nodes have %d GPUs free", reach+2))
 		Eventually(func(g Gomega) {
-			n, err := fixtures.TerminatingPodsOnNodes(ctx, k8sClient, key, product)
+			leaving, err := fixtures.TerminatingPodsOnNodes(ctx, k8sClient, key, product)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(n).To(BeZero(), "%d pods still terminating on the product's nodes", n)
+			g.Expect(leaving).To(BeEmpty(), "pods still terminating on the product's nodes, by namespace: %v", leaving)
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())
 		free := freeGPUsOfProduct(key, product, gpuRN)
 		if free < reach+2 {

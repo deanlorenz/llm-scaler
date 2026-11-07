@@ -99,6 +99,12 @@ const (
 	// OutcomePrefillRequired means a decode variant would fit, but no prefill
 	// could be placed alongside it and the policy requires one.
 	OutcomePrefillRequired SelectionOutcome = "prefill-required"
+	// OutcomeAwaitingInFlight means the wake was not judged this tick: the
+	// in-flight holds a restart carries are still to be read back, and a
+	// wake fitted to nodes without them could take a hole a replica ordered
+	// before the restart is about to land in. Not a refusal: the next tick
+	// judges it again.
+	OutcomeAwaitingInFlight SelectionOutcome = "awaiting-in-flight"
 )
 
 // SelectionInput is everything selectServingSet needs to choose a serving set.

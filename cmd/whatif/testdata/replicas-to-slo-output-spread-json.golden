@@ -36,7 +36,22 @@
           "fromCycle": 64,
           "toCycle": 77,
           "resamples": 200,
-          "tierChanges": 0
+          "tierChanges": 0,
+          "check": {
+            "status": "ok-at-another-shape",
+            "compared": 10,
+            "onRamp": 17,
+            "aboveBand": 0,
+            "tooOld": 0,
+            "past": 3,
+            "medianErrorPct": 14.319396863089322,
+            "worstErrorPct": 15.861032138310588,
+            "signedErrorPct": 14.319396863089322,
+            "fromCycle": 33,
+            "toCycle": 42,
+            "rowKVPerRequest": 2991.942343243448,
+            "otherShape": true
+          }
         },
         "fillBand": {
           "lo": 0.12,

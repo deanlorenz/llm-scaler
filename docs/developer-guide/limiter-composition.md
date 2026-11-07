@@ -339,26 +339,52 @@ is newer than the view's snapshot.
 - Persistence (`inflight_persist.go` in `allocation` and in `steadystate`):
   every steady-state cycle hands `MarshalInFlight` to the status publisher
   (`controllerstatus.KeyInFlightLedger`, carried over to a new term). It
-  holds each live entry's shape, `want`, placed count, expiry and TTL, and
-  its partial groups' placed pods. It is bounded by `maxInFlightPersisted`
-  and `maxInFlightBytes`, keeping the holds that end last. The engine reads
-  it back once, before its first cycle (`restoreInFlight`, from
-  `StartOptimizeLoop` and each cycle until a read succeeds), and persists
-  nothing before that read. `RestoreInFlight` keeps each entry's clock,
-  skips a variant the ledger already holds, and drops an entry with figures
-  this controller does not write, then keeps the `maxInFlightPersisted` holds
-  that end last. A TTL is cut to `max(InFlightTTL, 3 x PlacementTimeout)`.
-  A restored entry has no `placed` func: it counts no pods until the
-  variant's next `Commit`. The first fitted cycle ends every restored entry
-  it does not admit (`DropRestoredExcept`, from `admitInFlight`; a committed
-  admission, a wake's included, takes the entry off `restored`).
+  holds each live entry's shape, `want`, placed count, expiry and TTL, its
+  partial groups' placed pods, and its scale target (`targetKind`,
+  `targetName`, from `InFlightAdmission.Target`). It is bounded by
+  `maxInFlightPersisted` and `maxInFlightBytes`, keeping the holds that end
+  last. The engine reads it back once, before its first cycle
+  (`restoreInFlight`, from `StartOptimizeLoop` and each cycle until a read
+  succeeds), and persists nothing before that read. `RestoreInFlightWith`
+  keeps each entry's clock, skips a variant the ledger already holds, and
+  drops an entry with figures this controller does not write (a scale target
+  kind other than Deployment or LeaderWorkerSet among them), then keeps the
+  `maxInFlightPersisted` holds that end last. A TTL is cut to
+  `max(InFlightTTL, 3 x PlacementTimeout)`. A restored entry gets a `placed`
+  func from its scale target at once (`Engine.restoredPlaced`: the target is
+  read on first count and kept), so one whose pods land before any cycle
+  admits it ends on the next `settle`; an entry persisted without a target
+  counts no pods until its variant's next `Commit`. Each fitted cycle ends
+  the restored entries no admission has updated since (`DropRestoredExcept`,
+  from `admitInFlight`) unless it admits them or did not decide their
+  variant while the variant is still enumerated (`Engine.cycleVariants`, set
+  in `optimizeV2`): a model skipped for missing metrics keeps its restored
+  holds, on their own clock, and they stay on `restored` for the next cycle
+  to judge. A variant gone, or decided without an admission (passive,
+  planned by the share), loses them. A decision counts only with a resolved
+  accelerator and a state the cycle read; one without either keeps the
+  hold. A committed admission, a wake's included, takes the entry off
+  `restored`. The count (`restoredPlaced`) runs under a 5 s context
+  (`restoredCountTimeout`), since the scale-from-zero engine builds its node
+  view under `wakeMu`.
+  `main` marks the ledger `ExpectRestore(time.Now())` before either engine
+  starts and `restoreInFlight` marks it `MarkRestored` once a read succeeds
+  (found or not, readable or not; a failed read, Forbidden included, leaves
+  it pending). Until then a scale-from-zero wake under the physical limiter
+  is not judged (`awaitInFlightRestore` in `wake_tick.go`, before the node
+  view is built, outcome `awaiting-in-flight`), a share-claim wake included,
+  for at most `inFlightRestoreWait` (1 minute) from when this replica became
+  leader: `scalefromzero.Engine.StartOptimizeLoop`, a leader-only runnable,
+  calls `RestartRestoreClock` before its first tick. Past it wakes go
+  without the holds, logged once, and do not wait again
+  (`inFlightGaveUp`).
   `MarshalInFlight` encodes each entry under the lock. On shutdown the
   publisher writes once more, bounded by 2s (`flushOnShutdown`), so the last
   cycle's ledger reaches the next leader. A restored partial
   group's placed pods are seen at the zero time, so they are never charged
   again on their node. An Unschedulable replica and a half-placed group thus
-  keep their holes across a restart: the first cycle's `ExistingOnly`
-  admission updates the restored entry. A ledger that is not JSON, or of
+  keep their holes across a restart: the `ExistingOnly` admission of the
+  first cycle that decides the variant updates the restored entry. A ledger that is not JSON, or of
   another `InFlightFormat`, is ignored.
 - TTL: `InFlightTTL` (5 minutes), or `InFlightAdmission.TTL` when longer
   (a replica on a Kueue flavor: the governor's `PlacementTimeout`, from both

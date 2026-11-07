@@ -689,15 +689,139 @@ func TestTTFT_TransferOmittedStandsUntilAReading(t *testing.T) {
 		"a value the presence bit denies")
 }
 
+// A pod behind on its pulls reads ten times its quiet transfer. On, the window's
+// figure stands; off, the cycle's rows, as before.
+func TestTTFT_TheQuietTransferSwitch(t *testing.T) {
+	const prompt, key = 8000.0, "ns|model|dec"
+	busy, quiet := transferRowsAt(9, 0.34), transferRowsAt(0, 0.03)
+	r := newTTFTRig(ttftEstimate(), nil)
+	r.a.noteDecodeTTFT(key, whatif.DecodeTTFT{}, ttftNow)
+	cycle := func(rows []domain.ReplicaMetrics) float64 {
+		return r.a.transferPerToken(r.a.noteTransfer(key, "", "", rows, ttftNow), rows, prompt)
+	}
+	assert.InDelta(t, 0.34/prompt, cycle(busy), 1e-15, "no quiet cycle yet: every row")
+	assert.InDelta(t, 0.03/prompt, cycle(quiet), 1e-15)
+	assert.InDelta(t, 0.03/prompt, cycle(busy), 1e-15, "held through a busy cycle")
+
+	require.NoError(t, r.a.SetSwitchesForReplay(map[string]bool{SwitchTTFTQuietTransfer: false}))
+	assert.InDelta(t, 0.34/prompt, cycle(busy), 1e-15, "off, the cycle's rows")
+}
+
+// transferRowsAt is two decode rows reading seconds, each with queue waiting.
+func transferRowsAt(queue int, seconds float64) []domain.ReplicaMetrics {
+	dec := decodeRows("dec", 2)
+	for i := range dec {
+		dec[i].QueueLength, dec[i].AvgKVTransferTime, dec[i].AvgKVTransferTimeKnown = queue, seconds, true
+	}
+	return dec
+}
+
+// S1, cycle by cycle: a busy fleet holds the quiet figure for HeldDecodeAge, flagged,
+// then every row's figure stands, unflagged, and with no reading in age there is
+// none, which the model flags TransferOmitted.
+func TestTTFT_TheHeldTransferAgesOut(t *testing.T) {
+	const key = "ns|model|dec"
+	r := newTTFTRig(ttftEstimate(), nil)
+	r.a.noteDecodeTTFT(key, whatif.DecodeTTFT{}, ttftNow)
+	line := &whatif.Decode{}
+	held := func(at time.Time, rows []domain.ReplicaMetrics) (bool, float64) {
+		got := r.a.noteTransfer(key, "", "", rows, at)
+		in := ttftInputs{decode: line, transferHeld: r.a.ttftQuietTransfer && got.Held}
+		_, flags := ttftFleet(in, 1)
+		return slices.Contains(flags, whatif.TransferHeld), r.a.transferPerToken(got, rows, 8000) * 8000
+	}
+	flagged, seconds := held(ttftNow, transferRowsAt(0, 0.03))
+	assert.False(t, flagged, "quiet: read this cycle")
+	assert.InDelta(t, 0.03, seconds, 1e-12)
+
+	flagged, seconds = held(ttftNow.Add(prefill.HeldDecodeAge), transferRowsAt(9, 0.34))
+	assert.True(t, flagged, "inside the age, held")
+	assert.InDelta(t, 0.03, seconds, 1e-12)
+
+	flagged, seconds = held(ttftNow.Add(prefill.HeldDecodeAge+time.Second), transferRowsAt(9, 0.34))
+	assert.False(t, flagged, "past the age, every row's figure")
+	assert.InDelta(t, 0.34, seconds, 1e-12)
+
+	flagged, seconds = held(ttftNow.Add(3*prefill.HeldDecodeAge), decodeRows("dec", 2))
+	assert.False(t, flagged)
+	assert.Zero(t, seconds, "no reading in age: none, so the model flags TransferOmitted")
+
+	require.NoError(t, r.a.SetSwitchesForReplay(map[string]bool{SwitchTTFTQuietTransfer: false}))
+	flagged, seconds = held(ttftNow.Add(3*prefill.HeldDecodeAge), transferRowsAt(9, 0.34))
+	assert.False(t, flagged, "off, nothing is held")
+	assert.InDelta(t, 0.34, seconds, 1e-12)
+}
+
+// The floor is the safety of #494: past the age a saturated fleet's own figure sets
+// it again, on the fleet's price.
+func TestTTFT_TheFloorRisesAgainAtExpiry(t *testing.T) {
+	floor := func(perToken float64) float64 {
+		fl := ladderFleetForFloor(perToken)
+		return mustPricedTTFT(t, whatif.TTFTAt(fl, 1, 0.9)).Floor
+	}
+	const prompt, key = 8000.0, "ns|model|dec"
+	r := newTTFTRig(ttftEstimate(), nil)
+	r.a.noteDecodeTTFT(key, whatif.DecodeTTFT{}, ttftNow)
+	cycle := func(at time.Time, rows []domain.ReplicaMetrics) float64 {
+		return r.a.transferPerToken(r.a.noteTransfer(key, "", "", rows, at), rows, prompt)
+	}
+	quiet := floor(cycle(ttftNow, transferRowsAt(0, 0.03)))
+	heldFloor := floor(cycle(ttftNow.Add(prefill.HeldDecodeAge), transferRowsAt(9, 0.34)))
+	expired := floor(cycle(ttftNow.Add(prefill.HeldDecodeAge+time.Second), transferRowsAt(9, 0.34)))
+	assert.InDelta(t, quiet, heldFloor, 1e-12, "held, the floor stays down")
+	assert.Greater(t, expired, 2*quiet, "at expiry it rises")
+}
+
+// A change of engine sweeps the window through Analyze's own arguments.
+func TestTTFT_AChangeOfAcceleratorSweepsTheTransfer(t *testing.T) {
+	r := newTTFTRig(ttftEstimate(), nil)
+	const key = "ns|model|dec"
+	r.a.noteDecodeTTFT(key, whatif.DecodeTTFT{}, ttftNow)
+	r.a.noteTransfer(key, "A", "args", transferRowsAt(0, 0.03), ttftNow)
+	got := r.a.noteTransfer(key, "B", "args", transferRowsAt(9, 0.34), ttftNow.Add(time.Second))
+	assert.InDelta(t, 0.34, got.Figure(), 1e-12)
+	assert.False(t, got.Held)
+}
+
+// ladderFleetForFloor is a fleet on a fit that sits under the old sum.
+func ladderFleetForFloor(perToken float64) whatif.TTFTFleet {
+	term := whatif.DecodeTerm{Engine: whatif.PromptLine{Base: 0.001, PerToken: 1e-6}, PerStep: 7, Hop: whatif.PromptLine{Base: 0.005}}
+	return whatif.TTFTFleet{
+		Prefill: whatif.Prefill{VP: 288000, FixedLatency: 0.012, Imbalance: 1.2, Replicas: 2, PromptTokens: 8000,
+			PromptCV: 0.06, TransferSecondsPerToken: perToken},
+		Decode: &whatif.Decode{Line: itl.Model{A: 0.03, B: 0.002}, Band: whatif.DefaultBand(), Tier: "pinned-B",
+			CapacityTokens: 1162240, KVPerRequest: 8100, OutputTokens: 200, ReplicaCap: 256, Replicas: 2},
+		DecodeTerm: &term, FlowControl: whatif.FlowControl{State: whatif.FlowControlOff},
+	}
+}
+
+func mustPricedTTFT(t *testing.T, r whatif.Result) whatif.TTFT {
+	t.Helper()
+	v, ok := r.(whatif.TTFT)
+	require.True(t, ok, "%#v", r)
+	return v
+}
+
 // Test 11, narrowed to what holds. From cv 0.3 up to the peak for the
 // percentile, a larger cv never prices a shorter TTFT at the current rate, from
 // 0.05 of the knee, nor a higher rate at the target, on seeded fleets. Past the
 // peak the rate side fails (TestTTFT_TheCVClaimsThatDoNotHold), and so does
 // the bottom of the range; PromptSpreadAbovePeak flags the first.
+//
+// Every draw holds the TTFT side; the first draw of each percentile and kind
+// holds the rate side too. A RateForTTFT here costs about 100 ms against a few
+// for a TTFTAt, nearly all of it the price's unused old-sum floor, so 60 rate
+// draws took minutes. Both kinds, because the rate falls steeply near the floor
+// and a small fault shows only on the draws above it.
 func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
+	type rateCase struct {
+		percent   int
+		nearFloor bool
+	}
+	percents := []int{90, 91, 92, 93, 95, 99}
 	r := rand.New(rand.NewPCG(11, 13))
 	const draws = 60
-	priced := 0
+	priced := map[rateCase]int{}
 	for range draws {
 		in := ttftInputsAt(1+r.IntN(4), 0)
 		in.prompt = 500 + 12000*r.Float64()
@@ -708,7 +832,7 @@ func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
 		if r.IntN(2) == 0 {
 			in.decodeTTFT = whatif.DecodeTTFT{Seconds: 0.05 * r.Float64(), PromptTokens: in.prompt}
 		}
-		percent := []int{90, 91, 92, 93, 95, 99}[r.IntN(6)]
+		percent := percents[r.IntN(len(percents))]
 		q := float64(percent) / 100
 		fl, _ := ttftFleet(in, in.pods)
 		knee, ok := whatif.PrefillKnee(fl.Prefill).(whatif.Answer)
@@ -727,11 +851,13 @@ func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
 			floor = max(floor, at.Floor)
 		}
 		// Half the draws sit just over the highest floor, where a fault shows.
-		margin := 1.001
+		margin, nearFloor := 1.001, true
 		if r.IntN(2) == 0 {
-			margin = 1.1 + 4*r.Float64()
+			margin, nearFloor = 1.1+4*r.Float64(), false
 		}
 		target := whatif.TTFTTarget{Seconds: floor * margin, Percentile: q}
+		kind := rateCase{percent, nearFloor}
+		rateSide := priced[kind] == 0
 		prevT, prevR := 0.0, math.Inf(1)
 		for _, cv := range cvs {
 			in.spread.CV = cv
@@ -740,14 +866,21 @@ func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
 			require.True(t, ok)
 			require.GreaterOrEqual(t, at.Seconds, prevT*(1-1e-9), "TTFT fell as cv rose to %g: %+v at %g q %g", cv, fl.Prefill, rate, q)
 			prevT = at.Seconds
+			if !rateSide {
+				continue
+			}
 			ans, ok := whatif.RateForTTFT(fl, target).(whatif.Answer)
 			require.True(t, ok, "a target above every floor is answered")
 			require.LessOrEqual(t, ans.Value, prevR*(1+1e-9), "the rate rose as cv rose to %g: %+v", cv, fl.Prefill)
 			prevR = ans.Value
-			priced++
+			priced[kind]++
 		}
 	}
-	assert.Greater(t, priced, draws*10, "the rate side must be exercised")
+	for _, percent := range percents {
+		for _, nearFloor := range []bool{true, false} {
+			assert.Greater(t, priced[rateCase{percent, nearFloor}], 10, "the rate side must be exercised at p%d, near the floor %v", percent, nearFloor)
+		}
+	}
 }
 
 // The S1 decisions take TTFT as rising with cv over [0, 3] at p90. At the

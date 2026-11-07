@@ -125,7 +125,9 @@ func (a *ThroughputAnalyzer) settleView() settle.View {
 // first cycle and nothing settles. The eviction runs inside observe, so
 // after a long gap the model analyzed first that cycle is still held and
 // stale, and every model after it was evicted meanwhile; reading both the
-// same way is what makes the result independent of the order. Part of
+// same way is what makes the settle reading independent of the order. Only
+// the settle reading: what the eviction sweeps besides (the line's windows,
+// intercepts and held slopes, the variant states) is untouched here. Part of
 // SwitchITLReadsSettle: off, as before it, only a model never seen is
 // backdated, and the line's own traces are kept.
 //
