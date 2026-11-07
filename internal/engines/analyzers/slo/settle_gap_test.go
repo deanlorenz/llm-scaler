@@ -15,6 +15,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 )
 
 // Issue #459: the analyzer alone, with no engine tracker, across a gap
@@ -50,21 +51,8 @@ var gapModels = []string{"m1", "m2"}
 func runGap(t *testing.T, switches map[string]bool, evict gapEviction, gapAt int) map[string][]int {
 	t.Helper()
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
-	a := New(nil, nil).WithStateTimeout(gapStateTimeout)
-	a.now = func() time.Time { return now }
-	require.NoError(t, a.SetSwitchesForReplay(switches))
-	analyze := func(model string) int64 {
-		in := domain.AnalyzerInput{Namespace: "ns", ModelID: model, Config: policy(44*time.Millisecond, 0),
-			ArrivalRate: 1, VariantStates: []domain.VariantReplicaState{settleAgg}, ReplicaMetrics: settleFleet()}
-		core, logs := observer.New(zapcore.Level(-logging.VERBOSE))
-		_, err := a.Analyze(logr.NewContext(context.Background(), zapr.NewLogger(zap.New(core))), in)
-		require.NoError(t, err)
-		lines := logs.FilterMessage("slo-variant").FilterField(zap.String("variant", "agg")).All()
-		require.Len(t, lines, 1, "premise: Analyze logs the variant's line")
-		settling, ok := lines[0].ContextMap()["settling"].(int64)
-		require.True(t, ok, "slo-variant carries no settling")
-		return settling
-	}
+	a := newGapAnalyzer(t, switches, &now)
+	analyze := func(model string) int64 { return analyzeSettling(t, a, model, settleFleet()) }
 	out := map[string][]int{}
 	for i := range gapAt + settleCycles + 4 {
 		if i == gapAt {
@@ -84,6 +72,81 @@ func runGap(t *testing.T, switches map[string]bool, evict gapEviction, gapAt int
 		now = now.Add(settleCycle)
 	}
 	return out
+}
+
+// newGapAnalyzer is the analyzer alone, with no engine view, a state
+// timeout of gapStateTimeout, switches, and its clock at *now.
+func newGapAnalyzer(t *testing.T, switches map[string]bool, now *time.Time) *Analyzer {
+	t.Helper()
+	a := New(nil, nil).WithStateTimeout(gapStateTimeout)
+	a.now = func() time.Time { return *now }
+	require.NoError(t, a.SetSwitchesForReplay(switches))
+	return a
+}
+
+// analyzeSettling is one Analyze of model in namespace ns with rows, and
+// how many of agg's readings were kept out as their replica's settle, as
+// the slo-variant log line states it.
+func analyzeSettling(t *testing.T, a *Analyzer, model string, rows []domain.ReplicaMetrics) int64 {
+	t.Helper()
+	in := domain.AnalyzerInput{Namespace: "ns", ModelID: model, Config: policy(44*time.Millisecond, 0),
+		ArrivalRate: 1, VariantStates: []domain.VariantReplicaState{settleAgg}, ReplicaMetrics: rows}
+	core, logs := observer.New(zapcore.Level(-logging.VERBOSE))
+	_, err := a.Analyze(logr.NewContext(context.Background(), zapr.NewLogger(zap.New(core))), in)
+	require.NoError(t, err)
+	lines := logs.FilterMessage("slo-variant").FilterField(zap.String("variant", "agg")).All()
+	require.Len(t, lines, 1, "premise: Analyze logs the variant's line")
+	settling, ok := lines[0].ContextMap()["settling"].(int64)
+	require.True(t, ok, "slo-variant carries no settling")
+	return settling
+}
+
+// The forget after a long gap reaches only the stale model's line keys. A
+// model of the same namespace analyzed every cycle, whose name has the
+// stale one's as a prefix (m10 against m), is midway through a replica's
+// settle (a new Ready time under its name) when m comes back from its gap:
+// the settle runs its full steadyFor, and its replica stays on the own
+// tracker as it was. Forgetting its line keys' traces would end the settle
+// on the next cycle: a trace made anew takes the settle as begun before the
+// key's first sight, which does not wait with no engine view. Kills a
+// prefix without the trailing separator ("ns|m" matches "ns|m10|") and one
+// of the whole namespace ("ns|").
+func TestSettle_AfterALongGapTheForgetSparesARecentModel(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	a := newGapAnalyzer(t, nil, &now)
+	analyzeSettling(t, a, "m", settleFleet())
+	now = now.Add(gapLength)
+	restartAt := settleCycles + 2
+	staleAt := restartAt + 2
+	restartedAt := now.Add(time.Duration(restartAt)*settleCycle - 5*time.Second)
+	servingSince := now.Add(-time.Hour)
+	rows := func(i int) []domain.ReplicaMetrics {
+		f := settleFleet()
+		for j := range f {
+			f[j].ReadySince = servingSince
+		}
+		if i >= restartAt {
+			f[2].ReadySince = restartedAt
+		}
+		return f
+	}
+	key := settle.Key{Pod: "agg-c", Variant: "agg"}
+	var settling []int
+	for i := range restartAt + settleCycles + 3 {
+		if analyzeSettling(t, a, "m10", rows(i)) > 0 {
+			settling = append(settling, i)
+		}
+		if i == staleAt {
+			before, held := a.ownSettle.Replica("ns/m10", key)
+			require.True(t, held, "premise: the own tracker holds m10's restarted replica")
+			assert.Zero(t, analyzeSettling(t, a, "m", settleFleet()), "premise: m, back from its gap, is first-seen")
+			after, held := a.ownSettle.Replica("ns/m10", key)
+			require.True(t, held, "m's gap forgot m10's replica on the own tracker")
+			assert.Equal(t, before.Since, after.Since, "m's gap moved m10's settle on the own tracker")
+		}
+		now = now.Add(settleCycle)
+	}
+	assert.Equal(t, span(restartAt, settleCycles), settling, "m's gap ended m10's settle: its line keys' traces were forgotten")
 }
 
 // After a gap past the state timeout every model is first-seen, wherever

@@ -112,8 +112,11 @@ func (a *Analyzer) settleView() settle.View {
 // (settle.Rejoined), and every replica settled, unless EvictStale had run
 // first; and run between two models' Analyze calls, it settled the model
 // analyzed before it and not the one after. Reading a stale model as an
-// evicted one makes the result depend only on the model's own last sight,
-// as the throughput analyzer's (learner PR 4b-2). SwitchITLLongGapFirstSeen,
+// evicted one makes the settle reading after the gap depend only on the
+// model's own last sight, as the throughput analyzer's (learner PR 4b-2).
+// Only the settle reading: the line's windows, intercepts and held slope
+// are still swept by EvictStale (a.lines.Sweep), so the fit after a long
+// gap still depends on whether and when it ran. SwitchITLLongGapFirstSeen,
 // read with SwitchITLReadsSettle: either off, as before, only a model the
 // tracker does not hold is backdated, and the line's own traces are kept.
 //

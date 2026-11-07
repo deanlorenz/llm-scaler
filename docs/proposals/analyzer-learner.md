@@ -2239,9 +2239,9 @@ band (`T2-above-band`) inside that wait. Before the review it priced 4.
   `observe`, after the model analyzed first that cycle has observed. So
   after a gap past an hour that model read the gap as an absence and
   settled, and every later model, evicted meanwhile, was first-seen and
-  did not: the result depended on the order. `observeOwnSettle` now makes a
-  model last seen more than `ownSettleTimeout` ago first-seen whatever the
-  order: it forgets the model's observations, observes it backdated, and
+  did not: the settle read depended on the order. `observeOwnSettle` now
+  makes a model last seen more than `ownSettleTimeout` ago first-seen to its
+  settle reading whatever the order: it forgets the model's observations, observes it backdated, and
   drops its line keys' replica traces (`itl.Tracker.ForgetTraces`), keeping
   their windows and held slope, as the eviction keeps them for that model.
   Part of the move: off, the line reads no tracker. Test:
@@ -2260,7 +2260,9 @@ band (`T2-above-band`) inside that wait. Before the review it priced 4.
   first-seen, as here, behind its own switch
   (`slo-itl-own-settle-reads-a-long-gap-as-first-seen`, read with the move
   on), since 4a's switches and goldens are already merged. It moves no
-  golden.
+  golden. Only the settle reading is order-independent: the line's
+  windows, intercepts and held slope are still swept by `EvictStale`, so
+  the fit after a long gap still depends on whether and when it ran.
 - **N1: the restart wait reads the tracker only.** `WaitsAfterRestart` was
   set with an engine view whatever the move said, and on the key's own
   trace it made every replica of a key made anew wait `steadyFor`, not only
