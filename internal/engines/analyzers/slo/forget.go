@@ -22,6 +22,7 @@ import (
 //
 // What a forget takes, per field of the Analyzer: the line (lines), the
 // engine arguments it was learned under (args), its last-seen stamp (seen),
+// what learner-write last logged of it (lineLogged),
 // the accelerator memo (accelerators), as the saturation analyzer drops its
 // lastAccelerator: a variant forgotten after a move to new hardware would
 // otherwise key its next line under the old card for any cycle whose pods do
@@ -31,7 +32,8 @@ import (
 // What it keeps: transients, the model's recent fleet history, which is no
 // learned state of the variant; ownSettled (and ownSettle), when each replica
 // was last seen, which the line reads its settle from and the engine's tracker
-// keeps alike; paths, the replay's counters over every fit.
+// keeps alike; paths, the replay's counters over every fit; learnerReports and
+// forgottenReports, which go to the engine and name the forget themselves.
 //
 // The rest is configuration or plumbing (router, store, now, mu, rec, settle,
 // prefillEstimates: the last is a handle to the saturation analyzer's stash,
@@ -64,6 +66,7 @@ func (a *Analyzer) forgetVariant(namespace, modelID, variant string) (int, []lea
 		n += dropped
 		forgotten = append(forgotten, keys...)
 	}
+	a.noteForgottenLocked(namespace, modelID, variant, forgotten)
 	if _, ok := a.accelerators[namespace+"/"+variant]; ok {
 		delete(a.accelerators, namespace+"/"+variant)
 		n++
@@ -141,6 +144,11 @@ func (a *Analyzer) forgetLinesLocked(namespace, modelID, variant string) (int, [
 	for key := range a.seen {
 		if match(key) {
 			delete(a.seen, key)
+		}
+	}
+	for key := range a.lineLogged {
+		if match(key) {
+			delete(a.lineLogged, key)
 		}
 	}
 	return windows + baselines, forgotten

@@ -493,7 +493,7 @@ func (c *cycle) fitLines() {
 	// itl.Model carries neither the tier nor the sample count, so there is
 	// nothing to tie-break on here yet; that is a known gap, not a property.
 	sort.Strings(variants)
-	mixed := revisionsMixed(c.input.ReplicaMetrics)
+	mixed := domain.RevisionsMixed(c.input.ReplicaMetrics)
 	for _, variant := range variants {
 		// Decode, and an aggregated variant (itlLineRole, issue #432); never
 		// prefill. ITL is the latency between GENERATED tokens, and
@@ -537,8 +537,11 @@ func (c *cycle) fitLines() {
 		}
 		c.a.itlUnderArgs(variantKey, windowArgs(params))
 		rows, withheld := c.a.itlRows(c.input.ReplicaMetrics, variant, params)
-		if rec.InRollout() || mixed[variant] {
+		rollingOut := rec.InRollout() || mixed[variant]
+		if rollingOut {
 			rows = nil
+		} else if c.a.itlClearsOnRevision {
+			rows = c.a.itlTracker.RolloutRows(variantKey, variant, rows, false).Rows
 		}
 		// The namespace rides on every ITL line because the variant name alone
 		// does not identify one: the same Deployment applied to two namespaces
@@ -711,7 +714,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 	// replica-capacity-summary: derived-mu says it at perReplicaLogLevel only.
 	muMissing := make(map[string]string)
 	c.reportedMu = make(map[string][]float64)
-	mixed := revisionsMixed(c.input.ReplicaMetrics)
+	mixed := domain.RevisionsMixed(c.input.ReplicaMetrics)
 	// Priced on the queue decode capacity drains: on decode of a P/D model,
 	// requests waiting for their KV from prefill are not one
 	// (decodeCapacityView), except on a replica at its sequence cap. The

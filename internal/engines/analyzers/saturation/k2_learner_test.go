@@ -139,7 +139,7 @@ func TestK2Learner_LearnerStartIsOneLinePerModelAtTheDefaultLevel(t *testing.T) 
 	}
 	require.Len(t, starts, 1, "one learner-start per model, at the shipped verbosity")
 	assert.Equal(t, restartT0.Add(JoinedReplicaWindow).Format(time.RFC3339), starts[0]["settleUntil"])
-	assert.Equal(t, map[string]int{learn.K2: 0, learn.Mu: 0}, starts[0]["restoredKeys"])
+	assert.Equal(t, map[string]int{learn.K2: 0, learn.Mu: 0, learn.ITL: 0}, starts[0]["restoredKeys"])
 	assert.Equal(t, map[string]int{learn.K2: 1, learn.Mu: 1}, starts[0]["coldVariants"])
 }
 

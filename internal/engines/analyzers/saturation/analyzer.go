@@ -347,6 +347,9 @@ type SaturationAnalyzer struct {
 	// them off (SetSwitchesForReplay).
 	k2ReadsSettle       bool
 	k2WaitsAfterRestart bool
+	// k2WaitsAfterRollout is SwitchK2WaitsAfterRollout (settle_view.go): on
+	// from the constructor; a replay turns it off (SetSwitchesForReplay).
+	k2WaitsAfterRollout bool
 	// muRepeatIsUse, muUnknownAgeSafe and muLatchRestoresSafe are mu's
 	// replay switches (mu_learner.go): SwitchMuRepeatIsUse,
 	// SwitchMuUnknownAgeSafe and SwitchMuLatchRestoresSafe. On from the
@@ -478,6 +481,10 @@ type SaturationAnalyzer struct {
 	// itlTierHysteresis is SwitchITLTierHysteresis (issue #495,
 	// itl_tier_hysteresis.go): on, the line's tier is latched.
 	itlTierHysteresis bool
+	// itlClearsOnRevision is SwitchITLClearsOnNewRevision
+	// (itl_tier_hysteresis.go): on from the constructor; a replay turns it
+	// off (SetSwitchesForReplay).
+	itlClearsOnRevision bool
 	// itlOneSidedLast is, per ITL key, the one-sided fields of the admission
 	// the line was last priced under (itlOneSided), and whether it was raised
 	// (noteITLOneSided), for the what-if refit (ITLOneSided): its prior on B
@@ -664,6 +671,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		itlForgotten:           make(map[string]map[string][]learn.Forgotten),
 		k2ReadsSettle:          true,
 		k2WaitsAfterRestart:    true,
+		k2WaitsAfterRollout:    true,
 		muRepeatIsUse:          true,
 		muUnknownAgeSafe:       true,
 		muLatchRestoresSafe:    true,
@@ -705,6 +713,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		prefillAQuadratic:      true,
 		itlOneSidedAtCap:       true,
 		itlTierHysteresis:      true,
+		itlClearsOnRevision:    true,
 		itlOneSidedLast:        make(map[string]itlOneSidedRecord),
 		prefillObserver:        prefill.NewObserver(),
 		prefillBounds:          make(map[string]stashedBound),

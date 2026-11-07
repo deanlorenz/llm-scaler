@@ -37,10 +37,11 @@ import (
 // inside it: with the engine's view, on the analyzer's own tracker, and on
 // the key's own trace; with no trace, only the engine's view with its wait
 // would keep it (TestForget_AReplicaSettlingAtAForgetStillSettlesOnEveryPath).
-// Also kept: ownSettle and ownSettled, when each replica was last seen, which
+// Also kept: learnerReports and forgottenReports, which go to the engine and
+// name the forget themselves; ownSettle and ownSettled, when each replica was last seen, which
 // the engine's tracker keeps alike; the shape, the traffic now, which no line
-// is learned from; the role, and the log lines' memories of what they last
-// said; paths, the replay's counters over every fit. The rest is
+// is learned from; the role, whether the variant is rolling out, and the log
+// lines' memories of what they last said; paths, the replay's counters over every fit. The rest is
 // configuration or plumbing. Two tests hold every field to one of those lists
 // (TestForget_EveryFieldIsClassified,
 // TestForget_EveryVariantStateFieldIsClassified).
@@ -78,6 +79,7 @@ func (a *ThroughputAnalyzer) forgetVariant(namespace, modelID, variant string) (
 		n += dropped
 		forgotten = append(forgotten, keys...)
 	}
+	a.noteForgottenLocked(namespace, modelID, variant, forgotten)
 	return n, forgotten
 }
 
@@ -135,9 +137,10 @@ func (a *ThroughputAnalyzer) forgetLineLocked(namespace, modelID, variant string
 
 // forgetLine drops what the state holds of the variant's line: the parent's
 // window and B, which are its line with SwitchITLSteadyGate off, and each
-// counts as one entry; and, not counted, this cycle's reading and the figures
-// last priced from the line, which a snapshot would go on showing. The next
-// Analyze observes anew: the shape stays, so no shape change is read.
+// counts as one entry; and, not counted, this cycle's reading, the figures
+// last priced from the line, which a snapshot would go on showing, and the
+// arguments it was learned under. The next Analyze observes anew: the shape
+// stays, so no shape change is read.
 func (s *variantState) forgetLine() int {
 	n := 0
 	if s.observationWindow.Len() > 0 {
@@ -148,6 +151,7 @@ func (s *variantState) forgetLine() int {
 	}
 	s.observationWindow.Clear()
 	s.lastFittedB, s.hasFittedB = 0, false
+	s.lineArgs = ""
 	s.consecutiveGPSMismatches = 0
 	s.reading, s.hasReading = itl.Reading{}, false
 	s.lastITLModel = itl.Model{}

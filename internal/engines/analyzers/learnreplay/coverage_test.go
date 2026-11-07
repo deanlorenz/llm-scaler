@@ -97,7 +97,9 @@ var reviewed = map[reflect.Type]buckets{
 		recorded: []string{"Analyze", "EvictStale", "BeginCycle", "NoteVariantsPresent", "ForgetVariant"},
 		// PathCounts reads the per-path counters of the slo line's fits
 		// (2.5), which only a replay reads and nothing restores.
-		readers: []string{"Name", "StateTimeout", "SlopeHoldFor", "Judging", "PathCounts"},
+		// TakeLearnerReports hands the line's reports to the engine's metrics
+		// and keeps none, as the saturation analyzer's does.
+		readers: []string{"Name", "StateTimeout", "SlopeHoldFor", "Judging", "PathCounts", "TakeLearnerReports"},
 		// WithSettleView hands the slo line the engine's settle tracker; the
 		// replay hands it its own, as it does k2's (settle.go).
 		// WithPrefillEstimates hands it the saturation analyzer's prefill
@@ -107,11 +109,13 @@ var reviewed = map[reflect.Type]buckets{
 		seams: []string{"SetSwitchesForReplay"},
 	},
 	reflect.TypeFor[*throughput.ThroughputAnalyzer](): {
-		recorded: []string{"Analyze", "Observe", "ForgetVariant"},
+		recorded: []string{"Analyze", "Observe", "ForgetVariant", "NoteVariantsPresent"},
 		// StartConfig states what the builders set, for the recording's
 		// first line; it changes nothing. PathCounts reads the per-path
 		// counters of the ITL line's fits (2.5), which only a replay reads.
-		readers: []string{"Name", "VariantState", "StartConfig", "PathCounts"},
+		// TakeLearnerReports hands the line's reports to the engine's metrics
+		// and keeps none, as the saturation analyzer's does.
+		readers: []string{"Name", "VariantState", "StartConfig", "PathCounts", "TakeLearnerReports"},
 		// WithSettleView and WithCapacityStore hand the ITL line's admission
 		// the engine's settle tracker and store, read-only; the replay hands
 		// it its own (start.ThroughputConfig).
@@ -186,6 +190,7 @@ func TestCoverage_EachRecordedCallWritesOneEvent(t *testing.T) {
 		{"slo.EvictStale", slo.KindEvictStale, func(f *fixture) { f.slo.EvictStale(at) }},
 		{"slo.BeginCycle", slo.KindBeginCycle, func(f *fixture) { f.slo.BeginCycle() }},
 		{"slo.NoteVariantsPresent", slo.KindNoteVariantsPresent, func(f *fixture) { f.slo.NoteVariantsPresent("ns", "m", []string{"v"}) }},
+		{"throughput.NoteVariantsPresent", throughput.KindNoteVariantsPresent, func(f *fixture) { f.tp.NoteVariantsPresent("ns", "m", []string{"v"}) }},
 		{"slo.ForgetVariant", slo.KindForgetVariant, func(f *fixture) { f.slo.ForgetVariant(ctx, "ns", "m", "v") }},
 		{"throughput.ForgetVariant", throughput.KindForgetVariant, func(f *fixture) { f.tp.ForgetVariant(ctx, "ns", "m", "v") }},
 		{"throughput.Analyze", throughput.KindAnalyze, func(f *fixture) { _, _ = f.tp.Analyze(ctx, input) }},

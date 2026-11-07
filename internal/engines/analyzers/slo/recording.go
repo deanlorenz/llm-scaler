@@ -131,6 +131,12 @@ func (a *Analyzer) switchFields() map[string]*bool {
 		SwitchITLRestartUnderName:             &a.itlRestartUnderName,
 		SwitchITLIdleOnEvidence:               &a.itlIdleOnEvidence,
 
+		// Issue #495: the line's reports and learner-write (learner.go).
+		SwitchITLFilesReports: &a.itlFilesReports,
+
+		// Issue #481: no rows for the line in a rollout (rollout.go).
+		SwitchITLRolloutGuard: &a.itlRolloutGuard,
+
 		// Issue #431: the forget-learned-state annotation reaches the line
 		// (forget.go).
 		SwitchITLForgetReachesTheLine: &a.itlForgetReachesLine,
