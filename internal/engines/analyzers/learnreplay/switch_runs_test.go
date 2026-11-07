@@ -177,6 +177,11 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	saturation.SwitchMuUnreadAtTarget:        nil,
 	saturation.SwitchMuMinorityFigureExpires: nil,
 
+	// Which rows the transfer is read from. It moves no golden: no committed
+	// recording prices a line (the decode term's reason, above). Its unit test
+	// holds it (heldBy).
+	slo.SwitchTTFTQuietTransfer: nil,
+
 	// #276 on the slo line: KVreq with the spread of output lengths. It moves
 	// no golden: of those that list slo, only the four staircases read the
 	// output histogram, at D 1.000. Its unit test holds it (heldBy); the CLI,
@@ -803,6 +808,8 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestMuSlowPod_AMinorityFigureExpiresOnlyPastTheHold"},
 		{"../saturation", "TestMuSlowPod_OneReplicasFigureExpiresAfterTheHold"},
 	},
+	// Runs the switch on and off and asserts both.
+	slo.SwitchTTFTQuietTransfer: {{"../slo", "TestTTFT_TheQuietTransferSwitch"}, {"../slo", "TestTTFT_TheHeldTransferAgesOut"}},
 	// #276 on the slo line: it runs the switch on and off through Analyze and
 	// asserts both (the replica's rate halved at D 2 on, as it was off).
 	slo.SwitchKVPerRequestOutputDispersion: {

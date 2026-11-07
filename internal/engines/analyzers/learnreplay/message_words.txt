@@ -387,6 +387,7 @@ TooFewImbalanceMinutes
 TooFewLowLoadMinutes
 TooFewPromptClusters
 TooManySlots
+TransferHeld
 TransferOmitted
 TriggeredScaleUp
 UP
@@ -575,6 +576,7 @@ averages
 avgITLObs
 avgInputTokens
 avgOutputTokens
+awaiting-in-flight
 awaiting-return
 b
 back
@@ -1149,6 +1151,7 @@ given
 gives
 giving
 global
+go
 goes
 going
 gone
@@ -1585,6 +1588,7 @@ maxNumSeqs
 maxRatio
 maxReplicas
 maxRoles
+maxWait
 max_model_len
 max_num_active_seqs
 max_num_batched_tokens
@@ -2475,6 +2479,7 @@ slo-ttft-decode-term
 slo-ttft-measured-spread
 slo-ttft-measured-transfer
 slo-ttft-price
+slo-ttft-quiet-transfer
 slo-ttft-variant
 slo-variant
 slo.Analyze
@@ -2865,6 +2870,7 @@ vpSamples
 vpSource
 wait
 waitBeforeReverseMove
+waited
 waiting
 waits
 wake

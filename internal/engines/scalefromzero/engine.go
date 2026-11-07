@@ -187,6 +187,11 @@ type Engine struct {
 	// tickReclaimed is, per namespace and type, the lent-out nominal this
 	// tick's wakes grew into without a node hole (placement.reclaimable).
 	tickReclaimed map[string]map[string]allocation.Reclaim
+	// inFlightWaitLogged is set once a wake waited for the in-flight holds to
+	// be read back (awaitInFlightRestore), inFlightGaveUp once wakes stopped
+	// waiting. Guarded by wakeMu.
+	inFlightWaitLogged bool
+	inFlightGaveUp     bool
 	// wakeBlocked is the models (modelGroup.key) this loop set a refused-wake
 	// reason on wva_model_scaling_blocked for (reportWakeBlocked), each as
 	// the modelGroup it was set for, so pruneRefusals can clear it.
@@ -296,7 +301,13 @@ func NewEngine(client client.Client, recorder record.EventRecorder, ds datastore
 
 // StartOptimizeLoop starts the optimization loop for the scale-from-zero engine.
 // It runs until the context is cancelled.
+//
+// It runs only while this replica leads: the wait for the in-flight holds to
+// be read back (awaitInFlightRestore) is measured from here, before the first
+// tick, so a standby that waited for the lease longer than
+// inFlightRestoreWait still waits for them.
 func (e *Engine) StartOptimizeLoop(ctx context.Context) {
+	allocation.DefaultInFlight.RestartRestoreClock(time.Now())
 	e.executor.Start(ctx)
 }
 
@@ -604,6 +615,11 @@ func (e *Engine) processInactiveModel(
 	place, selected, outcome := e.wakeVerdict(ctx, group, candidates, covered)
 	constraints := place.constraints
 	if len(selected) == 0 {
+		if outcome == OutcomeAwaitingInFlight {
+			// Not judged yet: the next tick does, once the holds are back
+			// (awaitInFlightRestore logs the wait once).
+			return nil
+		}
 		if outcome == OutcomeAlreadyServing {
 			// The steady state for every serving model with a queue. Not a
 			// refusal, and on a 100ms loop it must never reach Info.
