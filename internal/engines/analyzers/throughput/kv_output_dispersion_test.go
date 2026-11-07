@@ -11,10 +11,22 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
 
+// pricedKVreq is the KV per request v1's supply was priced at this cycle: one
+// replica's supply is k_sat x KV_max / KVreq sequences over ITL(k_sat)
+// (computeVariantSupply), and lineRow's KV_max is 65536.
+func pricedKVreq(t *testing.T, a *ThroughputAnalyzer, vc domain.VariantCapacity) float64 {
+	t.Helper()
+	st, ok := a.VariantState("m", "ns", "v1")
+	require.True(t, ok)
+	itlSat := st.ITLModel.ITLAt(itl.DefaultKSat)
+	require.Greater(t, itlSat, 0.0)
+	require.Greater(t, vc.PerReplicaCapacity, 0.0)
+	return itl.DefaultKSat * 65536 / (vc.PerReplicaCapacity * itlSat)
+}
+
 // dispersionKVreq runs an analyzer through Analyze on the steady fleet (1024
 // tokens in, 256 out, no prefix hits), each row read through spread, and
-// returns the KV per request its supply was priced at: one replica's supply is
-// k_sat x KV_max / KVreq sequences over ITL(k_sat) (computeVariantSupply).
+// returns the KV per request its supply was priced at.
 func dispersionKVreq(t *testing.T, on bool, spread func(*domain.ReplicaMetrics)) float64 {
 	t.Helper()
 	a := NewThroughputAnalyzer()
@@ -32,12 +44,7 @@ func dispersionKVreq(t *testing.T, on bool, spread func(*domain.ReplicaMetrics))
 		vc, has = r.step(rows)
 	}
 	require.True(t, has, "no capacity for v1: the case tests nothing")
-	st, ok := a.VariantState("m", "ns", "v1")
-	require.True(t, ok)
-	itlSat := st.ITLModel.ITLAt(itl.DefaultKSat)
-	require.Greater(t, itlSat, 0.0)
-	require.Greater(t, vc.PerReplicaCapacity, 0.0)
-	return itl.DefaultKSat * 65536 / (vc.PerReplicaCapacity * itlSat)
+	return pricedKVreq(t, a, vc)
 }
 
 // spreadOf gives a row outputs of dispersion d about its mean.
@@ -47,9 +54,6 @@ func spreadOf(d float64) func(*domain.ReplicaMetrics) {
 		rm.AvgOutputTokensSquaredKnown = true
 	}
 }
-
-// noSpread leaves a row as steadyFleet built it: no histogram read.
-func noSpread(*domain.ReplicaMetrics) {}
 
 // saturationKVreq is the KV per request the saturation analyzer prices the
 // same fleet at: the fleet's shape with its request-weighted spread
@@ -70,27 +74,29 @@ func TestKVOutputDispersion_TheSupplyHoldsTheSpread(t *testing.T) {
 	require.True(t, NewThroughputAnalyzer().kvOutputDispersion, "on from the constructor")
 }
 
-// No reading of the spread is no spread: no histogram, a bound of 0, NaN or
-// +Inf, or one row of three that read nothing (the mix of a read row and an
-// unread one is neither fleet's spread). Each prices D 1.
+// No reading of the spread is no spread. Every case is one row of three that
+// read no bound beside two that read D 4, so a guard that lets the bad row
+// through prices a spread from mismatched rows (fleet.Mean drops a NaN or
+// +Inf bound from E[O^2] but not the row's length from E[O]): no histogram,
+// the presence bit unset, a bound of 0, NaN, or +Inf. Each prices D 1. A
+// fleet with no histogram at all prices D 1 too.
 func TestKVOutputDispersion_NoReadingIsNoSpread(t *testing.T) {
-	bound := func(v float64) func(*domain.ReplicaMetrics) {
+	podABound := func(v float64, known bool) func(*domain.ReplicaMetrics) {
 		return func(rm *domain.ReplicaMetrics) {
-			rm.AvgOutputTokensSquared, rm.AvgOutputTokensSquaredKnown = v, true
-		}
-	}
-	oneUnread := func(rm *domain.ReplicaMetrics) {
-		if rm.PodName != "pod-a" {
 			spreadOf(4)(rm)
+			if rm.PodName == "pod-a" {
+				rm.AvgOutputTokensSquared, rm.AvgOutputTokensSquaredKnown = v, known
+			}
 		}
 	}
-	unknown := func(rm *domain.ReplicaMetrics) {
-		spreadOf(4)(rm)
-		rm.AvgOutputTokensSquaredKnown = false
-	}
+	require.InDelta(t, 1024+4*128.0, dispersionKVreq(t, true, spreadOf(4)), 1e-6, "premise: the good rows read D 4")
 	for name, spread := range map[string]func(*domain.ReplicaMetrics){
-		"absent": noSpread, "unknown": unknown, "zero": bound(0), "NaN": bound(math.NaN()),
-		"+Inf": bound(math.Inf(1)), "one row unread": oneUnread,
+		"absent":  podABound(0, false),
+		"unknown": podABound(4*256*256, false),
+		"zero":    podABound(0, true),
+		"NaN":     podABound(math.NaN(), true),
+		"+Inf":    podABound(math.Inf(1), true),
+		"no row":  func(*domain.ReplicaMetrics) {},
 	} {
 		require.InDelta(t, 1152, dispersionKVreq(t, true, spread), 1e-6, name)
 	}

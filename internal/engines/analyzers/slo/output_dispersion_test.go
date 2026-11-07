@@ -45,6 +45,9 @@ func dispersionRate(t *testing.T, on bool, spread func(*domain.ReplicaMetrics)) 
 	return res.VariantCapacities[0].PerReplicaCapacity
 }
 
+// dispersionPod is the row the cases below set apart from the others.
+const dispersionPod = "agg-a"
+
 // wide is a row whose outputs have D = 2 about their mean of 1000.
 func wide(rm *domain.ReplicaMetrics) {
 	rm.AvgOutputTokensSquared, rm.AvgOutputTokensSquaredKnown = 2e6, true
@@ -69,23 +72,28 @@ func TestKVOutputDispersion_TheSwitch(t *testing.T) {
 // is no number.
 func TestKVOutputDispersion_NoReadingIsNoSpread(t *testing.T) {
 	unread := func(rm *domain.ReplicaMetrics) {
-		if rm.PodName != "agg-a" {
+		if rm.PodName != dispersionPod {
 			wider(rm)
 		}
 	}
 	assert.InDelta(t, 120/0.044, dispersionRate(t, true, unread), 1e-6)
-	notANumber := func(rm *domain.ReplicaMetrics) {
-		rm.AvgOutputTokensSquared, rm.AvgOutputTokensSquaredKnown = math.Inf(1), true
+	// One row's bound is no number beside rows that read D 4: a guard that
+	// lets it through prices a spread from mismatched rows, since the mean of
+	// E[O^2] drops it and the mean of E[O] does not. NaN fails every
+	// comparison, so a guard written x <= 0 would admit it; +Inf passes > 0.
+	oneBound := func(v float64) func(*domain.ReplicaMetrics) {
+		return func(rm *domain.ReplicaMetrics) {
+			wider(rm)
+			if rm.PodName == dispersionPod {
+				rm.AvgOutputTokensSquared = v
+			}
+		}
 	}
-	assert.InDelta(t, 120/0.044, dispersionRate(t, true, notANumber), 1e-6)
-	// NaN fails every comparison: a guard written x <= 0 would admit it.
-	nan := func(rm *domain.ReplicaMetrics) {
-		rm.AvgOutputTokensSquared, rm.AvgOutputTokensSquaredKnown = math.NaN(), true
-	}
-	assert.InDelta(t, 120/0.044, dispersionRate(t, true, nan), 1e-6)
+	assert.InDelta(t, 120/0.044, dispersionRate(t, true, oneBound(math.Inf(1))), 1e-6, "+Inf")
+	assert.InDelta(t, 120/0.044, dispersionRate(t, true, oneBound(math.NaN())), 1e-6, "NaN")
 	knownButZero := func(rm *domain.ReplicaMetrics) {
 		wider(rm)
-		if rm.PodName == "agg-a" {
+		if rm.PodName == dispersionPod {
 			rm.AvgOutputTokensSquared = 0
 		}
 	}
