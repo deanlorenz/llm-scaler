@@ -122,7 +122,54 @@ func TestLineCheck_AnotherShapeIsSaid(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, vs[0].check.Mismatch())
 	assert.Contains(t, vs[0].checkText(), "ok at another shape (rows at KV 3000 a request, priced at 1500): median 0.0%")
+	assert.NotContains(t, vs[0].flags, lineMismatch, "an ok at another shape raises no flag")
 	assert.Equal(t, checkOtherShape, wireCheck(vs[0]).Status)
+}
+
+// A mismatch at another shape says both, and keeps the flag: a line that
+// fails the tokens read is suspect at any shape. An ok there raises none.
+func TestLineCheck_AMismatchAtAnotherShape(t *testing.T) {
+	st := checkedState(1)
+	for i := range st.Variants[0].LineRows {
+		r := &st.Variants[0].LineRows[i]
+		r.KVPerRequest = 3000
+		r.TokenRate = whatif.ReplicaTokenRate(st.Variants[0].Line, r.K, 100000, 3000, 1000) / 2
+	}
+	f := answerFlags{set: map[string]bool{}}
+	vs, err := f.decodeVariants(st)
+	require.NoError(t, err)
+	assert.True(t, vs[0].check.Mismatch())
+	assert.True(t, vs[0].check.OtherShape)
+	assert.Contains(t, vs[0].flags, lineMismatch)
+	assert.Contains(t, vs[0].checkText(), "MISMATCH at another shape (rows at KV 3000 a request, priced at 1500): median 100.0%")
+	w := wireCheck(vs[0])
+	assert.Equal(t, checkMismatch, w.Status, "the mismatch wins the status")
+	assert.True(t, w.OtherShape)
+	assert.InDelta(t, 3000, w.RowKVPerRequest, 1e-9)
+}
+
+// The age limit on a real replay: read at the last cycle, every row of
+// throughput-sweep-restart is older than the tracker's window, and read near them
+// none is. Both clocks come from the replay.
+func TestLineCheck_TheAgeLimitOnARealReplay(t *testing.T) {
+	check := func(args ...string) wireLineCheck {
+		t.Helper()
+		q := slices.Concat([]string{"replicas-to-slo", "--recording", goldenDir + "throughput-sweep-restart/recording.jsonl.gz", "-o", "json"}, args)
+		out, _ := runCmd(t, q...)
+		w := decodeOutput(t, out)
+		require.NotEmpty(t, w.Roles)
+		c := w.Roles[0].Inputs.Line.Check
+		require.NotNil(t, c, out)
+		return *c
+	}
+	last := check()
+	assert.Equal(t, 53, last.TooOld)
+	assert.Equal(t, checkNotRun, last.Status)
+	assert.Equal(t, 0, last.Compared)
+
+	near := check("--cycle", "60")
+	assert.Equal(t, 0, near.TooOld, "%+v", near)
+	assert.Positive(t, near.Compared, "%+v", near)
 }
 
 // A row older than the tracker's window is no row of the check.

@@ -3,6 +3,7 @@ package main
 import (
 	"math"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -138,6 +139,46 @@ func TestEngineTPOT_TheRateQuestionKeepsTheFlags(t *testing.T) {
 	require.NotNil(t, r, out)
 	assert.Equal(t, string(whatif.TPOTBucketTooWide), r.Reason)
 	assert.Contains(t, r.Flags, string(whatif.EngineTPOTHistogram))
+}
+
+// The success path through the command's own code, on a state: no recording
+// holds a fine engine histogram and no router. The percentile answers, says
+// from what, in the row, the flags and the JSON's inputs.
+func TestEngineTPOT_ThePathThatAnswers(t *testing.T) {
+	st := checkedState(1)
+	st.EngineTPOTWindows = []whatif.TPOTWindow{fineWindow, fineWindow, fineWindow}
+	require.Empty(t, st.TPOTWindows)
+
+	f := answerFlags{set: map[string]bool{}}
+	variants, err := f.decodeVariants(st)
+	require.NoError(t, err)
+	require.Len(t, variants, 1)
+	ratio, flags, refused := f.tpotRatioFor(st, 0.9)
+	require.Nil(t, refused)
+	require.InDelta(t, 1.2, ratio.Value, 1e-9)
+	assert.True(t, f.engineTPOT)
+	assert.Equal(t, 3, f.tpotWindowCount(st))
+
+	in := f.tpotInputs(st, 0, 0.9, ratio)
+	assert.Equal(t, "engine histogram", in.RatioSource)
+	assert.Equal(t, 3, in.Windows)
+	assert.Regexp(t, `^R_q 1\.2\d* from 3 engine TPOT windows, not the router's$`, f.ratioNote(st, ratio))
+
+	pv := variants[0]
+	query := whatif.ReplicasQuery{Headroom: 0.85, PercentileTarget: &whatif.TPOTTarget{Percentile: 0.9, Ratio: ratio}}
+	slo := whatif.SLOAtReplicas(pv.decode, query)
+	slo.PercentileTPOT = pv.qualify(onRatio(slo.PercentileTPOT, ratio, flags))
+	a, ok := slo.PercentileTPOT.(whatif.Answer)
+	require.True(t, ok, "%#v", slo.PercentileTPOT)
+	assert.Contains(t, a.Flags, whatif.EngineTPOTHistogram)
+	assert.NotContains(t, a.Flags, whatif.CoarseTPOTBucket)
+
+	var b strings.Builder
+	answers := []replicasAnswer{{pv: pv, slo: slo, ratio: ratio, query: query, headroom: 0.85}}
+	require.NoError(t, writeReplicasText(&b, &f, st, variants, answers, nil, nil, nil, "90"))
+	assert.Regexp(t, `TPOT p90 .*per request; R_q 1\.2\d* from 3 engine TPOT windows, not the router's`, b.String())
+	assert.Contains(t, b.String(), string(whatif.EngineTPOTHistogram))
+	assert.NotContains(t, b.String(), "refused")
 }
 
 // A refusal priced on R_q says where R_q came from: an engine's ratio, or an

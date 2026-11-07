@@ -146,5 +146,8 @@ func TestStateAt_CarriesTheLineRows(t *testing.T) {
 	for _, r := range rows {
 		assert.LessOrEqual(t, r.Cycle, st.Cycle)
 		assert.Positive(t, r.KVPerRequest)
+		assert.False(t, r.At.IsZero(), "a row carries its clock")
+		assert.False(t, r.At.After(st.At), "a row is read by the cycle asked")
 	}
+	assert.False(t, st.At.IsZero(), "the state carries the cycle's clock: the age limit reads it")
 }

@@ -331,7 +331,7 @@ func TestDecodeValidation_OnTheGoldens(t *testing.T) {
 	for _, check := range []string{"tpot ", "knee "} {
 		assert.Positive(t, measured(got, check), "no %srow measured: an empty report is not a pass", check)
 	}
-	if os.Getenv("LEARNREPLAY_WRITE_DECODE_VALIDATION") != "" {
+	if writesDecodeTable() {
 		require.NoError(t, os.WriteFile(decodeTable, []byte(text), 0o644))
 		return
 	}
@@ -339,6 +339,11 @@ func TestDecodeValidation_OnTheGoldens(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, strings.ReplaceAll(string(want), "\r\n", "\n"), text, "a figure moved: rewrite the table and say which in the PR")
 }
+
+// writesDecodeTable reports whether the run rewrites the table, on exactly
+// the value LEARNREPLAY_WRITE_MESSAGE_WORDS asks by: =0 or =false must compare,
+// not rewrite and pass.
+func writesDecodeTable() bool { return os.Getenv("LEARNREPLAY_WRITE_DECODE_VALIDATION") == "1" }
 
 // measured counts the lines whose check gave a figure.
 func measured(lines []string, check string) int {
@@ -351,6 +356,14 @@ func measured(lines []string, check string) int {
 		}
 	}
 	return n
+}
+
+// Only =1 rewrites the table: any other value compares.
+func TestDecodeValidation_OnlyOneRewrites(t *testing.T) {
+	for value, want := range map[string]bool{"1": true, "": false, "0": false, "false": false, "true": false} {
+		t.Setenv("LEARNREPLAY_WRITE_DECODE_VALIDATION", value)
+		assert.Equal(t, want, writesDecodeTable(), "=%q", value)
+	}
 }
 
 // A check with too little data says why, whatever figure it might have read.

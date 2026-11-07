@@ -103,6 +103,23 @@ var _ = Describe("CheckLine", func() {
 		Expect(c.OnRamp).To(Equal(0))
 	})
 
+	// A row can be both. It is counted once, for what puts it furthest from
+	// the check: its age, then the band, then the ramp.
+	It("counts a row that is two of them once", func() {
+		both := row(6, 0.9, 0.2)
+		both.AboveBand, both.Ramp = true, true
+		c := check(rows(5, 1), []LineRow{both})
+		Expect(c.AboveBand).To(Equal(1))
+		Expect(c.OnRamp).To(Equal(0))
+		Expect(c.Compared).To(Equal(5))
+
+		both.At = now.Add(-MaxLineRowAge - time.Second)
+		c = check(rows(5, 1), []LineRow{both})
+		Expect(c.TooOld).To(Equal(1))
+		Expect(c.AboveBand).To(Equal(0))
+		Expect(c.OnRamp).To(Equal(0))
+	})
+
 	It("leaves a row older than the tracker's window out, once, and an equal age in", func() {
 		old := row(1, 0.5, 0.2)
 		old.At, old.Ramp = now.Add(-MaxLineRowAge-time.Second), true
@@ -203,7 +220,12 @@ var _ = Describe("EngineTPOTRatio", func() {
 		ws[0] = window(0.5)
 		_, _, refused := EngineTPOTRatio(ws, 0.9)
 		Expect(refused).ToNot(HaveOccurred())
-		ws[1], ws[2] = window(0.5), window(0.5)
+		// Rank 18 of 20, the eighteenth width sorted: two wide windows are the
+		// most it stands, and a third reaches the rank.
+		ws[1] = window(0.5)
+		_, _, refused = EngineTPOTRatio(ws, 0.9)
+		Expect(refused).ToNot(HaveOccurred())
+		ws[2] = window(0.5)
 		_, _, refused = EngineTPOTRatio(ws, 0.9)
 		Expect(refused).To(HaveOccurred())
 	})
