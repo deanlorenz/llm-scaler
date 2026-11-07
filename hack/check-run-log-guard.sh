@@ -2,8 +2,9 @@
 # Executes post_run_analyze.sh against a stub kubectl and fixture controller
 # logs, and asserts the zero-line guard (docs/proposals/analyzer-learner.md
 # 6.1): the run window must hold the line the controller logs at its -v,
-# replica-capacity-summary below 3 and k2-decision at 3 or more, and a
-# verbosity it cannot read fails rather than passes.
+# replica-capacity-summary at 2 and k2-decision at 3 or more; below 2 neither
+# is logged and the analysis says it checked nothing; and a verbosity it
+# cannot read fails rather than passes.
 #
 # Before the guard, only k2-decision was asked for, and only through
 # dump_k2_decisions.py, which exits 0 on an empty window. So a run at the
@@ -16,7 +17,7 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BENCH="$ROOT/hack/benchmark"
-EXPECTED_CASES=12
+EXPECTED_CASES=17
 
 command -v python3 >/dev/null 2>&1 || {
     echo "FATAL: python3 is required by this check and is missing. Nothing below would be about the code."
@@ -45,8 +46,10 @@ for s in dump_wva_target_timeseries.py dump_capacity_demand_estimate.py dump_epp
     printf 'print("stub")\n' > "$COPY/$s"
 done
 
-# A kubectl that lists one controller Pod whose manager args are STUB_ARGS
-# (space-separated), or fails when STUB_KUBECTL=fail. Logs come from the
+# A kubectl that lists the controller Pods STUB_PODS describes, or fails when
+# STUB_KUBECTL=fail. STUB_PODS is ";"-separated, one Pod each: its phase, then
+# its manager args, space-separated. Pod i is wva-controller-manager-h<i>-a<i>.
+# Unset, it is one Running Pod with the args in STUB_ARGS. Logs come from the
 # captured wva_controller.log, so a logs call is an error.
 STUB="$WORK/bin"
 mkdir -p "$STUB"
@@ -60,27 +63,34 @@ if os.environ.get("STUB_KUBECTL") == "fail":
 if sys.argv[1:3] != ["get", "pods"]:
     print(f"stub kubectl: unexpected call {sys.argv[1:]}", file=sys.stderr)
     sys.exit(1)
-args = os.environ.get("STUB_ARGS", "").split()
-pod = {
-    "metadata": {
-        "name": "wva-controller-manager-abc12-a1",
-        "labels": {"control-plane": "controller-manager", "pod-template-hash": "abc12"},
-        "ownerReferences": [{"apiVersion": "apps/v1", "kind": "ReplicaSet",
-                             "name": "wva-controller-manager-abc12", "controller": True}],
-    },
-    "spec": {"containers": [{"name": "manager", "command": ["/manager"],
-                             "args": ["--leader-elect=true"] + args}]},
-}
-print(json.dumps({"items": [pod]}))
+spec = os.environ.get("STUB_PODS") or "Running " + os.environ.get("STUB_ARGS", "")
+items = []
+for i, entry in enumerate(spec.split(";"), start=1):
+    phase, *args = entry.split()
+    rs = f"wva-controller-manager-h{i}"
+    items.append({
+        "metadata": {
+            "name": f"{rs}-a{i}",
+            "labels": {"control-plane": "controller-manager", "pod-template-hash": f"h{i}"},
+            "ownerReferences": [{"apiVersion": "apps/v1", "kind": "ReplicaSet",
+                                 "name": rs, "controller": True}],
+        },
+        "spec": {"containers": [{"name": "manager", "command": ["/manager"],
+                                 "args": ["--leader-elect=true"] + args}]},
+        "status": {"phase": phase},
+    })
+print(json.dumps({"items": items}))
 STUBEOF
 chmod +x "$STUB/kubectl"
 
 WINDOW="2026-10-16T10:00:00+00:00 -> 2026-10-16T10:10:00+00:00"
+POD1="wva-controller-manager-h1-a1"
+POD2="wva-controller-manager-h2-a2"
 
-# line <time> <message> prints one controller log line in the shipped zap
-# console encoding: ts, level, caller, message, fields.
+# line <time> <message> [zone] prints one controller log line in the shipped
+# zap console encoding: ts, level, caller, message, fields.
 line() {
-    printf '2026-10-16T%s.000Z\tINFO\tsaturation/analyze.go:1\t%s\t{"modelID":"m","variant":"v"}\n' "$1" "$2"
+    printf '2026-10-16T%s.000%s\tINFO\tsaturation/analyze.go:1\t%s\t{"modelID":"m","variant":"v"}\n' "$1" "${3-Z}" "$2"
 }
 
 # run <name> <log lines...>: a results dir holding them, through the analysis.
@@ -99,37 +109,47 @@ run() {
     RC=$?
 }
 
-# passes <case> <text>: the analysis exited 0 and said <text>.
+# says <text>...: the output holds every <text>, or names the first missing.
+says() {
+    local t
+    for t in "$@"; do
+        printf '%s\n' "$OUT" | grep -qF -- "$t" || { MISSING="$t"; return 1; }
+    done
+}
+
+got() { printf '%s\n' "$OUT" | grep -iE 'guard|checked' | tail -3; }
+
+# passes <case> <text>...: the analysis exited 0 and said every <text>.
 passes() {
-    if [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -qF -- "$2"; then
-        ok "$1"
+    local name="$1"
+    shift
+    if [ "$RC" -ne 0 ]; then
+        bad "$name: exit $RC, want 0; got: $(got)"
+    elif ! says "$@"; then
+        bad "$name: exit 0, but no \"$MISSING\"; got: $(got)"
     else
-        bad "$1: exit $RC, want 0 and \"$2\"; got: $(printf '%s\n' "$OUT" | grep -i 'guard' | tail -2)"
+        ok "$name"
     fi
 }
 
 # refuses <case> <text>...: the analysis exited non-zero and said every <text>.
 refuses() {
-    local name="$1" t
+    local name="$1"
     shift
     if [ "$RC" -eq 0 ]; then
-        bad "$name: exit 0, want a failure; got: $(printf '%s\n' "$OUT" | grep -i 'guard' | tail -2)"
-        return
+        bad "$name: exit 0, want a failure; got: $(got)"
+    elif ! says "$@"; then
+        bad "$name: exit $RC, but no \"$MISSING\"; got: $(got)"
+    else
+        ok "$name"
     fi
-    for t in "$@"; do
-        if ! printf '%s\n' "$OUT" | grep -qF -- "$t"; then
-            bad "$name: exit $RC, but no \"$t\"; got: $(printf '%s\n' "$OUT" | grep -i 'guard' | tail -2)"
-            return
-        fi
-    done
-    ok "$name"
 }
 
 SUMMARY="$(line 10:05:00 replica-capacity-summary)"
 K2="$(line 10:05:00 k2-decision)"
 OTHER="$(line 10:05:00 scheduler-queue-demand)"
 
-echo "below --v=3: replica-capacity-summary"
+echo "at --v=2: replica-capacity-summary"
 export STUB_ARGS="--v=2"
 run v2-lines "$SUMMARY" "$(line 10:05:30 replica-capacity-summary)" "$OTHER"
 passes "--v=2 with replica-capacity-summary lines in the window" \
@@ -137,6 +157,8 @@ passes "--v=2 with replica-capacity-summary lines in the window" \
 run v2-none "$OTHER" "$K2"
 refuses "--v=2 with no replica-capacity-summary line fails, naming the window and the line" \
     "zero replica-capacity-summary lines in the run window $WINDOW" "expected at --v=2"
+refuses "a guard failure is named in the summary, and the steps after it still ran" \
+    "[6] run_log_guard.py — the run window holds none" "[7/7] comparison_table.py" "Outputs:"
 run v2-outside "$(line 09:59:00 replica-capacity-summary)" "$(line 10:11:00 replica-capacity-summary)"
 refuses "--v=2 with lines only outside the window fails" \
     "zero replica-capacity-summary lines in the run window $WINDOW"
@@ -144,9 +166,13 @@ export STUB_ARGS=""
 run shipped "$SUMMARY"
 passes "no -v in the args is the shipped --v=2" \
     "1 replica-capacity-summary lines in the run window $WINDOW at --v=2"
+
+echo "below --v=2: nothing to check, and said so"
 export STUB_ARGS="-v=1"
-run v1-none "$OTHER"
-refuses "--v=1 also asks for replica-capacity-summary" "zero replica-capacity-summary lines" "expected at --v=1"
+run v1 "$OTHER"
+passes "--v=1 logs neither line: not a failure, and it says it checked nothing" \
+    "nothing to check at --v=1" "The run window was NOT checked" "Not checked:" \
+    "[6] run_log_guard.py — the controller ran below --v=2"
 
 echo "at --v=3 or more: k2-decision"
 export STUB_ARGS="--v=3"
@@ -159,6 +185,18 @@ refuses "--v=3 with no k2-decision line fails, naming the window and the line" \
 export STUB_ARGS="--v 5"
 run v5-split-flag "$K2"
 passes "--v 5, the flag and its value as two args" "1 k2-decision lines in the run window $WINDOW at --v=5"
+
+echo "several Pods: the lowest Running one"
+STUB_PODS="Running --v=2;Running --v=3" run rollout "$SUMMARY"
+passes "a rollout at --v=2 and --v=3 is checked at 2, naming both Pods" \
+    "1 replica-capacity-summary lines in the run window $WINDOW at --v=2" \
+    "$POD1 --v=2, $POD2 --v=3"
+STUB_PODS="Failed --v=1;Running --v=3" run leftover "$K2"
+passes "a Failed Pod left by an earlier install at a lower -v is not read" \
+    "1 k2-decision lines in the run window $WINDOW at --v=3 (Running controller Pods: $POD2 --v=3)"
+STUB_PODS="Failed --v=2;Succeeded --v=2" run none-running "$SUMMARY"
+refuses "no Running controller Pod is unreadable, naming what was listed" \
+    "could not read what the run must hold" "no Running controller Pod" "$POD1 Failed, $POD2 Succeeded"
 
 echo "the verbosity: read, or said to be unreadable"
 export STUB_ARGS="--v=high"
@@ -175,6 +213,9 @@ passes "CONTROLLER_VERBOSITY names the level over the Pods" \
 CONTROLLER_VERBOSITY=three run v-env-garbage "$SUMMARY" "$K2"
 refuses "a CONTROLLER_VERBOSITY that is not an integer is unreadable" \
     "could not read what the run must hold" "CONTROLLER_VERBOSITY='three' is not an integer"
+run naive-stamp "$(line 10:05:00 replica-capacity-summary '')"
+refuses "a log line stamped with no time zone is unreadable, not a traceback" \
+    "could not read what the run must hold" "replica-capacity-summary line stamped '2026-10-16T10:05:00.000'"
 
 # ---- the count itself ------------------------------------------------------
 # Asserted without ok()/bad(), which would change the number being asserted.

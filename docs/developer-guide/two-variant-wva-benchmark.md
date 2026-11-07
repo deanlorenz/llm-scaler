@@ -335,9 +335,11 @@ full-pipeline PNG plot into `<results-dir>/metrics/graphs/`.
 
 It exits 1 when the run window holds no controller line of the level the
 controller ran at: `k2-decision` at `--v=3` or more, `replica-capacity-summary`
-below. It reads that level from the controller Pods' args, so a controller
-reinstalled since the run gives the wrong one; set `CONTROLLER_VERBOSITY=<n>` to
-name the run's level. It also exits 1 when it cannot read the level.
+at `--v=2`. Below 2 the controller logs neither, and the analysis prints "Not
+checked" instead. It reads that level from the Running controller Pods' args, so
+a controller reinstalled since the run gives the wrong one; set
+`CONTROLLER_VERBOSITY=<n>` to name the run's level. It also exits 1 when it
+cannot read the level.
 
 **Markdown table** (printed to stdout, copy-paste into `docs/developer-guide/benchmark-results.md`):
 
