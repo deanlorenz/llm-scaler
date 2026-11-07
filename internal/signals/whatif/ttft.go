@@ -820,11 +820,16 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 			out.Parts.DecodeEngine += excess
 		}
 	}
-	floored := func(seconds, old *float64, floor, oldFloor float64) {
+	// oldFloorAt is the old sum's floor, read only with a term. With none,
+	// oldOwnZero is a zero ownTime, whose quantile (shape 0) runs the gamma's
+	// continued fraction to maxSeriesTerms for a NaN that nothing reads: about
+	// 100 ms a price, so most of every RateForTTFT with no decode term.
+	floored := func(seconds, old *float64, floor float64, oldFloorAt func() float64) {
 		if pl.term == nil {
 			out.Floor = floor
 			return
 		}
+		oldFloor := oldFloorAt()
 		out.Floor = max(floor, oldFloor)
 		if *old > *seconds || oldFloor > floor {
 			out.Flags = addFlags(out.Flags, DecodeTermFloored)
@@ -835,7 +840,7 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 	if q == 0 {
 		mean := out.Parts.EngineWait + out.Parts.OwnPrefill + out.Parts.DecodeWait + first
 		oldMean := out.Parts.EngineWait + a + oldOwn.mean + out.Parts.DecodeWait + oldFirst
-		floored(&mean, &oldMean, a+pl.pf.own().mean+floorStep, a+oldOwnZero.mean+oldFloorStep)
+		floored(&mean, &oldMean, a+pl.pf.own().mean+floorStep, func() float64 { return a + oldOwnZero.mean + oldFloorStep })
 		if !Finite(mean) {
 			u := refuse(Saturated, fmt.Sprintf("no finite mean TTFT at %g r/s", rate))
 			return priced{u: &u}
@@ -871,7 +876,7 @@ func (pl ttftPlan) price(rate, q float64, withDecodeWait, extras bool) priced {
 			out.DecodeShare = oldBeta
 		}
 	}
-	floored(&out.Seconds, &oldSeconds, a+pl.pf.own().quantile(q)+floorStep, a+oldOwnZero.quantile(q)+oldFloorStep)
+	floored(&out.Seconds, &oldSeconds, a+pl.pf.own().quantile(q)+floorStep, func() float64 { return a + oldOwnZero.quantile(q) + oldFloorStep })
 	out.Independent = out.Seconds
 	if extras {
 		// The two waits always sum (a single-piece wait and the decode
