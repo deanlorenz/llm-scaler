@@ -2453,11 +2453,13 @@ The closed-loop probe runs C for true starts of 15 s and 463 s (the
 `liveness/*/closed-loop-*-start-{15,90,463}s` property cases,
 `closed_loop_probe_starts_test.go`), each held to the true start
 published, a peak ceiling of 1.5x need plus one, and need at the horizon.
-At 15 s every case passes. At 90 s the decode step, with or without the
-snapshot, overshoots to 31 for a need of 17 and recovers within 40 min.
-At 463 s both steps overshoot (16 for 9, 29-30 for 17) and the decode
-step is still over need at the horizon, with or without a restart. The
-six failing cases are ledger rows owned by issue #520. It runs E through
+The probe reports the replicas still starting, as the engine does, so
+the floor credits them. At 15 s and 90 s every case passes (the 90 s
+decode step peaks at 24 for a need of 17). At 463 s four cases fail,
+ledger rows owned by issue #520: the decode step, alone or through the
+snapshot, holds 22 and ends at 21, over the 20.5 bound; after a restart,
+before mu is back, it climbs to 29 and ends at 23; and the aggregated
+load step peaks at 16 for a need of 9. It runs E through
 a restart, and the PR pastes both.
 
 #### Persistence and back-compat

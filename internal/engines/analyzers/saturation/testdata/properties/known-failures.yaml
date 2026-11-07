@@ -23,43 +23,29 @@
   class: liveness
   learner: floor
   expect: over-priced
-  finding: "At a 463 s start the decode step from 2.5 to 12 req/s (need 17), with no restart, overshoots to 30 replicas and is still over the bound at the 40 min horizon (#520)."
-  measured: "1/1 seed (the probe draws nothing from it); peak 30 against the 26.5 ceiling, final 21 against the 20.5 bound, never under need"
-  owner: "#520"
-- id: liveness/floor/closed-loop-decode-step-start-90s
-  class: liveness
-  learner: floor
-  expect: over-priced
-  finding: "At a 90 s start the same decode step overshoots to 31 replicas, over the 26.5 ceiling, and recovers to need within the horizon (#520)."
-  measured: "1/1 seed; peak 31 at 16.75 min, 17 from 28 min, never under need"
+  finding: "At a 463 s start the decode step from 2.5 to 12 req/s (need 17), with no restart, holds 22 replicas until 36.5 min and ends at 21, over the bound at the 40 min horizon (#520)."
+  measured: "1/1 seed (the probe draws nothing from it); starting replicas shown: peak 22 (ceiling 26.5), 22 from 15.25 min, 21 from 36.5 min against the 20.5 bound, never under need"
   owner: "#520"
 - id: liveness/floor/closed-loop-load-step-start-463s
   class: liveness
   learner: floor
   expect: over-priced
-  finding: "At a 463 s start the aggregated load step from 1.2 to 6 req/s (need 9) overshoots to 16 replicas, over the 14.5 ceiling, and ends at 11, 0.35 replica inside the bound (#520)."
-  measured: "1/1 seed; peak 16 at 15.25 min, final 11 (bound 11.35), under need 8m0s (bound 11m13s)"
+  finding: "At a 463 s start the aggregated load step from 1.2 to 6 req/s (need 9) overshoots to 16 replicas, over the 14.5 ceiling, and ends at 11, 0.35 replica inside the bound; showing the starting replicas does not change it (#520)."
+  measured: "1/1 seed; starting replicas shown: peak 16 at 15.25 min, final 11 (bound 11.35), under need 8m0s (bound 11m13s)"
   owner: "#520"
 - id: liveness/floor/closed-loop-restart-before-step-start-463s
   class: liveness
   learner: floor
   expect: over-priced
-  finding: "At a 463 s start the decode step after a controller restart overshoots to 29 replicas and is still over the bound at the 40 min horizon, as the same step with no restart does (#520)."
-  measured: "1/1 seed; peak 29 against the 26.5 ceiling, final 23 against the 20.5 bound, under need 8m0s (bound 11m13s)"
+  finding: "At a 463 s start the decode step after a controller restart, with no mu yet, overshoots to 29 replicas and ends at 23, over the bound at the 40 min horizon; showing the starting replicas does not change it (#520)."
+  measured: "1/1 seed; starting replicas shown: peak 29 against the 26.5 ceiling, final 23 against the 20.5 bound, under need 8m0s (bound 11m13s)"
   owner: "#520"
 - id: liveness/floor/closed-loop-restored-snapshot-start-463s
   class: liveness
   learner: floor
   expect: over-priced
-  finding: "At a 463 s start the decode step through a restored snapshot overshoots to 30 replicas and is still over the bound at 40 min, the same trace as with no restart (#520)."
-  measured: "1/1 seed; peak 30 against the 26.5 ceiling, final 21 against the 20.5 bound, never under need"
-  owner: "#520"
-- id: liveness/floor/closed-loop-restored-snapshot-start-90s
-  class: liveness
-  learner: floor
-  expect: over-priced
-  finding: "At a 90 s start the decode step through a restored snapshot overshoots to 31 replicas, over the 26.5 ceiling, as with no restart, and recovers within the horizon (#520)."
-  measured: "1/1 seed; peak 31 at 16.75 min, 17 from 28 min, never under need"
+  finding: "At a 463 s start the decode step through a restored snapshot holds 22 replicas until 36.5 min and ends at 21, over the bound at the 40 min horizon, the same trace as with no restart (#520)."
+  measured: "1/1 seed; starting replicas shown: peak 22 (ceiling 26.5), 21 from 36.5 min against the 20.5 bound, never under need"
   owner: "#520"
 - id: liveness/k2/flow-control-on
   class: liveness
