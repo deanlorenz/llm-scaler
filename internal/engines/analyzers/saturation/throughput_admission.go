@@ -530,6 +530,61 @@ type muChoice struct {
 	// low is, per replica, its current run of saturated readings refused as
 	// under MinMeasuredOfDerived of the derived figure.
 	low map[string]lowRun
+	// ratio is the measurement's ratio to the derived figure smoothed over
+	// MuLatchRatioSmoothing, as of ratioAt (smoothRatio); zero before the
+	// first. The stale latch is set and released on it
+	// (SwitchMuLatchReadsSmoothedRatio).
+	ratio   float64
+	ratioAt time.Time
+}
+
+// MuLatchRatioSmoothing is the time constant of the ratio the stale latch
+// is set and released on (#526): the measured mu over the derived one,
+// smoothed exponentially in time.
+//
+// The latch sets at MeasuredDerivedMaxRatio (2.0) and releases at
+// MeasuredDerivedReturnRatio (1.6). The per-pod rate noise measured on the
+// E1 recording, against a centred 9-cycle median, is 7.5-18.9 % with a
+// lag-one correlation of 0.1-0.4. At a ratio near 2 that is a standard
+// deviation of 0.2-0.4, as wide as the band, so on the single cycle's
+// ratio a stale measurement coming back across 1.6 once let go and was set
+// again by the next reading past 2.0: on edges/mu/latch-return-excursion
+// every seed reversed more than once at 10 % and 15 % (seed 1: 7 and 17
+// reversals). Smoothed over 3 min (about 12 cycles at 15 s) the ratio's
+// noise is about a quarter of the reading's, and one excursion changes the
+// choice at most once at both noise levels on every seed of the cases.
+//
+// The cost is reaction time, on both edges. A ratio that steps while the
+// measurement is already stale reaches the set point after
+// MuLatchRatioSmoothing times ln((new-old)/(new-MaxRatio)): from 1x to
+// 2.5x, 3.3 min, 14 cycles at 15 s; to 4x, 1.2 min, 5 cycles. Above the derived
+// figure the latch errs, while it waits, on the measured and higher
+// figure, the side that under-orders, for that long; released, it errs on
+// the derived and lower one, the side that over-orders, so the release is
+// never faster toward the risky side. Under the derived figure the low
+// hold (MeasuredLowHoldFor, 30 min) sets first and dominates. A ratio
+// that was past the set point while the measurement was still fresh is
+// already smoothed there, so the common case, a measurement that goes stale
+// after the shape it measured has gone, latches on the cycle it goes stale.
+// The served yield is new evidence and reads the cycle's own ratio.
+const MuLatchRatioSmoothing = 3 * time.Minute
+
+// smoothRatio folds this cycle's ratio r of the measured mu to the derived
+// one, read at now, into c's smoothed ratio and returns it. The first
+// reading starts it; a reading at or before the last one's time -- another
+// replica on the same cycle -- adds nothing. After a gap of many time
+// constants the weight rounds to 1, and the ratio is the reading's exactly.
+func (c *muChoice) smoothRatio(r float64, now time.Time) float64 {
+	if !(c.ratio > 0) {
+		c.ratio, c.ratioAt = r, now
+		return r
+	}
+	if dt := now.Sub(c.ratioAt); dt > 0 {
+		w := 1 - math.Exp(-float64(dt)/float64(MuLatchRatioSmoothing))
+		c.ratio = w*r + (1-w)*c.ratio
+		c.ratioAt = now
+	}
+	return c.ratio
 }
 
 // lowRun is one replica's run of saturated readings refused as low.
@@ -608,6 +663,10 @@ func (a *SaturationAnalyzer) noteSaturatedReading(key, pod string, mu float64, r
 //     figure, or, once it has given way, still MeasuredDerivedReturnRatio
 //     above it; and when it sits as far under it, but only once it has been
 //     stale for MeasuredLowHoldFor -- until then the lower of the two prices.
+//
+// The stale rule and a latch restored with no evidence read the ratio
+// smoothed over MuLatchRatioSmoothing, not the cycle's own
+// (SwitchMuLatchReadsSmoothedRatio).
 func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading throughputReading, derived whatif.DerivedMu, served float64, t tuning, now time.Time) bool {
 	return a.measuredYield(key, reading, derived, served, t, now) != muYieldNone
 }
@@ -634,10 +693,21 @@ func (a *SaturationAnalyzer) measuredYield(key string, reading throughputReading
 	defer a.mu.Unlock()
 	c := a.throughputMuChoice[key]
 	latched := c != nil && c.yielded
-	ratio := reading.rate / derived.Rate
+	// raw is this cycle's ratio, which the served yield reads; ratio is
+	// what the stale latch reads, smoothed when the switch is on.
+	raw := reading.rate / derived.Rate
+	ratio := raw
 	// Unknown: a memo with no evidence behind it, or none at all for a
 	// window on record (restored, or brought back).
 	_, onRecord := a.saturatedThroughput[key]
+	if a.muLatchSmoothed {
+		if c == nil {
+			// Known exactly when an absent memo would be (unknown, below).
+			c = &muChoice{latchKnown: !onRecord}
+			a.throughputMuChoice[key] = c
+		}
+		ratio = c.smoothRatio(raw, now)
+	}
 	unknown := a.muLatchRestoresSafe && ((c == nil && onRecord) || (c != nil && !c.latchKnown))
 	if unknown {
 		// The latch is not persisted: with no evidence behind it, it
@@ -653,7 +723,7 @@ func (a *SaturationAnalyzer) measuredYield(key string, reading throughputReading
 		}
 		c.latchKnown = true
 	}
-	if ratio < 1 && (served > maxR*reading.rate ||
+	if raw < 1 && (served > maxR*reading.rate ||
 		(latched && served > retR*reading.rate)) {
 		if c == nil {
 			c = &muChoice{}

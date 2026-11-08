@@ -783,6 +783,7 @@ Add a row when you add such a threshold.
 | threshold | set | clear | dwell | safe side | after a restart |
 | --- | --- | --- | --- | --- | --- |
 | ITL tier: full fit or pinned fit (`itl/tier_latch.go`, on the saturation, slo and throughput lines) | 10 steady readings, spread 0.30 of `k` | under 8 steady readings or spread 0.18, or a pinned fit pricing 3 % more | 10 min after the last change, unless the new line prices 3 % more replicas | the line that prices more replicas, from either tier, judged by what the line sustains where the analyzer prices it | the latch is not kept: a key with a restored slope stands at the pinned fit |
+| Mu's stale latch: measured or derived mu (`measuredYield`, `muChoice`) | the ratio of measured to derived mu, smoothed over `MuLatchRatioSmoothing` (3 min), past `muChoice.maxRatio` (2.0), or under 1/2.0 once stale for `lowHoldFor` | the smoothed ratio back within `muChoice.returnRatio` (1.6) | none: the smoothing is the delay. A stale ratio stepping from 1x to 2.5x sets on the 14th cycle at 15 s (3.25 min), to 4x on the 5th | the lower figure: latched over the derived one, unlatched under it | the latch is not kept, and restores to the safe side (`SwitchMuLatchRestoresSafe`); the smoothing starts again from the first reading |
 
 **Price.** A line's price is sequences over ITL at the fill the analyzer reads
 (`Admission.PricedRate`). At a fixed fill that is the ITL there. With a TPOT
@@ -1154,6 +1155,19 @@ replay switch (`mu_switches.go`):
   window with no sample time and no agreeing reading on record is stale over
   the derived figure, and under it holds for `MeasuredLowHoldFor` from its
   own last write (`lowHeldOut`, `TestMuUnknownAge_*`).
+- **The latch reads a smoothed ratio** (`SwitchMuLatchReadsSmoothedRatio`,
+  #526). The stale rule sets and releases on the ratio of measured to derived
+  mu smoothed exponentially over `MuLatchRatioSmoothing` (3 min), not on the
+  cycle's own ratio (`muChoice.smoothRatio`). The per-pod rate noise measured
+  on E1 is 7.5-18.9 % at lag-one 0.1-0.4, as wide as the 1.6-2.0 band, so on
+  one cycle's ratio a stale measurement coming back across 1.6 let go and was
+  set again several times in one excursion. Smoothed, it changes once on every
+  seed at 10 % and 15 % (`TestMuLatchBand_*`). The cost is reaction time when
+  the ratio moves while the measurement is already stale: from 1x to 2.5x the
+  latch sets 3.25 min later, priced on the higher, measured figure until then.
+  A ratio already past 2x while the measurement was fresh latches on the cycle
+  it goes stale. The served yield is new evidence and reads the cycle's own
+  ratio.
 - **The latch restores to the safe side** (`SwitchMuLatchRestoresSafe`). The
   latch is not persisted. A window restored, or brought back, with no choice
   on record comes back latched over the derived figure and unlatched under

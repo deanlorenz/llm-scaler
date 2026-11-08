@@ -177,6 +177,12 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	saturation.SwitchMuUnreadAtTarget:        nil,
 	saturation.SwitchMuMinorityFigureExpires: nil,
 
+	// #526: mu's stale latch reads its ratio smoothed over 3 min. It moves
+	// no golden: no recording holds a stale measurement whose ratio to the
+	// derived figure crosses the 1.6-2.0 band. Its unit tests hold it
+	// (heldBy), and #524's latch-return-excursion cases.
+	saturation.SwitchMuLatchReadsSmoothedRatio: nil,
+
 	// Which rows the transfer is read from. It moves no golden: no committed
 	// recording prices a line (the decode term's reason, above). Its unit test
 	// holds it (heldBy).
@@ -1250,6 +1256,13 @@ var heldBy = map[string][]heldTest{
 	saturation.SwitchBatchCapLearned: {
 		{"../saturation", "TestBatchCapSwitch_LearnedOffLearnsNothing"},
 		{"../saturation", "TestBatchCap_SwitchesOffReproduceTheIssue"},
+	},
+	// #526: the first runs the switch on and off and asserts both, at the
+	// measured rate noise; the second states the reaction time either way.
+	saturation.SwitchMuLatchReadsSmoothedRatio: {
+		{"../saturation", "TestMuLatchBand_OneChangePerExcursionAtTheMeasuredNoise"},
+		{"../saturation", "TestMuLatchBand_AStaleStepLatchesWithinTheStatedTime"},
+		{"../saturation", "TestMuLatchBand_ARatioSmoothedWhileFreshLatchesWhenStale"},
 	},
 	saturation.SwitchMuLatchRestoresSafe: {
 		{"../saturation", "TestMuLatch_ARestoredMeasurementOverDerivedComesBackLatched"},

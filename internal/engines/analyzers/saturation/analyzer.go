@@ -360,6 +360,10 @@ type SaturationAnalyzer struct {
 	muRepeatIsUse       bool
 	muUnknownAgeSafe    bool
 	muLatchRestoresSafe bool
+	// muLatchSmoothed is SwitchMuLatchReadsSmoothedRatio
+	// (throughput_admission.go): on from the constructor; a replay turns it
+	// off (SetSwitchesForReplay).
+	muLatchSmoothed bool
 	// muWeighsFleet, muYieldCapped, muUnreadAtTarget and
 	// muMinorityExpires are the slow pod's replay switches (mu_slow_pod.go):
 	// SwitchMuWeighsFleet, SwitchMuYieldCappedAtMeasurement, SwitchMuUnreadAtTarget and
@@ -692,6 +696,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		muRepeatIsUse:          true,
 		muUnknownAgeSafe:       true,
 		muLatchRestoresSafe:    true,
+		muLatchSmoothed:        true,
 		muWeighsFleet:          true,
 		muYieldCapped:          true,
 		muUnreadAtTarget:       true,
