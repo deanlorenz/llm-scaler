@@ -111,7 +111,7 @@ func TestPrefillBoundHeld_AFleetTheBoundGrewGrowsOnceUnderNoise(t *testing.T) {
 		r := propRand(seed)
 		b := boundAt(on)().(*boundMu)
 		n := 4
-		var out []int
+		out := make([]int, 0, episodes)
 		for range episodes {
 			for range 10 {
 				for p := range n {
