@@ -74,19 +74,27 @@ func TestLearnerWrite_CarriesPodsAndMargins(t *testing.T) {
 	assert.InDelta(t, 0, f["kSpreadOverThreshold"], 1e-12)
 }
 
-// A line that keeps fitting and does not move logs learner-write once per
-// LearnerHeartbeat (analyzer-learner.md 6.1, heartbeat): not every cycle,
-// and not never. The run's cycle is 15 s, so the heartbeat falls on the
-// 40th cycle after the line before.
+// A line that keeps fitting and moves less than ITLWriteBand logs
+// learner-write once per LearnerHeartbeat (analyzer-learner.md 6.1,
+// heartbeat): not every cycle, and not never. The run's cycle is 15 s, so
+// the heartbeat falls on the 40th cycle after the line before. The fleet's
+// ITL rises 1 % at the start of each heartbeat, under the band, so the line
+// the heartbeat logs differs from the one logged before it, and its
+// previous figures must be the logged ones, not the last cycle's fit.
 func TestLearnerWrite_AQuietLineLogsOncePerHeartbeat(t *testing.T) {
 	observed, logs := observer.New(zapcore.Level(int8(-logging.VERBOSE)))
 	r := newLineRun(t, NewThroughputAnalyzer())
 	r.ctx = logr.NewContext(context.Background(), zapr.NewLogger(zap.New(observed)))
-	// cycle runs one cycle of the three-replica fleet and returns how many
-	// learner-write lines it logged.
+	scale := 1.0
+	// cycle runs one cycle of the three-replica fleet, its ITL scaled by
+	// scale, and returns how many learner-write lines it logged.
 	cycle := func() int {
 		before := logs.FilterMessage("learner-write").Len()
-		r.step(settleFleet())
+		fleet := settleFleet()
+		for i := range fleet {
+			fleet[i].AvgITL *= scale
+		}
+		r.step(fleet)
 		return logs.FilterMessage("learner-write").Len() - before
 	}
 	for i := range 3 {
@@ -103,16 +111,20 @@ func TestLearnerWrite_AQuietLineLogsOncePerHeartbeat(t *testing.T) {
 	require.Greater(t, perHeartbeat, 1, "premise: the heartbeat spans several cycles")
 	prev := first
 	for beat := range 2 {
+		scale += 0.01
 		for i := 1; i < perHeartbeat; i++ {
-			require.Zero(t, cycle(), "beat %d, cycle %d of %d: a quiet line does not log before the heartbeat", beat, i, perHeartbeat)
+			require.Zero(t, cycle(), "beat %d, cycle %d of %d: a line moving under the band does not log before the heartbeat", beat, i, perHeartbeat)
 		}
-		require.Equal(t, 1, cycle(), "beat %d: a quiet line that has not logged for LearnerHeartbeat logs once", beat)
+		require.Equal(t, 1, cycle(), "beat %d: a line that has not logged for LearnerHeartbeat logs once", beat)
 		all := logs.FilterMessage("learner-write").All()
 		line := all[len(all)-1].ContextMap()
 		assert.Equal(t, false, line["firstWrite"], "beat %d", beat)
-		// The refit over the rolling window differs in the last bits only.
-		assert.InDelta(t, first["a"], line["a"], 1e-12, "beat %d: the slope did not move", beat)
-		assert.InDelta(t, first["b"], line["b"], 1e-12, "beat %d: the intercept did not move", beat)
+		// The window has rolled over to the scaled readings: the line is the
+		// first one scaled, and no longer the one logged before it.
+		assert.InEpsilon(t, first["a"].(float64)*scale, line["a"], 1e-9, "beat %d: the slope follows the load", beat)
+		assert.InEpsilon(t, first["b"].(float64)*scale, line["b"], 1e-9, "beat %d: the intercept follows the load", beat)
+		require.Greater(t, line["a"].(float64)-prev["a"].(float64), 0.005*prev["a"].(float64),
+			"premise: the line moved since the last logged one")
 		assert.Equal(t, prev["a"], line["previousA"], "beat %d: against the last logged slope", beat)
 		assert.Equal(t, prev["b"], line["previousB"], "beat %d: against the last logged intercept", beat)
 		assert.Equal(t, first["source"], line["source"], "beat %d: the source did not change", beat)

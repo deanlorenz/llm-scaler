@@ -132,6 +132,22 @@ func TestMuLearner_AWriteLineListsSixteenPodsLowestFirst(t *testing.T) {
 	assert.Contains(t, buf.String(), "learner-write")
 }
 
+// Pods with equal readings are listed by name, so the line is the same
+// whatever order the cycle met them in, and the bound cuts the same ones.
+func TestMuLearner_WritePodsBreaksTiesByPodName(t *testing.T) {
+	in := []muPodReading{
+		{pod: "p3", reading: 5}, {pod: "p1", reading: 5}, {pod: "p0", reading: 6}, {pod: "p2", reading: 5},
+	}
+	out, omitted := muWritePods(in)
+	assert.Zero(t, omitted)
+	got := make([]string, 0, len(out))
+	for _, m := range out {
+		got = append(got, m["pod"].(string))
+	}
+	assert.Equal(t, []string{"p1", "p2", "p3", "p0"}, got, "lowest reading first, ties by pod name")
+	assert.Equal(t, "p3", in[0].pod, "the caller's slice is not reordered")
+}
+
 // measuredSamples is how many samples the analyzer's own mu windows hold.
 func (a *SaturationAnalyzer) measuredSamples() int {
 	a.mu.Lock()
