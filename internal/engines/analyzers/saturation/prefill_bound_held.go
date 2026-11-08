@@ -50,12 +50,25 @@ import (
 // The error goes to the safe side. The held figure is under the true rate,
 // with confidence 1 - alpha over the bound's whole life; the mean is
 // unbiased. Their max is above the mean only when the window's mean dips
-// under the held figure. Measured at one pod and 19 % noise, the worst case:
-// within 0.2 % of the true rate after ten minutes and after an hour, 1.2 %
-// high after a day (the held figure, under the true rate, catching the
+// under the held figure. Measured at one pod and 19 % noise, the worst case,
+// under stationary noise with one read a pod a minute: within 0.2 % of the
+// true rate after ten minutes and after an hour, 1.2 % high after a day (the held figure, under the true rate, catching the
 // mean's low dips). A rise reaches the bound through the mean, by its weight,
 // not in one minute as the max took it: the bound reads low while the window
 // turns over, which orders more prefill, not less.
+//
+// The confidence holds only if each minute's sample is an unbiased,
+// roughly independent reading of the rate. In production it is not yet:
+// the within-minute fold keeps a max over one pod's re-reads (#531), so each
+// sample is biased high, and with four reads a minute at AR(1) noise
+// (phi 0.3) the held figure stood above the true rate on 47 of 50 seeds after
+// an hour and 50 of 50 after a day, at 10 % and at 15 % noise. Until #531
+// lands, the bound is still high by about that fold's bias (8.8 % at 10 %
+// noise, 13 % at 15 %), though no longer by the running max over minutes.
+//
+// The held figure falls only when the window is evicted, put aside by an
+// engine-argument change, forgotten with the variant (or a flush of the
+// learned state), or lost to a restart: where the old max fell too.
 //
 // The held figure is working state, not in the snapshot. After a restart, or
 // a window put aside and brought back, the bound is the window's mean until
@@ -81,6 +94,11 @@ const prefillBoundAlpha = 0.05
 // learned in its first minutes holds, few enough to leave the full windows
 // most of prefillBoundAlpha. Once full, a window takes one each time all its
 // samples are new since the last, so no two full windows share a sample.
+// Either way a window is tested only when every sample in it was taken since
+// the held figure started (prefillHeldBound.fresh): a window restored from a
+// build that raised each sample to its running max holds that max, equal
+// values with no spread, and tested as it stands it would pin the held
+// figure at the old build's high reading for good.
 var prefillBoundFillTests = []int{3, 6}
 
 // prefillHeldBound is the prefill bound's held figure for one window key.
@@ -91,7 +109,8 @@ type prefillHeldBound struct {
 	// tests is how many lower confidence bounds have been taken.
 	tests int
 	// fresh is how many samples started since the last full window's bound
-	// was taken, or since the figure was first kept.
+	// was taken, or since the figure was first kept: a window is tested only
+	// when all its samples are among them.
 	fresh int
 }
 
@@ -107,7 +126,7 @@ func (a *SaturationAnalyzer) raiseHeldBoundLocked(key string, samples []float64)
 	switch {
 	case full && h.fresh > len(samples):
 		h.fresh = 1
-	case !full && slices.Contains(prefillBoundFillTests, len(samples)):
+	case !full && h.fresh > len(samples) && slices.Contains(prefillBoundFillTests, len(samples)):
 	default:
 		a.prefillBoundHeld[key] = h
 		return

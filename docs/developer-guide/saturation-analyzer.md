@@ -1545,27 +1545,38 @@ once by that much and then stays
 (`TestPrefillBoundHeld_AFleetTheBoundGrewGrowsOnceUnderNoise`; on the window's
 mean alone the fleet grows every episode, 5 to 15 replicas over six).
 
-Its error is on the safe side. Measured at one pod (the worst case), the bound
-is within 0.2 % of the true rate after ten minutes and after an hour at 10, 15
-and 19 % noise, and 0.6-1.2 % high after a day, where the held figure, under
+Its error is on the safe side, under a condition: the 95 % holds only if each
+minute's sample is an unbiased, roughly independent reading of the rate.
+Measured at one pod (the worst case), under stationary noise with one read a
+pod a minute, the bound is within 0.2 % of the true rate after ten minutes and
+after an hour at 10, 15 and 19 % noise, and 0.6-1.2 % high after a day, where the held figure, under
 the true rate, catches the mean's low dips
 (`TestPrefillBoundHeld_TheBiasAtTheMeasuredNoise`). A rise reaches the bound
 through the mean, by its weight: it reads low while the window turns over,
 which orders more prefill. The held figure is working state, not in the
 snapshot: after a restart, or a window put aside and brought back, the bound
-is the window's mean until it takes a lower confidence bound again.
+is the window's mean until it takes a lower confidence bound again. Like the
+old max, the held figure falls only when the window is evicted, put aside by
+an engine-argument change, forgotten with the variant (or a flush), or lost to
+a restart. A window restored from a build that raised its samples is not
+tested as it stands: only samples taken since the held figure started are
+(`prefillHeldBound.fresh`), or the old build's max, equal values with no
+spread, would be held for good
+(`TestPrefillBoundHeld_ARestoredRaisedWindowDoesNotPinTheHeldFigure`).
 
 The four `n-dependence/prefill-bound/*` property cases (iid and AR(1) noise at
 10 and 15 %) pass with the switch on and fail on every seed with it off
 (`TestPrefillBoundHeld_TheClearedLedgerCasesFailWithTheSwitchOff`).
 
-Not fixed here: the within-minute fold takes a max over one pod's re-reads
+Not fixed here ([#531](https://github.com/ev-shindin/llm-scaling-manager/issues/531)): the within-minute fold takes a max over one pod's re-reads
 before the mean across pods (`recordSaturatedThroughputFrom`), shared with mu.
 The property rig reads each pod once a minute, so it does not exercise that
 max. At the 15 s cycle a pod is re-read about four times a minute, and with
 AR(1) noise at phi 0.3 per cycle the bound then reads 8.8 % high at 10 %
 noise and 13 % at 15 %, at one pod and at four (the running max read 15-32 %
-high there).
+high there). That breaks the condition above: at four reads a minute the held
+figure stood above the true rate on 47 of 50 seeds after an hour and 50 of 50
+after a day, at 10 % and 15 % noise.
 
 ## Shape change
 
