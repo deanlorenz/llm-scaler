@@ -1,6 +1,7 @@
 package saturation
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -70,6 +71,65 @@ func TestMuLearner_AMeasuredMuWaitsOutThePostRestartSettleAndLogsItsFirstSample(
 	assert.Equal(t, 1, rep[0].Samples)
 	assert.Equal(t, written, rep[0].LastAdmitted)
 	assert.Contains(t, rep[0].PricingKey, "|v|test-model|")
+}
+
+// Mu's learner-write line lists at most LearnerWriteMaxPods pods, lowest
+// reading first, each with k2's stamp on it, and counts the rest in
+// podsOmitted; it stays under the CRI line limit (muWritePods), as k2's
+// line does.
+func TestMuLearner_AWriteLineListsSixteenPodsLowestFirst(t *testing.T) {
+	r := newRestartRig(t, restartT0)
+	const pods = 40
+	states := decodeVariants("v")
+	states[0].CurrentReplicas = pods
+	rows := func() []domain.ReplicaMetrics {
+		out := make([]domain.ReplicaMetrics, 0, pods)
+		for i := range pods {
+			row := fullRow(fmt.Sprintf("p%02d", i), "v", restartT0.Add(-time.Hour))
+			// Highest rate first, so the order the line lists is its own.
+			row.GenerationTokenRate = 3000 - 10*float64(i)
+			out = append(out, row)
+		}
+		return out
+	}
+	// The settle every replica waits after the restart: mu writes only
+	// beside k2's write.
+	for range waitWindow {
+		r.cycle(rows(), states)
+	}
+	// The first write, logged twice over: to the console encoding the
+	// controller ships, for the line's length, and to an observer, for its
+	// fields.
+	var buf bytes.Buffer
+	enc := zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig())
+	console := zapcore.NewCore(enc, zapcore.AddSync(&buf), zapcore.Level(int8(-perReplicaLogLevel)))
+	observed, logs := observer.New(zapcore.Level(-perReplicaLogLevel))
+	ctx := logr.NewContext(context.Background(), zapr.NewLogger(zap.New(zapcore.NewTee(console, observed))))
+	r.cycleCtx(ctx, rows(), states)
+
+	lines := learnerWrites(logs, learn.Mu)
+	require.Len(t, lines, 1, "one line per key per cycle, however many pods wrote")
+	f := lines[0].ContextMap()
+	require.Equal(t, true, f["firstWrite"], "premise: the first write")
+	assert.EqualValues(t, pods-LearnerWriteMaxPods, f["podsOmitted"])
+	listed, ok := f["pods"].([]map[string]any)
+	require.True(t, ok, "pods is a list, got %T", f["pods"])
+	require.Len(t, listed, LearnerWriteMaxPods)
+	readings := make([]float64, 0, len(listed))
+	for _, m := range listed {
+		readings = append(readings, m["reading"].(float64))
+		assert.Equal(t, muTimeBase, m["timeBase"])
+		assert.Equal(t, "batch", m["passedBy"], "k2's stamp")
+		assert.GreaterOrEqual(t, m["settledForSeconds"].(float64), JoinedReplicaWindow.Seconds(), "k2's stamp")
+	}
+	assert.IsIncreasing(t, readings, "lowest reading first")
+	assert.Equal(t, fmt.Sprintf("p%02d", pods-1), listed[0]["pod"], "the lowest rate reads the lowest mu")
+	assert.InDelta(t, (3000-10*float64(pods-1))/500, readings[0], 1e-9)
+
+	for _, line := range strings.Split(buf.String(), "\n") {
+		assert.Less(t, len(line), criMaxLogLineBytes, "a line over the CRI limit is split by the runtime")
+	}
+	assert.Contains(t, buf.String(), "learner-write")
 }
 
 // measuredSamples is how many samples the analyzer's own mu windows hold.
