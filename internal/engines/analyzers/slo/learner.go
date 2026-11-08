@@ -33,6 +33,12 @@ const ITLWriteBand = 0.05
 // while it holds: the saturation analyzer's heartbeat.
 const LearnerHeartbeat = 10 * time.Minute
 
+// LearnerWriteMaxPods is how many pods one learner-write line lists, lowest
+// reading first; the rest are counted in podsOmitted, so a line stays under
+// the CRI line limit: the bound every analyzer's learner-write lines share
+// (itl.WriteMaxPods).
+const LearnerWriteMaxPods = itl.WriteMaxPods
+
 // lineLogged is the line learner-write last logged for a key, and when.
 type lineLogged struct {
 	a, b   float64
@@ -78,12 +84,13 @@ func (a *Analyzer) noteLineLearner(logger logr.Logger, namespace, modelID string
 	}
 	a.lineLogged[key] = lineLogged{a: r.Model.A, b: r.Model.B, source: source, at: now}
 	a.mu.Unlock()
-	logger.V(logging.VERBOSE).Info("learner-write",
-		"learner", learn.ITL, "analyzer", domain.SLOAnalyzerName, "modelID", modelID, "namespace", namespace,
+	pods, omitted := r.WritePods(LearnerWriteMaxPods)
+	kv := []any{"learner", learn.ITL, "analyzer", domain.SLOAnalyzerName, "modelID", modelID, "namespace", namespace,
 		"variant", vs.VariantName, "role", role, "key", key, "a", r.Model.A, "b", r.Model.B,
 		"previousA", last.a, "previousB", last.b, "firstWrite", !logged, "source", source,
 		"previousSource", last.source, "samples", r.Held, "steadyHeld", r.SteadyHeld, "settling", r.Settling,
-		"slopeAgeSeconds", r.SlopeAge(now).Seconds())
+		"slopeAgeSeconds", r.SlopeAge(now).Seconds(), "pods", pods, "podsOmitted", omitted}
+	logger.V(logging.VERBOSE).Info("learner-write", append(kv, r.AdmissionMargins()...)...)
 }
 
 // noteForgottenLocked files keys of a variant as forgotten: the next

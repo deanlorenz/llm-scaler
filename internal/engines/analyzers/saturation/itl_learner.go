@@ -100,12 +100,14 @@ func (a *SaturationAnalyzer) noteITLLearner(namespace, modelID, variant, role, k
 	}
 	a.itlLogged[key] = itlLogged{a: r.Model.A, b: r.Model.B, source: source, at: now}
 	a.mu.Unlock()
-	logger.V(perReplicaLogLevel).Info("learner-write",
-		"learner", learn.ITL, "modelID", modelID, "namespace", namespace, "variant", variant,
+	pods, omitted := r.WritePods(LearnerWriteMaxPods)
+	kv := []any{"learner", learn.ITL, "modelID", modelID, "namespace", namespace, "variant", variant,
 		"role", role, "key", key, "a", r.Model.A, "b", r.Model.B,
 		"previousA", last.a, "previousB", last.b, "firstWrite", !logged,
 		"source", source, "previousSource", last.source, "samples", r.Held,
-		"restored", restored, "steadyHeld", r.SteadyHeld, "slopeAgeSeconds", r.SlopeAge(now).Seconds())
+		"restored", restored, "steadyHeld", r.SteadyHeld, "slopeAgeSeconds", r.SlopeAge(now).Seconds(),
+		"pods", pods, "podsOmitted", omitted}
+	logger.V(perReplicaLogLevel).Info("learner-write", append(kv, r.AdmissionMargins()...)...)
 }
 
 // closeITLCycle ends the ITL line's cycle for a model: its reports join k2's

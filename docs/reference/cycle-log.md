@@ -317,7 +317,20 @@ while too few settled readings remain), `samples` (readings in the window),
 `steadyHeld` and `slopeAgeSeconds` (how old a held A is, 0 for a fit made this
 cycle). It logs when the line is set for the first time, when `source`
 changes, when A or B moves more than 5 % from the value last logged, or after
-10 minutes; there is no `pods` list.
+10 minutes. The throughput and slo analyzers' ITL lines log the same fields,
+with `analyzer` and `settling`, and `source` in their own words.
+
+`pods` lists the pods whose readings the line was fitted from this cycle,
+lowest `reading` first, at most 16; `podsOmitted` counts the rest. Each entry
+carries `reading` (the pod's mean ITL over those readings, seconds per token),
+`k` (their mean KV fill), `rows` (how many of the fit's readings were the
+pod's) and `timeBase`. A held slope fitted nothing this cycle and lists no
+pods. The line also carries the full fit's admission test with its margins:
+`kSpread` (the steady readings' spread in KV fill) against `kSpreadThreshold`
+(0.30), `steadyHeld` against `steadyHeldThreshold` (10), each with how far
+over its threshold it is (`kSpreadOverThreshold`, `steadyHeldOverThreshold`;
+negative when the test was missed and the line is the pinned fit or a held
+slope), and `fitRows`, the readings the line was fitted from.
 
 For `learner` `start` the key is the variant's start key, and `value` the
 published start estimate in seconds, with `previousValue`. `source` is

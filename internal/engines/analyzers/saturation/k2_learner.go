@@ -14,6 +14,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
 )
@@ -39,8 +40,9 @@ const (
 	LearnerHeartbeat = 10 * time.Minute
 	// LearnerWriteMaxPods is how many contributing pods one learner-write
 	// line lists, lowest reading first; the rest are counted in podsOmitted,
-	// so a line stays under the CRI line limit however large the fleet.
-	LearnerWriteMaxPods = 16
+	// so a line stays under the CRI line limit however large the fleet. It is
+	// the bound every analyzer's learner-write lines share (itl.WriteMaxPods).
+	LearnerWriteMaxPods = itl.WriteMaxPods
 	// k2TimeBase is the time base of a k2 reading: the busiest rank's
 	// resident tokens at its one-minute peak, scaled to the pod.
 	k2TimeBase = "busiest-rank-max_over_time[1m]"
