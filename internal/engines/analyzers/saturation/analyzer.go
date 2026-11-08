@@ -456,6 +456,9 @@ type SaturationAnalyzer struct {
 	// k2FirstReadingWaits is SwitchK2FirstReadingWaits (#392): on from the
 	// constructor; a replay turns it off (SetSwitchesForReplay).
 	k2FirstReadingWaits bool
+	// joinedFromFirstServed is SwitchJoinedFromFirstServed (#392): on from
+	// the constructor; a replay turns it off (SetSwitchesForReplay).
+	joinedFromFirstServed bool
 	// itlPerToken is SwitchITLPerToken (#274): on from the constructor; a
 	// replay turns it off (SetSwitchesForReplay).
 	itlPerToken bool
@@ -726,6 +729,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		muSwapFreeze:           true,
 		muMarginClamp:          true,
 		k2FirstReadingWaits:    true,
+		joinedFromFirstServed:  true,
 		itlPerToken:            true,
 		itlWithheldLogged:      make(map[string]itlWithheldReasons),
 		k2Pending:              make(map[string]*k2PendingReadings),

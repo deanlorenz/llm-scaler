@@ -390,7 +390,9 @@ than everything the rank holds:
 
 ```
 joined   = later of Pod Ready and its first sight (else first sight) under
-           JoinedReplicaWindow (1m) ago, read from the settle tracker
+           JoinedReplicaWindow (1m) ago, read from the settle tracker,
+        || its first served row under JoinedReplicaWindow ago, after an
+           idle row of the same Ready time (joined_served.go)
 suspect  = queue x (I [+ O unless prefill]) > tokens / ranks
 admitted = !joined && (!suspect
         || (rate >= K2SettleRateFraction x rateOnRecord             // 0.7
@@ -419,6 +421,23 @@ sighting. An analyzer given no view, as a unit test builds one, observes a
 tracker of its own and takes its first cycle's replicas as already watched.
 The two changes from the analyzer's own memo of Ready times are replay
 switches (`SwitchK2ReadsSettle`, `SwitchK2WaitsAfterRestart`).
+
+The joined clock also starts when a replica is first routed to
+(`joined_served.go`, #392, `SwitchJoinedFromFirstServed`). A replica Ready for
+longer than a minute but idle until a burst reaches it has a rate[1m] that
+covers only the part of the minute it served, and that reading read as a low
+mu. So the settle memo keeps, per replica and Ready time, whether a row showed
+it known to have served nothing (`RequestRateKnown`, no request completed and
+no token generated) and the cycle of its first served row after that
+(`settleMemo.served`, `noteServed`). A saturated reading under
+`JoinedReplicaWindow` of that cycle is refused as a joined one, with its own
+reason: k2 is not written, and mu, written only beside a k2 write, is not
+either. Refusing mu alone was tried and reverted (f32a32ed7): it left k2's
+settle rate test with no mu on record. A replica already serving at the
+memo's first sight is not held, nor is an idle run and return after it has
+served under the same Ready time. The cost is one rate window (4 cycles at
+15 s) before a late-routed replica's first k2 and mu, and one cycle more for
+k2's first reading (`k2_confirm.go`).
 
 Each cycle k2 also fills a `learn.Report` per variant (`k2_learner.go`;
 `LearnerReports`), and logs `learner-write` at `--v=3` for a key whose figure

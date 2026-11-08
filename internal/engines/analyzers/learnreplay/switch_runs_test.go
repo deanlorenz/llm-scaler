@@ -304,6 +304,19 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// recording has a hot rank on a floored role, so results, composite-roles,
 	// composite-results, composite-holds and composite-release are unchanged
 	// in every fixture. The unit tests hold that case (heldBy).
+	// #392: a replica's joined clock starts at its first served cycle
+	// (saturation.SwitchJoinedFromFirstServed). Measured alone against all
+	// off at main 39551b9be, it moves one output: in e1, model-02's
+	// variant-01 has one Pod, Ready at 13:56:09 and idle until 14:01:31, then
+	// saturated at 14:02:16 and 14:02:31 with a request rate of 4.01 and 4.90
+	// req/s against the 5.5-7.2 it served from 14:02:46. Those two readings
+	// were under a rate window of its first served row, so they are refused
+	// (P1-obs-unsettled), and nothing saturates the variant again: 18 rows of
+	// e1/variant-capacities.csv change only their Reason, P1-obs (two) and
+	// P2-hist (sixteen) to P3-k2. No capacity, demand or mu moves: results,
+	// store-records and learned-state are unchanged.
+	saturation.SwitchJoinedFromFirstServed: {"e1/variant-capacities.csv"},
+
 	saturation.SwitchThroughputFloorRaisesVariants: {
 		"e1-tuned/variant-capacities.csv",
 		"e1/variant-capacities.csv",
