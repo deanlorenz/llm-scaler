@@ -40,12 +40,18 @@ import (
 // (0.85), so need is ceil(0.95 lambda / (0.68 mu)) whatever n is. The two
 // verdicts, over- and under-ordered, are learnertest.Result.Verdict's.
 
-// probeStart is S, from an order to the replica Ready.
+// probeStart is S, from an order to the replica Ready, for a case that sets
+// none.
 const probeStart = learnertest.DefaultStartTime
 
 // probeCase is one closed-loop scenario.
 type probeCase struct {
 	name string
+	// start, when set, is the case's true S, and every row reports it as
+	// the replica's measured start (ReplicaMetrics.StartSeconds, the
+	// collector's figure), so the start learner reads the truth. Unset, S
+	// is probeStart and no row reports one: the analyzer prices its default.
+	start time.Duration
 	// pods is the fleet's true mu per replica at the start; added replicas
 	// serve addedMu.
 	pods    []float64
@@ -81,6 +87,12 @@ type probeCase struct {
 	stabilization time.Duration
 	// switches are set on every process (SetSwitchesForReplay).
 	switches map[string]bool
+	// hidePending withholds the replicas still starting from the analyzer.
+	// Unset, every cycle reports them as the engine does
+	// (VariantReplicaState.PendingReplicas, and PendingAges from the Pods'
+	// ages, variantmeta/discovery.go), so the floor credits what they will
+	// drain once Ready.
+	hidePending bool
 }
 
 // probeITL is the decode replicas' ITL at fill k: a line on which the mu
@@ -91,7 +103,7 @@ func probeITL(k float64) float64 { return 0.119 + 0.6*k }
 // probeProcess is one controller process of a decode probe: its analyzer
 // over a store holding the variant's engine parameters, and its settle
 // tracker, with switches set.
-func probeProcess(t *testing.T, rig *propRig, switches map[string]bool) *settle.Tracker {
+func probeProcess(t probeTB, rig *propRig, switches map[string]bool) *settle.Tracker {
 	t.Helper()
 	store := capacity.NewStore()
 	store.Update("test-ns", "test-model", "v", capacity.Record{EngineParams: mtParams(1024, "vllm:v1")}, rig.clock)
@@ -121,10 +133,22 @@ type probeResult struct {
 	fleet learnertest.Result
 	// sightings is how many restored sightings the last process installed.
 	sightings int64
+	// startSeconds is the slowest role's published start
+	// (AnalyzerResult.RoleStartSeconds) on the last cycle, zero when no
+	// role published one.
+	startSeconds float64
+}
+
+// probeTB is what the probe needs of a test: *testing.T, or probeT when a
+// property case runs the probe (require.TestingT plus Helper).
+type probeTB interface {
+	Helper()
+	Errorf(format string, args ...any)
+	FailNow()
 }
 
 // runProbe drives the case to its horizon and returns what the fleet did.
-func runProbe(t *testing.T, pc probeCase) probeResult {
+func runProbe(t probeTB, pc probeCase) probeResult {
 	t.Helper()
 	rig := newPropRig()
 	res := probeResult{muCounts: map[learn.Reason]int64{}}
@@ -135,10 +159,18 @@ func runProbe(t *testing.T, pc probeCase) probeResult {
 		require.NoError(t, rig.a.SetSwitchesForReplay(pc.switches))
 	}
 	restarted := false
+	start := probeStart
+	if pc.start > 0 {
+		start = pc.start
+	}
 	fleet := learnertest.Fleet{
 		Pods: pc.pods, AddedMu: pc.addedMu, Mu: pc.mu, Lambda: pc.lambda, Weight: pc.weight, Horizon: pc.horizon,
 		Need:  func(lambda float64) int { return int(math.Ceil(0.95*lambda/(0.68*pc.meanMu) - 1e-9)) },
-		Start: rig.clock, StartTime: probeStart, Stabilization: pc.stabilization,
+		Start: rig.clock, StartTime: start, Stabilization: pc.stabilization,
+	}
+	var starting []time.Duration
+	if !pc.hidePending {
+		fleet.Starting = func(ages []time.Duration) { starting = ages }
 	}
 	out := fleet.Run(func(now time.Time, elapsed time.Duration, lambda float64, ready []learnertest.Replica) int {
 		require.Equal(t, now, rig.clock, "the rig's clock and the fleet's")
@@ -165,6 +197,9 @@ func runProbe(t *testing.T, pc probeCase) probeResult {
 				kv = 0.95
 			}
 			rm := imbRow(r.Name, "v", kv, int(math.Round(r.Backlog)), 1000, 1000, r.Served)
+			if pc.start > 0 {
+				rm.StartSeconds = pc.start.Seconds()
+			}
 			if pc.decode {
 				rm.KvCacheUsageKnown, rm.GenerationTokenRateKnown, rm.RequestRateKnown = true, true, true
 				rm.AvgITL, rm.AvgITLKnown = probeITL(kv), true
@@ -177,8 +212,19 @@ func runProbe(t *testing.T, pc probeCase) probeResult {
 			states = decodeStates(len(rows))
 			st.Observe(settleModel("test-ns", "test-model"), settlerow.Of(rows, map[string]string{"v": domain.RoleDecode}), rig.clock)
 		}
+		if len(starting) > 0 {
+			states[0].CurrentReplicas += len(starting)
+			states[0].PendingReplicas = len(starting)
+			for _, age := range starting {
+				states[0].PendingAges = append(states[0].PendingAges, age.Seconds())
+			}
+		}
 		out, err := rig.analyze(rows, states, lambda, propCycle)
 		require.NoError(t, err)
+		res.startSeconds = 0
+		for _, s := range out.RoleStartSeconds {
+			res.startSeconds = max(res.startSeconds, s)
+		}
 		for _, r := range rig.a.LearnerReports()["test-ns|test-model"] {
 			if r.Learner != learn.Mu {
 				continue
@@ -402,6 +448,39 @@ func TestClosedLoopProbe_ARestoredSnapshotCarriesTheFleetThroughARestart(t *test
 		r.underFor, control.underFor)
 	require.Empty(t, r.verdict())
 	require.Equal(t, control.underFor, r.underFor, "the snapshot restores what the floor prices from")
+}
+
+// Issue #520: the probe showed the analyzer only its Ready replicas, so the
+// floor's landing projection (floor.backlogAtLanding) credited none of the
+// replicas it had already ordered. Every cycle of a start re-priced the
+// whole queue as if nothing were coming, and the order grew with the queue
+// until the first order landed: on the decode step (need 17) to 31 at a
+// 90 s start and 30 at 463 s. The engine reports the starting replicas and
+// their ages (variantmeta/discovery.go), and shown them the floor credits
+// what each will drain once Ready.
+//
+// Measured: peak 24 at 90 s and 22 at 463 s, against 31 and 30 with them
+// hidden; time under need 0 either way. The ceiling is the start probes'
+// (half again over need, plus a replica). The 463 s step still ends over
+// need's tolerance at 40 min (21 against 20.5): that is the queue its start
+// left on the first four replicas, which an equal-split router drains at
+// mu less their share, not the projection (#520).
+func TestClosedLoopProbe_StartingReplicasAreCreditedNotReordered(t *testing.T) {
+	for _, start := range []time.Duration{probeStart, 463 * time.Second} {
+		t.Run(start.String(), func(t *testing.T) {
+			pc := restartStepCase(0, false, 0)
+			pc.start = start
+			r := runProbe(t, pc)
+			pc.hidePending = true
+			hidden := runProbe(t, pc)
+			ceiling := 1.5*float64(r.need) + 1
+			t.Logf("need %d: peak %d (under need %s), %d with the starting replicas hidden (under need %s)",
+				r.need, r.peak, r.underFor, hidden.peak, hidden.underFor)
+			require.Greater(t, float64(hidden.peak), ceiling, "premise: hidden, the starting replicas are re-ordered")
+			require.LessOrEqual(t, float64(r.peak), ceiling, "shown, the floor credits them")
+			require.LessOrEqual(t, r.underFor, hidden.underFor, "the credit costs no time under need")
+		})
+	}
 }
 
 // Learner PR 5d's change E through the same restart and step: the first

@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -158,5 +159,25 @@ func TestPodStatesCarriesStartSeconds(t *testing.T) {
 	}
 	if got := podStartSeconds(p); got != 70 {
 		t.Fatalf("podStartSeconds = %v, want 70", got)
+	}
+}
+
+// TestPodStartSecondsCeilingEdge holds the 3600 s start ceiling
+// (maxCredibleStartSeconds) at its edge, through the listing the collector
+// reads a Pod's start from: 3599 s and 3600 s are a start, 3601 s is not one.
+// The figures are literal, so a ceiling moved by a second fails here
+// (analyzer-learner.md 2.6, the start-time row of the threshold table).
+func TestPodStartSecondsCeilingEdge(t *testing.T) {
+	created := time.Date(2026, 9, 28, 7, 46, 23, 0, time.UTC)
+	for _, tc := range []struct {
+		after, want float64
+	}{{3599, 3599}, {3600, 3600}, {3601, 0}} {
+		p := servingPod("decode-0", true, false)
+		p.CreationTimestamp = metav1.NewTime(created)
+		p.Status.Conditions[0].LastTransitionTime = metav1.NewTime(created.Add(time.Duration(tc.after) * time.Second))
+		c := collectorWithPods(t, p)
+		if got := c.podStartSeconds(context.Background(), "tenant", "decode-0"); got != tc.want {
+			t.Errorf("Ready %.0f s after creation: start %v, want %v", tc.after, got, tc.want)
+		}
 	}
 }

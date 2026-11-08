@@ -817,13 +817,13 @@ not cover a key.
 
 | learner | thresholds |
 | --- | --- |
-| ITL | OLS at 10 rows and spread 0.30; slope held under `minSettledSamples`; `steadyFor`; `idleRows`; `carry`; the KV band edges; the sequence cap and `itlBand.capMaxPreemptionRate`; `steadyGate.maxKDrift` (0.10); 20 / 40 rows; 30 min window |
-| k2 | queue threshold; joined 1 min; `rateFraction` of mu and of k2; `maxRise` at 1 min back; window 10; episode gap 24 h; eviction 7 d; the key boundaries |
+| ITL | OLS at 10 rows and spread 0.30; slope held under `minSettledSamples`; `steadyFor`; `idleRows`; `carry`; the KV band edges; the sequence cap and `itlBand.capMaxPreemptionRate`; `steadyGate.maxKDrift` (0.10); 20 / 40 rows (`edges/itl/steady-window-40-rows`); 30 min window |
+| k2 | queue threshold; joined 1 min; `rateFraction` of mu and of k2; `maxRise` at 1 min back; window 10; episode gap 24 h; eviction 7 d (`edges/k2/eviction-7d`, `eviction-nondefault`); the key boundaries |
 | borrowed k2 | 3 % KV; 30 min hold; 6 h relaxation; 20 % re-arm |
 | mu | half of served; `minMeasuredOfDerived`; 2 min confirm; `maxTokensOverCompletions`; `siblingMuTolerance`; the sibling yield's "full cache" line; the siblings' lower median's 50 % mass point; 2x stale agreement; `freshFor` / `lowHoldFor`; latch `maxRatio` / `returnRatio` |
-| floor | the trust blend between `floorTrust.lagFraction` (0.5) and `floorTrust.trustFraction` (0.8); growth band max(`backlogGrowth.minRequests` (2), `backlogGrowth.fraction` (0.10) of the backlog) over 1 min; the standing-queue cap |
+| floor | the trust blend between `floorTrust.lagFraction` (0.5) and `floorTrust.trustFraction` (0.8); growth band max(`backlogGrowth.minRequests` (2), `backlogGrowth.fraction` (0.10) of the backlog) over 1 min; the standing-queue cap (`edges/floor/standing-queue-cap`, and `standing-queue-cap-start-over-drain` for `floor.DrainHorizon` taking a start over the drain time; the start `applyThroughputFloor` passes is not held) |
 | shape, idle, decode memory | shape tolerance band and 5 min hold; idle 2 min with 1 min gap; the 0.30 idle line (`loadImbalance.idleKvUsage`, saturation's idle test: `D/roles.go:123`, `D/idle_room.go:88`); `loadImbalance.idleAfterReady`; decode memory 1 min |
-| start time | 3x outlier, 3 confirmations, 0–3600 s, α 0.3 |
+| start time | 3x outlier, 3 confirmations, 0–3600 s (`collector.TestPodStartSecondsCeilingEdge`), α 0.3 |
 | share (#14, #15) | step spread 0.25; p90 at ≥ 3 releases (listed for later; see 2.7) |
 
 ### 2.7 Past findings against the test classes
@@ -2450,7 +2450,17 @@ at V(3) and `restored: true` until its first admitted sample after a restart
 (6.1). The "Learned state: snapshot restored" line adds `startKeys` and
 `sightings`. Metrics: no new series; the gauge's `source` values become
 `default`, `seed` and `measured` (A).
-The closed-loop probe runs C for true starts of 15 s and 463 s, and E through
+The closed-loop probe runs C for true starts of 15 s and 463 s (the
+`liveness/*/closed-loop-*-start-{15,90,463}s` property cases,
+`closed_loop_probe_starts_test.go`), each held to the true start
+published, a peak ceiling of 1.5x need plus one, and need at the horizon.
+The probe reports the replicas still starting, as the engine does, so
+the floor credits them. At 15 s and 90 s every case passes (the 90 s
+decode step peaks at 24 for a need of 17). At 463 s four cases fail,
+ledger rows owned by issue #520: the decode step, alone or through the
+snapshot, holds 22 and ends at 21, over the 20.5 bound; after a restart,
+before mu is back, it climbs to 29 and ends at 23; and the aggregated
+load step peaks at 16 for a need of 9. It runs E through
 a restart, and the PR pastes both.
 
 #### Persistence and back-compat
