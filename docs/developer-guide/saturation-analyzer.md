@@ -390,7 +390,9 @@ than everything the rank holds:
 
 ```
 joined   = later of Pod Ready and its first sight (else first sight) under
-           JoinedReplicaWindow (1m) ago, read from the settle tracker
+           JoinedReplicaWindow (1m) ago, read from the settle tracker,
+        || the first return of load after an idle run in its current
+           settle, under JoinedReplicaWindow ago (joined_served.go)
 suspect  = queue x (I [+ O unless prefill]) > tokens / ranks
 admitted = !joined && (!suspect
         || (rate >= K2SettleRateFraction x rateOnRecord             // 0.7
@@ -419,6 +421,52 @@ sighting. An analyzer given no view, as a unit test builds one, observes a
 tracker of its own and takes its first cycle's replicas as already watched.
 The two changes from the analyzer's own memo of Ready times are replay
 switches (`SwitchK2ReadsSettle`, `SwitchK2WaitsAfterRestart`).
+
+The joined clock also starts when a replica is first routed to
+(`joined_served.go`, #392, `SwitchJoinedFromFirstServed`). A replica Ready for
+longer than a minute but idle until a burst reaches it has a rate[1m] that
+covers only the part of the minute it served, and that reading read as a low
+mu. What the replica did is read from the settle tracker, by role
+(`settle.Row.Activity`): a row is idle only with its KV known and empty and no
+token generated (prefill: no request completed). A replica holding KV is never
+idle, so a full, queued replica with no completion yet is unknown, not idle.
+The first row of load after an idle run is a return (`settle.Replica.Returns`);
+the tracker keeps the returns of the current settle, which begins at the Pod's
+Ready time, a restart, a rejoin, a rollout or a lend. A saturated reading under
+`JoinedReplicaWindow` of the settle's FIRST return is refused as a joined one,
+with its own reason (`P1-obs-unsettled`). The analyzer keeps no per-pod state
+of its own for it.
+
+Only the first return of a settle holds, so a replica is protected once per
+settle. It is the replica first routed to after it became Ready, or after the
+controller first saw it idle: the case of the issue. A replica that idles every
+night and takes a morning burst is held on its first morning only; on later
+mornings its first partial rate[1m] is admitted, as before #392.
+
+The narrower-sounding rule, hold any return whose idle run left idle seconds in
+the reading's window, is the same as holding every return: a return is the
+first load row after an idle row, so unless rows were missed between them the
+minute after it holds idle seconds. Holding every return was measured on the
+pd-restart golden, whose decode Pods idle and return as the load steps.
+Decode's mu was unpriced from 12:27:02 to 12:28:32, then read 5.06 and 4.65
+req/s until 12:46:50 against the 6.21 the first-return rule prices (-25 %); its
+k2 was 48 005 against 55 212; e1-tuned and ttft-staircase-b-off moved too. The
+first attempt (f32a32ed7, reverted), which held every return for mu alone, left
+decode's mu 27 % low on the same golden. The first-return rule holds one of the
+two decode Pods there (the other had returned at 12:13:44) and moves decode's
+mu toward its steady figure a cycle sooner.
+
+k2 is refused with mu, not mu alone, and that costs valid k2 readings. Mu is
+written only beside a k2 write, and k2's settle rate test reads the mu on
+record: refusing mu alone left that test with no mu (f32a32ed7), and the k2
+readings it then admitted wrote ramp readings as mu. But a max_over_time[1m]
+KV peak is not lowered by the idle part of the minute, so the k2 reading of a
+full replica in that minute is right, and it is lost. On the e1 golden,
+model-02's variant-01 saturates only in the minute after its first return,
+holding 363 871 tokens, so it never records an observed k2 and prices from the
+derived figure (its capacity does not move). The cost in time is one rate
+window (4 cycles at 15 s) before a late-routed replica's first k2 and mu, and
+one cycle more for k2's first reading (`k2_confirm.go`).
 
 Each cycle k2 also fills a `learn.Report` per variant (`k2_learner.go`;
 `LearnerReports`), and logs `learner-write` at `--v=3` for a key whose figure

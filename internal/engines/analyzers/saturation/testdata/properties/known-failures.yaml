@@ -61,13 +61,6 @@
   finding: "Under assumed stress noise on the output length (4 %, phi 0.9; E1 measures 0.5-0.9 %, where the main case passes) the shape tracker, which moves its anchor and the key on one reading past 20 % and anchors on that reading, is moved a second time by one tail reading and back by the next."
   measured: "5/1000 seeds (64, 247, 407, 901, 926); seed 64, down to 775: 1000 -> 792 at cycle 91 -> 630 at 171 -> 765 at 185"
   owner: "#495"
-- id: first-sample/mu/joiner-rate-timebase
-  class: first-sample
-  learner: mu
-  expect: adopted-raw
-  finding: "On the time base, a replica's first saturated rate[1m] covers only the part of the minute it served. Served for half the minute or more, the reading is at least half the derived mu and passes minMeasuredOfDerived, so a second reading moves the figure by up to half. The joined test refuses this for a replica Ready under a minute, not for one routed to late. Measured on throughputRefusal alone, so an upper bound: the analyzer's full path also applies tokensOutrunCompletions and the served bound, which may refuse some of these readings."
-  measured: "51/100 seeds; seed 3: served 30 s of its first minute, rate[1m] 0.1095 against a derived 0.2118, admitted"
-  owner: "#392"
 - id: liveness/floor/closed-loop-decode-step-start-463s
   class: liveness
   learner: floor

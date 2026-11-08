@@ -1358,6 +1358,7 @@ itl|
 its
 itself
 joined
+joined-clock-starts-at-first-served
 joined-refused-ready-since
 joint
 judged
@@ -2113,6 +2114,7 @@ range
 rank
 rate
 rateRefused
+rates
 rather
 ratio
 raw
