@@ -490,6 +490,8 @@ func (a *SaturationAnalyzer) lowHeldOut(fresh time.Time, reading throughputReadi
 func (a *SaturationAnalyzer) unknownLatchLocked(key string) {
 	if c, ok := a.throughputMuChoice[key]; ok {
 		c.latchKnown = false
+		// The smoothed ratio was the window's that was replaced.
+		c.ratio, c.ratioAt = 0, time.Time{}
 	}
 }
 
@@ -532,8 +534,14 @@ type muChoice struct {
 	low map[string]lowRun
 	// ratio is the measurement's ratio to the derived figure smoothed over
 	// MuLatchRatioSmoothing, as of ratioAt (smoothRatio); zero before the
-	// first. The stale latch is set and released on it
-	// (SwitchMuLatchReadsSmoothedRatio).
+	// first, and again when the key's window starts over, is installed by a
+	// restore or is brought back (unknownLatchLocked). The stale latch is
+	// released on it, and set on it unless the cycle's own ratio is past
+	// MuLatchRawSetFactor (SwitchMuLatchReadsSmoothedRatio). The series is
+	// the reading the choice is asked about: where a minority's figure has
+	// expired (minorityFigureExpired) that is the fleet's served bound, so
+	// the ratio moves from the figure to the bound over the time constant,
+	// not on the cycle of the release.
 	ratio   float64
 	ratioAt time.Time
 }
@@ -554,20 +562,37 @@ type muChoice struct {
 // noise is about a quarter of the reading's, and one excursion changes the
 // choice at most once at both noise levels on every seed of the cases.
 //
-// The cost is reaction time, on both edges. A ratio that steps while the
-// measurement is already stale reaches the set point after
-// MuLatchRatioSmoothing times ln((new-old)/(new-MaxRatio)): from 1x to
-// 2.5x, 3.3 min, 14 cycles at 15 s; to 4x, 1.2 min, 5 cycles. Above the derived
-// figure the latch errs, while it waits, on the measured and higher
-// figure, the side that under-orders, for that long; released, it errs on
-// the derived and lower one, the side that over-orders, so the release is
-// never faster toward the risky side. Under the derived figure the low
-// hold (MeasuredLowHoldFor, 30 min) sets first and dominates. A ratio
+// The cost is reaction time. Above the derived figure the latch errs,
+// while it waits to set, on the measured and higher figure, the side that
+// under-orders; a stale measurement met by a shape swap is that case. So
+// the set is asymmetric: a cycle whose own ratio is at or past
+// MuLatchRawSetFactor times MaxRatio (2.8x at the default) sets it at
+// once, and only a ratio between MaxRatio and that waits for the smoothed
+// one, MuLatchRatioSmoothing times ln((new-old)/(new-MaxRatio)): from 1x
+// to 2.5x, 3.3 min, 14 cycles at 15 s; to 2.2x, 5.4 min, 22 cycles.
+// Released, the latch errs on the
+// derived and lower figure, the side that over-orders, and the release
+// always reads the smoothed ratio, so it is never faster toward the risky
+// side. Under the derived figure a latched measurement prices the higher
+// figure, the risky side there, so nothing sets it on one cycle, and the
+// low hold (MeasuredLowHoldFor, 30 min) sets first and dominates. A ratio
 // that was past the set point while the measurement was still fresh is
-// already smoothed there, so the common case, a measurement that goes stale
-// after the shape it measured has gone, latches on the cycle it goes stale.
-// The served yield is new evidence and reads the cycle's own ratio.
+// already smoothed there, so a measurement that goes stale after the shape
+// it measured has gone latches on the cycle it goes stale. The served
+// yield is new evidence and reads the cycle's own ratio.
 const MuLatchRatioSmoothing = 3 * time.Minute
+
+// MuLatchRawSetFactor is how far past MeasuredDerivedMaxRatio, as a factor
+// of it, one cycle's ratio sets the stale latch without waiting for the
+// smoothed ratio (MuLatchRatioSmoothing). Once released at the return ratio
+// (1.6), a single reading must then be 75 % above it to set it again: 7.5
+// standard deviations of the 10 % rate noise and 5 of the 15 %. Measured on
+// the latch-return-excursion cases over 1000 seeds, at the default ratios:
+// at 1.25 (2.5x) the raw set re-sets a released latch on 6 seeds at 15 %
+// (seed 85 among the cases' 100), at 1.3 on 1, at 1.35 and 1.4 on none; at
+// 20 % 1.4 fails 11 seeds, against 5 with no raw set. 1.4 is the lowest
+// factor with a step of margin over the noise's high end.
+const MuLatchRawSetFactor = 1.4
 
 // smoothRatio folds this cycle's ratio r of the measured mu to the derived
 // one, read at now, into c's smoothed ratio and returns it. The first
@@ -664,9 +689,12 @@ func (a *SaturationAnalyzer) noteSaturatedReading(key, pod string, mu float64, r
 //     above it; and when it sits as far under it, but only once it has been
 //     stale for MeasuredLowHoldFor -- until then the lower of the two prices.
 //
-// The stale rule and a latch restored with no evidence read the ratio
-// smoothed over MuLatchRatioSmoothing, not the cycle's own
-// (SwitchMuLatchReadsSmoothedRatio).
+// The stale rule reads the ratio smoothed over MuLatchRatioSmoothing, not
+// the cycle's own, except that a cycle's ratio past MuLatchRawSetFactor
+// times the ratio sets it at once (SwitchMuLatchReadsSmoothedRatio). A
+// restored latch with no evidence picks its side from the smoothed ratio,
+// which a restore has just started over, so on its first cycle that is the
+// cycle's own.
 func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading throughputReading, derived whatif.DerivedMu, served float64, t tuning, now time.Time) bool {
 	return a.measuredYield(key, reading, derived, served, t, now) != muYieldNone
 }
@@ -702,7 +730,9 @@ func (a *SaturationAnalyzer) measuredYield(key string, reading throughputReading
 	_, onRecord := a.saturatedThroughput[key]
 	if a.muLatchSmoothed {
 		if c == nil {
-			// Known exactly when an absent memo would be (unknown, below).
+			// A memo made here is unknown exactly when no memo would be:
+			// for a window on record (restored, or brought back), so the
+			// test below reads the same either way.
 			c = &muChoice{latchKnown: !onRecord}
 			a.throughputMuChoice[key] = c
 		}
@@ -748,10 +778,13 @@ func (a *SaturationAnalyzer) measuredYield(key string, reading throughputReading
 		return muYieldNone
 	}
 	var yielded bool
-	if ratio >= 1 {
+	// A cycle far past the ratio sets the latch on its own: waiting for the
+	// smoothed ratio would price the higher, measured figure meanwhile.
+	rawSet := a.muLatchSmoothed && raw >= MuLatchRawSetFactor*maxR
+	if ratio >= 1 || rawSet {
 		// An unknown age is as stale as can be, as it is above: the safe
 		// side for a measurement over the derived figure.
-		yielded = ratio > maxR || (latched && ratio > retR)
+		yielded = rawSet || ratio > maxR || (latched && ratio > retR)
 	} else {
 		yielded = a.lowHeldOut(fresh, reading, t, now) && (ratio < 1/maxR || (latched && ratio < 1/retR))
 	}

@@ -122,15 +122,18 @@ func stepLatchCycles(t *testing.T, on bool, to float64) int {
 }
 
 // The reaction time the smoothing costs: a stale measurement whose ratio
-// steps from 1x to 2.5x sets the latch on the 14th cycle at 15 s (3.25 min;
-// MuLatchRatioSmoothing times ln 3 is 3.3 min), and from 1x to 4x on the
-// 5th (1.25 min). Off, it set on the step. The latch is not made useless:
-// a real stale measurement latches within those times.
+// steps from 1x to 2.8x or 4x, at or past MuLatchRawSetFactor times the
+// ratio, sets the latch on the step, as it did with the switch off. One
+// that steps to 2.5x waits for the smoothed ratio, the 14th cycle at 15 s
+// (3.5 min; MuLatchRatioSmoothing times ln 3 is 3.3 min), and to 2.2x the
+// 22nd (5.5 min; times ln 6, 5.4 min), pricing the higher, measured figure
+// until then. The latch is not made useless: a
+// real stale measurement latches within those times.
 func TestMuLatchBand_AStaleStepLatchesWithinTheStatedTime(t *testing.T) {
 	for _, tc := range []struct {
 		to      float64
 		on, off int
-	}{{2.5, 14, 1}, {4, 5, 1}} {
+	}{{2.8, 1, 1}, {4, 1, 1}, {2.5, 14, 1}, {2.2, 22, 1}} {
 		assert.Equal(t, tc.on, stepLatchCycles(t, true, tc.to), "1x -> %.1fx, switch on", tc.to)
 		assert.Equal(t, tc.off, stepLatchCycles(t, false, tc.to), "1x -> %.1fx, switch off", tc.to)
 	}
@@ -138,6 +141,7 @@ func TestMuLatchBand_AStaleStepLatchesWithinTheStatedTime(t *testing.T) {
 
 // A measurement whose ratio was past maxRatio while it was still fresh
 // latches on the cycle it goes stale: the smoothed ratio is already there.
+// At 2.2x, under MuLatchRawSetFactor, so only the smoothed ratio sets it.
 func TestMuLatchBand_ARatioSmoothedWhileFreshLatchesWhenStale(t *testing.T) {
 	a := bandAnalyzer(t, true)
 	tn := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
@@ -146,7 +150,7 @@ func TestMuLatchBand_ARatioSmoothedWhileFreshLatchesWhenStale(t *testing.T) {
 	fresh := tn.MuChoice.FreshFor.Duration()
 	for i := 0; ; i++ {
 		now := propStart.Add(time.Duration(i) * propCycle)
-		got := a.measuredYieldsToDerived(propMuKey, throughputReading{rate: 2.5, sampledAt: sampled}, d, 0, tn, now)
+		got := a.measuredYieldsToDerived(propMuKey, throughputReading{rate: 2.2, sampledAt: sampled}, d, 0, tn, now)
 		if now.Sub(sampled) < fresh {
 			require.False(t, got, "cycle %d: fresh", i)
 			continue
@@ -168,4 +172,60 @@ func TestMuLatchBand_ASecondReadingOnOneCycleAddsNothing(t *testing.T) {
 		assert.InDelta(t, first, c.smoothRatio(3.0, next), 1e-12)
 	}
 	assert.Less(t, first, 1.2, "one cycle of 15 s moves the ratio by about 8 %% of the step")
+}
+
+// A new window's ratio is its own. The old window read 1x of the derived
+// figure until the cycle before a write past EpisodeGap started a new one
+// at 2.2x; the new window latches on the first cycle it is stale. Carried
+// over, the old 1x would still hold the smoothed ratio under 2.0 then
+// (1.97 after the 5 min the new window is fresh).
+func TestMuLatchBand_ANewWindowStartsItsRatioOver(t *testing.T) {
+	a := bandAnalyzer(t, true)
+	now := propStart
+	a.now = func() time.Time { return now }
+	tn := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
+	d := whatif.DerivedMu{Rate: 1, OK: true}
+	ask := func() bool {
+		return a.measuredYieldsToDerived(propMuKey, a.saturatedThroughputReading(propMuKey), d, 0, tn, now)
+	}
+	a.recordSaturatedThroughputFrom(propMuKey, "pod-a", 1.0)
+	now = now.Add(a.horizons.EpisodeGap + time.Hour)
+	for range 4 {
+		require.False(t, ask(), "the old window at 1x")
+		now = now.Add(propCycle)
+	}
+	a.recordSaturatedThroughputFrom(propMuKey, "pod-a", 2.2)
+	written := now
+	for now.Sub(written) < tn.MuChoice.FreshFor.Duration() {
+		require.False(t, ask(), "fresh at %s", now.Sub(written))
+		now = now.Add(propCycle)
+	}
+	assert.True(t, ask(), "the first stale cycle of the new window at 2.2x")
+}
+
+// A window installed by a restore, or brought back, starts its ratio over
+// with its latch (unknownLatchLocked).
+func TestMuLatchBand_AnUnknownLatchStartsItsRatioOver(t *testing.T) {
+	a := bandAnalyzer(t, true)
+	a.throughputMuChoice[propMuKey] = &muChoice{latchKnown: true, ratio: 1.0, ratioAt: propStart}
+	a.unknownLatchLocked(propMuKey)
+	c := a.throughputMuChoice[propMuKey]
+	assert.False(t, c.latchKnown)
+	assert.Zero(t, c.ratio)
+	assert.True(t, c.ratioAt.IsZero())
+}
+
+// A served yield returns before the stale rule, and the cycle still counts
+// in the smoothed ratio: the next stale cycle reads it.
+func TestMuLatchBand_AServedYieldStillAdvancesTheRatio(t *testing.T) {
+	a := bandAnalyzer(t, true)
+	tn := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
+	d := whatif.DerivedMu{Rate: 1, OK: true}
+	sampled := propStart.Add(-2 * time.Hour)
+	require.False(t, a.measuredYieldsToDerived(propMuKey, throughputReading{rate: 1.0, sampledAt: sampled}, d, 0, tn, propStart))
+	next := propStart.Add(propCycle)
+	require.Equal(t, muYieldServed, a.measuredYield(propMuKey, throughputReading{rate: 0.4, sampledAt: sampled}, d, 1.0, tn, next))
+	c := a.throughputMuChoice[propMuKey]
+	assert.Equal(t, next, c.ratioAt, "the served cycle was folded in")
+	assert.Less(t, c.ratio, 1.0)
 }

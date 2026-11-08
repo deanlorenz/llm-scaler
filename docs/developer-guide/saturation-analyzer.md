@@ -783,7 +783,7 @@ Add a row when you add such a threshold.
 | threshold | set | clear | dwell | safe side | after a restart |
 | --- | --- | --- | --- | --- | --- |
 | ITL tier: full fit or pinned fit (`itl/tier_latch.go`, on the saturation, slo and throughput lines) | 10 steady readings, spread 0.30 of `k` | under 8 steady readings or spread 0.18, or a pinned fit pricing 3 % more | 10 min after the last change, unless the new line prices 3 % more replicas | the line that prices more replicas, from either tier, judged by what the line sustains where the analyzer prices it | the latch is not kept: a key with a restored slope stands at the pinned fit |
-| Mu's stale latch: measured or derived mu (`measuredYield`, `muChoice`) | the ratio of measured to derived mu, smoothed over `MuLatchRatioSmoothing` (3 min), past `muChoice.maxRatio` (2.0), or under 1/2.0 once stale for `lowHoldFor` | the smoothed ratio back within `muChoice.returnRatio` (1.6) | none: the smoothing is the delay. A stale ratio stepping from 1x to 2.5x sets on the 14th cycle at 15 s (3.25 min), to 4x on the 5th | the lower figure: latched over the derived one, unlatched under it | the latch is not kept, and restores to the safe side (`SwitchMuLatchRestoresSafe`); the smoothing starts again from the first reading |
+| Mu's stale latch: measured or derived mu (`measuredYield`, `muChoice`) | the ratio of measured to derived mu, smoothed over `MuLatchRatioSmoothing` (3 min), past `muChoice.maxRatio` (2.0), or one cycle's own ratio at or past `MuLatchRawSetFactor` times it (2.8x); under 1/2.0, smoothed only, once stale for `lowHoldFor` | the smoothed ratio back within `muChoice.returnRatio` (1.6) | none: the smoothing is the delay. A stale ratio stepping from 1x to 2.8x or more sets on the step, to 2.5x on the 14th cycle at 15 s, to 2.2x on the 22nd | the lower figure: latched over the derived one, unlatched under it | the latch is not kept, and restores to the safe side (`SwitchMuLatchRestoresSafe`); the smoothed ratio starts over with a restored, brought-back or new window |
 
 **Price.** A line's price is sequences over ITL at the fill the analyzer reads
 (`Admission.PricedRate`). At a fixed fill that is the ITL there. With a TPOT
@@ -1163,11 +1163,16 @@ replay switch (`mu_switches.go`):
   one cycle's ratio a stale measurement coming back across 1.6 let go and was
   set again several times in one excursion. Smoothed, it changes once on every
   seed at 10 % and 15 % (`TestMuLatchBand_*`). The cost is reaction time when
-  the ratio moves while the measurement is already stale: from 1x to 2.5x the
-  latch sets 3.25 min later, priced on the higher, measured figure until then.
-  A ratio already past 2x while the measurement was fresh latches on the cycle
-  it goes stale. The served yield is new evidence and reads the cycle's own
-  ratio.
+  the ratio moves while the measurement is already stale, and while the latch
+  waits to set it prices the higher, measured figure, the SLO side. So one
+  cycle's ratio at or past `MuLatchRawSetFactor` (1.4) times `maxRatio`, 2.8x,
+  sets it at once; a step to 2.5x waits 14 cycles at 15 s, to 2.2x 22. The
+  release always reads the smoothed ratio. At 1.25 (2.5x) the raw set re-set
+  a released latch on 6 of 1000 seeds at 15 % noise, at 1.4 on none. A ratio
+  already past 2x while the measurement was fresh latches on the cycle it goes
+  stale. The smoothed ratio starts over when the key's window does, and with a
+  restored or brought-back window. The served yield is new evidence and reads
+  the cycle's own ratio; its cycle still counts in the smoothed one.
 - **The latch restores to the safe side** (`SwitchMuLatchRestoresSafe`). The
   latch is not persisted. A window restored, or brought back, with no choice
   on record comes back latched over the derived figure and unlatched under
