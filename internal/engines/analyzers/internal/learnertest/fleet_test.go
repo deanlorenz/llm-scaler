@@ -5,6 +5,7 @@ import (
 	"go/token"
 	"io/fs"
 	"math"
+	"math/rand/v2"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -58,42 +59,80 @@ func TestFleet_TheVerdictTellsATruthfulOrderFromAWrongOne(t *testing.T) {
 
 // What the step is shown: only Ready replicas, sharing the arrivals, each
 // saturated and queueing when its share is over its mu; a scale-down waits
-// for the stabilization window.
+// for the stabilization window. Queue-blind, each is offered an equal share;
+// at the shortest-queue limit the shares still sum to the arrivals.
 func TestFleet_TheStepSeesTheReadyReplicas(t *testing.T) {
-	f := stepFleet()
-	f.Horizon = 10 * time.Minute
-	var sawJoiner, sawQueue bool
-	res := f.Run(func(now time.Time, e time.Duration, lambda float64, ready []Replica) int {
-		offered := 0.0
-		for _, r := range ready {
-			offered += r.Offered
-		}
-		if math.Abs(offered-lambda) > 1e-9 {
-			t.Fatalf("the replicas were offered %g of %g", offered, lambda)
-		}
-		for _, r := range ready {
-			if r.ReadyAt.After(now) {
-				t.Fatalf("%s is shown before it is Ready", r.Name)
+	for _, blind := range []bool{true, false} {
+		f := stepFleet()
+		f.Horizon = 10 * time.Minute
+		f.QueueBlind = blind
+		var sawJoiner, sawQueue bool
+		res := f.Run(func(now time.Time, e time.Duration, lambda float64, ready []Replica) int {
+			offered := 0.0
+			for _, r := range ready {
+				offered += r.Offered
+				if blind && r.Offered != lambda/float64(len(ready)) {
+					t.Fatalf("queue-blind: %s offered %g of %g over %d", r.Name, r.Offered, lambda, len(ready))
+				}
 			}
-			if r.Saturated && r.Backlog > 0 {
-				sawQueue = true
+			if math.Abs(offered-lambda) > 1e-9 {
+				t.Fatalf("queue-blind %v: the replicas were offered %g of %g", blind, offered, lambda)
 			}
-			if r.Index >= 2 {
-				sawJoiner = true
+			for _, r := range ready {
+				if r.ReadyAt.After(now) {
+					t.Fatalf("%s is shown before it is Ready", r.Name)
+				}
+				if r.Saturated && r.Backlog > 0 {
+					sawQueue = true
+				}
+				if r.Index >= 2 {
+					sawJoiner = true
+				}
 			}
+			if e >= 5*time.Minute {
+				return 1
+			}
+			return Ceil(lambda)
+		})
+		if !sawQueue || !sawJoiner {
+			t.Errorf("queue-blind %v: the step never saw a queue (%v) or a joined replica (%v)", blind, sawQueue, sawJoiner)
 		}
-		if e >= 5*time.Minute {
-			return 1
+		// The order fell to 1 at 5 min; the window keeps the fleet at 6 for
+		// 5 min more, to the horizon.
+		if res.Final != 6 {
+			t.Errorf("queue-blind %v: the fleet fell to %d inside the stabilization window: %v", blind, res.Final, res.Trace)
 		}
-		return Ceil(lambda)
-	})
-	if !sawQueue || !sawJoiner {
-		t.Errorf("the step never saw a queue (%v) or a joined replica (%v)", sawQueue, sawJoiner)
 	}
-	// The order fell to 1 at 5 min; the window keeps the fleet at 6 for 5
-	// min more, to the horizon.
-	if res.Final != 6 {
-		t.Errorf("the fleet fell to %d inside the stabilization window: %v", res.Final, res.Trace)
+}
+
+// A replica that drains its queue while offered less than its mu serves its
+// share and its queue, up to its mu: offered nothing, it still serves at its
+// limit, and it never serves less than the lower of its share and its mu.
+func TestFleet_ADrainingReplicaServesItsQueue(t *testing.T) {
+	f := Fleet{Pods: []float64{1, 1}, AddedMu: 1, QueueBlind: false, Need: Ceil, Horizon: 20 * time.Minute,
+		Lambda: func(e time.Duration) float64 {
+			if e < 2*time.Minute {
+				return 4
+			}
+			return 1
+		}}
+	var sawDrain bool
+	f.Run(func(_ time.Time, _ time.Duration, _ float64, ready []Replica) int {
+		for _, r := range ready {
+			if r.Served > r.Mu+1e-12 || r.Served < min(r.Offered, r.Mu)-1e-12 {
+				t.Fatalf("%s served %g, offered %g at mu %g", r.Name, r.Served, r.Offered, r.Mu)
+			}
+			if r.Offered < r.Mu && r.Backlog > 0 {
+				sawDrain = true
+				if r.Served != r.Mu || !r.Saturated {
+					t.Fatalf("%s drains a queue of %g offered %g and served %g (saturated %v)", r.Name, r.Backlog, r.Offered, r.Served, r.Saturated)
+				}
+			}
+		}
+		return 2
+	})
+	if !sawDrain {
+		t.Fatal("premise: no replica drained a queue")
 	}
 }
 
@@ -203,12 +242,63 @@ func TestFleet_TheRouterFillsTheShortestQueues(t *testing.T) {
 		{"weight scales the level", 9, []float64{2, 1}, []float64{3, 0}, []float64{5, 4}},
 		{"weight zero gets nothing", 6, []float64{0, 1}, []float64{0, 0}, []float64{0, 6}},
 		{"no arrivals", 0, []float64{1, 1}, []float64{0, 4}, []float64{0, 0}},
+		{"equal queues split equally", 6, []float64{1, 1, 1}, []float64{2, 2, 2}, []float64{2, 2, 2}},
+		{"a queue tied with the level gets none", 8, []float64{1, 1, 1}, []float64{4, 0, 0}, []float64{0, 4, 4}},
+		{"negative weight gets nothing", 6, []float64{-1, 1}, []float64{0, 0}, []float64{0, 6}},
+		{"NaN weight gets nothing", 6, []float64{math.NaN(), 1}, []float64{0, 0}, []float64{0, 6}},
+		{"infinite weight gets nothing", 6, []float64{math.Inf(1), 1}, []float64{0, 0}, []float64{0, 6}},
+		{"NaN queue gets nothing", 6, []float64{1, 1}, []float64{math.NaN(), 0}, []float64{0, 6}},
+		{"no queue a number: split by weight", 6, []float64{1, 2}, []float64{math.NaN(), math.Inf(1)}, []float64{2, 4}},
+		{"a negative queue counts as none", 6, []float64{1, 1}, []float64{-5, 0}, []float64{3, 3}},
 	} {
 		got := route(c.lambda, c.w, c.q)
 		for i := range got {
 			if math.Abs(got[i]-c.out[i]) > 1e-9 {
 				t.Errorf("%s: offers %v, want %v", c.name, got, c.out)
 				break
+			}
+		}
+	}
+}
+
+// The router on random fleets: the offers sum to the arrivals and none is
+// negative; every replica offered something ends at one level of queue plus
+// offer per unit of weight, and every replica offered nothing already holds
+// that level or more.
+func TestFleet_TheRouterFillsToOneLevel(t *testing.T) {
+	rng := rand.New(rand.NewPCG(1, 2))
+	for trial := range 2000 {
+		n := 1 + rng.IntN(8)
+		w, q := make([]float64, n), make([]float64, n)
+		for i := range n {
+			w[i] = 0.1 + 3*rng.Float64()
+			if rng.IntN(3) > 0 {
+				q[i] = 50 * rng.Float64()
+			}
+		}
+		lambda := 20 * rng.Float64()
+		offers := route(lambda, w, q)
+		sum, level := 0.0, math.NaN()
+		for i, o := range offers {
+			if !(o >= 0) {
+				t.Fatalf("trial %d: offer %g to replica %d (w %v, q %v, lambda %g)", trial, o, i, w, q, lambda)
+			}
+			sum += o
+			if o > 0 {
+				l := (q[i] + o) / w[i]
+				if math.IsNaN(level) {
+					level = l
+				} else if math.Abs(l-level) > 1e-9*max(1, level) {
+					t.Fatalf("trial %d: replica %d fills to %g, another to %g (w %v, q %v, lambda %g, offers %v)", trial, i, l, level, w, q, lambda, offers)
+				}
+			}
+		}
+		if math.Abs(sum-lambda) > 1e-9*max(1, lambda) {
+			t.Fatalf("trial %d: offers sum to %g of %g", trial, sum, lambda)
+		}
+		for i, o := range offers {
+			if o == 0 && lambda > 0 && q[i]/w[i] < level-1e-9*max(1, level) {
+				t.Fatalf("trial %d: replica %d holds %g under the level %g and was offered nothing", trial, i, q[i]/w[i], level)
 			}
 		}
 	}

@@ -60,10 +60,11 @@ type probeCase struct {
 	// pods and addedMu (a slow replica that recovers).
 	mu func(i int, elapsed time.Duration) float64
 	// lambda is the arrival rate at an elapsed time, routed over the Ready
-	// replicas by queue, as the EPP's queue scorer routes, and by weight
-	// when set (learnertest.Fleet.Weight). queueBlind splits it by weight
-	// alone (learnertest.Fleet.QueueBlind), for a case whose premise is a
-	// queue that a queue-aware router would not let form.
+	// replicas at the shortest-queue limit, and by weight when set
+	// (learnertest.Fleet.Weight). queueBlind splits it by weight alone
+	// (learnertest.Fleet.QueueBlind). The EPP lies between the two; a case
+	// whose premise is a queue the shortest-queue limit would not let form
+	// sets queueBlind.
 	lambda     func(elapsed time.Duration) float64
 	weight     func(i int, elapsed time.Duration) float64
 	queueBlind bool
@@ -197,7 +198,9 @@ func runProbe(t probeTB, pc probeCase) probeResult {
 		}
 		rows := make([]domain.ReplicaMetrics, 0, len(ready))
 		for _, r := range ready {
-			kv := 0.95 * r.Offered / r.Mu
+			// KV in proportion to what it served, its queue included: a
+			// replica draining a queue it is offered nothing for is full.
+			kv := 0.95 * r.Served / r.Mu
 			if r.Saturated {
 				kv = 0.95
 			}
@@ -337,9 +340,11 @@ func TestClosedLoopProbe_ASlowReplicaInsideTheServedBoundStaysUnderTheBound(t *t
 // replicas at mu 1 under 12 req/s, the router sending twice the share to
 // four of them: those four queue and are read at 1, their limit, while the
 // fourteen others serve unqueued, so a minority of the fleet wrote the figure.
-// The router steers by weight alone (queueBlind), as prefix affinity can: a
-// queue-aware one holds the four's queue to a couple of requests, no figure
-// is written from them, and the fleet meets the return 3m30s under need.
+// The router steers by weight alone (queueBlind), as prefix affinity can. At
+// the shortest-queue limit the four's queue is held to a couple of requests
+// and the case's premise is gone: measured there, the fleet peaks at 45 for
+// a need of 17 at the return and sits 3m30s under need, occupancy reading
+// every replica full while the return's queue drains (cause B, #520).
 // Then a lull at 2 req/s from 10 to 45 min, which queues nothing for longer
 // than lowHoldFor, and the load returns at 12. The figure is not under what
 // the fleet serves in the lull (a fleet at a fraction of its limit serves a
@@ -387,11 +392,12 @@ func TestClosedLoopProbe_ASteeringRouterKeepsARightMinorityFigure(t *testing.T) 
 // slowReplicaCase is sixteen replicas at mu 1, one of them at slow for its
 // first 10 min and at 1 after, under 12.8 req/s split equally by a
 // queue-blind router: 0.8 each, so the slow one queues and the rest serve
-// unqueued at KV 0.76, under the 0.8 line. A queue-aware router would send
-// the slow one's excess to its siblings and hold its queue to a few requests,
-// too short to be read (#282 H1 saw it queue). The horizon is 60 min, past lowHoldFor (30 min) after the slow
-// replica's last saturated reading and the 5 min scale-down stabilization,
-// so the run covers the minority rule's decision.
+// unqueued at KV 0.76, under the 0.8 line. The shortest-queue limit would
+// send the slow one's excess to its siblings and hold its queue to a few
+// requests, too short to be read; the real router lies between, and #282 H1
+// saw a slow replica queue behind it. The horizon is 60 min, past lowHoldFor
+// (30 min) after the slow replica's last saturated reading and the 5 min
+// scale-down stabilization, so the run covers the minority rule's decision.
 func slowReplicaCase(slow float64) probeCase {
 	pods := make([]float64, 16)
 	for i := range pods {
@@ -474,18 +480,23 @@ func TestClosedLoopProbe_ARestoredSnapshotCarriesTheFleetThroughARestart(t *test
 // their ages (variantmeta/discovery.go), and shown them the floor credits
 // what each will drain once Ready.
 //
-// Measured: peak 24 at 90 s and 22 at 463 s, against 31 and 30 with them
-// hidden; time under need 0 either way. The ceiling is the start probes'
-// (half again over need, plus a replica). The router is queue-blind, so the
-// fleet is the floor's projection alone: under the queue-aware router the
-// replicas that join fill to the first four's queue at once, and occupancy
-// orders past the ceiling at 463 s whether the starting replicas are shown
-// or not (the decode-step-start-463s ledger row, #520).
+// Measured: peak 25 at 90 s at the shortest-queue limit, and 22 at 463 s on
+// the even split, against 31 and 30 with them hidden; time under need 0
+// either way. The ceiling is the start probes' (half again over need, plus a
+// replica). At 463 s the router is the even split, so the fleet is the
+// floor's projection alone: at the shortest-queue limit the replicas that
+// join fill to the first four's queue at once, and occupancy orders past the
+// ceiling whether the starting replicas are shown or not (the
+// decode-step-start-463s-jsq ledger row, #520).
 func TestClosedLoopProbe_StartingReplicasAreCreditedNotReordered(t *testing.T) {
-	for _, start := range []time.Duration{probeStart, 463 * time.Second} {
+	for _, c := range []struct {
+		start      time.Duration
+		queueBlind bool
+	}{{probeStart, false}, {463 * time.Second, true}} {
+		start := c.start
 		t.Run(start.String(), func(t *testing.T) {
 			pc := restartStepCase(0, false, 0)
-			pc.start, pc.queueBlind = start, true
+			pc.start, pc.queueBlind = start, c.queueBlind
 			r := runProbe(t, pc)
 			pc.hidePending = true
 			hidden := runProbe(t, pc)
@@ -581,4 +592,36 @@ func TestClosedLoopProbe_AShortStabilizationThroughARestartSettlesAtNeed(t *test
 		short.underFor, long.underFor)
 	require.Empty(t, short.verdict())
 	require.Equal(t, long.underFor, short.underFor)
+}
+
+// backlogClears and the horizon a start probe is judged at, pinned at the
+// cases the formula's doc works through: the 463 s decode step is judged at
+// 44m15s (backlogClears 44m9s, rounded up to a cycle); at 90 s and for the
+// 463 s load step backlogClears falls inside the 40 min horizon; a rate that
+// stays under the first replicas' capacity queues nothing, and the term is
+// start plus the cycle; a case with no step keeps its horizon.
+func TestClosedLoopProbe_TheBacklogAllowanceIsTheFormula(t *testing.T) {
+	probes := map[string]startProbe{}
+	for _, sp := range startProbes() {
+		probes[sp.name] = sp
+	}
+	under := probes["load-step"]
+	under.pc.lambda = stepTo(1.2, 1.5, 2*time.Minute)
+	for _, c := range []struct {
+		name          string
+		sp            startProbe
+		start         time.Duration
+		clears, judge time.Duration
+	}{
+		{"decode step, 463 s", probes["decode-step"], 463 * time.Second, 44*time.Minute + 9*time.Second, 44*time.Minute + 15*time.Second},
+		{"decode step, 90 s", probes["decode-step"], probeStart, 25*time.Minute + 30*time.Second, 40 * time.Minute},
+		{"load step, 463 s", probes["load-step"], 463 * time.Second, 30*time.Minute + 54*time.Second, 40 * time.Minute},
+		{"a step under capacity, 463 s", under, 463 * time.Second, 2*time.Minute + 478*time.Second + 5*time.Minute, 40 * time.Minute},
+		{"no step", probes["slow-pod-055"], 463 * time.Second, -1, 60 * time.Minute},
+	} {
+		if c.clears >= 0 {
+			require.Equal(t, c.clears, backlogClears(c.sp.pc, c.sp.step, c.start), "%s: backlogClears", c.name)
+		}
+		require.Equal(t, c.judge, verdictHorizon(c.sp.pc, c.sp.step, c.start), "%s: verdictHorizon", c.name)
+	}
 }

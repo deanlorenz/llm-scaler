@@ -16,13 +16,17 @@ import (
 //
 // The simulator, one Cycle at a time:
 //
-//   - The router is queue-aware, as the EPP's queue scorer is: each cycle's
-//     arrivals go to the replicas holding the fewest waiting requests
-//     (route). With no queue anywhere that is an equal split, or a split
-//     by Weight, a router that also steers by something else. QueueBlind
-//     is a router that splits by Weight alone.
-//   - Each replica serves up to its true mu; what it cannot serve queues on
-//     it, and its queue drains as the router sends it less than its mu.
+//   - The router is one of two bounds on the real one. By default it is
+//     the shortest-queue limit (route): each cycle's arrivals go to the
+//     replicas holding the fewest waiting requests, and a replica already
+//     queued past the others gets none. QueueBlind splits by Weight alone,
+//     whatever is queued. The EPP lies between the two: its queue scorer
+//     is one weighted scorer beside KV and prefix affinity, and a slow
+//     replica has been seen to queue behind it (#282 H1). With no queue
+//     anywhere the two agree: an equal split, or a split by Weight.
+//   - Each replica serves up to its true mu, from its queue first; what it
+//     cannot serve queues on it, and its queue drains as the router sends
+//     it less than its mu.
 //   - The step (the analyzer under test, and how its rows are made from the
 //     replicas) returns an order, in replicas.
 //   - An order above the fleet starts replicas, Ready after the start time
@@ -69,9 +73,10 @@ type Fleet struct {
 	Weight func(i int, elapsed time.Duration) float64
 	// QueueBlind splits the arrivals by Weight alone, whatever each replica
 	// holds queued: a Service's round robin, or a router with no queue
-	// scorer. A case whose premise is a replica that queues while its
-	// siblings do not runs on it; a queue-aware router would not let that
-	// queue form.
+	// scorer. Unset, the router is the shortest-queue limit (route). The
+	// EPP lies between the two. A case whose premise is a replica that
+	// queues while its siblings do not runs on it; the shortest-queue limit
+	// would not let that queue form.
 	QueueBlind bool
 	Horizon    time.Duration
 	// Need is the fleet a truthful analyzer orders at arrival rate lambda.
@@ -100,10 +105,11 @@ type Replica struct {
 	Name    string
 	ReadyAt time.Time
 	// Mu is its true rate, Offered its share of the arrivals, Served what
-	// it served, and Backlog its queue after the cycle.
+	// it served (its share and its queue, up to its mu), and Backlog its
+	// queue after the cycle.
 	Mu, Offered, Served, Backlog float64
-	// Saturated is whether it served at its limit: it queued, or was
-	// offered its mu or more.
+	// Saturated is whether it served at its limit: it is still queued, or
+	// served its mu.
 	Saturated bool
 }
 
@@ -212,12 +218,12 @@ func (f Fleet) Run(step Step) Result {
 		for j, i := range ready {
 			p, mu := pods[i], trueMu(i, elapsed)
 			offered := offers[j]
+			// A replica offered less than its mu drains its queue with
+			// the rest: one offered nothing while it drains serves at its
+			// limit, not zero.
+			served := min(mu, offered+p.backlog/dt)
 			p.backlog = max(p.backlog+(offered-mu)*dt, 0)
-			saturated := p.backlog > 0 || offered >= mu
-			served := offered
-			if saturated {
-				served = mu
-			}
+			saturated := p.backlog > 0 || served >= mu
 			replicas = append(replicas, Replica{Index: i, Name: p.name, ReadyAt: p.readyAt, Mu: mu,
 				Offered: offered, Served: served, Backlog: p.backlog, Saturated: saturated})
 		}
@@ -283,30 +289,48 @@ func (f Fleet) Run(step Step) Result {
 }
 
 // route is the router: arrival rate lambda split over replicas of weight w
-// holding queue q (requests waiting, over the cycle: a rate). It is the fluid
-// limit of a shortest-queue pick, which the EPP's queue scorer makes per
-// request: the arrivals fill the replicas to one level L of queue per unit of
-// weight, and a replica whose queue is already over the level gets none,
+// holding queue q (requests waiting, over the cycle: a rate). It is the
+// shortest-queue limit: the fluid form of sending every request to the
+// replica with the fewest waiting. The arrivals fill the replicas to one
+// level L of queue per unit of weight, and a replica whose queue is already
+// over the level gets none,
 //
 //	offer_i = max(w_i L - q_i, 0),  sum_i offer_i = lambda.
 //
 // With no queue anywhere it is the split by weight, and with equal weights
-// the equal split. A replica that queues gets a share that drains it, so the
-// queue a slow start leaves on the first replicas is spread over the fleet
-// instead of fed. It is a model of the scorer's ordering only: the router
-// does not know a replica's mu, and the EPP's other scorers (KV, prefix) are
-// what Weight stands for. A replica of weight zero or less gets nothing.
+// the equal split. A queued replica gets nothing until the others reach its
+// queue, so the queue a slow start leaves on the first replicas drains at
+// their mu instead of being fed. The router does not know a replica's mu.
+// The EPP is not this limit: its queue scorer is one weighted scorer among
+// KV and prefix affinity, so it lies between this and an even split.
+//
+// A replica whose weight is not a positive finite number gets nothing, and
+// so does one whose queue is not a finite number while another's is. A
+// negative queue counts as none.
 func route(lambda float64, w, q []float64) []float64 {
 	offers := make([]float64, len(w))
-	order := make([]int, 0, len(w))
+	weighed := make([]int, 0, len(w))
 	for j := range w {
-		if w[j] > 0 {
+		if w[j] > 0 && !math.IsInf(w[j], 1) {
+			weighed = append(weighed, j)
+		}
+	}
+	if !(lambda > 0) || len(weighed) == 0 {
+		return offers
+	}
+	queue := make([]float64, len(w))
+	order := make([]int, 0, len(weighed))
+	for _, j := range weighed {
+		if !math.IsNaN(q[j]) && !math.IsInf(q[j], 0) {
+			queue[j] = max(q[j], 0)
 			order = append(order, j)
 		}
 	}
-	if !(lambda > 0) || len(order) == 0 {
-		return offers
+	if len(order) == 0 {
+		// No queue reads as a number: split by weight.
+		order = weighed
 	}
+	q = queue
 	sort.SliceStable(order, func(a, b int) bool { return q[order[a]]/w[order[a]] < q[order[b]]/w[order[b]] })
 	level, sumW, sumQ, n := 0.0, 0.0, 0.0, 0
 	for n < len(order) {
