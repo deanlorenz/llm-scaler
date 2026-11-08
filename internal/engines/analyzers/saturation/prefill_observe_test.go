@@ -235,7 +235,9 @@ func TestPrefillObserve_TheBoundIsObservedThroughAnalyze(t *testing.T) {
 		require.Len(t, lines[i], 1, "cycle %d", i)
 		l := lines[i][0]
 		assert.Contains(t, l, `"vpSource"="back-pressure-bound"`, "cycle %d", i)
-		assert.Contains(t, l, `"vp"=24000`, "cycle %d: the bound in tokens/s", i)
+		// The mean of its two readings, 24000 and 23760: two minutes hold
+		// no lower confidence bound above it (SwitchPrefillBoundHeldConfidence).
+		assert.Contains(t, l, `"vp"=23880`, "cycle %d: the bound in tokens/s", i)
 		assert.Contains(t, l, `"vpSamples"=2`, "cycle %d: its two readings", i)
 		assert.Contains(t, l, `"vpLowerBound"=true`, "cycle %d", i)
 	}

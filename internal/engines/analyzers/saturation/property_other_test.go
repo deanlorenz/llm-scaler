@@ -1,6 +1,7 @@
 package saturation
 
 import (
+	"math"
 	"sort"
 	"time"
 
@@ -20,11 +21,52 @@ func otherCases() []propCase {
 		{class: classHeterogeneity, learner: "prefill-bound", name: "one-pod-doubled", family: familyDirect, tuning: tunedDefault, seeds: cheapSeeds, check: checkMuDoubled(bound)},
 		{class: classHeterogeneity, learner: "prefill-bound", name: "one-slow-pod-n4", family: familyDirect, tuning: tunedDefault, seeds: cheapSeeds, check: checkMuOneSlowPod(bound, 4)},
 		{class: classNDependence, learner: "prefill-bound", name: "iid-max", family: familyDirect, tuning: tunedDefault, seeds: 10, check: checkMuNDependence(bound, false)},
+		{class: classNDependence, learner: "prefill-bound", name: "iid-max-sigma15", family: familyDirect, tuning: tunedDefault, seeds: 10, check: checkMuNDependenceAt(bound, arNoiseSpec{0.15, 0})},
+		{class: classNDependence, learner: "prefill-bound", name: "ar-max", family: familyDirect, tuning: tunedDefault, seeds: 10, check: checkMuNDependenceAt(bound, rateNoise10)},
+		{class: classNDependence, learner: "prefill-bound", name: "ar-max-sigma15", family: familyDirect, tuning: tunedDefault, seeds: 10, check: checkMuNDependenceAt(bound, rateNoise15)},
 		{class: classEdges, learner: "idle", name: "idle-line-030", family: familyTimeBase, tuning: tunedDefault, seeds: cheapSeeds, check: checkIdleEdge(realIdleVerdict)},
 		{class: classFirstSample, learner: "start-time", name: "between-sample-and-default", family: familyDirect, tuning: tunedDefault, seeds: cheapSeeds, check: checkStartFirstSample},
 		{class: classFirstSample, learner: "start-time", name: "seed-bounds", family: familyDirect, tuning: tunedDefault, seeds: cheapSeeds, check: checkStartSeedBounds},
 		{class: classStale, learner: "start-time", name: "reaches-measured", family: familyDirect, tuning: tunedDefault, seeds: cheapSeeds, check: checkStartConverges},
 		{class: classEdges, learner: "start-time", name: "outlier-3x", family: familyDirect, tuning: tunedDefault, seeds: cheapSeeds, check: checkStartOutlier},
+	}
+}
+
+// checkMuNDependenceAt is checkMuNDependence on direct inputs at the noise
+// ns: each pod's rate is 1 + an AR(1) deviation of standard deviation
+// ns.sigma whose lag-one correlation from one minute to the next is ns.phi.
+// The measured lag-one (rateNoise10, rateNoise15) is per 15 s cycle, so over
+// a minute it is about phi^4: taking phi as the minute's correlation
+// overstates it, and with it the spread of the window's mean.
+func checkMuNDependenceAt(newL func() muLearner, ns arNoiseSpec) func(uint64) error {
+	return func(seed uint64) error {
+		r := propRand(seed)
+		const trials, minutes = 40, 10
+		for _, n := range []int{1, 2, 4, 16} {
+			sum := 0.0
+			for range trials {
+				paths := make([][]float64, n)
+				for p := range paths {
+					paths[p] = arNoise(r, minutes, ns.sigma, ns.phi)
+				}
+				reads := make([][]float64, minutes)
+				for m := range reads {
+					reads[m] = make([]float64, n)
+					for p := range n {
+						reads[m][p] = 1 + paths[p][m]
+					}
+				}
+				sum += muFigure(newL(), reads)
+			}
+			mean := sum / trials
+			if !(mean > 0) {
+				return violation(kindNotLearned, "N=%d: no figure", n)
+			}
+			if e := mean - 1; !(math.Abs(e) <= propNDepBias) {
+				return violation(kindNDependent, "%s: E at N=%d is %.4f against a true 1: %+.1f%%", ns, n, mean, 100*e)
+			}
+		}
+		return nil
 	}
 }
 

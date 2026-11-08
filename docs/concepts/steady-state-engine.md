@@ -214,8 +214,10 @@ little. These limits keep that small:
   for the new replicas to become ready.
 - While decode is still saturated, prefill is held as before, so the bound
   does not add prefill for decode's shortfall.
-- The bound only rises. A later reading behind a full decode is lower once
-  prefill has grown, and does not replace a higher one.
+- The bound does not fall below a level its readings held. A later reading
+  behind a full decode is lower once prefill has grown, and does not lower
+  it. Readings are noisy, so the level held is a little under their average,
+  never their highest one: the highest reading is high because of the noise.
 - Within a minute the bound is the average of the queued prefill replicas,
   not the fastest one.
 - Prefill's own reading replaces the bound as soon as prefill saturates while

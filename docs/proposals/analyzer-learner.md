@@ -794,8 +794,10 @@ class below runs on it as well as on direct inputs.
 listed when 0b landed that have since been cleared are known truth on the
 time-base family (A5, #393), first sample on k2 (#392), first sample on start
 time (`first-sample/start-time/between-sample-and-default`, 86f9cb5f0), edges
-on the k2 key boundary (#396), and heterogeneity on mu
-(`half-served-max-slow-pod` and `sibling-yield-slow-pod`, #495). 0b commits a ledger of (class, learner, finding,
+on the k2 key boundary (#396), heterogeneity on mu
+(`half-served-max-slow-pod` and `sibling-yield-slow-pod`, #495), and
+n-dependence on the prefill bound (`n-dependence/prefill-bound/iid-max`,
+#397, with three more cases at 15 % and AR(1) noise). 0b commits a ledger of (class, learner, finding,
 measured result, the issue that clears it or "open"), and `CheckLedger` holds
 the owner to that form. It reads no tracker, so a closed issue passes. A listed
 case runs and must
@@ -1179,7 +1181,7 @@ restores, exact repeats and unknown ages. Two rules apply to all:
 | borrowed k2 | too high | the upward relaxation over 6 h of serving time |
 | measured mu | too high | the stale yield to a higher derived figure after 30 min (5 min toward a lower one). The restart that drops the latch (see [the mu choice](#the-mu-choice); restored to the safe side since PR 3). An unknown age (above; safe side since PR 3). An exact repeat: since PR 3 it refreshes freshness only under the derived figure, where losing it would let a repeating low rate yield to the higher figure, and not over it, where staleness yields to the lower one. Backed by new evidence, so allowed: the **immediate** yield when a Ready replica serves more than 2x it. The sibling yield was on this list; since #495 it is capped at the measurement (`mu-yield-capped-at-measurement`), so it no longer moves mu up: what the siblings serve reaches mu through the sample instead. Since #495, with no line, a figure a minority of the fleet wrote, under what the fleet's Ready replicas serve, gives way to that served bound after `lowHoldFor` with no saturated reading agreeing with it (`mu-minority-figure-expires`). The reason is the low hold's: an over-ordered fleet never saturates to correct a low figure. The bound is a lower bound, so the move stops at what the replicas showed they sustain, never at no mu. A figure at or over the bound, the whole fleet's, a borrowed one, or one whose writers are unknown (a restore), stands. And an unread replica under the KV line counts at what it serves over the scale-up target (`mu-unread-replica-at-target`): at most 1 / target over what it served unqueued, so the floor orders the fleet in which it serves that again, and no more ([one slow pod, as built](#one-slow-pod-as-built-495)) |
 | ITL line and derived mu | ITL(kPrice) too low, that is, derived mu too high (with B pinned low, A comes out too high and the prediction is still low) | the 6 ms default B or a stashed B. With B pinned below the true intercept, the pinned A absorbs the error and the prediction at kPrice is low by (B_true − B_pin)(1 − kPrice / k̄): **risky whenever the fleet runs above its pricing point**, the under-provisioned fleet that most needs a correct line |
-| prefill bound | too high | its window max only rises, survives the episode reset through `RaiseLast`, and never ages while read. Because `RaiseLast` carries the max past every reset, it is a running max over the bound's life: about 1.5σ above the mean after 10 readings, about 3.2σ after a day at one a minute. Unreviewed |
+| prefill bound | too high | before #397, its window max only rose, survived the episode reset through `RaiseLast`, and never aged while read: a running max over the bound's life, about 1.5σ above the mean after 10 readings and 3.2σ after a day at one a minute (measured at one pod: +15 % after ten minutes at 10 % noise, +50 % after a day at 15 %). Since #397 (`prefill-bound-held-confidence`) the window keeps its samples as read and the bound is the larger of their mean and a **held** figure, the max of lower confidence bounds on a window's mean (`mean - t * sd / sqrt(n)`, Student's t), the k-th taken at `1 - alpha/(k(k+1))` with alpha 0.05, so over the bound's life all of them stand under the true rate with 95 % confidence. The held figure still only rises and carries past a new window after `EpisodeGap`; the reason is the episode test's (a reading behind a full decode falls once the bound grows prefill, and pricing on it grew prefill every episode). It is the move toward the SLO side this row names, bounded: measured at one pod and 19 % noise, the bound is within 0.2 % of the truth after ten minutes and an hour and 1.2 % high after a day. Not in the snapshot: after a restart the bound is the window's mean, the safe side. Left: the within-minute fold takes a max over one pod's re-reads, as mu's does, which the property rig (one read a pod a minute) does not exercise; read four times a minute at AR(1) noise (phi 0.3 per 15 s cycle), the bound reads 8.8 % high at 10 % noise and 13 % at 15 %, at one pod and at four |
 | start time | **both** | too low under-orders a fleet that is behind (λ > mu · ready). Too high, in `internal/signals/floor/floor.go`: `DrainHorizon` under-prices the backlog whenever S exceeds 60 s, `startingCredit` credits a stuck pod for up to 2S, and a fleet with spare projects more drain and orders less. Share pacing errs the other way: too low moves GPUs for bursts that end first. PR 5 bounds both sides |
 | share need history (#14) | too low for the role, too high for its neighbours | `PeakNeed` is a max of adjacent-pair minima, low by design; trimming to the swing window ages a peak out with no new evidence |
 | share release time (#15) | too low | p90 over ≥ 3 releases is the max at n = 3 |
@@ -1353,7 +1355,7 @@ The clock fix itself is [2.2](#22-one-clock). The clocks in use:
 | --- | --- |
 | **write** | ITL line age, the shared line |
 | **use** | k2 and mu eviction, 7 d after the last read; the prefill bound's `Touch` |
-| **write gap** | k2's and mu's new episode after 24 h without a write, on the same window as the use clock. The prefill bound defeats it (`RaiseLast`) |
+| **write gap** | k2's and mu's new episode after 24 h without a write, on the same window as the use clock. The prefill bound's held figure outlives it (`RaiseLast` before #397) |
 | **agreement** | mu freshness: the last saturated reading within 2x. Refused readings set it too. An exact repeat sets it only while the measurement is under the derived figure (PR 3) |
 | **serving** | the borrowed k2 relaxation, and the hold clocks that only a serving row advances |
 | **existence** | `VariantTimeout` (last reported or found to exist), the ITL sweep at 24 h unseen, `evictStartSeenPods` |
@@ -4007,7 +4009,12 @@ stabilization), need 18, bound 21.7:
   size a slow variant shorter than measured
   ([PR 5 design](#pr-5-design-start-time-and-the-snapshot)).
 - **The prefill bound** is reviewed before it moves: a double scrape once
-  doubled its input, its max kept it, and `RaiseLast` keeps it past a reset.
+  doubled its input, its max kept it, and `RaiseLast` kept it past a reset.
+  #395 folded the pods of a minute at their mean; #397 replaced the max over
+  minutes with the larger of the window's mean and a held lower confidence
+  bound ([3.4](#34-which-side-breaks-the-slo)). Both moved on property cases
+  and unit tests: no committed recording turns the bound on, so the recorded
+  P/D run with a double-scrape fixture is still owed.
 - **The recorder can evict the controller** if pointed at `/tmp`. It is off by
   default and has its own volume and cap.
 - **Open defects this does not fix:** shape dependence of the ITL line (#275).

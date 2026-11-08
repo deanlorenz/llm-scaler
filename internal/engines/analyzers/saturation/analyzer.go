@@ -127,6 +127,13 @@ type SaturationAnalyzer struct {
 	// readings per replica (recordSaturatedThroughputFrom); swept with the
 	// window.
 	throughputPodReads map[string]podReads
+	// prefillBoundHeld is, per prefill bound window key, the bound's held
+	// figure (prefill_bound_held.go); swept and put aside with the window,
+	// kept past a new window after EpisodeGap.
+	prefillBoundHeld map[string]prefillHeldBound
+	// prefillBoundConfident is SwitchPrefillBoundHeldConfidence (issue #397):
+	// on from the constructor; a replay turns it off (SetSwitchesForReplay).
+	prefillBoundConfident bool
 	// throughputMuChoice is, per saturatedThroughput key, what the choice
 	// between its measured and its derived mu remembers: when the bucket
 	// last read saturated in agreement with its measurement, whether a
@@ -640,6 +647,8 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		throughputSampledAt:    make(map[string]time.Time),
 		throughputLastRead:     make(map[string]float64),
 		throughputPodReads:     make(map[string]podReads),
+		prefillBoundHeld:       make(map[string]prefillHeldBound),
+		prefillBoundConfident:  true,
 		throughputMuChoice:     make(map[string]*muChoice),
 		capacityStore:          store,
 		decodeSaturatedAt:      make(map[string]time.Time),
@@ -1148,6 +1157,7 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 			delete(a.throughputSampledAt, key)
 			delete(a.throughputLastRead, key)
 			delete(a.throughputPodReads, key)
+			delete(a.prefillBoundHeld, key)
 			delete(a.throughputMuChoice, key)
 			evicted.MuWindows++
 			// Mu forgets the key itself, unused past its horizon, unless a

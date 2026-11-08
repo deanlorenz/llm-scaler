@@ -569,6 +569,16 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 		"start-restored/composite-results.csv", "start-restored/learned-state.csv", "start-restored/results.csv",
 	},
 	settle.SwitchFirstSightRestored: nil,
+
+	// Issue #397: the prefill bound held at a lower confidence bound
+	// (saturation.SwitchPrefillBoundHeldConfidence): the window keeps its
+	// samples as read, and the bound priced is the larger of their mean and
+	// the max of lower confidence bounds on it, where off it was the running
+	// max. Measured alone against all off on main 98ac6fc22, it moves no
+	// golden: no committed recording turns EnablePrefillThroughputBound on
+	// (every recorded policy states it false), so no replay writes the
+	// bound's window. Its unit tests hold it (heldBy).
+	saturation.SwitchPrefillBoundHeldConfidence: nil,
 })
 
 // learner4b2Seams is learner PR 4b-2's switches, earlier seams now (merged
@@ -923,6 +933,14 @@ func withSeams(more, rows map[string][]string) map[string][]string {
 // test that holds the same on either side is a control, not a hold, and is
 // not listed here.
 var heldBy = map[string][]heldTest{
+	// Issue #397: each runs the switch on and off and asserts both (the
+	// n-dependence cases pass on and fail every seed off; a fleet the bound
+	// grew grows at most once on and stays put off).
+	saturation.SwitchPrefillBoundHeldConfidence: {
+		{"../saturation", "TestPrefillBoundHeld_TheClearedLedgerCasesFailWithTheSwitchOff"},
+		{"../saturation", "TestPrefillBoundHeld_TheBiasAtTheMeasuredNoise"},
+		{"../saturation", "TestPrefillBoundHeld_AFleetTheBoundGrewGrowsOnceUnderNoise"},
+	},
 	// #495's one slow pod: each test runs its switch on and off and asserts
 	// both (the ledger cases fail off, as on the parent; the credit and the
 	// expiry move the sample, the expiry and the probe's fleet).
