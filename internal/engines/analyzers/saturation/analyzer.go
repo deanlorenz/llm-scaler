@@ -369,6 +369,10 @@ type SaturationAnalyzer struct {
 	muYieldCapped     bool
 	muUnreadAtTarget  bool
 	muMinorityExpires bool
+	// muWeighingBand is the weighing's band (muChoice.weighs):
+	// SwitchMuWeighingBand. On from the constructor; a replay turns it off
+	// (SetSwitchesForReplay).
+	muWeighingBand bool
 	// batchCapDeclared and batchCapLearned are the batch cap's replay
 	// switches (batch_cap.go): SwitchBatchCapDeclared and
 	// SwitchBatchCapLearned. On from the constructor; a replay turns them
@@ -696,6 +700,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		muYieldCapped:          true,
 		muUnreadAtTarget:       true,
 		muMinorityExpires:      true,
+		muWeighingBand:         true,
 		batchCapDeclared:       true,
 		batchCapLearned:        true,
 		batchCapITLAdmission:   true,

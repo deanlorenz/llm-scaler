@@ -116,7 +116,11 @@ func (a *SaturationAnalyzer) weighUnreadReplicas(key string, served servedRates,
 	read := meanOf(reads.pods)
 	mean, n := served.unread(reads.pods)
 	h := max(c.unread, mean)
-	if n == 0 || !(read < t.Admission.SiblingMuTolerance*h) {
+	weigh := n > 0 && read < t.Admission.SiblingMuTolerance*h
+	if a.muWeighingBand {
+		weigh = c.weighs(read, h, n, t.Admission.SiblingMuTolerance, a.now())
+	}
+	if !weigh {
 		c.unread, c.unreadLast = 0, 0
 		return 0, 0
 	}
@@ -128,6 +132,132 @@ func (a *SaturationAnalyzer) weighUnreadReplicas(key string, served servedRates,
 	}
 	ra.SetLastAt(byWeight(read, len(reads.pods), h, n), a.now())
 	return n, h
+}
+
+// The weighing's band (SwitchMuWeighingBand; analyzer-learner.md, 3.5). The
+// weighing switches the sample's source: the readers alone, or the readers
+// and the replicas they did not read. On the bare tolerance one crossing of
+// it switched that source on the noise, 3 to 11 times at 4 % AR(1) noise
+// (phi 0.9), each switch stepping the sample about 11 %. The band judges the
+// readers' rate over what the unread replicas count at (the ratio), averaged
+// over time, not one reading: per-replica rates read 9 % to 19 % apart from
+// one scrape to the next on E1, where no band of a usable width holds a
+// single reading.
+const (
+	// WeighSetWindow is how far back the ratio a key not weighing is judged
+	// on reaches: it starts weighing when the ratio's mean over the last
+	// WeighSetWindow sits under SiblingMuTolerance. A key's first readings
+	// are all it has, so its first set is on its first reading, as the bare
+	// tolerance's was. Five minutes is the longest measured that the
+	// closed-loop probe allows: a slow replica's readings in the window
+	// before it is weighed are samples of the readers alone, and the window
+	// keeps them. With a slow replica that appears at 20 min, 5 min held
+	// the probe at the bare tolerance's peaks (24, 21, 20 and 19 at 0.3,
+	// 0.55, 0.65 and 0.75 of its siblings); 10 min sealed it at 56 and 29.
+	WeighSetWindow = 5 * time.Minute
+	// WeighClearWindow is how long a key weighs at least, once it starts,
+	// and how far back the ratio it clears on reaches: it stops when the
+	// ratio's mean over the last WeighClearWindow reaches weighClear. The
+	// dwell is on the clear only: a set is never delayed past its window.
+	WeighClearWindow = 10 * time.Minute
+	// WeighClearMargin is how far over SiblingMuTolerance the ratio's mean
+	// must rise before a weighing sample stops counting the unread replicas:
+	// set under 0.80, clear at 0.90 by default, never past 1. 0.90 is the low
+	// end of what equally saturated replicas read of each other on E1
+	// (SiblingMuTolerance): a key clears once its readers read as equal
+	// replicas do, and no sooner.
+	WeighClearMargin = 0.10
+)
+
+// weighClear is the ratio at or over which a weighing sample stops counting
+// the unread replicas: tol plus WeighClearMargin, never past 1, where a
+// replica serving less than the readers would lower the sample.
+func weighClear(tol float64) float64 {
+	return max(tol, min(tol+WeighClearMargin, 1))
+}
+
+// weighs is the weighing's latch (SwitchMuWeighingBand): whether the newest
+// sample counts the n replicas its readers did not read, given the readers'
+// mean read and the rate h those count at. A key not weighing starts when the
+// ratio read / h, averaged over WeighSetWindow, sits under tol. A key weighing
+// stops no sooner than WeighClearWindow after it started, when the ratio
+// averaged over WeighClearWindow reaches weighClear(tol), and at once when no
+// replica is left unread: the band holds a source, never a replica that is
+// gone.
+//
+// Which side it errs to (3.4): the readers alone are the lower figure, the
+// one that orders more, and the weighed sample is the fleet's mean with every
+// unread replica at what it serves, a lower bound on what it sustains
+// (servedPod.credit). The band moves both ways from the bare tolerance:
+//
+//   - Set later, toward the lower figure, the cost side: a slow replica is
+//     weighed once the set window's mean crosses tol, from a step of its
+//     ratio from 1 to x after 5 x 0.2 / (1 - x) min (1.4 min at 0.3, 2.2 at
+//     0.55, 4 at 0.75) where the bare tolerance took the next sample. A key's
+//     first set is not delayed.
+//   - Clear later, toward the higher figure: a weighing key keeps the
+//     weighed sample for at least WeighClearWindow and while its readers
+//     average under 0.90 of the unread replicas, where the bare tolerance
+//     took the readers alone from 0.80. That sample is still every replica
+//     at what it showed: never over what the fleet's replicas served, but
+//     for the credit's bounded 1 / target.
+//
+// The latch is not persisted, nor is the memo it lives on: a restarted key
+// starts not weighing, the lower figure, and sets on its first reading under
+// tol. A forgotten or swept key forgets it with the memo, and a new window
+// (an episode gap) starts it again.
+func (c *muChoice) weighs(read, h float64, n int, tol float64, now time.Time) bool {
+	if n == 0 || !(h > 0) {
+		c.weighRatios = nil
+		if c.weighing {
+			c.weighing, c.weighChanged = false, now
+		}
+		return false
+	}
+	c.weighRatios = append(c.weighRatios, weighRatio{at: now, ratio: read / h})
+	i := 0
+	for i < len(c.weighRatios)-1 && now.Sub(c.weighRatios[i].at) >= max(WeighSetWindow, WeighClearWindow) {
+		i++
+	}
+	c.weighRatios = c.weighRatios[i:]
+	if !c.weighing {
+		if c.meanRatioSince(now.Add(-WeighSetWindow)) < tol {
+			c.weighing, c.weighChanged = true, now
+		}
+		return c.weighing
+	}
+	since := now.Add(-WeighClearWindow)
+	if c.weighChanged.After(since) {
+		return true
+	}
+	if !(c.meanRatioSince(since) < weighClear(tol)) {
+		c.weighing, c.weighChanged = false, now
+	}
+	return c.weighing
+}
+
+// meanRatioSince is the mean of the key's ratios read after since, the
+// newest of them at least.
+func (c *muChoice) meanRatioSince(since time.Time) float64 {
+	var sum float64
+	var k int
+	for _, r := range c.weighRatios {
+		if r.at.After(since) {
+			sum += r.ratio
+			k++
+		}
+	}
+	if k == 0 {
+		return c.weighRatios[len(c.weighRatios)-1].ratio
+	}
+	return sum / float64(k)
+}
+
+// weighRatio is one reading of the readers' rate over what the replicas
+// they did not read count at.
+type weighRatio struct {
+	at    time.Time
+	ratio float64
 }
 
 // fleetBound is what the variant's Ready replicas serve, weighed as a sample

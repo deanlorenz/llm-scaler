@@ -1689,6 +1689,7 @@ mu-sample-written
 mu-swap-freeze
 mu-unknown-age-resolves-safe
 mu-unread-replica-at-target
+mu-weighing-band
 mu-yield-capped
 mu-yield-capped-at-measurement
 mu-yield-served

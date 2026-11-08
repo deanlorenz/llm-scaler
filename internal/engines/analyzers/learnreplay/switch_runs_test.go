@@ -177,6 +177,17 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	saturation.SwitchMuUnreadAtTarget:        nil,
 	saturation.SwitchMuMinorityFigureExpires: nil,
 
+	// The weighing's band (muChoice.weighs). Alone it moves nothing: with
+	// SwitchMuWeighsFleet off there is no weighing to latch. On top of it,
+	// all on, it moves mu-paths (learned-state 6 rows, variant capacities 4):
+	// variant-01's 09:06 sample is its reader alone, 6.60, where the bare
+	// tolerance weighed it to 12.12 on one reading, since the band sets on
+	// a 5 min mean; the priced mu falls 11.537 to 10.884 (-5.7 %) on the
+	// four cycles of 09:11, the cost side. Both outputs are named by
+	// SwitchMuWeighsFleet, so all off is still their base. Its unit tests
+	// hold it (heldBy).
+	saturation.SwitchMuWeighingBand: nil,
+
 	// Which rows the transfer is read from. It moves no golden: no committed
 	// recording prices a line (the decode term's reason, above). Its unit test
 	// holds it (heldBy).
@@ -940,6 +951,12 @@ var heldBy = map[string][]heldTest{
 	saturation.SwitchMuMinorityFigureExpires: {
 		{"../saturation", "TestMuSlowPod_AMinorityFigureExpiresOnlyPastTheHold"},
 		{"../saturation", "TestMuSlowPod_OneReplicasFigureExpiresAfterTheHold"},
+	},
+	// The weighing's band: each runs it on and off and asserts both (the
+	// bare tolerance flaps on the excursion, and seals the probe at 0.65).
+	saturation.SwitchMuWeighingBand: {
+		{"../saturation", "TestWeighingBand_OneChangePerExcursion"},
+		{"../saturation", "TestWeighingBand_ALateSlowReplicaStaysInsideTheProbesBound"},
 	},
 	// #495: the first two run the switch on and off and assert both (the
 	// variants read the role's spare on; their occupancy, sparer, off).

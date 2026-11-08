@@ -783,6 +783,7 @@ Add a row when you add such a threshold.
 | threshold | set | clear | dwell | safe side | after a restart |
 | --- | --- | --- | --- | --- | --- |
 | ITL tier: full fit or pinned fit (`itl/tier_latch.go`, on the saturation, slo and throughput lines) | 10 steady readings, spread 0.30 of `k` | under 8 steady readings or spread 0.18, or a pinned fit pricing 3 % more | 10 min after the last change, unless the new line prices 3 % more replicas | the line that prices more replicas, from either tier, judged by what the line sustains where the analyzer prices it | the latch is not kept: a key with a restored slope stands at the pinned fit |
+| Mu's weighing: a sample of the readers alone, or counting the replicas they did not read (`saturation/mu_slow_pod.go`, `muChoice.weighs`) | the readers' rate over the unread replicas', averaged over 5 min, under `siblingMuTolerance` (0.80) | that average over 10 min at 0.90 or over (the tolerance plus 0.10, never past 1), or no unread replica (at once) | 10 min after a set, on the clear only; a set is never held | neither source is the safe side alone: the readers alone are the lower mu, but a slow replica read alone seals the fleet over need (3.4), so the set is kept fast and the clear slow | the latch is not kept: a key starts not weighing, and its first reading under 0.80 sets it |
 
 **Price.** A line's price is sequences over ITL at the fill the analyzer reads
 (`Admission.PricedRate`). At a fixed fill that is the ITL there. With a TPOT
@@ -822,6 +823,23 @@ if its `B` came out at or under zero and was not kept. Once the dwell ends a new
 line may price less than the one it replaces by more than 3 %, as it could before.
 
 `SwitchITLTierHysteresis`, one per analyzer, turns the latch off for a replay.
+
+**The weighing's band.** One crossing of `siblingMuTolerance` switched the
+sample's source 3 to 11 times at 4 % noise, each switch moving the sample
+about 11 %. Per-replica rates read 9 % to 19 % apart from one scrape to the
+next on E1, so the band judges a 5 min average to set and a 10 min average to
+clear, not one reading. A key's first readings are all its window holds, so
+its first set is on its first reading. The cost is reaction time: a slow
+replica in a settled fleet is weighed once the 5 min average crosses 0.80,
+1.4 min after a step to 0.3 and 2.2 min after one to 0.55, where the bare
+tolerance took the next sample. Longer set windows seal the closed-loop probe:
+at 10 min a slow replica at 0.3 appearing at 20 min took the fleet to 56
+against a need of 18. A recovered replica stops being weighed after at least
+10 min. On 20 seeds of one crossing (`TestWeighingBand_OneChangePerExcursion`)
+the source changes once at 4 % (phi 0.9), 10 % and 15 % (phi 0.3 and 0.75);
+at 10 % to 15 % a key whose first reading falls in a noise trough sets and
+clears once at its start. `SwitchMuWeighingBand` turns the band off for a
+replay.
 
 #### One-sided at the cap (issue #467)
 
