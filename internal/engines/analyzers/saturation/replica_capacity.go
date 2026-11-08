@@ -231,13 +231,11 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// it has just been handed (k2_settle.go). Judged on the busiest rank, as
 	// the reading is.
 	serviceRate, serviceRateOK := saturatedCompletionRate(rm, role, fleetOutput, keyInput)
-	rowServes, rowIdle := rowServed(rm)
 	adm.unsettled = a.k2Unsettled(k2SettleInput{
 		namespace: namespace, modelID: modelID, variant: rm.VariantName, pod: rm.PodName,
 		queue: rm.BusiestRankQueue(), tokens: rm.BusiestRankTokens(), ranks: rm.Ranks(),
 		perRequest: k2SettlePerRequest(rm, role, shapeKeyInput, fleetOutput), threshold: config.QueueLengthThreshold,
 		rate: serviceRate, rateOK: serviceRateOK, ref: ref, k2Ref: k2Ref, ready: rm.Ready, readyAt: a.readySince(rm), bridge: rm.FromWarmPool,
-		served: rowServes, idle: rowIdle,
 		tune: tune,
 	})
 	// The batch cap the derived k2 is priced at where the flags state none

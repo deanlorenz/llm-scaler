@@ -2114,6 +2114,7 @@ range
 rank
 rate
 rateRefused
+rates
 rather
 ratio
 raw
@@ -2661,7 +2662,6 @@ they
 this
 thisControllerGPUs
 those
-though
 threshold
 thresholdPct
 throughput

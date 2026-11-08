@@ -127,11 +127,6 @@ type settleMemo struct {
 	// seen, for the joined test (noteReady). Dropped with the replica's
 	// readings, and on any cycle the replica is not Ready.
 	readySince map[string]readySighting
-	// served is each replica's first routing under its Pod Ready time, for
-	// the joined test's clock (noteServed, SwitchJoinedFromFirstServed).
-	// Dropped with the replica's readings, and on any cycle the replica is
-	// not Ready.
-	served map[string]servedSighting
 	// pastFirstCycle is set once the memo's first cycle has ended
 	// (noteIdleRuns, which runs once at the end of every cycle's pricing).
 	pastFirstCycle bool
@@ -161,7 +156,6 @@ func newSettleMemo(now time.Time) *settleMemo {
 	return &settleMemo{
 		pods:       make(map[string][]settleReading),
 		readySince: make(map[string]readySighting),
-		served:     make(map[string]servedSighting),
 		firstCycle: now,
 	}
 }
@@ -186,10 +180,6 @@ type k2SettleInput struct {
 	ready   bool
 	readyAt time.Time
 	bridge  bool
-	// served and idle are whether the row served anything over the rate
-	// window, and whether it is known to have served nothing (rowServed),
-	// for the joined test's clock (noteServed).
-	served, idle bool
 	// rate is the replica's own service rate this cycle (saturatedCompletionRate)
 	// and rateOK whether it has one; ref is the rate on record for the bucket,
 	// zero when there is none; k2Ref is the mean of the bucket's k2 window,
@@ -226,7 +216,6 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 			a.paths.add(pathReadySince, 1)
 		}
 	}
-	servedFrom := memo.noteServed(pod, in.ready, in.readyAt, in.served, in.idle, now)
 	trace := memo.pods[pod]
 	settled := in.tune.settledOverWindow(trace, now, in.tokens, in.threshold)
 	trace = append(trace, settleReading{at: now, queue: in.queue, tokens: in.tokens})
@@ -245,10 +234,6 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 		_, live := memo.pods[p]
 		return !live
 	})
-	maps.DeleteFunc(memo.served, func(p string, _ servedSighting) bool {
-		_, live := memo.pods[p]
-		return !live
-	})
 	a.mu.Unlock()
 
 	var since time.Time
@@ -260,17 +245,11 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 			a.paths.add(pathReadySince, 1)
 		}
 	}
-	// A replica first routed to under a rate window ago has joined as far as
-	// its rate window can tell, whenever its Pod became Ready
-	// (joined_served.go).
-	routedLate := false
-	if a.joinedFromFirstServed && in.ready && !servedFrom.IsZero() && now.Sub(servedFrom) < JoinedReplicaWindow {
-		routedLate = !joined
-		joined = true
-		if servedFrom.After(since) {
-			since = servedFrom
-		}
-	}
+	// A replica whose load first returned, since its settle began, under a
+	// rate window ago has joined as far as its rate window can tell, whenever
+	// its Pod became Ready (joined_served.go).
+	routedLate := !joined && a.firstReturnUnderWindow(in, now)
+	joined = joined || routedLate
 	// admit records how the reading passed, for learner-write's margins.
 	admit := func(by string) string {
 		m := k2Margin{passedBy: by, queueOverThreshold: float64(in.queue) / max(in.threshold, 1)}

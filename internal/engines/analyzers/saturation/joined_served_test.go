@@ -4,90 +4,122 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
 )
 
-// servedRow is one cycle's row as noteServed reads it.
-type servedRow struct {
-	ready         bool
-	readyAt       time.Time
-	served, idle  bool
-	wantFromCycle int // index of the cycle the clock starts at, -1 for none
+// lateRow is r0 on the time base: Ready an hour before the run, every gauge
+// known, holding tokens with queue waiting and completing at rate.
+func lateRow(ready time.Time, tokens int64, queue int, rate float64) domain.ReplicaMetrics {
+	rm := satRow("r0", tokens, queue, rate)
+	rm.ReadySince = ready
+	rm.KvCacheUsageKnown, rm.GenerationTokenRateKnown, rm.RequestRateKnown = true, true, true
+	if tokens == 0 {
+		rm.AvgITLEmpty = true
+	}
+	return rm
 }
 
-func TestNoteServed_TheClockStartsAtTheFirstServedRowAfterAnIdleOne(t *testing.T) {
-	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	ready := t0.Add(-time.Hour)
-	other := t0.Add(2 * time.Minute)
-	cases := []struct {
-		name string
-		rows []servedRow
-	}{
-		{"idle, then routed to: the clock starts at the first served row", []servedRow{
-			{true, ready, false, true, -1},
-			{true, ready, false, true, -1},
-			{true, ready, true, false, 2},
-			{true, ready, true, false, 2},
-		}},
-		{"already serving at first sight: nothing says when its load began", []servedRow{
-			{true, ready, true, false, -1},
-			{true, ready, false, true, -1},
-			{true, ready, true, false, -1},
-		}},
-		{"an idle run and return after serving does not restart it", []servedRow{
-			{true, ready, false, true, -1},
-			{true, ready, true, false, 1},
-			{true, ready, false, true, 1},
-			{true, ready, true, false, 1},
-		}},
-		{"a row whose rate was not read is no evidence of idle", []servedRow{
-			{true, ready, false, false, -1},
-			{true, ready, true, false, -1},
-		}},
-		{"a new Ready time is a new sighting", []servedRow{
-			{true, ready, false, true, -1},
-			{true, ready, true, false, 1},
-			{true, other, false, true, -1},
-			{true, other, true, false, 3},
-		}},
-		{"a row that is not Ready ends the sighting", []servedRow{
-			{true, ready, false, true, -1},
-			{false, ready, false, true, -1},
-			{true, ready, true, false, -1},
-		}},
+// A full, queued replica that has completed nothing and generated nothing
+// over the minute is not idle: it holds KV. So its first completion is not a
+// return, and its readings are not held as a late-routed replica's.
+func TestJoinedServed_AFullQueuedReplicaWithNoCompletionIsNotIdle(t *testing.T) {
+	rm := lateRow(propStart.Add(-time.Hour), int64(0.95*float64(propKv)), 10, 0)
+	rm.GenerationTokenRate = 0
+	rows := settlerow.Of([]domain.ReplicaMetrics{rm}, map[string]string{"v": domain.RoleDecode})
+	require.NotEqual(t, settle.Idle, rows[0].Activity(), "a replica holding KV is not idle, whatever its rates read")
+
+	rig := newPropRig()
+	ready := rig.clock.Add(-time.Hour)
+	full := propKv * 95 / 100
+	for i := range 12 {
+		rate := 0.0
+		if i >= 4 {
+			rate = 0.2
+		}
+		rm := lateRow(ready, full, 10, rate)
+		if rate == 0 {
+			rm.GenerationTokenRate = 0
+		}
+		_, err := rig.analyze([]domain.ReplicaMetrics{rm}, decodeStates(1), 0.2, propCycle)
+		require.NoError(t, err)
+		r, ok := rig.a.settleView().Replica(settleModel("test-ns", "test-model"), settlerow.Key(rm))
+		require.True(t, ok)
+		require.Empty(t, r.Returns, "cycle %d: a full replica's first completion is no return", i)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			m := newSettleMemo(t0)
-			for i, r := range tc.rows {
-				now := t0.Add(time.Duration(i) * 15 * time.Second)
-				got := m.noteServed("v/p0", r.ready, r.readyAt, r.served, r.idle, now)
-				want := time.Time{}
-				if r.wantFromCycle >= 0 {
-					want = t0.Add(time.Duration(r.wantFromCycle) * 15 * time.Second)
-				}
-				if !got.Equal(want) {
-					t.Fatalf("cycle %d: clock from %v, want %v", i, got, want)
-				}
+	require.Positive(t, rig.k2(""), "the full replica's readings were recorded")
+}
+
+// A replica Ready for an hour, idle, then routed to: neither k2 nor mu is
+// written for a rate window from its first served row. Refusing mu alone
+// would write k2 there. With the switch off, k2 is written inside the window.
+func TestJoinedServed_ALateRoutedReplicaWritesNoK2ForAWindow(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		rig := newPropRig()
+		rig.a.joinedFromFirstServed = on
+		ready := rig.clock.Add(-time.Hour)
+		const load = 125
+		rate := make([]float64, 6*60)
+		for s := load; s < len(rate); s++ {
+			rate[s] = 0.2
+		}
+		full := propKv * 92 / 100
+		firstServed := -1
+		k2InWindow, muInWindow := false, false
+		for i, rr := range sampleTimeBase(rate).Rate1m {
+			at := 60 + i*int(propCycle/time.Second)
+			rm := lateRow(ready, 0, 0, rr)
+			if at >= load {
+				rm = lateRow(ready, full, 10, rr)
 			}
-		})
-	}
-}
-
-func TestRowServed_ReadsCompletionsAndTokens(t *testing.T) {
-	for _, tc := range []struct {
-		name                 string
-		rm                   domain.ReplicaMetrics
-		wantServed, wantIdle bool
-	}{
-		{"a completion", domain.ReplicaMetrics{RequestRate: 0.1, RequestRateKnown: true}, true, false},
-		{"tokens with no completion yet", domain.ReplicaMetrics{GenerationTokenRate: 30, RequestRateKnown: true}, true, false},
-		{"known idle", domain.ReplicaMetrics{RequestRateKnown: true}, false, true},
-		{"unread", domain.ReplicaMetrics{}, false, false},
-	} {
-		served, idle := rowServed(tc.rm)
-		if served != tc.wantServed || idle != tc.wantIdle {
-			t.Errorf("%s: served %v idle %v, want %v %v", tc.name, served, idle, tc.wantServed, tc.wantIdle)
+			if rr > 0 && firstServed < 0 {
+				firstServed = at
+			}
+			_, err := rig.analyze([]domain.ReplicaMetrics{rm}, decodeStates(1), 0.2, propCycle)
+			require.NoError(t, err)
+			if firstServed >= 0 && at-firstServed < int(JoinedReplicaWindow/time.Second) {
+				k2InWindow = k2InWindow || rig.k2("") > 0 || rig.k2Admitted()
+				muInWindow = muInWindow || rig.measuredMu() > 0
+			}
+		}
+		if on {
+			require.False(t, k2InWindow, "on: k2 written within a rate window of the first served row")
+			require.False(t, muInWindow, "on: mu written within a rate window of the first served row")
+			require.Positive(t, rig.k2(""), "on: k2 is recorded once the window has passed")
+			require.Positive(t, rig.measuredMu(), "on: mu is recorded once the window has passed")
+		} else {
+			require.True(t, k2InWindow, "off: k2 is written inside the window, as before")
 		}
 	}
+}
+
+// Only the first return of a settle holds: a replica that served, went idle
+// and was routed to again under the same settle is admitted at once.
+func TestJoinedServed_OnlyTheFirstReturnOfASettleHolds(t *testing.T) {
+	rig := newPropRig()
+	ready := rig.clock.Add(-time.Hour)
+	full := propKv * 92 / 100
+	step := func(tokens int64, queue int, rate float64) {
+		_, err := rig.analyze([]domain.ReplicaMetrics{lateRow(ready, tokens, queue, rate)}, decodeStates(1), 0.2, propCycle)
+		require.NoError(t, err)
+	}
+	step(0, 0, 0)
+	step(0, 0, 0)
+	in := k2SettleInput{namespace: "test-ns", modelID: "test-model", variant: "v", pod: "r0", ready: true}
+	step(full, 10, 0.2) // the first return
+	require.True(t, rig.a.firstReturnUnderWindow(in, rig.clock.Add(-propCycle)), "the first return holds")
+	for range 8 {
+		step(full, 10, 0.2)
+	}
+	require.False(t, rig.a.firstReturnUnderWindow(in, rig.clock), "a rate window on, it holds no more")
+	step(0, 0, 0)
+	step(0, 0, 0)
+	step(full, 10, 0.2) // a second return, same settle
+	r, ok := rig.a.settleView().Replica(settleModel("test-ns", "test-model"), settlerow.Key(lateRow(ready, 0, 0, 0)))
+	require.True(t, ok)
+	require.Len(t, r.Returns, 2, "the tracker saw both returns")
+	require.False(t, rig.a.firstReturnUnderWindow(in, rig.clock.Add(-propCycle)), "the second return does not hold")
 }

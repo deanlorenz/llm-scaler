@@ -391,8 +391,8 @@ than everything the rank holds:
 ```
 joined   = later of Pod Ready and its first sight (else first sight) under
            JoinedReplicaWindow (1m) ago, read from the settle tracker,
-        || its first served row under JoinedReplicaWindow ago, after an
-           idle row of the same Ready time (joined_served.go)
+        || the first return of load after an idle run in its current
+           settle, under JoinedReplicaWindow ago (joined_served.go)
 suspect  = queue x (I [+ O unless prefill]) > tokens / ranks
 admitted = !joined && (!suspect
         || (rate >= K2SettleRateFraction x rateOnRecord             // 0.7
@@ -426,18 +426,34 @@ The joined clock also starts when a replica is first routed to
 (`joined_served.go`, #392, `SwitchJoinedFromFirstServed`). A replica Ready for
 longer than a minute but idle until a burst reaches it has a rate[1m] that
 covers only the part of the minute it served, and that reading read as a low
-mu. So the settle memo keeps, per replica and Ready time, whether a row showed
-it known to have served nothing (`RequestRateKnown`, no request completed and
-no token generated) and the cycle of its first served row after that
-(`settleMemo.served`, `noteServed`). A saturated reading under
-`JoinedReplicaWindow` of that cycle is refused as a joined one, with its own
-reason: k2 is not written, and mu, written only beside a k2 write, is not
-either. Refusing mu alone was tried and reverted (f32a32ed7): it left k2's
-settle rate test with no mu on record. A replica already serving at the
-memo's first sight is not held, nor is an idle run and return after it has
-served under the same Ready time. The cost is one rate window (4 cycles at
-15 s) before a late-routed replica's first k2 and mu, and one cycle more for
-k2's first reading (`k2_confirm.go`).
+mu. What the replica did is read from the settle tracker, by role
+(`settle.Row.Activity`): a row is idle only with its KV known and empty and no
+token generated (prefill: no request completed). A replica holding KV is never
+idle, so a full, queued replica with no completion yet is unknown, not idle.
+The first row of load after an idle run is a return (`settle.Replica.Returns`);
+the tracker keeps the returns of the current settle, which begins at the Pod's
+Ready time, a restart, a rejoin, a rollout or a lend. A saturated reading under
+`JoinedReplicaWindow` of the settle's FIRST return is refused as a joined one,
+with its own reason (`P1-obs-unsettled`). The analyzer keeps no per-pod state
+of its own for it.
+
+Only the first return holds. It is the replica first routed to after it
+became Ready, or after the controller first saw it idle: the case of the
+issue. Holding every return was the first attempt (f32a32ed7, reverted): on
+the pd-restart golden, whose decode replicas idle and return as the load
+steps, it refused enough readings to leave decode's mu 27 % low.
+
+k2 is refused with mu, not mu alone, and that costs valid k2 readings. Mu is
+written only beside a k2 write, and k2's settle rate test reads the mu on
+record: refusing mu alone left that test with no mu (f32a32ed7), and the k2
+readings it then admitted wrote ramp readings as mu. But a max_over_time[1m]
+KV peak is not lowered by the idle part of the minute, so the k2 reading of a
+full replica in that minute is right, and it is lost. On the e1 golden,
+model-02's variant-01 saturates only in the minute after its first return,
+holding 363 871 tokens, so it never records an observed k2 and prices from the
+derived figure (its capacity does not move). The cost in time is one rate
+window (4 cycles at 15 s) before a late-routed replica's first k2 and mu, and
+one cycle more for k2's first reading (`k2_confirm.go`).
 
 Each cycle k2 also fills a `learn.Report` per variant (`k2_learner.go`;
 `LearnerReports`), and logs `learner-write` at `--v=3` for a key whose figure
