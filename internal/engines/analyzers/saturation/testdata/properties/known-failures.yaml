@@ -44,15 +44,15 @@
   class: edges
   learner: mu
   expect: flipped
-  finding: "With the weighing's band (mu-weighing-band) the crossing itself changes the source once; what is left is the key's start. A key's first set is on its first reading, which the closed-loop probe needs (a delayed first set sealed it), so a first reading in a noise trough (sigma 10 %, lag-one 0.3) sets the weighing while the noise-free reader is at 0.95 of h; the clear window lets it go after 10 min, and the crossing sets it again: two changes."
-  measured: "1/20 seeds (3/100); seed 3: set on the first reading at 0.796 of h, cleared at cycle 40, set again at 76"
+  finding: "The crossing is fixed: with the weighing's band (mu-weighing-band) it changes the source once. What still flips is a key's first reading landing in a noise trough (sigma 10 %, lag-one 0.3): the first set is on the first reading, it sets the weighing while the noise-free reader is at 0.95 of h, the clear window lets it go after 10 min, and the crossing sets it again. The fix for that seals the closed-loop probe: 45 s of readings before a first set took a replica slow at 0.3 from the start to a peak of 27 against the 21.7 bound (105 s: 57), and setting a young key only under 0.75 sealed a replica slow at 0.65 mid-run at 24 (0/20 and 2/20 flips here then)."
+  measured: "3/100 seeds; seed 3: set on the first reading at 0.796 of h, cleared at cycle 40, set again at 76"
   owner: "#495"
 - id: edges/mu/sibling-tolerance-excursion-sigma15
   class: edges
   learner: mu
   expect: flipped
-  finding: "As edges/mu/sibling-tolerance-excursion at the high end of the measured rate noise (sigma 15 %, lag-one 0.3): with the band the crossing changes the source once, and a first reading in a noise trough sets the weighing at the key's start, which clears after 10 min and sets again at the crossing."
-  measured: "3/20 seeds (14/100); seed 3: cleared at cycle 40, set again at 76"
+  finding: "As edges/mu/sibling-tolerance-excursion at the high end of the measured rate noise (sigma 15 %, lag-one 0.3): the crossing changes the source once; a key's first reading in a noise trough sets the weighing at its start, it clears after 10 min, and the crossing sets it again. The fixes that remove it seal the closed-loop probe (see the 10 % row)."
+  measured: "14/100 seeds; seed 3: cleared at cycle 40, set again at 76"
   owner: "#495"
 - id: edges/shape-hold/tolerance-excursion-stress
   class: edges

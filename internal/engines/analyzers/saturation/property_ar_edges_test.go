@@ -98,8 +98,11 @@ func arEdgeCases() []propCase {
 		edge("mu", "latch-return-excursion-sigma15", cheapSeeds, checkLatchReturnExcursion(tuningDefault, rateNoise15)),
 		nonDefault("latch-return-excursion-nondefault", checkLatchReturnExcursion(ret, rateNoise10)),
 		nonDefault("latch-return-excursion-nondefault-sigma15", checkLatchReturnExcursion(ret, rateNoise15)),
-		edge("mu", "sibling-tolerance-excursion", 0, checkWeighExcursion(rateNoise10)),
-		edge("mu", "sibling-tolerance-excursion-sigma15", 0, checkWeighExcursion(rateNoise15)),
+		// On cheapSeeds, not 20: their rows fail on a few percent of seeds (a
+		// key's first reading in a noise trough), and on 20 a shift of the
+		// generator's draws could make one pass and fail the ledger.
+		edge("mu", "sibling-tolerance-excursion", cheapSeeds, checkWeighExcursion(rateNoise10)),
+		edge("mu", "sibling-tolerance-excursion-sigma15", cheapSeeds, checkWeighExcursion(rateNoise15)),
 		edge("k2", "key-bucket-excursion", 0, checkKeyBucketExcursion(false, lengthNoise, nil)),
 		edge("k2", "key-bucket-excursion-stress", keyStressSeeds, checkKeyBucketExcursion(false, keyStress, nil)),
 		edge("mu", "key-bucket-excursion", 0, checkKeyBucketExcursion(true, lengthNoise, nil)),
@@ -210,7 +213,7 @@ func (r *propRig) weighSample() (sample, read float64, ok bool) {
 // Ledger rows (#495): the band (mu-weighing-band) holds the crossing to one
 // change at 10 % and 15 %; a key's first set is on its first reading, so a
 // first reading in a noise trough sets it at the start, it clears after the
-// clear window, and the crossing sets it again: 1 and 3 of 20 seeds.
+// clear window, and the crossing sets it again: 3 and 14 of 100 seeds.
 func checkWeighExcursion(ns arNoiseSpec) func(uint64) error {
 	return func(seed uint64) error {
 		r := propRand(seed)
