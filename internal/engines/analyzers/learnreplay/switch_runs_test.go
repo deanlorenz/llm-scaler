@@ -283,18 +283,27 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// hold the restore (itl_baseline_stamp_test.go).
 	saturation.SwitchITLBaselineStamped: {"acceptance/learned-state.csv", "mu-paths/learned-state.csv"},
 
-	// #495: the variants follow a role the throughput floor raises
-	// (saturation.SwitchThroughputFloorRaisesVariants). Measured alone
-	// against all off at main 01049df61, it moves the per-variant outputs
-	// only, on the cycles the floor raised a role: each raised variant's
-	// TotalDemand and Utilization rise to its share of the floored figure by
-	// supply (variant-capacities, composite-variants; up to 35x on a variant
-	// whose occupancy read near zero), and its warm-pool SpareFraction falls
-	// by the same amount (warm-pool-pressure; NeedsScaleUp turns true on one
-	// cycle each of ols-sweep, ols-sweep-slo-restart and throughput-sweep).
-	// No role-level or model-level figure moves: results, composite-roles,
+	// #495: the variants follow a role the throughput floor or the
+	// fleet-shape hold raises (saturation.SwitchThroughputFloorRaisesVariants):
+	// the raised role is water-filled over its variants by supply, so they sum
+	// to it. Measured alone against all off at main 01049df61, it moves the
+	// per-variant outputs only, on the cycles the floor raised a role: each
+	// raised variant's TotalDemand and Utilization rise to its share
+	// (variant-capacities, composite-variants; up to 35x on a variant whose
+	// occupancy read near zero), and its warm-pool SpareFraction falls by the
+	// same amount (warm-pool-pressure; NeedsScaleUp turns true on one cycle
+	// each of ols-sweep, ols-sweep-slo-restart and throughput-sweep). No
+	// recording has a variant above its share on such a cycle: the water-fill
+	// and the larger of own figure and share differ there in the last bit only.
+	//
+	// It can move a role's demand and the model total, though no golden
+	// does: the hot-rank hold that runs after the floor (holdHotRanks) adds
+	// what a hot replica's variant is short of against the variant's own
+	// figure, so on it adds nothing a floored variant's share already covers,
+	// where off it added the hot replica's want on top of the floor. No
+	// recording has a hot rank on a floored role, so results, composite-roles,
 	// composite-results, composite-holds and composite-release are unchanged
-	// in every fixture, as the floor's role demand is.
+	// in every fixture. The unit tests hold that case (heldBy).
 	saturation.SwitchThroughputFloorRaisesVariants: {
 		"e1-tuned/variant-capacities.csv",
 		"e1/variant-capacities.csv",
@@ -938,6 +947,12 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestFloorRaisesVariants_TheDecodeVariantReadsTheRolesSpare"},
 		{"../saturation", "TestFloorRaisesVariants_TheSwitchOffLeavesTheVariants"},
 		{"../saturation", "TestFloorRaisesVariants_TwoDecodeVariantsSplitBySupply"},
+		// The hot-rank interaction, which moves a role and the model total
+		// and which no recording holds: on, the hold adds nothing to a
+		// floored decode; off, it adds the hot replica's want on top.
+		{"../saturation", "TestFloorRaisesVariants_TheHotRankHoldDoesNotCountTheFloorTwice"},
+		// The warm pool's publisher reading a floored result, on and off.
+		{"../../steadystate", "TestVariantPressure_AFlooredRoleIsReadAtTheRolesSpare"},
 	},
 	// Runs the switch on and off and asserts both.
 	slo.SwitchTTFTQuietTransfer: {{"../slo", "TestTTFT_TheQuietTransferSwitch"}, {"../slo", "TestTTFT_TheHeldTransferAgesOut"}},

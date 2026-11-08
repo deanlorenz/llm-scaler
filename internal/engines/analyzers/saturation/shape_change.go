@@ -611,7 +611,20 @@ func (a *SaturationAnalyzer) fleetShapeState(namespace, modelID string) (out, in
 //
 // Each role is floored against its OWN supply, so a fleet already above the
 // band in one role and below it in another is left correct in both.
+//
+// The variants follow as raiseVariantsToRoles spreads them; holdFleetFloorAs
+// is the same with SwitchThroughputFloorRaisesVariants named, for the analyzer
+// to pass its switch.
 func holdFleetFloor(roleDemand map[string]float64, variants []domain.VariantCapacity, scaleDown float64) (float64, map[string]float64) {
+	return holdFleetFloorAs(roleDemand, variants, scaleDown, true)
+}
+
+// holdFleetFloorAs is holdFleetFloor with SwitchThroughputFloorRaisesVariants
+// as waterFill. Off, each variant of a raised role is lifted to the larger of
+// its own figure and its supply share of the role, as before the switch, and
+// a variant above its share leaves the variants summing to more than the
+// role.
+func holdFleetFloorAs(roleDemand map[string]float64, variants []domain.VariantCapacity, scaleDown float64, waterFill bool) (float64, map[string]float64) {
 	if roleDemand == nil || scaleDown <= 0 {
 		return 0, nil
 	}
@@ -639,37 +652,93 @@ func holdFleetFloor(roleDemand map[string]float64, variants []domain.VariantCapa
 	// holdPrefillDemand gives: the optimizer prices each variant by its share
 	// of the role demand, and a raw variant figure would leave the hold to be
 	// split by the measurement the hold has just declared stale.
-	raiseVariantsToRoles(variants, byRole, raised)
-	return moved, raised
-}
-
-// raiseVariantsToRoles lifts each variant of a role in raised to its share of
-// the role's raised demand, by supply: raised[role] x the variant's supply /
-// the role's supply (byRole, aggregation.AggregateByRole of the same
-// variants). Utilization moves with TotalDemand, so a variant at its share
-// reads 1 - raised[role] / role supply spare -- the figure the warm pool's
-// pressure reads (steadystate.variantPressure). Only ever a raise: a variant
-// already above its share keeps its own figure, and a role not in raised, or
-// a variant with no supply, is left as it was.
-//
-// holdFleetFloor raises the variants with it, and so does the throughput
-// floor (applyThroughputFloor, SwitchThroughputFloorRaisesVariants).
-func raiseVariantsToRoles(variants []domain.VariantCapacity, byRole map[string]aggregation.ScopeTotals, raised map[string]float64) {
+	if waterFill {
+		raiseVariantsToRoles(variants, raised)
+		return moved, raised
+	}
 	for i := range variants {
 		vc := &variants[i]
-		role := domain.CanonicalRole(vc.Role)
-		want, ok := raised[role]
+		held, ok := raised[domain.CanonicalRole(vc.Role)]
 		if !ok {
 			continue
 		}
-		rc := byRole[role]
+		rc := byRole[domain.CanonicalRole(vc.Role)]
 		supply := float64(vc.ReplicaCount) * vc.PerReplicaCapacity
 		if supply <= 0 || rc.TotalSupply <= 0 {
 			continue
 		}
-		if share := want * supply / rc.TotalSupply; share > vc.TotalDemand {
+		if share := held * supply / rc.TotalSupply; share > vc.TotalDemand {
 			vc.TotalDemand = share
 			vc.Utilization = share / supply
+		}
+	}
+	return moved, raised
+}
+
+// raiseVariantsToRoles spreads each raised role's demand, raised[role], over
+// the role's variants by supply (aggregation.Supply), and only ever raises.
+// It is a water-fill: a variant whose own TotalDemand is above its supply
+// share keeps it, and what is left of raised[role] once those are taken out
+// is spread over the rest by supply, again until no variant left is above its
+// share. Every variant it lifts then reads the same Utilization, the level,
+// and so the same spare to the warm pool's pressure
+// (steadystate.variantPressure, 1 - Utilization); where no variant is above
+// its share that is 1 - raised[role] / role supply. The role's variants sum
+// to max(raised[role], the sum of their own figures).
+//
+// Not the larger of each variant's own figure and its share: with one variant
+// above its share that summed to more than the role, so the optimizer, which
+// prices each variant at its fraction of the variants' sum
+// (allocation.variantDemandShare), priced the hot variant under its own
+// occupancy, and the composite's redistributeVariantDemand skewed the same
+// way. A variant with no supply keeps its figure, and counts toward the role.
+//
+// holdFleetFloor raises the variants with it, and so does the throughput
+// floor (applyThroughputFloor, SwitchThroughputFloorRaisesVariants).
+func raiseVariantsToRoles(variants []domain.VariantCapacity, raised map[string]float64) {
+	for _, role := range slices.Sorted(maps.Keys(raised)) {
+		want := raised[role]
+		// fixed is the demand of the variants that keep their own figure;
+		// pool the variants still to be lifted, by index.
+		var fixed float64
+		var pool []int
+		for i := range variants {
+			if domain.CanonicalRole(variants[i].Role) != role {
+				continue
+			}
+			if aggregation.Supply(variants[i]) > 0 {
+				pool = append(pool, i)
+			} else {
+				fixed += variants[i].TotalDemand
+			}
+		}
+		var level float64
+		for len(pool) > 0 {
+			var supply float64
+			for _, i := range pool {
+				supply += aggregation.Supply(variants[i])
+			}
+			level = (want - fixed) / supply
+			kept := pool[:0:0]
+			for _, i := range pool {
+				if variants[i].TotalDemand > level*aggregation.Supply(variants[i]) {
+					fixed += variants[i].TotalDemand
+					continue
+				}
+				kept = append(kept, i)
+			}
+			if len(kept) == len(pool) {
+				break
+			}
+			pool = kept
+		}
+		for _, i := range pool {
+			vc := &variants[i]
+			supply := aggregation.Supply(*vc)
+			if share := level * supply; share > vc.TotalDemand {
+				vc.TotalDemand = share
+				vc.Utilization = share / supply
+			}
 		}
 	}
 }

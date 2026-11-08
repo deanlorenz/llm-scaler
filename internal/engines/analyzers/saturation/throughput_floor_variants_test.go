@@ -2,6 +2,9 @@ package saturation
 
 import (
 	"context"
+	"fmt"
+	"math"
+	"slices"
 	"testing"
 	"time"
 
@@ -135,64 +138,83 @@ func TestFloorRaisesVariants_TheDecodeVariantReadsTheRolesSpare(t *testing.T) {
 	t.Logf("decode role demand %.0f on supply %.0f: spare %.4f on, %.4f off", roleDemand, supply, spareOf(d), spareOf(dOff))
 }
 
+// fvK1 is the per-replica capacity of the direct-call fixtures below.
+const fvK1 = 930_508.0
+
 // twoDecodeVariants is a P/D fleet with two decode variants of different
-// supply (four replicas and two, the same per-replica capacity) idling at a
-// tenth of a replica each, and one prefill variant of two replicas holding
-// three replicas' worth -- above its floor, so the floor does not raise it.
-// Every replica row carries a saturated throughput of runMu on enough samples
-// to order.
+// supply -- d4 four replicas of fvK1, d2 two of half that, so 4 and 1 of the
+// role's 5 replicas' worth: a split by replica count (4/6, 2/6) is not a
+// split by supply (4/5, 1/5) -- idling at 0.1 x fvK1 each, and one prefill
+// variant of two replicas holding three replicas' worth, above its floor, so
+// the floor does not raise it. Each pod is a row (caps) carrying a saturated
+// throughput of runMu on enough samples to order, and its share of its
+// variant's demand.
 func twoDecodeVariants() ([]domain.VariantCapacity, []capacity.ReplicaCapacity, map[string]float64) {
-	const k1 = 930_508.0
 	variants := []domain.VariantCapacity{
-		{VariantName: "p", Role: domain.RolePrefill, PerReplicaCapacity: k1, ReplicaCount: 2,
-			TotalDemand: 3 * k1, Utilization: 1.5},
-		{VariantName: "d4", Role: domain.RoleDecode, PerReplicaCapacity: k1, ReplicaCount: 4,
-			TotalDemand: 0.1 * k1, Utilization: 0.1 / 4},
-		{VariantName: "d2", Role: domain.RoleDecode, PerReplicaCapacity: k1, ReplicaCount: 2,
-			TotalDemand: 0.1 * k1, Utilization: 0.1 / 2},
+		{VariantName: "p", Role: domain.RolePrefill, PerReplicaCapacity: fvK1, ReplicaCount: 2,
+			TotalDemand: 3 * fvK1, Utilization: 1.5},
+		{VariantName: "d4", Role: domain.RoleDecode, PerReplicaCapacity: fvK1, ReplicaCount: 4,
+			TotalDemand: 0.1 * fvK1, Utilization: 0.1 / 4},
+		{VariantName: "d2", Role: domain.RoleDecode, PerReplicaCapacity: fvK1 / 2, ReplicaCount: 2,
+			TotalDemand: 0.1 * fvK1, Utilization: 0.1},
 	}
-	replicas := []capacity.ReplicaCapacity{
-		{VariantName: "p", SaturatedThroughput: runMu, SaturatedThroughputSamples: 2},
-		{VariantName: "d4", SaturatedThroughput: runMu, SaturatedThroughputSamples: 2},
-		{VariantName: "d2", SaturatedThroughput: runMu, SaturatedThroughputSamples: 2},
+	caps := make([]capacity.ReplicaCapacity, 0, 8)
+	for _, vc := range variants {
+		for i := range vc.ReplicaCount {
+			caps = append(caps, capacity.ReplicaCapacity{
+				VariantName: vc.VariantName, PodName: fmt.Sprintf("%s-%d", vc.VariantName, i),
+				SaturatedThroughput: runMu, SaturatedThroughputSamples: 2,
+				ReplicaDemand: int64(vc.TotalDemand / float64(vc.ReplicaCount)),
+			})
+		}
 	}
 	roleDemand := map[string]float64{
-		domain.RolePrefill: 3 * k1,
-		domain.RoleDecode:  0.2 * k1,
+		domain.RolePrefill: 3 * fvK1,
+		domain.RoleDecode:  0.2 * fvK1,
 	}
-	return variants, replicas, roleDemand
+	return variants, caps, roleDemand
 }
 
-// floorTwoDecodeVariants runs the floor on twoDecodeVariants at 12 req/s,
-// with edit applied to the analyzer first, and returns the variants and role
-// demand it leaves.
-func floorTwoDecodeVariants(t *testing.T, edit func(*SaturationAnalyzer)) ([]domain.VariantCapacity, map[string]float64) {
-	t.Helper()
+// fvFloor runs the floor at 12 req/s on an analyzer with
+// SwitchThroughputFloorRaisesVariants on, edit applied first, and returns the
+// model total it leaves.
+func fvFloor(edit func(*SaturationAnalyzer), variants []domain.VariantCapacity, caps []capacity.ReplicaCapacity,
+	roleDemand, eppByRole map[string]float64, eppQueued float64,
+) float64 {
 	a := &SaturationAnalyzer{floorRaisesVariants: true}
 	if edit != nil {
 		edit(a)
 	}
-	variants, replicas, roleDemand := twoDecodeVariants()
-	total := roleDemand[domain.RolePrefill] + roleDemand[domain.RoleDecode]
-	a.applyThroughputFloor(domain.AnalyzerInput{ModelID: "m", Namespace: "n", ArrivalRate: 12},
-		&config.ScalingPolicy{}, replicas, variants, total, roleDemand, nil, 0, false, logr.Discard())
+	var total float64
+	for _, v := range roleDemand {
+		total += v
+	}
+	return a.applyThroughputFloor(domain.AnalyzerInput{ModelID: "m", Namespace: "n", ArrivalRate: 12},
+		&config.ScalingPolicy{}, caps, variants, total, roleDemand, eppByRole, eppQueued, false, logr.Discard())
+}
+
+// floorTwoDecodeVariants runs fvFloor on twoDecodeVariants with no scheduler
+// queue and returns the variants and role demand it leaves.
+func floorTwoDecodeVariants(edit func(*SaturationAnalyzer)) ([]domain.VariantCapacity, map[string]float64) {
+	variants, caps, roleDemand := twoDecodeVariants()
+	fvFloor(edit, variants, caps, roleDemand, nil, 0)
 	return variants, roleDemand
 }
 
 // P/D with two decode variants of different supply: the floor's raise is
-// split by supply, so both read the role's spare, and prefill, which the
-// floor does not raise, keeps its own figures.
+// split by supply, not by replica count, so both read the role's spare, and
+// prefill, which the floor does not raise, keeps its own figures.
 func TestFloorRaisesVariants_TwoDecodeVariantsSplitBySupply(t *testing.T) {
-	variants, roleDemand := floorTwoDecodeVariants(t, nil)
+	variants, roleDemand := floorTwoDecodeVariants(nil)
 	before, _, beforeRoles := twoDecodeVariants()
 
 	want := roleDemand[domain.RoleDecode]
 	require.Greater(t, want, beforeRoles[domain.RoleDecode], "the premise: the floor raised decode")
-	roleSupply := 6 * before[1].PerReplicaCapacity
+	roleSupply := 5 * fvK1
 
 	d4, d2 := variantNamed(t, variants, "d4"), variantNamed(t, variants, "d2")
-	assert.InDelta(t, want*4/6, d4.TotalDemand, 1e-6, "four of the role's six replicas take four sixths")
-	assert.InDelta(t, want*2/6, d2.TotalDemand, 1e-6, "two of six take two sixths")
+	assert.InDelta(t, want*4/5, d4.TotalDemand, 1e-6, "four of the role's five replicas' worth take four fifths")
+	assert.InDelta(t, want*1/5, d2.TotalDemand, 1e-6, "two half-size replicas, one fifth")
 	assert.InDelta(t, want, d4.TotalDemand+d2.TotalDemand, 1e-6, "the shares are the role's demand")
 	for _, vc := range []domain.VariantCapacity{d4, d2} {
 		assert.InDelta(t, 1-want/roleSupply, spareOf(vc), 1e-12,
@@ -210,11 +232,11 @@ func TestFloorRaisesVariants_TwoDecodeVariantsSplitBySupply(t *testing.T) {
 // and the variants keep their occupancy figures, reading sparer than the
 // role.
 func TestFloorRaisesVariants_TheSwitchOffLeavesTheVariants(t *testing.T) {
-	on, onRoles := floorTwoDecodeVariants(t, nil)
-	off, offRoles := floorTwoDecodeVariants(t, floorRaisesVariantsOff)
+	on, onRoles := floorTwoDecodeVariants(nil)
+	off, offRoles := floorTwoDecodeVariants(floorRaisesVariantsOff)
 	before, _, _ := twoDecodeVariants()
 
-	assert.Equal(t, onRoles, offRoles, "the role demand is the same either way")
+	assert.Equal(t, onRoles, offRoles, "the floor's role demand is the same either way")
 	assert.Equal(t, before, off, "off, no variant moves")
 	for _, name := range []string{"d4", "d2"} {
 		vOn, vOff := variantNamed(t, on, name), variantNamed(t, off, name)
@@ -223,23 +245,146 @@ func TestFloorRaisesVariants_TheSwitchOffLeavesTheVariants(t *testing.T) {
 	}
 }
 
-// A variant already above its share keeps its own figure: the raise only
-// ever raises.
-func TestFloorRaisesVariants_AVariantAboveItsShareKeepsIt(t *testing.T) {
-	a := &SaturationAnalyzer{floorRaisesVariants: true}
-	variants, replicas, roleDemand := twoDecodeVariants()
-	// d2 holds 1.9 of its 2 replicas: above any share of a floor near 2.2
-	// replicas' worth over six.
-	variants[2].TotalDemand = 1.9 * variants[2].PerReplicaCapacity
+// A variant above its share keeps its own figure, and its sibling takes what
+// is left of the role, not its own supply share of the whole: the variants sum
+// to the role, so the optimizer's split by variant demand
+// (allocation.variantDemandShare) prices the hot one at its own figure.
+func TestFloorRaisesVariants_AVariantAboveItsShareKeepsItAndTheRestFillsTheRole(t *testing.T) {
+	variants, caps, roleDemand := twoDecodeVariants()
+	// d2 holds 0.95 of its one replica's worth: above a fifth of any floor
+	// under 4.75 replicas' worth.
+	variants[2].TotalDemand = 0.95 * fvK1
 	variants[2].Utilization = 0.95
 	roleDemand[domain.RoleDecode] = variants[1].TotalDemand + variants[2].TotalDemand
+	measured := roleDemand[domain.RoleDecode]
 	hot := variants[2]
-	total := roleDemand[domain.RolePrefill] + roleDemand[domain.RoleDecode]
-	a.applyThroughputFloor(domain.AnalyzerInput{ModelID: "m", Namespace: "n", ArrivalRate: 12},
-		&config.ScalingPolicy{}, replicas, variants, total, roleDemand, nil, 0, false, logr.Discard())
+	fvFloor(nil, variants, caps, roleDemand, nil, 0)
 
 	want := roleDemand[domain.RoleDecode]
-	require.Greater(t, want, 0.1*variants[1].PerReplicaCapacity+hot.TotalDemand, "the premise: the floor raised decode")
+	require.Greater(t, want, measured, "the premise: the floor raised decode")
+	require.Greater(t, hot.TotalDemand, want/5, "the premise: d2 is above its supply share")
 	assert.Equal(t, hot, variants[2], "the hot variant is above its share and keeps its figures")
-	assert.InDelta(t, want*4/6, variants[1].TotalDemand, 1e-6, "its sibling takes its share")
+	assert.InDelta(t, want-hot.TotalDemand, variants[1].TotalDemand, 1e-6, "its sibling takes the rest of the role")
+	assert.InDelta(t, want, variants[1].TotalDemand+variants[2].TotalDemand, 1e-6, "the variants sum to the role")
+	assert.InDelta(t, variants[1].TotalDemand/(4*fvK1), variants[1].Utilization, 1e-12)
+}
+
+// The water-fill itself: a variant pushed above the level by the first pass
+// is taken out on the next, the variants sum to max(want, their own sum), a
+// variant with no supply or a non-finite capacity keeps its figure, and a role
+// not raised is not touched.
+func TestFloorRaisesVariants_TheWaterFill(t *testing.T) {
+	vc := func(name string, replicas int, perReplica, demand float64) domain.VariantCapacity {
+		v := domain.VariantCapacity{VariantName: name, Role: domain.RoleDecode, ReplicaCount: replicas,
+			PerReplicaCapacity: perReplica, TotalDemand: demand}
+		if s := float64(replicas) * perReplica; s > 0 && !math.IsInf(s, 1) {
+			v.Utilization = demand / s
+		}
+		return v
+	}
+	sum := func(vs []domain.VariantCapacity) float64 {
+		var s float64
+		for _, v := range vs {
+			s += v.TotalDemand
+		}
+		return s
+	}
+
+	// Supplies 1, 1, 2 (4 in all) and a want of 4. The first level is 1 a
+	// unit, so a (1.5) is above it; without a, 2.5 over a supply of 3 is
+	// 0.83, so b (0.9) is above that too; c then takes the 1.6 left, a level
+	// of 0.8.
+	vs := []domain.VariantCapacity{vc("a", 1, 1, 1.5), vc("b", 1, 1, 0.9), vc("c", 2, 1, 0.1)}
+	raiseVariantsToRoles(vs, map[string]float64{domain.RoleDecode: 4})
+	assert.InDelta(t, 1.5, vs[0].TotalDemand, 1e-12)
+	assert.InDelta(t, 0.9, vs[1].TotalDemand, 1e-12, "above the second level, so it keeps its own")
+	assert.InDelta(t, 1.6, vs[2].TotalDemand, 1e-12)
+	assert.InDelta(t, 0.8, vs[2].Utilization, 1e-12)
+	assert.InDelta(t, 4, sum(vs), 1e-12, "the variants sum to the role")
+
+	// A want under the variants' own sum moves none of them.
+	vs = []domain.VariantCapacity{vc("a", 1, 1, 1.5), vc("b", 1, 1, 0.1)}
+	unmoved := slices.Clone(vs)
+	raiseVariantsToRoles(vs, map[string]float64{domain.RoleDecode: 1.2})
+	assert.Equal(t, unmoved, vs)
+
+	// No supply, or a capacity that is not a number of tokens, keeps its
+	// figure and counts toward the role; the role not raised is not touched.
+	vs = []domain.VariantCapacity{vc("zero", 0, 1, 0.5), vc("inf", 1, math.Inf(1), 0.5), vc("ok", 1, 1, 0),
+		{VariantName: "p", Role: domain.RolePrefill, ReplicaCount: 1, PerReplicaCapacity: 1, TotalDemand: 0.1, Utilization: 0.1}}
+	raiseVariantsToRoles(vs, map[string]float64{domain.RoleDecode: 2})
+	assert.InDelta(t, 0.5, vs[0].TotalDemand, 0)
+	assert.InDelta(t, 0.5, vs[1].TotalDemand, 0, "a +Inf capacity is no supply: no +Inf demand")
+	assert.False(t, math.IsNaN(vs[1].Utilization), "and no NaN utilization")
+	assert.InDelta(t, 1, vs[2].TotalDemand, 1e-12, "the one variant with supply takes the rest")
+	assert.InDelta(t, 0.1, vs[3].TotalDemand, 0, "prefill was not raised")
+}
+
+// A role the swap LOWERS -- the queue priced as work to drain, below the
+// residency it was measured at -- is not followed, even where the lowered
+// figure is still above what its variants hold.
+func TestFloorRaisesVariants_ARoleTheSwapLowersLeavesItsVariants(t *testing.T) {
+	variants, caps, _ := twoDecodeVariants()
+	variants = variants[1:] // decode alone: the queue is decode's to drain
+	caps = slices.DeleteFunc(caps, func(rc capacity.ReplicaCapacity) bool { return rc.VariantName == "p" })
+	const queueTokens = 3 * fvK1
+	own := variants[0].TotalDemand + variants[1].TotalDemand
+	roleDemand := map[string]float64{domain.RoleDecode: own + queueTokens}
+	before := slices.Clone(variants)
+	fvFloor(nil, variants, caps, roleDemand, map[string]float64{domain.RoleDecode: queueTokens}, 20)
+
+	want := roleDemand[domain.RoleDecode]
+	require.Less(t, want, own+queueTokens, "the premise: the swap lowered decode")
+	require.Greater(t, want, own, "the premise: the lowered figure is above what the variants hold")
+	assert.Equal(t, before, variants, "a lowered role's variants keep their figures")
+}
+
+// Prefill with no mu: its share of the scheduler queue is dropped from the
+// role (it was never in a variant), and the prefill variant is not moved by
+// the drop.
+func TestFloorRaisesVariants_PrefillsDroppedQueueShareLeavesItsVariant(t *testing.T) {
+	variants, caps, roleDemand := twoDecodeVariants()
+	caps = slices.DeleteFunc(caps, func(rc capacity.ReplicaCapacity) bool { return rc.VariantName == "p" })
+	caps = append(caps, capacity.ReplicaCapacity{VariantName: "p", PodName: "p-0"},
+		capacity.ReplicaCapacity{VariantName: "p", PodName: "p-1"}) // no mu
+	const share = 2 * fvK1
+	variants[0].TotalDemand, variants[0].Utilization = 0.1*fvK1, 0.05
+	roleDemand[domain.RolePrefill] = variants[0].TotalDemand + share
+	before := variants[0]
+	fvFloor(nil, variants, caps, roleDemand, map[string]float64{domain.RolePrefill: share, domain.RoleDecode: 0}, 20)
+
+	require.InDelta(t, before.TotalDemand, roleDemand[domain.RolePrefill], 1e-6, "the premise: the share was dropped")
+	assert.Equal(t, before, variantNamed(t, variants, "p"), "the prefill variant is not moved by the drop")
+}
+
+// The hot-rank hold runs after the floor and adds what a hot replica's
+// variant is short of against the VARIANT's TotalDemand, into the role and the
+// model total. On, a floored variant already carries its share of the floor,
+// and the hold adds nothing that share covers; off, the variant still read its
+// occupancy, and the hold added the hot replica's want on top of a role the
+// floor had already raised to carry it -- the load counted twice.
+func TestFloorRaisesVariants_TheHotRankHoldDoesNotCountTheFloorTwice(t *testing.T) {
+	run := func(edit func(*SaturationAnalyzer)) (role, total float64, hot map[string]float64) {
+		variants, caps, roleDemand := twoDecodeVariants()
+		total = fvFloor(edit, variants, caps, roleDemand, nil, 0)
+		states := make([]domain.VariantReplicaState, 0, len(variants))
+		for _, vc := range variants {
+			states = append(states, domain.VariantReplicaState{VariantName: vc.VariantName, Role: vc.Role,
+				CurrentReplicas: vc.ReplicaCount})
+		}
+		total, hot = holdHotRanks(map[hotPod]bool{{"d4", "d4-0"}: true}, caps, variants, states,
+			roleDemand, total, 0.85, 0.70)
+		return roleDemand[domain.RoleDecode], total, hot
+	}
+	onRole, onTotal, onHot := run(nil)
+	offRole, offTotal, offHot := run(floorRaisesVariantsOff)
+
+	// The floor's decode figure, from the same fleet without the hold.
+	_, roles := floorTwoDecodeVariants(nil)
+	assert.InDelta(t, roles[domain.RoleDecode], onRole, 1e-6, "on, the hold adds nothing to a floored decode")
+	assert.Empty(t, onHot)
+	assert.Greater(t, offRole, onRole+0.5*fvK1, "off, the hold adds the hot replica's want on top of the floor")
+	assert.NotEmpty(t, offHot)
+	assert.Greater(t, offTotal, onTotal, "and the model total with it")
+	t.Logf("decode role demand %.0f on, %.0f off; model total %.0f on, %.0f off", onRole, offRole, onTotal, offTotal)
 }
