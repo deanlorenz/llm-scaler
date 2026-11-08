@@ -318,10 +318,11 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	//     P1-obs -> P3-k2, sixteen P2-hist -> P3-k2. The variant never records
 	//     an observed k2: the cost of refusing k2 with mu. No capacity moves.
 	//   - pd-restart, six outputs. Both decode Pods idle 12:26:02-12:26:32 and
-	//     return at 12:26:47, the first return of their current settle.
-	//     Their partial readings at 12:27:02 and 12:27:17 (2.78/2.36 and
-	//     4.00/3.62 req/s, against the 6.1-6.2 they serve from 12:27:32) are
-	//     refused until 12:27:47. Decode's priced mu reads 4.17 instead of 3.66
+	//     return at 12:26:47. For pod-01 it is the first return of its settle,
+	//     so its partial readings at 12:27:02 and 12:27:17 (2.36 and 3.62
+	//     req/s, against the 6.1-6.2 it serves from 12:27:32) are refused
+	//     until 12:27:47; pod-07 had returned at 12:13:44, so its readings
+	//     (2.78, 4.00) are admitted as before. Decode's priced mu reads 4.17 instead of 3.66
 	//     at 12:27:17 (+13.8 %) and 6.21 instead of 5.60 at 12:27:32 (+10.9 %),
 	//     the steady figure a cycle sooner; per-replica capacity is up 7-12 %
 	//     on 12:27:17-12:28:17 and decode's required capacity down 31 % to

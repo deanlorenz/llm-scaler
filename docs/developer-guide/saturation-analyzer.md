@@ -437,11 +437,24 @@ Ready time, a restart, a rejoin, a rollout or a lend. A saturated reading under
 with its own reason (`P1-obs-unsettled`). The analyzer keeps no per-pod state
 of its own for it.
 
-Only the first return holds. It is the replica first routed to after it
-became Ready, or after the controller first saw it idle: the case of the
-issue. Holding every return was the first attempt (f32a32ed7, reverted): on
-the pd-restart golden, whose decode replicas idle and return as the load
-steps, it refused enough readings to leave decode's mu 27 % low.
+Only the first return of a settle holds, so a replica is protected once per
+settle. It is the replica first routed to after it became Ready, or after the
+controller first saw it idle: the case of the issue. A replica that idles every
+night and takes a morning burst is held on its first morning only; on later
+mornings its first partial rate[1m] is admitted, as before #392.
+
+The narrower-sounding rule, hold any return whose idle run left idle seconds in
+the reading's window, is the same as holding every return: a return is the
+first load row after an idle row, so unless rows were missed between them the
+minute after it holds idle seconds. Holding every return was measured on the
+pd-restart golden, whose decode Pods idle and return as the load steps.
+Decode's mu was unpriced from 12:27:02 to 12:28:32, then read 5.06 and 4.65
+req/s until 12:46:50 against the 6.21 the first-return rule prices (-25 %); its
+k2 was 48 005 against 55 212; e1-tuned and ttft-staircase-b-off moved too. The
+first attempt (f32a32ed7, reverted), which held every return for mu alone, left
+decode's mu 27 % low on the same golden. The first-return rule holds one of the
+two decode Pods there (the other had returned at 12:13:44) and moves decode's
+mu toward its steady figure a cycle sooner.
 
 k2 is refused with mu, not mu alone, and that costs valid k2 readings. Mu is
 written only beside a k2 write, and k2's settle rate test reads the mu on

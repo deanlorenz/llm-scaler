@@ -123,3 +123,36 @@ func TestJoinedServed_OnlyTheFirstReturnOfASettleHolds(t *testing.T) {
 	require.Len(t, r.Returns, 2, "the tracker saw both returns")
 	require.False(t, rig.a.firstReturnUnderWindow(in, rig.clock.Add(-propCycle)), "the second return does not hold")
 }
+
+// A prefill replica is read by its role: it holds no KV and reads no ITL, and
+// only its request rate says it served. One Ready for an hour, idle, then
+// routed to is held for a rate window from that row. Read as decode, its
+// serving rows (KV empty, no token generated) would be idle, and nothing
+// would hold it.
+func TestJoinedServed_ALateRoutedPrefillReplicaIsHeld(t *testing.T) {
+	rig := newPropRig()
+	ready := rig.clock.Add(-time.Hour)
+	states := []domain.VariantReplicaState{
+		{VariantName: "v", AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1, Role: domain.RolePrefill},
+	}
+	row := func(rate float64) domain.ReplicaMetrics {
+		rm := satRow("r0", 0, 0, rate)
+		rm.ReadySince = ready
+		rm.GenerationTokenRate = 0
+		rm.KvCacheUsageKnown, rm.GenerationTokenRateKnown, rm.RequestRateKnown = true, true, true
+		return rm
+	}
+	in := k2SettleInput{namespace: "test-ns", modelID: "test-model", variant: "v", pod: "r0", ready: true}
+	for range 3 {
+		_, err := rig.analyze([]domain.ReplicaMetrics{row(0)}, states, 0.5, propCycle)
+		require.NoError(t, err)
+	}
+	served := rig.clock
+	for i := range 6 {
+		_, err := rig.analyze([]domain.ReplicaMetrics{row(0.5)}, states, 0.5, propCycle)
+		require.NoError(t, err)
+		at := served.Add(time.Duration(i) * propCycle)
+		require.Equal(t, at.Sub(served) < JoinedReplicaWindow, rig.a.firstReturnUnderWindow(in, at),
+			"%s after the prefill replica's first served row", at.Sub(served))
+	}
+}
