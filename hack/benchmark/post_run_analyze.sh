@@ -12,6 +12,13 @@
 #      log-rotation window constraint as step 1 -- run promptly)
 #   7. WVA-vs-arm comparison table (TTFT/TPOT/GPU-time)
 #
+# Step 6 also runs the zero-line guard, which fails the analysis (exit 1) when
+# the run window holds no line of the controller's verbosity:
+# replica-capacity-summary at --v=2, k2-decision at 3 or more. Below 2 neither
+# is logged, and it says it checked nothing. It reads the verbosity from the
+# Running controller Pods' args; set CONTROLLER_VERBOSITY=<n> to name it when
+# the run's controller is gone.
+#
 # Usage:
 #   ./hack/benchmark/post_run_analyze.sh <results_dir> [namespace] [suffix]
 #
@@ -84,6 +91,25 @@ python3 "$SCRIPT_DIR/dump_k2_decisions.py" "$RESULTS_DIR" -n "$NS" || {
     FAILED="${FAILED}  [6] dump_k2_decisions.py — no k2-decision report. Needs run_metadata.yaml in the results dir, the controller run at --v=3 or higher, and its log buffer to still cover the run window."$'\n'
 }
 
+# The zero-line guard (docs/proposals/analyzer-learner.md 6.1). The report
+# above comes back empty, and exits 0, at the shipped --v=2, where k2-decision
+# is not logged; so the guard reads the run's verbosity and asks for the line
+# that level logs: replica-capacity-summary at 2, k2-decision at 3 or more.
+# A window with none of it, or a verbosity it cannot read, fails the analysis.
+# Below 2 neither line is logged: exit 3, nothing checked, said so at the end
+# rather than failed or passed.
+echo "      run_log_guard.py (the run window holds the lines its --v logs)"
+GUARD_FAILED=false
+NOT_CHECKED=""
+guard_rc=0
+python3 "$SCRIPT_DIR/run_log_guard.py" "$RESULTS_DIR" -n "$NS" || guard_rc=$?
+case "$guard_rc" in
+    0) ;;
+    3) NOT_CHECKED="  [6] run_log_guard.py — the controller ran below --v=2, which logs no line the guard reads (above). The run window was not checked."$'\n' ;;
+    *) GUARD_FAILED=true
+       FAILED="${FAILED}  [6] run_log_guard.py — the run window holds none of the controller lines its verbosity logs, or the verbosity could not be read (above). Nothing here analyses this run's controller."$'\n' ;;
+esac
+
 echo "[7/7] comparison_table.py (WVA-vs-arm TTFT/TPOT/GPU-time table)"
 mkdir -p "$RESULTS_DIR/metrics/reports"
 python3 "$SCRIPT_DIR/comparison_table.py" "$RESULTS_DIR" > "$RESULTS_DIR/metrics/reports/comparison_table.md" || {
@@ -98,6 +124,11 @@ echo ""
 if [ -n "$FAILED" ]; then
     echo "Finished, but some steps produced nothing:"
     printf '%s' "$FAILED"
+    echo ""
+fi
+if [ -n "$NOT_CHECKED" ]; then
+    echo "Not checked:"
+    printf '%s' "$NOT_CHECKED"
     echo ""
 fi
 
@@ -121,3 +152,4 @@ for f in "$RESULTS_DIR/metrics/processed/wva_target_timeseries.json" \
     fi
 done
 [ "$found_any" = true ] || exit 1
+[ "$GUARD_FAILED" = false ] || exit 1

@@ -3190,6 +3190,12 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@echo "Checking the k1/k2 report's Restored column..."
 	@# Fixture events through render_report: a restore is a field, not a source.
 	@bash hack/check-k2-decisions-restored.sh
+	@echo "Checking the post-run analysis asks for the lines its controller verbosity logs..."
+	@# Runs post_run_analyze.sh against a stub kubectl and fixture logs. A run
+	@# at the shipped --v=2 has no k2-decision line, and an empty window, or a
+	@# verbosity nobody read, finished as analysed: all of it parses.
+	@bash -n hack/check-run-log-guard.sh
+	@bash hack/check-run-log-guard.sh
 	@echo "Checking model identification..."
 	@# Same shape as the check above, on the parsers that name the model every
 	@# ScaledObject is written for. `bash -n` sees none of it: a --served-model-name
