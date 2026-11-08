@@ -212,8 +212,9 @@ func (r *propRig) weighSample() (sample, read float64, ok bool) {
 //
 // Ledger rows (#495): the band (mu-weighing-band) holds the crossing to one
 // change at 10 % and 15 %; a key's first set is on its first reading, so a
-// first reading in a noise trough sets it at the start, it clears after the
-// clear window, and the crossing sets it again: 3 and 14 of 100 seeds.
+// first reading in a noise trough sets it at the start, the provisional set
+// clears on its own set-window mean, and the crossing sets it again: 3 and 14
+// of 100 seeds.
 func checkWeighExcursion(ns arNoiseSpec) func(uint64) error {
 	return func(seed uint64) error {
 		r := propRand(seed)

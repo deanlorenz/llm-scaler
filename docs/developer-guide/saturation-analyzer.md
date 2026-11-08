@@ -783,7 +783,7 @@ Add a row when you add such a threshold.
 | threshold | set | clear | dwell | safe side | after a restart |
 | --- | --- | --- | --- | --- | --- |
 | ITL tier: full fit or pinned fit (`itl/tier_latch.go`, on the saturation, slo and throughput lines) | 10 steady readings, spread 0.30 of `k` | under 8 steady readings or spread 0.18, or a pinned fit pricing 3 % more | 10 min after the last change, unless the new line prices 3 % more replicas | the line that prices more replicas, from either tier, judged by what the line sustains where the analyzer prices it | the latch is not kept: a key with a restored slope stands at the pinned fit |
-| Mu's weighing: a sample of the readers alone, or counting the replicas they did not read (`saturation/mu_slow_pod.go`, `muChoice.weighs`) | the readers' rate over the unread replicas', averaged over 5 min, under `siblingMuTolerance` (0.80) | that average over 10 min at 0.90 or over (the tolerance plus 0.10, never past 1), or no unread replica (at once) | 10 min after a set, on the clear only; a set is never held | neither source is the safe side alone: the readers alone are the lower mu, but a slow replica read alone seals the fleet over need (3.4), so the set is kept fast and the clear slow | the latch is not kept: a key starts not weighing, and its first reading under 0.80 sets it |
+| Mu's weighing: a sample of the readers alone, or counting the replicas they did not read (`saturation/mu_slow_pod.go`, `muChoice.weighs`) | the readers' rate over the unread replicas', averaged over 5 min, under `siblingMuTolerance` (0.80) | that average over 10 min at 0.90 or over (the tolerance plus 0.10, never past 1), or no unread replica (at once) | 10 min after a set, on the clear only; none for a set made on under 5 min of readings, which clears on its own 5 min mean at 0.90; a set is never held | neither source is the safe side alone: the readers alone are the lower mu, but a slow replica read alone seals the fleet over need (3.4), so the set is kept fast and the clear slow | the latch is not kept: a key starts not weighing, and its first reading under 0.80 sets it |
 
 **Price.** A line's price is sequences over ITL at the fill the analyzer reads
 (`Admission.PricedRate`). At a fixed fill that is the ITL there. With a TPOT
@@ -829,7 +829,11 @@ sample's source 3 to 11 times at 4 % noise, each switch moving the sample
 about 11 %. Per-replica rates read 9 % to 19 % apart from one scrape to the
 next on E1, so the band judges a 5 min average to set and a 10 min average to
 clear, not one reading. A key's first readings are all its window holds, so
-its first set is on its first reading. The cost is reaction time: a slow
+its first set is on its first reading. Such a set is provisional: no dwell
+holds it, and it clears as soon as its own 5 min mean reaches 0.90, so a
+first reading in a noise trough weighs for minutes, not 10. A NaN reading
+makes the mean NaN: the key does not set, and a weighing key lets go at its
+next clear test, both on the side that orders more. The cost is reaction time: a slow
 replica in a settled fleet is weighed once the 5 min average crosses 0.80,
 1.4 min after a step to 0.3 and 2.2 min after one to 0.55, where the bare
 tolerance took the next sample. Longer set windows seal the closed-loop probe:

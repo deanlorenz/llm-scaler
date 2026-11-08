@@ -526,6 +526,9 @@ type muChoice struct {
 	weighing     bool
 	weighChanged time.Time
 	weighRatios  []weighRatio
+	// weighProvisional is set while the weighing was set on less than a set
+	// window of readings (muChoice.weighs): no dwell holds it.
+	weighProvisional bool
 	// minority is set while the replicas that read the window's newest
 	// sample are a minority of the fleet (noteSampleWriters), which lets a
 	// figure no line can replace expire (minorityFigureExpired). Unset for

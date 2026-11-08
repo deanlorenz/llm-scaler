@@ -169,6 +169,11 @@ const (
 	WeighClearMargin = 0.10
 )
 
+// weighFullSpan is how far back a key's readings must reach for its set
+// window to count as full: the window less one sample spacing, since its
+// oldest reading falls just inside it.
+const weighFullSpan = WeighSetWindow - ThroughputSampleSpacing
+
 // weighClear is the ratio at or over which a weighing sample stops counting
 // the unread replicas: tol plus WeighClearMargin, never past 1, where a
 // replica serving less than the readers would lower the sample.
@@ -185,6 +190,22 @@ func weighClear(tol float64) float64 {
 // replica is left unread: the band holds a source, never a replica that is
 // gone.
 //
+// A set made on less than a set window of readings (a key's first readings,
+// or its first after its readings aged out) is provisional: it skips the
+// dwell, and clears as soon as its own set-window mean reaches
+// weighClear(tol). Its readings once span the window, it stands as any set.
+// The first set stays on the first reading, since a slow replica read alone
+// seals the fleet (the closed-loop probe), but it is no longer held 10 min on
+// that one reading, on the side that orders fewer replicas. It clears at the
+// clear value, not the set point: at the set point the next noise trough
+// would set it again on the same few readings, a flip each way.
+//
+// A NaN ratio makes the window's mean NaN: a key not weighing does not set
+// (NaN < tol is false), and one weighing lets go at its next clear test (the
+// test is !(mean < clear)): at once if provisional, past its dwell if not.
+// Both are the lower figure, the side that orders more, until the NaN ages
+// out of the windows.
+//
 // Which side it errs to (3.4): the readers alone are the lower figure, the
 // one that orders more, and the weighed sample is the fleet's mean with every
 // unread replica at what it serves, a lower bound on what it sustains
@@ -194,7 +215,7 @@ func weighClear(tol float64) float64 {
 //     weighed once the set window's mean crosses tol, from a step of its
 //     ratio from 1 to x after 5 x 0.2 / (1 - x) min (1.4 min at 0.3, 2.2 at
 //     0.55, 4 at 0.75) where the bare tolerance took the next sample. A key's
-//     first set is not delayed.
+//     first set is not delayed, and is provisional (above).
 //   - Clear later, toward the higher figure: a weighing key keeps the
 //     weighed sample for at least WeighClearWindow and while its readers
 //     average under 0.90 of the unread replicas, where the bare tolerance
@@ -214,15 +235,36 @@ func (c *muChoice) weighs(read, h float64, n int, tol float64, now time.Time) bo
 		}
 		return false
 	}
-	c.weighRatios = append(c.weighRatios, weighRatio{at: now, ratio: read / h})
+	// One ratio a cycle: the readers' mean is re-read on each replica's
+	// write in the cycle, and the newest is the fullest, so it replaces the
+	// cycle's entry rather than weighting the mean by how many replicas read.
+	if k := len(c.weighRatios); k > 0 && c.weighRatios[k-1].at.Equal(now) {
+		c.weighRatios[k-1].ratio = read / h
+	} else {
+		c.weighRatios = append(c.weighRatios, weighRatio{at: now, ratio: read / h})
+	}
 	i := 0
 	for i < len(c.weighRatios)-1 && now.Sub(c.weighRatios[i].at) >= max(WeighSetWindow, WeighClearWindow) {
 		i++
 	}
 	c.weighRatios = c.weighRatios[i:]
+	full := now.Sub(c.weighRatios[0].at) >= weighFullSpan
 	if !c.weighing {
 		if c.meanRatioSince(now.Add(-WeighSetWindow)) < tol {
-			c.weighing, c.weighChanged = true, now
+			c.weighing, c.weighChanged, c.weighProvisional = true, now, !full
+		}
+		return c.weighing
+	}
+	if c.weighProvisional {
+		// Set on less than a set window of readings: no dwell. It clears as
+		// soon as its own set-window mean is back at the clear value, and
+		// stands as any set once its readings span the window.
+		if full {
+			c.weighProvisional = false
+			return true
+		}
+		if !(c.meanRatioSince(now.Add(-WeighSetWindow)) < weighClear(tol)) {
+			c.weighing, c.weighChanged, c.weighProvisional = false, now, false
 		}
 		return c.weighing
 	}

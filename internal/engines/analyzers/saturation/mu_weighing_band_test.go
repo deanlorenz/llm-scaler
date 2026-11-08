@@ -2,10 +2,13 @@ package saturation
 
 import (
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 )
 
 // The weighing's band (muChoice.weighs, SwitchMuWeighingBand): a key starts
@@ -64,22 +67,32 @@ func TestWeighingBand_SetHoldClear(t *testing.T) {
 	require.Equal(t, setCycles+6, first, "set when the window's mean crosses 0.80, not on the first low reading")
 	t.Logf("a step from 0.95 to 0.5 set after %s", time.Duration(first-setCycles+1)*propCycle)
 
-	// Held inside the clear window at any ratio, then inside the band, then
-	// cleared once the window's mean reaches 0.90.
+	// A set on a full window of readings: the first reading at 0.5 sets
+	// provisionally, and once the readings span the set window (16 cycles,
+	// 4 min) the set stands, its dwell counted from the set.
+	confirm := int(weighFullSpan / propCycle)
 	c = &muChoice{}
 	start := propStart
-	require.Equal(t, []bool{true}, weighAt(c, start, []float64{0.5}))
-	held := weighAt(c, start.Add(propCycle), repeat(1.0, clearCycles-1))
+	got = weighAt(c, start, repeat(0.5, confirm+1))
+	require.True(t, got[0] && got[confirm], "set on the first reading and held under 0.90")
+	require.False(t, c.weighProvisional, "the readings span the set window: the set stands")
+
+	// Held inside the clear window at any ratio.
+	held := weighAt(c, start, append(repeat(0.5, confirm+1), repeat(1.0, clearCycles-confirm-1)...))
 	for i, w := range held {
-		require.True(t, w, "cycle %d inside the clear window: a weighing key holds at 1.0", i+1)
+		require.True(t, w, "cycle %d inside the clear window: a weighing key holds", i)
 	}
+	// Held while the clear window's mean sits under 0.90.
 	c = &muChoice{}
-	got = weighAt(c, start, append([]float64{0.5}, repeat(0.85, 3*clearCycles)...))
+	got = weighAt(c, start, append(repeat(0.5, confirm+1), repeat(0.85, 3*clearCycles)...))
 	for i, w := range got {
 		require.True(t, w, "cycle %d: a weighing key holds while its mean sits under 0.90", i)
 	}
+	// Cleared once the clear window's mean reaches 0.90: at cycle 55 the
+	// window's 40 readings hold one 0.5 (cycle 16), (0.5 + 39 x 0.92) / 40 =
+	// 0.9095; at 54 two, 0.899.
 	c = &muChoice{}
-	got = weighAt(c, start, append([]float64{0.5}, repeat(0.92, 3*clearCycles)...))
+	got = weighAt(c, start, append(repeat(0.5, confirm+1), repeat(0.92, 3*clearCycles)...))
 	cleared := -1
 	for i, w := range got {
 		if !w {
@@ -87,9 +100,24 @@ func TestWeighingBand_SetHoldClear(t *testing.T) {
 			break
 		}
 	}
-	require.Equal(t, clearCycles, cleared, "cleared once the clear window has run and its mean is over 0.90")
+	require.Equal(t, 55, cleared, "cleared once the clear window's mean is over 0.90")
 	require.False(t, c.weighs(0.85, 1, 3, SiblingMuTolerance, start.Add(time.Duration(len(got))*propCycle)),
 		"cleared, a reading inside the band does not set it again")
+
+	// A provisional set (one reading at 0.5, then 0.95) is not held by the
+	// dwell: it clears once its set-window mean reaches 0.90, at the ninth
+	// 0.95 ((0.5 + 9 x 0.95) / 10 = 0.905; 0.895 at eight). The bare dwell
+	// held it 10 min.
+	c = &muChoice{}
+	got = weighAt(c, start, append([]float64{0.5}, repeat(0.95, setCycles)...))
+	cleared = -1
+	for i, w := range got {
+		if !w {
+			cleared = i
+			break
+		}
+	}
+	require.Equal(t, 9, cleared, "a provisional set clears on its own set-window mean, no dwell")
 
 	// No unread replica clears at once, and forgets the ratios.
 	c = &muChoice{}
@@ -97,6 +125,63 @@ func TestWeighingBand_SetHoldClear(t *testing.T) {
 	require.False(t, c.weighs(0.5, 1, 0, SiblingMuTolerance, start.Add(propCycle)), "no replica left to count clears inside the clear window")
 	require.Empty(t, c.weighRatios)
 	require.True(t, c.weighs(0.5, 1, 3, SiblingMuTolerance, start.Add(2*propCycle)), "the replicas back, the next reading under 0.80 sets again")
+
+	// A NaN ratio: a key not weighing does not set, and a provisional one
+	// lets go at once.
+	c = &muChoice{}
+	require.False(t, c.weighs(math.NaN(), 1, 3, SiblingMuTolerance, start), "a NaN mean does not set")
+	c = &muChoice{}
+	require.True(t, c.weighs(0.5, 1, 3, SiblingMuTolerance, start))
+	require.False(t, c.weighs(math.NaN(), 1, 3, SiblingMuTolerance, start.Add(propCycle)), "a NaN mean clears a provisional set")
+}
+
+// The ratios are one a cycle, and the windows bound them: each replica's
+// write in a cycle re-reads the readers' mean, and the newest replaces the
+// cycle's entry; after two hours of three writes a cycle the key holds no
+// more than the clear window's readings.
+func TestWeighingBand_TheRatiosAreOneACycleAndBounded(t *testing.T) {
+	c := &muChoice{}
+	c.weighs(0.5, 1, 3, SiblingMuTolerance, propStart)
+	c.weighs(0.7, 1, 3, SiblingMuTolerance, propStart)
+	require.Len(t, c.weighRatios, 1, "two writes in one cycle are one ratio")
+	require.Equal(t, 0.7, c.weighRatios[0].ratio, "the newest write's")
+
+	c = &muChoice{}
+	cycles := int(2 * time.Hour / propCycle)
+	for i := range cycles {
+		now := propStart.Add(time.Duration(i) * propCycle)
+		for range 3 {
+			c.weighs(0.85, 1, 3, SiblingMuTolerance, now)
+		}
+	}
+	limit := int(max(WeighSetWindow, WeighClearWindow) / propCycle)
+	require.LessOrEqual(t, len(c.weighRatios), limit, "the windows bound the ratios kept")
+	require.GreaterOrEqual(t, len(c.weighRatios), limit-1, "premise: the clear window is full")
+}
+
+// An episode gap starts the throughput key's window over, and the weighing's
+// latch with it: the new window starts not weighing, with no ratios, no
+// dwell and no provisional mark, through recordSaturatedThroughputFrom.
+func TestWeighingBand_ANewWindowStartsNotWeighing(t *testing.T) {
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	now := propStart
+	a.now = func() time.Time { return now }
+	const key = "ns|v|m|H200|1|decode|ilong|medium|q5"
+	require.Equal(t, muSampled, a.recordSaturatedThroughputFrom(key, "p", 1))
+	a.mu.Lock()
+	a.throughputMuChoice[key] = &muChoice{weighing: true, weighChanged: now, weighProvisional: true,
+		weighRatios: []weighRatio{{at: now, ratio: 0.5}}, latchKnown: true}
+	a.mu.Unlock()
+
+	now = now.Add(a.horizons.EpisodeGap + time.Minute)
+	require.Equal(t, muSampled, a.recordSaturatedThroughputFrom(key, "p", 2), "premise: past the gap a new reading starts a sample")
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	c := a.throughputMuChoice[key]
+	require.False(t, c.weighing, "a new window starts not weighing")
+	require.Empty(t, c.weighRatios)
+	require.True(t, c.weighChanged.IsZero())
+	require.False(t, c.weighProvisional)
 }
 
 // weighNoise is one noise level of the excursion.
