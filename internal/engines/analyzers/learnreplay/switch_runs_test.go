@@ -188,6 +188,12 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// hold it (heldBy).
 	saturation.SwitchMuWeighingBand: nil,
 
+	// #526: mu's stale latch reads its ratio smoothed over 3 min. It moves
+	// no golden: no recording holds a stale measurement whose ratio to the
+	// derived figure crosses the 1.6-2.0 band. Its unit tests hold it
+	// (heldBy), and #524's latch-return-excursion cases.
+	saturation.SwitchMuLatchReadsSmoothedRatio: nil,
+
 	// Which rows the transfer is read from. It moves no golden: no committed
 	// recording prices a line (the decode term's reason, above). Its unit test
 	// holds it (heldBy).
@@ -315,6 +321,36 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// recording has a hot rank on a floored role, so results, composite-roles,
 	// composite-results, composite-holds and composite-release are unchanged
 	// in every fixture. The unit tests hold that case (heldBy).
+	// #392: a replica's joined clock also starts at its first return of load
+	// after an idle run, as the settle tracker reads it
+	// (saturation.SwitchJoinedFromFirstServed). Measured alone against all off
+	// at main 39551b9be, it moves two fixtures:
+	//
+	//   - e1/variant-capacities.csv, 18 of 762 rows, Reason only. model-02's
+	//     variant-01 has one Pod, Ready at 13:56:09 and idle until its first
+	//     return at 14:01:31. Its reading at 14:02:16 (request rate 4.01 req/s
+	//     against the 5.5-7.2 it served from 14:02:46) is refused, its
+	//     14:02:31 reading, the window's first, is held for a second
+	//     (k2_confirm.go), and nothing saturates the variant again: two rows
+	//     P1-obs -> P3-k2, sixteen P2-hist -> P3-k2. The variant never records
+	//     an observed k2: the cost of refusing k2 with mu. No capacity moves.
+	//   - pd-restart, six outputs. Both decode Pods idle 12:26:02-12:26:32 and
+	//     return at 12:26:47. For pod-01 it is the first return of its settle,
+	//     so its partial readings at 12:27:02 and 12:27:17 (2.36 and 3.62
+	//     req/s, against the 6.1-6.2 it serves from 12:27:32) are refused
+	//     until 12:27:47; pod-07 had returned at 12:13:44, so its readings
+	//     (2.78, 4.00) are admitted as before. Decode's priced mu reads 4.17 instead of 3.66
+	//     at 12:27:17 (+13.8 %) and 6.21 instead of 5.60 at 12:27:32 (+10.9 %),
+	//     the steady figure a cycle sooner; per-replica capacity is up 7-12 %
+	//     on 12:27:17-12:28:17 and decode's required capacity down 31 % to
+	//     4 % over the same cycles; from 12:28:47 the run is the base's (one
+	//     row's K2Source P1-obs -> P2-hist).
+	saturation.SwitchJoinedFromFirstServed: {
+		"e1/variant-capacities.csv",
+		"pd-restart/composite-results.csv", "pd-restart/composite-roles.csv", "pd-restart/composite-variants.csv",
+		"pd-restart/store-records.csv", "pd-restart/variant-capacities.csv", "pd-restart/warm-pool-pressure.csv",
+	},
+
 	saturation.SwitchThroughputFloorRaisesVariants: {
 		"e1-tuned/variant-capacities.csv",
 		"e1/variant-capacities.csv",
@@ -1268,6 +1304,13 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestBatchCapSwitch_LearnedOffLearnsNothing"},
 		{"../saturation", "TestBatchCap_SwitchesOffReproduceTheIssue"},
 	},
+	// #526: the first runs the switch on and off and asserts both, at the
+	// measured rate noise; the second states the reaction time either way.
+	saturation.SwitchMuLatchReadsSmoothedRatio: {
+		{"../saturation", "TestMuLatchBand_OneChangePerExcursionAtTheMeasuredNoise"},
+		{"../saturation", "TestMuLatchBand_AStaleStepLatchesWithinTheStatedTime"},
+		{"../saturation", "TestMuLatchBand_ARatioSmoothedWhileFreshLatchesWhenStale"},
+	},
 	saturation.SwitchMuLatchRestoresSafe: {
 		{"../saturation", "TestMuLatch_ARestoredMeasurementOverDerivedComesBackLatched"},
 		{"../saturation", "TestMuLatch_TheRestoredLatchIsKnownAfterItsFirstChoice"},
@@ -1514,6 +1557,11 @@ var switchBase = withDigests(staircaseBase, map[string]string{
 	"ttft-three-pods/composite-variants.csv":      "0c7aca65a555d5a39de684ee7db853956f386fb214f9c026113d437ec197db83",
 	"ttft-three-pods/variant-capacities.csv":      "7d68c9e1678b68410d5bf6a0915a37203e12ef265a14a0d742c5bb4dff78cf0a",
 	"ttft-three-pods/warm-pool-pressure.csv":      "56504bb5742a691393ebb6b33642a5d29fb3518f2bc70588376baee370a90fb4",
+
+	// #392's joined-clock outputs not named above, at main 39551b9be: no
+	// other switch of replaySwitches moves them, so all off is main's golden.
+	"pd-restart/composite-roles.csv": "b6629b4b25d4b0d8d20246ec2319ce6e6c596482def6d1fe7634977798918e07",
+	"pd-restart/store-records.csv":   "5f97bd429a7f97b77ea04146f204c2a310c2bd7f8decf32b993db398e99edd46",
 })
 
 // The slow tests of this package run in parallel with each other (each
