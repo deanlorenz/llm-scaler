@@ -18,29 +18,6 @@ import (
 // the cycle's own ratio one excursion set and released the latch several
 // times. On the smoothed ratio it changes at most once.
 
-// bandNoise is the measured rate noise, low and high, at the measured
-// middle lag-one correlation: the AR(1) noise #524's latch cases run.
-var bandNoise = []struct {
-	name       string
-	sigma, phi float64
-}{{"sigma 10%", 0.10, 0.3}, {"sigma 15%", 0.15, 0.3}}
-
-// bandPath is a noise-free ratio path: from for hold cycles, a straight
-// ramp over ramp cycles, then to for rest cycles.
-func bandPath(from, to float64, hold, ramp, rest int) []float64 {
-	out := make([]float64, 0, hold+ramp+rest)
-	for range hold {
-		out = append(out, from)
-	}
-	for i := 1; i <= ramp; i++ {
-		out = append(out, from+(to-from)*float64(i)/float64(ramp))
-	}
-	for range rest {
-		out = append(out, to)
-	}
-	return out
-}
-
 // bandAnalyzer is a new analyzer with the switch set to on.
 func bandAnalyzer(t testing.TB, on bool) *SaturationAnalyzer {
 	t.Helper()
@@ -49,13 +26,13 @@ func bandAnalyzer(t testing.TB, on bool) *SaturationAnalyzer {
 	return a
 }
 
-// checkLatchBand is #524's edges/mu/latch-return-excursion with the switch
-// set: a stale measurement starts at 2.5x the derived mu (0.4x on the low
+// checkLatchBand is checkLatchReturnExcursion (edges/mu/latch-return-excursion)
+// with the switch set: a stale measurement starts at 2.5x the derived mu (0.4x on the low
 // side), where it yields, and comes back across returnRatio once, on a
 // 30 min ramp to 0.75 of it, or a step onto it held for 40 min. The choice
 // changes at most once per excursion, and at the end of a ramp it has
 // changed.
-func checkLatchBand(tb testing.TB, tn config.AnalyzerTuning, sigma, phi float64, on bool) func(uint64) error {
+func checkLatchBand(tb testing.TB, tn config.AnalyzerTuning, ns arNoiseSpec, on bool) func(uint64) error {
 	return func(seed uint64) error {
 		r := propRand(seed)
 		t := tuning{AnalyzerTuning: tn.WithDefaults()}
@@ -66,12 +43,12 @@ func checkLatchBand(tb testing.TB, tn config.AnalyzerTuning, sigma, phi float64,
 			name      string
 			inv, ramp bool
 		}{{"high, ramp", false, true}, {"high, on the return ratio", false, false}, {"low, ramp", true, true}, {"low, on the return ratio", true, false}} {
-			path := bandPath(1.25*maxR, 0.75*retR, 8, 120, 40)
+			path := arPath(1.25*maxR, 0.75*retR, 8, 120, 40)
 			if !side.ramp {
-				path = bandPath(1.25*maxR, retR, 8, 0, 160)
+				path = arPath(1.25*maxR, retR, 8, 0, 160)
 			}
 			a := bandAnalyzer(tb, on)
-			noise := arNoise(r, len(path), sigma, phi)
+			noise := arNoise(r, len(path), ns.sigma, ns.phi)
 			noise[0] = 0
 			v := make([]bool, len(path))
 			for i, x := range path {
@@ -95,10 +72,10 @@ func checkLatchBand(tb testing.TB, tn config.AnalyzerTuning, sigma, phi float64,
 	}
 }
 
-// On, every seed of #524's latch cases holds at both measured noise levels,
-// at the default return ratio and at 1.3. Off, the same cases fail, as #524
-// ledgers them (default: 100 of 100 at either level; 1.3: 11 and 97 of
-// 100): the switch is what the cases see.
+// On, every seed of the latch-return-excursion cases holds at both measured
+// noise levels, at the default return ratio and at 1.3. Off, the same cases
+// fail as #524 measured them before this switch (default: 100 of 100 at
+// either level; 1.3: 11 and 97 of 100): the switch is what the cases see.
 func TestMuLatchBand_OneChangePerExcursionAtTheMeasuredNoise(t *testing.T) {
 	ret13 := tuningWith(func(t *config.AnalyzerTuning) { t.MuChoice.ReturnRatio = 1.3 })
 	for _, tc := range []struct {
@@ -111,25 +88,16 @@ func TestMuLatchBand_OneChangePerExcursionAtTheMeasuredNoise(t *testing.T) {
 		{"returnRatio 1.6", tuningDefault, [2]int{90, 90}},
 		{"returnRatio 1.3", ret13, [2]int{1, 80}},
 	} {
-		for i, ns := range bandNoise {
-			on, err := runCase(checkLatchBand(t, tc.tn, ns.sigma, ns.phi, true), arSeeds(cheapSeeds))
+		for i, ns := range []arNoiseSpec{rateNoise10, rateNoise15} {
+			on, err := runCase(checkLatchBand(t, tc.tn, ns, true), arControlSeeds(cheapSeeds))
 			require.NoError(t, err)
-			assert.Empty(t, on.Failures, "%s, %s, switch on: %s", tc.name, ns.name, on)
-			off, err := runCase(checkLatchBand(t, tc.tn, ns.sigma, ns.phi, false), arSeeds(cheapSeeds))
+			assert.Empty(t, on.Failures, "%s, %s, switch on: %s", tc.name, ns, on)
+			off, err := runCase(checkLatchBand(t, tc.tn, ns, false), arControlSeeds(cheapSeeds))
 			require.NoError(t, err)
-			assert.GreaterOrEqual(t, len(off.Failures), tc.offFailsAtLeast[i], "%s, %s, switch off: %s", tc.name, ns.name, off)
-			t.Logf("%s, %s: on %s; off %s", tc.name, ns.name, on, off)
+			assert.GreaterOrEqual(t, len(off.Failures), tc.offFailsAtLeast[i], "%s, %s, switch off: %s", tc.name, ns, off)
+			t.Logf("%s, %s: on %s; off %s", tc.name, ns, on, off)
 		}
 	}
-}
-
-// arSeeds is seeds 1..n.
-func arSeeds(n int) []uint64 {
-	seeds := make([]uint64, n)
-	for i := range seeds {
-		seeds[i] = uint64(i + 1)
-	}
-	return seeds
 }
 
 // stepLatchCycles is how many cycles after the ratio of a stale
