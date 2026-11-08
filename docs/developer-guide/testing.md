@@ -1722,16 +1722,45 @@ accounting.
 The replay is open loop: recorded inputs do not depend on what the analyzer
 ordered. Holds, latches, the sibling yield and a self-sealing low mu are
 closed-loop behaviours, and `closed_loop_probe_test.go` drives the
-saturation analyzer with a fleet simulator instead: arrivals split over the
-Ready replicas, each serves up to its true mu and queues the rest, the
-analyzer's order becomes replicas after a 90 s start time, and a release
-waits out a 5-minute stabilization. The verdict compares the fleet the loop
-settles at with need, the fleet a truthful analyzer orders once every
-replica serves the fleet's mean mu, within 15 % plus one replica. It also
-fails a fleet that sits below need at the arrival rate of the moment for
-more than 5 minutes in one run, an under-order mid-run. Each passing case
-asserts its premise from mu's reports: the load step measured mu and priced
-it `measured`, and the slow replica's rate was counted `refused-under-served`.
+saturation analyzer with a fleet simulator instead
+(`internal/engines/analyzers/internal/learnertest/fleet.go`): arrivals are
+routed over the Ready replicas, each serves up to its true mu and queues the
+rest, the analyzer's order becomes replicas after a 90 s start time, and a
+release waits out a 5-minute stabilization. The verdict compares the fleet
+the loop settles at with need, the fleet a truthful analyzer orders once
+every replica serves the fleet's mean mu, within 15 % plus one replica. It
+also fails a fleet that sits below need at the arrival rate of the moment
+for more than 5 minutes in one run, an under-order mid-run. Each passing
+case asserts its premise from mu's reports: the load step measured mu and
+priced it `measured`, and the slow replica's rate was counted
+`refused-under-served`.
+
+The simulated router is queue-aware, because the real one is: the EPP's
+queue scorer sends each request to the replica with the shortest queue. The
+simulator uses the fluid form of that rule. Each cycle's arrivals fill the
+replicas with the fewest requests waiting up to a common level, and a
+replica whose queue is already above that level gets nothing. With no queue
+anywhere this is an equal split. An equal-split router keeps feeding
+replicas that are already queued. Behind a slow start this left a backlog
+on the first replicas that drained for most of an hour, an artifact the
+real router does not produce (#520, cause C). It also hid the other side:
+under a queue-aware router every replica that joins a queued fleet fills to
+the same queue at once, and the analyzer then reads the whole fleet as full.
+Cases whose premise is a replica that queues while its siblings do not (the
+slow replica, the steering router, the floor's starting-replica credit) set
+`queueBlind`. That flag splits arrivals by weight alone, the way a Service's
+round robin does, because a queue-aware router would never let that queue
+form.
+
+The start-probe property cases (`closed_loop_probe_starts_test.go`) judge the
+final fleet at the case's horizon or at `backlogClears`, whichever is later.
+`backlogClears` is the earliest time a fleet that ordered need on the step's
+own cycle can be back inside the bound:
+`step + (start + cycle) * max(lambda1 / C, 1) + stabilization`. In that
+formula, lambda1 is the rate after the step and C is the summed mu of the
+replicas that were serving before it. The first replicas queue for
+`start + cycle`, and the router then sends them nothing, so they drain at
+their own mu.
 
 `TestClosedLoopProbe_KnownFailing_*` is a case today's code fails: one slow
 replica at 0.55 of its siblings' rate passes the served bound, becomes mu,

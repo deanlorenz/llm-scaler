@@ -4,6 +4,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"math"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -55,20 +56,24 @@ func TestFleet_TheVerdictTellsATruthfulOrderFromAWrongOne(t *testing.T) {
 	}
 }
 
-// What the step is shown: only Ready replicas, each offered an equal share,
-// saturated and queueing when the share is over its mu; a scale-down waits
+// What the step is shown: only Ready replicas, sharing the arrivals, each
+// saturated and queueing when its share is over its mu; a scale-down waits
 // for the stabilization window.
 func TestFleet_TheStepSeesTheReadyReplicas(t *testing.T) {
 	f := stepFleet()
 	f.Horizon = 10 * time.Minute
 	var sawJoiner, sawQueue bool
 	res := f.Run(func(now time.Time, e time.Duration, lambda float64, ready []Replica) int {
+		offered := 0.0
+		for _, r := range ready {
+			offered += r.Offered
+		}
+		if math.Abs(offered-lambda) > 1e-9 {
+			t.Fatalf("the replicas were offered %g of %g", offered, lambda)
+		}
 		for _, r := range ready {
 			if r.ReadyAt.After(now) {
 				t.Fatalf("%s is shown before it is Ready", r.Name)
-			}
-			if r.Offered != lambda/float64(len(ready)) {
-				t.Fatalf("%s offered %g of %g over %d", r.Name, r.Offered, lambda, len(ready))
 			}
 			if r.Saturated && r.Backlog > 0 {
 				sawQueue = true
@@ -179,5 +184,75 @@ func TestFleet_WeightsSplitTheArrivals(t *testing.T) {
 			}
 			return Hold
 		})
+	}
+}
+
+// The router fills the shortest queues first: with no queue it splits by
+// weight; a replica whose queue is over the level the arrivals fill the
+// others to gets none; one whose queue is under it gets the difference.
+func TestFleet_TheRouterFillsTheShortestQueues(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		lambda    float64
+		w, q, out []float64
+	}{
+		{"no queue, equal", 6, []float64{1, 1, 1}, []float64{0, 0, 0}, []float64{2, 2, 2}},
+		{"no queue, weighted", 4, []float64{3, 1}, []float64{0, 0}, []float64{3, 1}},
+		{"a long queue gets none", 6, []float64{1, 1, 1}, []float64{50, 0, 0}, []float64{0, 3, 3}},
+		{"a short queue is filled to the level", 9, []float64{1, 1, 1}, []float64{3, 0, 0}, []float64{1, 4, 4}},
+		{"weight scales the level", 9, []float64{2, 1}, []float64{3, 0}, []float64{5, 4}},
+		{"weight zero gets nothing", 6, []float64{0, 1}, []float64{0, 0}, []float64{0, 6}},
+		{"no arrivals", 0, []float64{1, 1}, []float64{0, 4}, []float64{0, 0}},
+	} {
+		got := route(c.lambda, c.w, c.q)
+		for i := range got {
+			if math.Abs(got[i]-c.out[i]) > 1e-9 {
+				t.Errorf("%s: offers %v, want %v", c.name, got, c.out)
+				break
+			}
+		}
+	}
+}
+
+// The queue a slow start leaves on the first replicas: four replicas at mu 1
+// under 12 requests a second for a 463 s start queue 2 a second each, about
+// 960 requests apiece by the time the thirteen joiners are Ready. The joiners
+// take the arrivals (12 over 13, under their mu), so the four drain at mu, in
+// about 16 min. A queue-blind router feeds them 12/17 and drains them at 0.29
+// a second, in about 54 min: the negative control.
+func TestFleet_TheRouterDrainsAStartsQueueAtMu(t *testing.T) {
+	drain := func(blind bool) (peak float64, landed, cleared time.Duration) {
+		f := Fleet{Pods: []float64{1, 1, 1, 1}, AddedMu: 1, Lambda: func(time.Duration) float64 { return 12 },
+			Need: Ceil, Horizon: 90 * time.Minute, StartTime: 463 * time.Second, QueueBlind: blind}
+		landed, cleared = -1, -1
+		f.Run(func(_ time.Time, e time.Duration, _ float64, ready []Replica) int {
+			var queued float64
+			for _, r := range ready {
+				if r.Index < 4 {
+					queued = max(queued, r.Backlog)
+				}
+			}
+			peak = max(peak, queued)
+			if len(ready) == 17 && landed < 0 {
+				landed = e
+			}
+			if landed >= 0 && queued == 0 && cleared < 0 {
+				cleared = e
+			}
+			return 17
+		})
+		return peak, landed, cleared
+	}
+	peak, landed, cleared := drain(false)
+	_, blindLanded, blindCleared := drain(true)
+	atMu := time.Duration(peak * float64(time.Second))
+	t.Logf("each first replica queued %.0f; the joiners landed at %s; the queue cleared %s later, %s later queue-blind",
+		peak, landed, cleared-landed, blindCleared-blindLanded)
+	if landed < 0 || cleared < 0 || cleared-landed > atMu+2*Cycle {
+		t.Fatalf("the start's queue of %.0f cleared %s after the joiners landed, want about %s at mu", peak, cleared-landed, atMu)
+	}
+	if blindCleared >= 0 && blindCleared-blindLanded < 2*atMu {
+		t.Fatalf("premise: queue-blind, the queue cleared %s after the joiners landed, not slower than at mu (%s)",
+			blindCleared-blindLanded, atMu)
 	}
 }

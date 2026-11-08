@@ -3,6 +3,7 @@ package learnertest
 import (
 	"fmt"
 	"math"
+	"sort"
 	"time"
 )
 
@@ -15,10 +16,13 @@ import (
 //
 // The simulator, one Cycle at a time:
 //
-//   - Arrivals split equally over the Ready replicas, or by Weight, a
-//     router that steers.
+//   - The router is queue-aware, as the EPP's queue scorer is: each cycle's
+//     arrivals go to the replicas holding the fewest waiting requests
+//     (route). With no queue anywhere that is an equal split, or a split
+//     by Weight, a router that also steers by something else. QueueBlind
+//     is a router that splits by Weight alone.
 //   - Each replica serves up to its true mu; what it cannot serve queues on
-//     it, and its queue drains when its share falls under its mu.
+//     it, and its queue drains as the router sends it less than its mu.
 //   - The step (the analyzer under test, and how its rows are made from the
 //     replicas) returns an order, in replicas.
 //   - An order above the fleet starts replicas, Ready after the start time
@@ -57,11 +61,19 @@ type Fleet struct {
 	// Lambda is the arrival rate at an elapsed time.
 	Lambda func(elapsed time.Duration) float64
 	// Weight, when set, is a replica's share of the arrivals relative to
-	// the other Ready replicas' at an elapsed time: a router that steers.
-	// Nil splits them equally, and so do weights that sum to zero or less,
-	// or to no number, on a cycle.
-	Weight  func(i int, elapsed time.Duration) float64
-	Horizon time.Duration
+	// the other Ready replicas' at an elapsed time, among replicas with the
+	// same queue per unit of weight (route): a router that steers by
+	// something besides the queue, such as prefix affinity. Nil weighs every
+	// replica 1, and so do weights that sum to zero or less, or to no
+	// number, on a cycle.
+	Weight func(i int, elapsed time.Duration) float64
+	// QueueBlind splits the arrivals by Weight alone, whatever each replica
+	// holds queued: a Service's round robin, or a router with no queue
+	// scorer. A case whose premise is a replica that queues while its
+	// siblings do not runs on it; a queue-aware router would not let that
+	// queue form.
+	QueueBlind bool
+	Horizon    time.Duration
 	// Need is the fleet a truthful analyzer orders at arrival rate lambda.
 	Need func(lambda float64) int
 	// Start is the first cycle's instant; Start (the package's) when zero.
@@ -178,22 +190,28 @@ func (f Fleet) Run(step Step) Result {
 			}
 		}
 		replicas := make([]Replica, 0, len(ready))
-		weights := 0.0
-		weight := func(i int) float64 {
-			if f.Weight == nil {
-				return 1
+		weights := make([]float64, len(ready))
+		queues := make([]float64, len(ready))
+		sum := 0.0
+		for j, i := range ready {
+			weights[j] = 1
+			if !f.QueueBlind {
+				queues[j] = pods[i].backlog / dt
 			}
-			return f.Weight(i, elapsed)
+			if f.Weight != nil {
+				weights[j] = f.Weight(i, elapsed)
+			}
+			sum += weights[j]
 		}
-		for _, i := range ready {
-			weights += weight(i)
+		if !(sum > 0) || math.IsInf(sum, 1) {
+			for j := range weights {
+				weights[j] = 1
+			}
 		}
-		if !(weights > 0) || math.IsInf(weights, 1) {
-			weight, weights = func(int) float64 { return 1 }, float64(len(ready))
-		}
-		for _, i := range ready {
+		offers := route(lambda, weights, queues)
+		for j, i := range ready {
 			p, mu := pods[i], trueMu(i, elapsed)
-			offered := lambda * weight(i) / weights
+			offered := offers[j]
 			p.backlog = max(p.backlog+(offered-mu)*dt, 0)
 			saturated := p.backlog > 0 || offered >= mu
 			served := offered
@@ -262,6 +280,47 @@ func (f Fleet) Run(step Step) Result {
 		res.OverSince = end.Sub(overFrom)
 	}
 	return res
+}
+
+// route is the router: arrival rate lambda split over replicas of weight w
+// holding queue q (requests waiting, over the cycle: a rate). It is the fluid
+// limit of a shortest-queue pick, which the EPP's queue scorer makes per
+// request: the arrivals fill the replicas to one level L of queue per unit of
+// weight, and a replica whose queue is already over the level gets none,
+//
+//	offer_i = max(w_i L - q_i, 0),  sum_i offer_i = lambda.
+//
+// With no queue anywhere it is the split by weight, and with equal weights
+// the equal split. A replica that queues gets a share that drains it, so the
+// queue a slow start leaves on the first replicas is spread over the fleet
+// instead of fed. It is a model of the scorer's ordering only: the router
+// does not know a replica's mu, and the EPP's other scorers (KV, prefix) are
+// what Weight stands for. A replica of weight zero or less gets nothing.
+func route(lambda float64, w, q []float64) []float64 {
+	offers := make([]float64, len(w))
+	order := make([]int, 0, len(w))
+	for j := range w {
+		if w[j] > 0 {
+			order = append(order, j)
+		}
+	}
+	if !(lambda > 0) || len(order) == 0 {
+		return offers
+	}
+	sort.SliceStable(order, func(a, b int) bool { return q[order[a]]/w[order[a]] < q[order[b]]/w[order[b]] })
+	level, sumW, sumQ, n := 0.0, 0.0, 0.0, 0
+	for n < len(order) {
+		j := order[n]
+		sumW, sumQ, n = sumW+w[j], sumQ+q[j], n+1
+		level = (lambda + sumQ) / sumW
+		if n < len(order) && q[order[n]]/w[order[n]] >= level {
+			break
+		}
+	}
+	for _, j := range order[:n] {
+		offers[j] = max(w[j]*level-q[j], 0)
+	}
+	return offers
 }
 
 // Verdict is "" when the fleet ends within tolerance of need, else why not.

@@ -24,7 +24,8 @@ import (
 //     cycle, else kindBiased. This is what makes the case about its start:
 //     without it a run that ignored the start could fail the same way;
 //   - never order more than peakCeiling, and end within tolerance of need by
-//     its horizon, else kindOverPriced;
+//     its horizon, or by backlogClears when that is later, else
+//     kindOverPriced;
 //   - end no more than a replica under need, and sit below need no longer
 //     than underBound, else kindStale;
 //   - for the restored snapshot, sit below need exactly as long as the same
@@ -60,6 +61,51 @@ func peakCeiling(need int) float64 { return peakCeilingFactor*float64(need) + 1 
 // overBound is learnertest.Result.Verdict's: the most a fleet may end at.
 func overBound(need int) float64 { return float64(need)*(1+learnertest.OverTolerance) + 1 }
 
+// backlogClears is the soonest a fleet hit by a load step at step, whose
+// replicas take start to become Ready, can be back inside overBound: the
+// allowance the verdict makes for the backlog a slow start leaves (#520).
+//
+// Until the first order lands, start plus the cycle that orders it, the
+// fleet's first replicas take the new rate lambda1 over their capacity C (the
+// sum of their mu), and each queues lambda1/C - 1 of its mu per second. A
+// queued request stays on its replica, and the queue-aware router sends that
+// replica nothing while its queue is the longest, so it drains at its mu, in
+// as long again times lambda1/C - 1. The fleet may then come down once the
+// scale-down stabilization has passed:
+//
+//	backlogClears = step + (start + cycle) * max(lambda1/C, 1) + stabilization
+//
+// For the decode step (4 replicas of mu 1, 2.5 -> 12 req/s at 15m15s) at a
+// 463 s start: 915 + 478 x 3 + 300 s = 44m9s, past the 40 min horizon; at
+// 90 s, 25m30s. For the load step (2 of mu 1, 1.2 -> 6 at 2 min) at 463 s:
+// 30m54s. The analyzer is not charged: it is the time a fleet ordering need
+// at the step's own cycle would take.
+func backlogClears(pc probeCase, step, start time.Duration) time.Duration {
+	capacity := 0.0
+	for _, mu := range pc.pods {
+		capacity += mu
+	}
+	stabilization := learnertest.DefaultStabilization
+	if pc.stabilization > 0 {
+		stabilization = pc.stabilization
+	}
+	ratio := 1.0
+	if capacity > 0 {
+		ratio = max(pc.lambda(pc.horizon)/capacity, 1)
+	}
+	return step + time.Duration(ratio*float64(start+propCycle)) + stabilization
+}
+
+// verdictHorizon is the case's horizon, or backlogClears rounded up to a
+// cycle when that is later.
+func verdictHorizon(pc probeCase, step, start time.Duration) time.Duration {
+	clears := backlogClears(pc, step, start)
+	if rest := clears % propCycle; rest > 0 {
+		clears += propCycle - rest
+	}
+	return max(pc.horizon, clears)
+}
+
 // traceSummary is a fleet trace as runs: "2 from 0s, 3 from 2m0s, ...".
 func traceSummary(trace []int) string {
 	var out []byte
@@ -79,6 +125,8 @@ func traceSummary(trace []int) string {
 type startProbe struct {
 	name, learner string
 	pc            probeCase
+	// step is when the case's load steps, zero for none (backlogClears).
+	step time.Duration
 	// sameAsUnrestarted holds the run's time under need to the same case's
 	// with no restart (the restored snapshot).
 	sameAsUnrestarted bool
@@ -86,13 +134,13 @@ type startProbe struct {
 
 func startProbes() []startProbe {
 	return []startProbe{
-		{name: "load-step", learner: "floor", pc: probeCase{
+		{name: "load-step", learner: "floor", step: 2 * time.Minute, pc: probeCase{
 			name: "step", pods: []float64{1, 1}, addedMu: 1, meanMu: 1,
 			lambda: stepTo(1.2, 6, 2*time.Minute), horizon: 40 * time.Minute,
 		}},
-		{name: "decode-step", learner: "floor", pc: restartStepCase(0, false, 0)},
-		{name: "restart-before-step", learner: "floor", pc: restartStepCase(15*time.Minute, false, 0)},
-		{name: "restored-snapshot", learner: "floor", pc: restartStepCase(15*time.Minute, true, 0), sameAsUnrestarted: true},
+		{name: "decode-step", learner: "floor", step: restartStepAt, pc: restartStepCase(0, false, 0)},
+		{name: "restart-before-step", learner: "floor", step: restartStepAt, pc: restartStepCase(15*time.Minute, false, 0)},
+		{name: "restored-snapshot", learner: "floor", step: restartStepAt, pc: restartStepCase(15*time.Minute, true, 0), sameAsUnrestarted: true},
 		{name: "slow-pod-030", learner: "mu", pc: slowReplicaCase(0.3)},
 		{name: "slow-pod-055", learner: "mu", pc: slowReplicaCase(0.55)},
 	}
@@ -117,12 +165,13 @@ func checkStartProbe(sp startProbe, start time.Duration) func(uint64) error {
 	return func(uint64) error {
 		pc := sp.pc
 		pc.start = start
+		pc.horizon = verdictHorizon(pc, sp.step, start)
 		r, err := tryProbe(pc)
 		if err != nil {
 			return err
 		}
-		summary := fmt.Sprintf("start %s (published %.1f s): need %d, final %d (bound %.1f), peak %d (ceiling %.1f), under need for %s (bound %s); fleet %s",
-			start, r.startSeconds, r.need, r.final, overBound(r.need), r.peak, peakCeiling(r.need), r.underFor, underBound(start), traceSummary(r.trace))
+		summary := fmt.Sprintf("start %s (published %.1f s): need %d, final %d at %s (bound %.1f), peak %d (ceiling %.1f), under need for %s (bound %s); fleet %s",
+			start, r.startSeconds, r.need, r.final, pc.horizon, overBound(r.need), r.peak, peakCeiling(r.need), r.underFor, underBound(start), traceSummary(r.trace))
 		if math.Abs(r.startSeconds-start.Seconds()) > 1 {
 			return violation(kindBiased, "the start learner publishes %.1f s against a true start of %s; %s", r.startSeconds, start, summary)
 		}
