@@ -14,12 +14,12 @@ import (
 // it stops no sooner than WeighClearWindow after, when the ratio averaged over
 // that window reaches 0.90, and at once with no unread replica.
 
-// weighAt feeds the latch one reading a cycle from start, n unread replicas,
-// h 1, and returns its choices.
-func weighAt(c *muChoice, start time.Time, ratios []float64, n int) []bool {
+// weighAt feeds the latch one reading a cycle from start, three unread
+// replicas, h 1, and returns its choices.
+func weighAt(c *muChoice, start time.Time, ratios []float64) []bool {
 	out := make([]bool, len(ratios))
 	for i, x := range ratios {
-		out[i] = c.weighs(x, 1, n, SiblingMuTolerance, start.Add(time.Duration(i)*propCycle))
+		out[i] = c.weighs(x, 1, 3, SiblingMuTolerance, start.Add(time.Duration(i)*propCycle))
 	}
 	return out
 }
@@ -44,14 +44,14 @@ func TestWeighingBand_SetHoldClear(t *testing.T) {
 
 	// A key's first reading under the tolerance sets it: its window holds
 	// that reading alone. Over it, the key stays out.
-	require.Equal(t, []bool{true}, weighAt(&muChoice{}, propStart, []float64{0.79}, 3), "first reading under 0.80 sets")
-	require.Equal(t, []bool{false}, weighAt(&muChoice{}, propStart, []float64{0.80}, 3), "first reading at 0.80 does not")
+	require.Equal(t, []bool{true}, weighAt(&muChoice{}, propStart, []float64{0.79}), "first reading under 0.80 sets")
+	require.Equal(t, []bool{false}, weighAt(&muChoice{}, propStart, []float64{0.80}), "first reading at 0.80 does not")
 
 	// Set on the window's mean, not a reading: after five minutes at 0.95 a
 	// reading at 0.5 does not set, and the readings that follow at 0.5 set
 	// once the five-minute mean is under 0.80.
 	c := &muChoice{}
-	got := weighAt(c, propStart, append(repeat(0.95, setCycles), repeat(0.5, setCycles)...), 3)
+	got := weighAt(c, propStart, append(repeat(0.95, setCycles), repeat(0.5, setCycles)...))
 	first := -1
 	for i, w := range got {
 		if w {
@@ -68,18 +68,18 @@ func TestWeighingBand_SetHoldClear(t *testing.T) {
 	// cleared once the window's mean reaches 0.90.
 	c = &muChoice{}
 	start := propStart
-	require.Equal(t, []bool{true}, weighAt(c, start, []float64{0.5}, 3))
-	held := weighAt(c, start.Add(propCycle), repeat(1.0, clearCycles-1), 3)
+	require.Equal(t, []bool{true}, weighAt(c, start, []float64{0.5}))
+	held := weighAt(c, start.Add(propCycle), repeat(1.0, clearCycles-1))
 	for i, w := range held {
 		require.True(t, w, "cycle %d inside the clear window: a weighing key holds at 1.0", i+1)
 	}
 	c = &muChoice{}
-	got = weighAt(c, start, append([]float64{0.5}, repeat(0.85, 3*clearCycles)...), 3)
+	got = weighAt(c, start, append([]float64{0.5}, repeat(0.85, 3*clearCycles)...))
 	for i, w := range got {
 		require.True(t, w, "cycle %d: a weighing key holds while its mean sits under 0.90", i)
 	}
 	c = &muChoice{}
-	got = weighAt(c, start, append([]float64{0.5}, repeat(0.92, 3*clearCycles)...), 3)
+	got = weighAt(c, start, append([]float64{0.5}, repeat(0.92, 3*clearCycles)...))
 	cleared := -1
 	for i, w := range got {
 		if !w {
