@@ -64,6 +64,7 @@ edges/k2/eviction-7d
 edges/k2/eviction-nondefault
 edges/k2/joined-1-min
 edges/k2/key-bucket-excursion
+edges/k2/key-bucket-excursion-stress
 edges/k2/key-follows-output-length
 edges/k2/key-near-output-boundary
 edges/k2/max-rise
@@ -78,11 +79,14 @@ edges/mu/fresh-for-nondefault
 edges/mu/half-of-served
 edges/mu/half-of-served-nondefault
 edges/mu/key-bucket-excursion
+edges/mu/key-bucket-excursion-stress
 edges/mu/key-near-output-boundary
 edges/mu/latch-at-2x
 edges/mu/latch-return
 edges/mu/latch-return-excursion
 edges/mu/latch-return-excursion-nondefault
+edges/mu/latch-return-excursion-nondefault-sigma15
+edges/mu/latch-return-excursion-sigma15
 edges/mu/latch-return-nondefault
 edges/mu/low-confirm-2-min
 edges/mu/low-hold-for
@@ -96,12 +100,14 @@ edges/mu/sibling-full-cache-line
 edges/mu/sibling-median-mass-point
 edges/mu/sibling-tolerance
 edges/mu/sibling-tolerance-excursion
+edges/mu/sibling-tolerance-excursion-sigma15
 edges/mu/sibling-tolerance-nondefault
 edges/mu/stale-agreement-2x
 edges/shape-hold/backstop-cooldown
 edges/shape-hold/hold-disabled
 edges/shape-hold/tolerance-20pct
 edges/shape-hold/tolerance-excursion
+edges/shape-hold/tolerance-excursion-stress
 edges/shared-line/reuse-switch
 edges/start-time/alpha-030
 edges/start-time/distinct-pods-3

@@ -14,14 +14,48 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
-// The source-switching thresholds at the gauges' autocorrelation (2.6, edges
-// by enumeration): the mu latch's return ratio, the weighing's sibling
+// The source-switching thresholds at the gauges' noise (2.6, edges by
+// enumeration): the mu latch's return ratio, the weighing's sibling
 // tolerance, the output-key band and the shape tracker's tolerance. edge3
 // holds each at one instant either side; here a noise-free path crosses the
 // threshold once (one excursion), AR(1) noise rides on it, and the learner's
 // source may change at most once per excursion. Where the learner computes a
 // value from its source, the value is also held Lipschitz in its input
 // between switches.
+
+// arNoiseSpec is the AR(1) noise a case runs: relative standard deviation
+// and lag-one correlation at the 15 s cycle.
+type arNoiseSpec struct {
+	sigma, phi float64
+}
+
+func (n arNoiseSpec) String() string {
+	return fmt.Sprintf("noise %.0f%%, phi %.2f", 100*n.sigma, n.phi)
+}
+
+// The noise the cases run. Measured on the E1 recording: each pod's series
+// on the cycles it served, as a residual against a centred 9-cycle median.
+// Per-pod request rate: sigma 7.5-18.9 %, lag-one 0.09-0.39 over ten pods.
+// Output length: sigma 0.5-0.9 %, lag-one 0.02-0.50. The centred median
+// removes slow drift, so the measured lag-one is a lower bound on the
+// noise's correlation, not its value; phi 0.3 is the measured middle. The
+// stress noise is assumed, not measured: the 4-6 % at phi 0.9 the earlier
+// key and shape cases ran, which the output length's measured 1 % never
+// reaches.
+var (
+	// rateNoise10 and rateNoise15 are the measured rate noise, low and high.
+	rateNoise10 = arNoiseSpec{0.10, 0.3}
+	rateNoise15 = arNoiseSpec{0.15, 0.3}
+	// lengthNoise is the measured output-length noise, rounded up.
+	lengthNoise = arNoiseSpec{0.01, 0.3}
+	// keyStress and shapeStress are assumed: edges/k2/key-near-output-boundary's
+	// 6 % and checkShapeWobble's 4 %, both at phi 0.9.
+	keyStress   = arNoiseSpec{0.06, 0.9}
+	shapeStress = arNoiseSpec{0.04, 0.9}
+	// insideBand is assumed: rate noise well inside the latch's 1.6-2.0
+	// band, for the latch's controls.
+	insideBand = arNoiseSpec{0.04, 0.9}
+)
 
 // arPath is a noise-free generator path: from for hold cycles, a straight
 // ramp over ramp cycles, then the end value (to) for rest cycles.
@@ -52,41 +86,42 @@ func valueChanges(v []float64) int {
 
 func arEdgeCases() []propCase {
 	ret := tuningWith(func(t *config.AnalyzerTuning) { t.MuChoice.ReturnRatio = 1.3 })
+	edge := func(learner, name string, seeds int, check func(uint64) error) propCase {
+		return propCase{class: classEdges, learner: learner, name: name, family: familyDirect, tuning: tunedDefault, seeds: seeds, check: check}
+	}
+	nonDefault := func(name string, check func(uint64) error) propCase {
+		return propCase{class: classEdges, learner: "mu", name: name, family: familyDirect, tuning: tunedPolicy,
+			policy: tuningPolicy(ret), seeds: cheapSeeds, check: check}
+	}
 	return []propCase{
-		{class: classEdges, learner: "mu", name: "latch-return-excursion", family: familyDirect, tuning: tunedDefault,
-			seeds: cheapSeeds, check: checkLatchReturnExcursion(tuningDefault)},
-		{class: classEdges, learner: "mu", name: "latch-return-excursion-nondefault", family: familyDirect, tuning: tunedPolicy,
-			policy: tuningPolicy(ret), seeds: cheapSeeds, check: checkLatchReturnExcursion(ret)},
-		{class: classEdges, learner: "mu", name: "sibling-tolerance-excursion", family: familyDirect, tuning: tunedDefault,
-			check: checkWeighExcursion(weighSigma)},
-		{class: classEdges, learner: "k2", name: "key-bucket-excursion", family: familyDirect, tuning: tunedDefault,
-			check: checkKeyBucketExcursion(false, nil)},
-		{class: classEdges, learner: "mu", name: "key-bucket-excursion", family: familyDirect, tuning: tunedDefault,
-			check: checkKeyBucketExcursion(true, nil)},
-		{class: classEdges, learner: "shape-hold", name: "tolerance-excursion", family: familyDirect, tuning: tunedDefault,
-			seeds: cheapSeeds, check: checkShapeExcursion(0)},
+		edge("mu", "latch-return-excursion", cheapSeeds, checkLatchReturnExcursion(tuningDefault, rateNoise10)),
+		edge("mu", "latch-return-excursion-sigma15", cheapSeeds, checkLatchReturnExcursion(tuningDefault, rateNoise15)),
+		nonDefault("latch-return-excursion-nondefault", checkLatchReturnExcursion(ret, rateNoise10)),
+		nonDefault("latch-return-excursion-nondefault-sigma15", checkLatchReturnExcursion(ret, rateNoise15)),
+		edge("mu", "sibling-tolerance-excursion", 0, checkWeighExcursion(rateNoise10)),
+		edge("mu", "sibling-tolerance-excursion-sigma15", 0, checkWeighExcursion(rateNoise15)),
+		edge("k2", "key-bucket-excursion", 0, checkKeyBucketExcursion(false, lengthNoise, nil)),
+		edge("k2", "key-bucket-excursion-stress", keyStressSeeds, checkKeyBucketExcursion(false, keyStress, nil)),
+		edge("mu", "key-bucket-excursion", 0, checkKeyBucketExcursion(true, lengthNoise, nil)),
+		edge("mu", "key-bucket-excursion-stress", keyStressSeeds, checkKeyBucketExcursion(true, keyStress, nil)),
+		edge("shape-hold", "tolerance-excursion", cheapSeeds, checkShapeExcursion(0, lengthNoise)),
+		edge("shape-hold", "tolerance-excursion-stress", shapeStressSeeds, checkShapeExcursion(0, shapeStress)),
 	}
 }
 
 // --- mu: the latch's return ratio ---
 
-// Latch noise: 4 % of the ratio, lag-one correlation 0.9 at the 15 s cycle
-// (a rate[1m] read every 15 s shares 45 s of its minute with the last).
-const (
-	latchSigma = 0.04
-	latchPhi   = 0.9
-)
-
-// checkLatchReturnExcursion: a stale measurement latched past maxRatio of the
-// derived mu (2.5x; 0.4x on the low side) comes back across returnRatio
-// (1.6x; 1/1.6) once, as a 30 min ramp to 0.75 of it, or as a step onto it
-// held for 40 min. The latch's set point is maxRatio, so once it lets go the
-// noise at returnRatio cannot set it again: the choice changes at most once
-// per excursion. On the ramp it must change: a latch that never returns
-// passes the reversal bound for the wrong reason. The choice is a source,
-// measured or derived, and the price on each is that figure unchanged, so
-// there is no value to bound between the switches.
-func checkLatchReturnExcursion(tn config.AnalyzerTuning) func(uint64) error {
+// checkLatchReturnExcursion: a stale measurement starts at 2.5x the derived
+// mu (0.4x on the low side), past maxRatio (2.0x; 1/2), where it yields, and
+// comes back across returnRatio (1.6x; 1/1.6) once: a 30 min ramp to 0.75 of
+// it, or a step onto it held for 40 min. The first reading is noise-free, so
+// the latch is set. The latch's set point is maxRatio, so once it lets go
+// only noise past maxRatio sets it again: the choice changes at most once per
+// excursion. On the ramp it must change: a latch that never returns passes
+// the reversal bound for the wrong reason. The choice is a source, measured
+// or derived, and the price on each is that figure unchanged, so there is no
+// value to bound between the switches.
+func checkLatchReturnExcursion(tn config.AnalyzerTuning, ns arNoiseSpec) func(uint64) error {
 	return func(seed uint64) error {
 		r := propRand(seed)
 		t := tuning{AnalyzerTuning: tn.WithDefaults()}
@@ -105,7 +140,8 @@ func checkLatchReturnExcursion(tn config.AnalyzerTuning) func(uint64) error {
 				path = arPath(1.25*maxR, retR, 8, 0, 160)
 			}
 			a := NewSaturationAnalyzer(capacity.NewStore())
-			noise := arNoise(r, len(path), latchSigma, latchPhi)
+			noise := arNoise(r, len(path), ns.sigma, ns.phi)
+			noise[0] = 0
 			v := make([]bool, len(path))
 			for i, x := range path {
 				if side.inv {
@@ -118,8 +154,8 @@ func checkLatchReturnExcursion(tn config.AnalyzerTuning) func(uint64) error {
 				return violation(kindNotDetected, "%s: a stale measurement at %.2fx the derived mu did not yield", side.name, path[0])
 			}
 			if n := reversals(v); n > 1 {
-				return violation(kindFlipped, "%s (maxRatio %.2f, returnRatio %.2f, noise %.0f%% phi %.2f): the choice reversed %d times in %d cycles, first at cycles %v",
-					side.name, maxR, retR, 100*latchSigma, latchPhi, n, len(v), flipCycles(v, 4))
+				return violation(kindFlipped, "%s (maxRatio %.2f, returnRatio %.2f, %s): the choice reversed %d times in %d cycles, first at cycles %v",
+					side.name, maxR, retR, ns, n, len(v), flipCycles(v, 4))
 			}
 			if side.ramp && v[len(v)-1] {
 				return violation(kindStale, "%s: the ramp ended at %.2fx and the measurement still yields", side.name, path[len(path)-1])
@@ -142,12 +178,6 @@ func flipCycles(v []bool, n int) []int {
 
 // --- mu: the weighing's sibling tolerance ---
 
-// Weighing noise: 4 % on the queued replica's rate, lag-one correlation 0.9.
-const (
-	weighSigma = 0.04
-	weighPhi   = 0.9
-)
-
 // weighSample is the newest sample of the rig's one measured-mu window and
 // the readers' mean it was formed from; ok is false before the first.
 func (r *propRig) weighSample() (sample, read float64, ok bool) {
@@ -168,20 +198,26 @@ func (r *propRig) weighSample() (sample, read float64, ok bool) {
 // TestMuSlowPod_TheCreditReachesTheSample. The queued replica's rate over h
 // ramps from 0.95 to 0.65 over 30 min, crossing siblingMuTolerance (0.8)
 // once. Under it the sample counts the three unread replicas
-// (weighUnreadReplicas); at or over it the sample is the reader alone. The
-// source changes at most once per excursion, and between changes the sample
-// moves no more than the reading it is formed from (the weighing's slope is
-// a quarter, the reader's own is one). sigma is the noise's (controls).
+// (weighUnreadReplicas); at or over it the sample is the reader alone.
+// Between changes of source the sample moves no more than the reading it is
+// formed from (the weighing's slope is a quarter, the reader's own is one),
+// judged first and as kindMoved, so a break of it is never read as the
+// ledgered flip. Then the source changes at most once per excursion. A sample
+// is weighed when it differs from the readers' mean: with the band a weighing
+// key keeps counting its unread replicas while a noisy reader reads over h,
+// where the weighed sample sits under the reader.
 //
-// A ledger row (#495): the tolerance has no band, so the source changes on
-// the noise for as long as the reader sits near it, 17 of 20 seeds.
-func checkWeighExcursion(sigma float64) func(uint64) error {
+// Ledger rows (#495): the band (mu-weighing-band) holds the crossing to one
+// change at 10 % and 15 %; a key's first set is on its first reading, so a
+// first reading in a noise trough sets it at the start, it clears after the
+// clear window, and the crossing sets it again: 1 and 3 of 20 seeds.
+func checkWeighExcursion(ns arNoiseSpec) func(uint64) error {
 	return func(seed uint64) error {
 		r := propRand(seed)
 		const served = 0.6
 		h := served / floorTarget
 		path := arPath(0.95, 0.65, 8, 120, 40)
-		noise := arNoise(r, len(path), sigma, weighPhi)
+		noise := arNoise(r, len(path), ns.sigma, ns.phi)
 		rig := newPropRig()
 		var weighed []bool
 		var samples, reads []float64
@@ -197,20 +233,20 @@ func checkWeighExcursion(sigma float64) func(uint64) error {
 				}
 				return violation(kindNotLearned, "cycle %d: no sample", i)
 			}
-			weighed = append(weighed, sample > read*(1+1e-9))
+			weighed = append(weighed, math.Abs(sample-read) > 1e-9*read)
 			samples, reads = append(samples, sample), append(reads, read)
-		}
-		if n := reversals(weighed); n > 1 {
-			return violation(kindFlipped, "the reader's rate over its unread siblings ramped 0.95 -> 0.65 across siblingMuTolerance 0.8 (noise %.0f%%, phi %.2f): the sample's source reversed %d times in %d cycles, first at cycles %v; the sample stepped %.3f -> %.3f of h at the first",
-				100*sigma, weighPhi, n, len(weighed), flipCycles(weighed, 4), firstFlipFrom(weighed, samples)/h, firstFlipTo(weighed, samples)/h)
-		}
-		if !weighed[len(weighed)-1] {
-			return violation(kindNotDetected, "the reader ended at 0.65 of its unread siblings and the sample does not count them")
 		}
 		for i := 1; i < len(samples); i++ {
 			if weighed[i] == weighed[i-1] && math.Abs(samples[i]-samples[i-1]) > math.Abs(reads[i]-reads[i-1])+1e-9 {
-				return violation(kindFlipped, "cycle %d: the sample stepped %.4f on a reading step of %.4f, one source", i, samples[i]-samples[i-1], reads[i]-reads[i-1])
+				return violation(kindMoved, "cycle %d: the sample stepped %.4f on a reading step of %.4f, one source", i, samples[i]-samples[i-1], reads[i]-reads[i-1])
 			}
+		}
+		if n := reversals(weighed); n > 1 {
+			return violation(kindFlipped, "the reader's rate over its unread siblings ramped 0.95 -> 0.65 across siblingMuTolerance 0.8 (%s): the sample's source reversed %d times in %d cycles, first at cycles %v; the sample stepped %.3f -> %.3f of h at the first",
+				ns, n, len(weighed), flipCycles(weighed, 4), firstFlipFrom(weighed, samples)/h, firstFlipTo(weighed, samples)/h)
+		}
+		if !weighed[len(weighed)-1] {
+			return violation(kindNotDetected, "the reader ended at 0.65 of its unread siblings and the sample does not count them")
 		}
 		return nil
 	}
@@ -234,38 +270,46 @@ func firstFlipTo(v []bool, s []float64) float64 {
 
 // --- k2 and mu: the output-key band ---
 
-// Key noise: 6 % on the output length, lag-one correlation 0.9, as
-// edges/k2/key-near-output-boundary.
-const (
-	keySigma = 0.06
-	keyPhi   = 0.9
-)
+// keyRampStart is where the key cases start counting: the first ramp, after
+// 30 min at 540 tokens. Before it the band chooses its starting bucket from
+// its first readings (the first-sample class, not this one), and the path
+// has not moved.
+const keyRampStart = 120
 
-// keyRampStart is the first cycle of keyExcursionPath's first ramp. Changes
-// are counted from it: before it the path has not moved, and the band is
-// choosing its starting bucket from its first readings (the first-sample
-// class, not this one).
-const keyRampStart = 40
+// keyRest is how far from the 500-token boundary the key path rests, either
+// side. Over seeds 1-100 of the stress noise, resting at 6 % (as
+// edges/k2/key-near-output-boundary does) the band flaps on 3 (29, 93, 95),
+// at 7 % on 1, at 8 % on none; with its smoothing cut to 3 min it fails 54,
+// 47 and 37. 8 % keeps the case passing and still kills the cut on 7 of its
+// 20 seeds (TestPropertyARKeyBucket_ShortSmoothingFlaps).
+const keyRest = 0.08
 
-// keyExcursionPath is the output length: 560 for 10 min, down to 440 over
-// 20 min, 440 for 20 min, back up to 560 over 20 min, 560 for 30 min. Two
-// crossings of the 500-token medium/long boundary; split is the first
-// cycle of the second excursion.
+// keyStressSeeds is the stress cases' seeds.
+const keyStressSeeds = defaultSeeds
+
+// keyExcursionPath is the output length: 540 for 30 min, down to 460 over
+// 40 min, 460 for 40 min, back up to 540 over 40 min, 540 for 40 min. Two
+// crossings of the 500-token medium/long boundary, each rest 8 % from it, so
+// the band's smoothing is what keeps the key. A rest is 40 min: the band
+// takes about 14 min to follow 530 -> 470 (k2_key_bucket.go), and longer
+// from a slow ramp. split is the first cycle of the second excursion.
 func keyExcursionPath() (path []float64, split int) {
-	down := arPath(560, 440, keyRampStart, 80, 80)
-	return append(down, arPath(440, 560, 0, 80, 120)...), len(down)
+	hi, lo := 500*(1+keyRest), 500*(1-keyRest)
+	down := arPath(hi, lo, keyRampStart, 160, 160)
+	return append(down, arPath(lo, hi, 0, 160, 160)...), len(down)
 }
 
 // checkKeyBucketExcursion: the noise-free output length crosses the 500-token
 // boundary down and back up (keyExcursionPath). The selected key (the k2 key,
-// or with mu the throughput key) changes at most once in each excursion, ends
-// the first in "medium" and the second in "long". The key is a source: the
-// window it names, so there is no value to bound between the switches. wrap
-// edits each row and edit the analyzer before the first cycle (controls).
-func checkKeyBucketExcursion(mu bool, edit func(*SaturationAnalyzer), wrap ...func(*domain.ReplicaMetrics)) func(uint64) error {
+// or with mu the throughput key) is "long" at keyRampStart, changes at most
+// once in each excursion from there, and ends the first in "medium" and the second
+// in "long". The key is a source: the window it names, so there is no value
+// to bound between the switches. wrap edits each row and edit the analyzer
+// before the first cycle (controls).
+func checkKeyBucketExcursion(mu bool, ns arNoiseSpec, edit func(*SaturationAnalyzer), wrap ...func(*domain.ReplicaMetrics)) func(uint64) error {
 	return func(seed uint64) error {
 		path, split := keyExcursionPath()
-		noise := arNoise(propRand(seed), len(path), keySigma, keyPhi)
+		noise := arNoise(propRand(seed), len(path), ns.sigma, ns.phi)
 		lengths := make([]float64, len(path))
 		for i, x := range path {
 			lengths[i] = x * (1 + noise[i])
@@ -283,7 +327,7 @@ func checkKeyBucketExcursion(mu bool, edit func(*SaturationAnalyzer), wrap ...fu
 			keys, which = muKeys, "mu"
 		}
 		if !strings.Contains(keys[keyRampStart], "|long|") {
-			return violation(kindWrongSide, "after 10 min at 560 tokens the %s key is %s, want \"long\"", which, keys[keyRampStart])
+			return violation(kindWrongSide, "after 30 min at %.0f tokens (%s) the %s key is %s, want \"long\"", 500*(1+keyRest), ns, which, keys[keyRampStart])
 		}
 		for _, ex := range []struct {
 			from, to int
@@ -302,8 +346,8 @@ func checkKeyBucketExcursion(mu bool, edit func(*SaturationAnalyzer), wrap ...fu
 				}
 			}
 			if n > 1 {
-				return violation(kindFlipped, "output length across the 500-token boundary (noise %.0f%%, phi %.2f), cycles %d-%d: the %s key changed %d times",
-					100*keySigma, keyPhi, ex.from, ex.to-1, which, n)
+				return violation(kindFlipped, "output length across the 500-token boundary (%s), cycles %d-%d: the %s key changed %d times",
+					ns, ex.from, ex.to-1, which, n)
 			}
 			if last := seg[len(seg)-1]; !strings.Contains(last, ex.want) {
 				return violation(kindNotDetected, "cycles %d-%d: the %s key ended on %s, want %q", ex.from, ex.to-1, which, last, ex.want)
@@ -315,12 +359,9 @@ func checkKeyBucketExcursion(mu bool, edit func(*SaturationAnalyzer), wrap ...fu
 
 // --- shape-hold: the tracker's 20 % tolerance ---
 
-// Shape noise: 4 % on the output length, lag-one correlation 0.9, as
-// checkShapeWobble.
-const (
-	shapeSigma = 0.04
-	shapePhi   = 0.9
-)
+// shapeStressSeeds is the stress case's seeds: it fails on 5 of 1000, so on
+// fewer the ledger row is one RNG change from passing.
+const shapeStressSeeds = 1000
 
 // checkShapeExcursion: the first reading is 1000 tokens out (the tracker's
 // anchor, so the band is 800-1200), then the noise-free output length leaves
@@ -329,10 +370,7 @@ const (
 // excursion, and on the ramps it changes. Between changes it is constant: the
 // key holds its shape. tol, when non-zero, is the tracker's tolerance in
 // place of the production one (controls).
-//
-// A ledger row (#495): the anchor is the one reading that crossed, so a tail
-// reading after it moves the key again, 1 of 100 seeds (5 of 1000).
-func checkShapeExcursion(tol float64) func(uint64) error {
+func checkShapeExcursion(tol float64, ns arNoiseSpec) func(uint64) error {
 	return func(seed uint64) error {
 		r := propRand(seed)
 		for _, ex := range []struct {
@@ -348,15 +386,15 @@ func checkShapeExcursion(tol float64) func(uint64) error {
 			if tol > 0 {
 				rig.a.fleetShape["ns|m"] = &shapeMemo{tracker: shape.NewTracker(tol)}
 			}
-			noise := arNoise(r, len(ex.path), shapeSigma, shapePhi)
+			noise := arNoise(r, len(ex.path), ns.sigma, ns.phi)
 			noise[0] = 0
 			keys := make([]float64, len(ex.path))
 			for i, x := range ex.path {
 				keys[i], _, _ = rig.note(1000, x*(1+noise[i]), ShapeChangeHoldMax)
 			}
 			if n := valueChanges(keys); n > 1 {
-				return violation(kindFlipped, "%s (noise %.0f%%, phi %.2f): the key's output length changed %d times in %d cycles: %s",
-					ex.name, 100*shapeSigma, shapePhi, n, len(keys), keyTrail(keys, 5))
+				return violation(kindFlipped, "%s (%s): the key's output length changed %d times in %d cycles: %s",
+					ex.name, ns, n, len(keys), keyTrail(keys, 5))
 			}
 			if ex.ramp && keys[len(keys)-1] == keys[0] {
 				return violation(kindNotDetected, "%s: the key never left %.0f", ex.name, keys[0])
@@ -377,10 +415,9 @@ func keyTrail(v []float64, n int) string {
 	return strings.Join(out, " -> ")
 }
 
-// --- negative controls ---
+// --- controls ---
 
-// arControlSeeds is the seeds a control runs: each must fail on at least one,
-// and the test logs how many.
+// arControlSeeds is seeds 1..n.
 func arControlSeeds(n int) []uint64 {
 	seeds := make([]uint64, n)
 	for i := range seeds {
@@ -389,10 +426,10 @@ func arControlSeeds(n int) []uint64 {
 	return seeds
 }
 
-// arControl runs check over n seeds and fails the test when none fails.
-func arControl(t *testing.T, what string, check func(uint64) error, n int) {
+// arControl runs check over seeds 1-20 (the stress cases' count) and fails the test when none fails.
+func arControl(t *testing.T, what string, check func(uint64) error) {
 	t.Helper()
-	run, err := runCase(check, arControlSeeds(n))
+	run, err := runCase(check, arControlSeeds(keyStressSeeds))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,21 +439,51 @@ func arControl(t *testing.T, what string, check func(uint64) error, n int) {
 	t.Logf("%s: %s", what, run)
 }
 
-// With returnRatio at maxRatio, an operator setting validation admits, the
-// latch has no band: the ratio is judged on maxRatio each way, and the noise
-// on it reverses the choice.
-func TestPropertyARLatchReturn_NoBandFlaps(t *testing.T) {
-	noBand := tuningWith(func(t *config.AnalyzerTuning) { t.MuChoice.ReturnRatio = config.DefaultMeasuredDerivedMaxRatio })
-	arControl(t, "returnRatio = maxRatio", checkLatchReturnExcursion(noBand), 20)
+// arHolds runs check over n seeds and fails the test when any fails.
+func arHolds(t *testing.T, what string, check func(uint64) error, n int) {
+	t.Helper()
+	run, err := runCase(check, arControlSeeds(n))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Failures) != 0 {
+		t.Fatalf("%s: %s", what, run)
+	}
+	t.Logf("%s: %s", what, run)
 }
 
-// The output-key band with its smoothing removed (every cycle restarts it,
-// so the smoothed length is the reading): the 3 % margin is inside the 6 %
-// noise, and the key flaps across the boundary.
-func TestPropertyARKeyBucket_UnsmoothedFlaps(t *testing.T) {
+// The latch cases are ledger rows: at the measured rate noise the 1.6-2.0
+// band is narrower than the noise. With noise inside the band the same case
+// holds, and with returnRatio at maxRatio (an operator setting validation
+// admits) it fails: the case sees the band, and what fails at the measured
+// noise is the band's width, not the rig.
+func TestPropertyARLatchReturn_TheBandHoldsNoiseInsideIt(t *testing.T) {
+	arHolds(t, "noise inside the band", checkLatchReturnExcursion(tuningDefault, insideBand), 20)
+	noBand := tuningWith(func(t *config.AnalyzerTuning) { t.MuChoice.ReturnRatio = config.DefaultMeasuredDerivedMaxRatio })
+	arControl(t, "returnRatio = maxRatio, noise inside the band", checkLatchReturnExcursion(noBand, insideBand))
+}
+
+// keySmoothingCut is a hook that shortens the band's smoothing to about
+// 3 min: each cycle the band's reading count is capped at what a 3 min
+// window holds, so a new reading weighs at least 1/12.
+func keySmoothingCut(a **SaturationAnalyzer) func(*domain.ReplicaMetrics) {
+	return func(*domain.ReplicaMetrics) {
+		(*a).mu.Lock()
+		defer (*a).mu.Unlock()
+		for _, m := range (*a).fleetShape {
+			m.k2Key.n = min(m.k2Key.n, 11)
+		}
+	}
+}
+
+// The output-key band with its smoothing shortened: the stress cases fail on
+// their own seeds, each side of the boundary resting at 8 % with 6 % noise.
+// Removed outright (every cycle restarts it) it fails too.
+func TestPropertyARKeyBucket_ShortSmoothingFlaps(t *testing.T) {
 	for _, mu := range []bool{false, true} {
 		var a *SaturationAnalyzer
 		edit := func(an *SaturationAnalyzer) { a = an }
+		arControl(t, fmt.Sprintf("smoothing cut to 3 min, mu key %v", mu), checkKeyBucketExcursion(mu, keyStress, edit, keySmoothingCut(&a)))
 		unsmoothed := func(*domain.ReplicaMetrics) {
 			a.mu.Lock()
 			defer a.mu.Unlock()
@@ -424,27 +491,22 @@ func TestPropertyARKeyBucket_UnsmoothedFlaps(t *testing.T) {
 				m.k2Key.n = 0
 			}
 		}
-		arControl(t, fmt.Sprintf("unsmoothed band, mu key %v", mu), checkKeyBucketExcursion(mu, edit, unsmoothed), 20)
+		arControl(t, fmt.Sprintf("unsmoothed band, mu key %v", mu), checkKeyBucketExcursion(mu, keyStress, edit, unsmoothed))
 	}
 }
 
-// The weighing's case is a ledger row: it fails at the default noise. Its
-// control runs the same path without noise, where the source changes once
-// and the sample stays Lipschitz in the reading: what fails is the noise at
-// the tolerance, not the rig.
+// The weighing's cases are ledger rows, for a key's start only (see
+// checkWeighExcursion). Their control runs the same path
+// without noise, where the source changes once and the sample stays
+// Lipschitz in the reading: what fails is the noise at the tolerance, not
+// the rig.
 func TestPropertyARWeigh_NoiseFreeChangesOnce(t *testing.T) {
-	run, err := runCase(checkWeighExcursion(0), arControlSeeds(3))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(run.Failures) != 0 {
-		t.Fatalf("the noise-free excursion across siblingMuTolerance: %s", run)
-	}
-	t.Logf("noise-free: %s", run)
+	arHolds(t, "noise-free", checkWeighExcursion(arNoiseSpec{}), 3)
 }
 
-// The shape tracker at a 2 % tolerance, inside the 4 % noise: the anchor
-// moves on noise and the key with it.
+// The shape tracker at a 2 % tolerance: at the measured 1 % noise the anchor
+// moves on noise and the key with it, so the main case sees a band narrowed
+// toward the noise.
 func TestPropertyARShapeTolerance_NarrowToleranceFlaps(t *testing.T) {
-	arControl(t, "shape tolerance 0.02", checkShapeExcursion(0.02), 20)
+	arControl(t, "shape tolerance 0.02, measured noise", checkShapeExcursion(0.02, lengthNoise))
 }
