@@ -124,7 +124,8 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 // SwitchITLFitsAggregated, SwitchITLAggregatedShapeTerm,
 // SwitchITLAggregatedSizes, SwitchPrefillCapacityObserve,
 // SwitchStartConfirmsByDistinctPod, SwitchPrefillBusyMinutes,
-// SwitchPrefillAQuadratic and SwitchITLOneSidedAtCap; a name it does not
+// SwitchPrefillAQuadratic, SwitchITLOneSidedAtCap and
+// SwitchPrefillBoundHeldConfidence; a name it does not
 // know is an error, and sets nothing. Never called on a production path;
 // a test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
@@ -240,6 +241,9 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		// Issue #495: the variants follow a role the throughput floor
 		// raises (throughput_floor.go).
 		SwitchThroughputFloorRaisesVariants: &a.floorRaisesVariants,
+		// Issue #397: the prefill bound held at a lower confidence bound
+		// (prefill_bound_held.go).
+		SwitchPrefillBoundHeldConfidence: &a.prefillBoundConfident,
 	}
 }
 

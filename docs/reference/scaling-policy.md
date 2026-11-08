@@ -1570,9 +1570,14 @@ llama-8b-prod:
 ```
 
 **The risk goes one way: it can add prefill replicas, never remove them.** The
-bound is low, so prefill can end up larger than its load needs. In the worst
-case the extra is the ratio between what prefill can really do and the highest
-rate it was seen doing behind a full decode. A prefill that large rarely
+bound is low, so prefill can end up larger than its load needs. One exception
+for now: the readings of one replica within a minute are combined by their
+highest, which reads about 9-13 % high under the gauge's normal noise
+([#531](https://github.com/ev-shindin/llm-scaling-manager/issues/531)), so
+until that is fixed the bound can read that much high and order that much
+less prefill than the load needs. In the worst
+case the extra is the ratio between what prefill can really do and the rate
+it was seen doing behind a full decode. A prefill that large rarely
 queues on its own, so the extra **lasts until you reset the variant's learned
 state** ([how](troubleshooting.md#reset-one-variants-learned-state)). These
 limits apply:
@@ -1582,8 +1587,10 @@ limits apply:
 - One cycle adds at most as many replicas as are ready, so the fleet at most
   doubles per replica start.
 - It does not add prefill while decode is still full.
-- It only rises. A lower reading, taken behind a full decode after prefill
-  grew, does not lower it.
+- It does not fall below a level its readings held. A lower reading, taken
+  behind a full decode after prefill grew, does not lower it. The level held
+  is a little under the readings' average, not the highest reading, which
+  is high because of the gauge's noise.
 - Within a minute it takes the average of the queued prefill replicas, not
   the fastest. One fast replica, or one replica whose rate was counted twice,
   does not set it.
@@ -1597,8 +1604,10 @@ limits apply:
 - Turning it off stops it at once. A bound already learned is kept, unread,
   and ages out after a week; turned back on within that week, it is used
   again.
-- The bound is kept with the rest of the learned state, so it survives a
-  restart when `LEARNED_STATE_SNAPSHOT` is set. It is set aside when the
+- The bound's readings are kept with the rest of the learned state, so they
+  survive a restart when `LEARNED_STATE_SNAPSHOT` is set. The level it held
+  is not: after a restart the bound is the readings' average until it holds
+  a level again, which can only add prefill. It is set aside when the
   variant's engine arguments change.
 - To see when the bound is in use, read `lowerBound` on the
   [`throughput-demand-floor`](cycle-log.md#throughput-demand-floor) line, or

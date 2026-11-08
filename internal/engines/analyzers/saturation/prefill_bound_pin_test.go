@@ -51,7 +51,8 @@ var _ = Describe("the prefill bound with two pods in one spacing", func() {
 		return analyzer.saturatedThroughput[prefillBoundKey(key)]
 	}
 
-	It("samples the two pods' mean in one minute, and keeps the max over minutes", func() {
+	It("samples the two pods' mean in one minute, and keeps the max over minutes ("+SwitchPrefillBoundHeldConfidence+" off)", func() {
+		Expect(analyzer.SetSwitchesForReplay(map[string]bool{SwitchPrefillBoundHeldConfidence: false})).To(Succeed())
 		read("prefill-0", 6000)
 		Expect(read("prefill-1", 4000)).To(BeNumerically("~", 5000, 1e-6))
 		clock = clock.Add(ThroughputSampleSpacing)
@@ -59,6 +60,19 @@ var _ = Describe("the prefill bound with two pods in one spacing", func() {
 		Expect(read("prefill-1", 3200)).To(BeNumerically("~", 5000, 1e-6),
 			"a lower minute does not displace the bound's max")
 		Expect(window().Len()).To(Equal(2))
+	})
+	// On (issue #397), the minutes' samples are kept as read, and one
+	// complete minute holds nothing: the bound is the window's mean.
+	It("samples the two pods' mean in one minute, and prices the mean over minutes ("+SwitchPrefillBoundHeldConfidence+" on)", func() {
+		read("prefill-0", 6000)
+		Expect(read("prefill-1", 4000)).To(BeNumerically("~", 5000, 1e-6))
+		clock = clock.Add(ThroughputSampleSpacing)
+		read("prefill-0", 3000)
+		Expect(read("prefill-1", 3200)).To(BeNumerically("~", 4050, 1e-6),
+			"the mean of the two minutes, 5000 and 3100")
+		Expect(window().Len()).To(Equal(2))
+		Expect(window().Max()).To(BeNumerically("~", 5000, 1e-6), "the samples as read")
+		Expect(window().Last()).To(BeNumerically("~", 3100, 1e-6), "not raised to the first")
 	})
 	for _, on := range []bool{true, false} {
 		It(fmt.Sprintf("takes an exact repeat of the last reading past the spacing as a write of its window (%s %v)", SwitchMuRepeatIsUse, on), func() {

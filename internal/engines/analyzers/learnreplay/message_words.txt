@@ -2015,6 +2015,7 @@ preempts
 prefill
 prefill-a-quadratic
 prefill-bound
+prefill-bound-held-confidence
 prefill-busy-minutes
 prefill-capacity-observe
 prefill-capacity-observed
@@ -2022,6 +2023,7 @@ prefill-catchup
 prefill-demand-held
 prefill-required
 prefill-throughput-bound-reading
+prefillBoundHeld
 prefillBounds
 prefillDemandAfter
 prefillDemandBefore

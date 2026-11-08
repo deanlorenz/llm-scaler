@@ -223,6 +223,10 @@ func (a *SaturationAnalyzer) throughputWindowUnderLocked(key, args string) {
 		delete(a.throughputSampledAt, key)
 		delete(a.throughputLastRead, key)
 		delete(a.throughputPodReads, key)
+		// The prefill bound's held figure was read under the old arguments
+		// and is not put aside with its window: brought back, the window
+		// prices its mean until it holds a figure again, the lower side.
+		delete(a.prefillBoundHeld, key)
 		delete(a.throughputMuChoice, key)
 		delete(a.throughputWindowArgs, key)
 	}

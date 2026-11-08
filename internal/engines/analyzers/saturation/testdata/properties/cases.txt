@@ -193,7 +193,10 @@ monotonicity/floor/lambda-rise-timebase
 monotonicity/floor/standing-local-queue
 n-dependence/mu/iid-fold
 n-dependence/mu/iid-fold-timebase
+n-dependence/prefill-bound/ar-max
+n-dependence/prefill-bound/ar-max-sigma15
 n-dependence/prefill-bound/iid-max
+n-dependence/prefill-bound/iid-max-sigma15
 redistribution/borrowed-k2/disable-borrow-keeps-own
 redistribution/decode-memory/row-order
 redistribution/demand/alternating-pods

@@ -37,6 +37,14 @@ import (
 // mean across pods, since a fleet serves the sum of its pods' rates and the
 // fastest pod's reading over-states what each one serves.
 //
+// That argument holds for a noise-free reading. Under the rate gauge's noise
+// the max over minutes picks the noise and reads high, the side that breaks
+// the SLO (issue #397). With SwitchPrefillBoundHeldConfidence on, the
+// constructor's default, the window keeps its samples as read, and the bound
+// is the larger of their mean and the max of lower CONFIDENCE bounds on it,
+// which is a lower bound under noise (prefill_bound_held.go). The max
+// described here, and below, is the bound with the switch off.
+//
 // The window holds computed TOKENS per second, not requests per second, and
 // is converted at the prompt length being served when it is read. Its key's
 // input bucket spans a factor of two, and the top one ("huge", 6000 tokens
@@ -134,7 +142,12 @@ func (a *SaturationAnalyzer) notePrefillBound(rm domain.ReplicaMetrics, cfg *con
 	a.throughputWindowUnderLocked(key, args)
 	a.mu.Unlock()
 	saturated := rm.BusiestRankQueue() >= int(cfg.QueueLengthThreshold) && rm.BusiestRankTokens() > 0
-	if saturated && adm.serving() && rm.PrefillComputedTokenRate > 0 && ileff > 0 {
+	// recorded: a serving row's saturated reading, the bound's evidence.
+	recorded := saturated && adm.serving() && rm.PrefillComputedTokenRate > 0 && ileff > 0
+	if recorded && a.prefillBoundConfident {
+		a.notePrefillBoundSample(key, rm.PodName, rm.PrefillComputedTokenRate, args)
+	}
+	if recorded && !a.prefillBoundConfident {
 		tokens := rm.PrefillComputedTokenRate
 		a.mu.Lock()
 		var prior, last float64
@@ -197,6 +210,9 @@ func (a *SaturationAnalyzer) notePrefillBound(rm domain.ReplicaMetrics, cfg *con
 			}
 		}
 		a.mu.Unlock()
+	}
+	if recorded {
+		tokens := rm.PrefillComputedTokenRate
 		logger.V(logging.DEFAULT).Info("prefill-throughput-bound-reading",
 			"variant", rm.VariantName, "pod", rm.PodName, "key", key,
 			"computedTokenRate", rm.PrefillComputedTokenRate, "effectiveInputTokens", ileff,
@@ -214,7 +230,36 @@ func (a *SaturationAnalyzer) notePrefillBound(rm domain.ReplicaMetrics, cfg *con
 	// saturation, which is the one thing a fleet the bound is working for
 	// stops producing.
 	ra.TouchAt(a.now())
+	tokens := ra.Max()
+	if a.prefillBoundConfident {
+		// Its samples are as read: the larger of their mean and the held
+		// figure (prefill_bound_held.go).
+		tokens = max(ra.Average(), a.prefillBoundHeld[key].tokens)
+	}
 	// The bound in tokens/s, for the prefill observation (prefill_observe.go).
-	a.stashPrefillBound(rm, ra.Max(), ra.Len())
-	return prefillBoundReading{rate: ra.Max() / ileff, samples: ra.Len()}
+	a.stashPrefillBound(rm, tokens, ra.Len())
+	return prefillBoundReading{rate: tokens / ileff, samples: ra.Len()}
+}
+
+// notePrefillBoundSample writes one saturated reading of pod to the bound's
+// window, as read, under SwitchPrefillBoundHeldConfidence: the minute's
+// readings fold at their mean across pods, as mu's do. When it starts a
+// sample, the samples before it are complete, and their lower confidence
+// bound may raise the held figure (prefill_bound_held.go).
+func (a *SaturationAnalyzer) notePrefillBoundSample(key, pod string, tokens float64, args string) {
+	a.mu.Lock()
+	var complete []float64
+	if ra, ok := a.saturatedThroughput[key]; ok {
+		complete = ra.Snapshot().Values
+	}
+	a.mu.Unlock()
+	w := a.recordSaturatedThroughputFrom(key, pod, tokens)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, ok := a.saturatedThroughput[key]; ok && args != "" {
+		a.throughputWindowArgs[key] = args
+	}
+	if w == muSampled {
+		a.raiseHeldBoundLocked(key, complete)
+	}
 }

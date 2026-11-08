@@ -333,7 +333,10 @@ var _ = Describe("a prefill lower bound learned while decode meters prefill", fu
 			if vc.VariantName == prefillVariant {
 				Expect(vc.ServiceRate).NotTo(BeNil())
 				Expect(vc.ServiceRate.RateSource).To(Equal(domain.ServiceRateSourceLowerBound))
-				Expect(vc.ServiceRate.Rate).To(BeNumerically("~", boundRate, 1e-9))
+				// The mean of its two readings, boundRate and 1 % under it
+				// (SwitchPrefillBoundHeldConfidence): two minutes hold no lower
+				// confidence bound above their mean.
+				Expect(vc.ServiceRate.Rate).To(BeNumerically("~", boundRate*0.995, 1e-9))
 			}
 		}
 	})
@@ -407,8 +410,10 @@ var _ = Describe("a prefill lower bound across prompt lengths in one input bucke
 		}
 		Expect(priced).NotTo(BeNil())
 		Expect(priced.RateSource).To(Equal(domain.ServiceRateSourceLowerBound))
-		Expect(priced.Rate).To(BeNumerically("~", 2.0, 1e-9),
-			"24,000 tokens/s at 12,000-token prompts, not the 4 req/s of the 6000-token episode")
+		// The window's mean, 23,880 tokens/s: its readings alternate 24,000
+		// and 23,760 (SwitchPrefillBoundHeldConfidence).
+		Expect(priced.Rate).To(BeNumerically("~", 23_880.0/12_000, 1e-9),
+			"23,880 tokens/s at 12,000-token prompts, not the 4 req/s of the 6000-token episode")
 	})
 })
 
@@ -428,6 +433,11 @@ var _ = Describe("notePrefillBound across the pods of one minute", func() {
 		clock    time.Time
 		cfg      *config.ScalingPolicy
 	)
+	// confident sets SwitchPrefillBoundHeldConfidence for the specs that
+	// follow it; on is the constructor's default.
+	confident := func(on bool) {
+		Expect(analyzer.SetSwitchesForReplay(map[string]bool{SwitchPrefillBoundHeldConfidence: on})).To(Succeed())
+	}
 	BeforeEach(func() {
 		analyzer = NewSaturationAnalyzer(capacity.NewStore())
 		clock = time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
@@ -447,37 +457,123 @@ var _ = Describe("notePrefillBound across the pods of one minute", func() {
 		return got.rate * prompt
 	}
 
-	It("prices the mean of four pods when one reads at twice its rate, not the doubled pod", func() {
-		Expect(minute(4000, 4000, 4000, 8000)).To(BeNumerically("~", 5000, 1e-6))
-	})
-	It("prices the mean of four pods when one is genuinely slow, not the fastest", func() {
-		Expect(minute(4000, 4000, 4000, 2000)).To(BeNumerically("~", 3500, 1e-6))
-	})
-	It("still only rises across minutes, after the higher minute has left the ring", func() {
-		Expect(minute(4000, 4000)).To(BeNumerically("~", 4000, 1e-6))
-		// More lower minutes than the ring holds: the first minute's sample
-		// is evicted, and only the rise keeps its figure.
-		for range capacity.RollingAverageWindowSize + 1 {
+	for _, on := range []bool{true, false} {
+		It(fmt.Sprintf("prices the mean of four pods when one reads at twice its rate, not the doubled pod (%s %v)", SwitchPrefillBoundHeldConfidence, on), func() {
+			confident(on)
+			Expect(minute(4000, 4000, 4000, 8000)).To(BeNumerically("~", 5000, 1e-6))
+		})
+		It(fmt.Sprintf("prices the mean of four pods when one is genuinely slow, not the fastest (%s %v)", SwitchPrefillBoundHeldConfidence, on), func() {
+			confident(on)
+			Expect(minute(4000, 4000, 4000, 2000)).To(BeNumerically("~", 3500, 1e-6))
+		})
+	}
+
+	// Off, as #395 shipped: the bound is the max over minutes, and a
+	// sample may not fall below the max when it started.
+	Context("with "+SwitchPrefillBoundHeldConfidence+" off", func() {
+		BeforeEach(func() { confident(false) })
+		It("still only rises across minutes, after the higher minute has left the ring", func() {
+			Expect(minute(4000, 4000)).To(BeNumerically("~", 4000, 1e-6))
+			// More lower minutes than the ring holds: the first minute's sample
+			// is evicted, and only the rise keeps its figure.
+			for range capacity.RollingAverageWindowSize + 1 {
+				clock = clock.Add(ThroughputSampleSpacing)
+				Expect(minute(3000, 3200)).To(BeNumerically("~", 4000, 1e-6))
+			}
 			clock = clock.Add(ThroughputSampleSpacing)
+			Expect(minute(4400, 4800)).To(BeNumerically("~", 4600, 1e-6))
+		})
+		It("keeps the earlier figure through a minute that starts a new window after EpisodeGap", func() {
+			Expect(minute(4000, 4000)).To(BeNumerically("~", 4000, 1e-6))
+			clock = clock.Add(capacity.EpisodeGap + time.Minute)
 			Expect(minute(3000, 3200)).To(BeNumerically("~", 4000, 1e-6))
-		}
-		clock = clock.Add(ThroughputSampleSpacing)
-		Expect(minute(4400, 4800)).To(BeNumerically("~", 4600, 1e-6))
+		})
+		It("keeps the earlier figure when a restart inside the minute lost the sample's readings", func() {
+			Expect(minute(4000, 4000)).To(BeNumerically("~", 4000, 1e-6))
+			clock = clock.Add(capacity.EpisodeGap + time.Minute)
+			Expect(minute(3000)).To(BeNumerically("~", 4000, 1e-6))
+			// What a restored snapshot, or a window put aside and brought back,
+			// leaves: the sample and its time, and not its per-pod readings.
+			analyzer.mu.Lock()
+			delete(analyzer.throughputPodReads, prefillBoundKey(key))
+			analyzer.mu.Unlock()
+			Expect(minute(3200, 3000)).To(BeNumerically("~", 4000, 1e-6))
+		})
 	})
-	It("keeps the earlier figure through a minute that starts a new window after EpisodeGap", func() {
-		Expect(minute(4000, 4000)).To(BeNumerically("~", 4000, 1e-6))
-		clock = clock.Add(capacity.EpisodeGap + time.Minute)
-		Expect(minute(3000, 3200)).To(BeNumerically("~", 4000, 1e-6))
-	})
-	It("keeps the earlier figure when a restart inside the minute lost the sample's readings", func() {
-		Expect(minute(4000, 4000)).To(BeNumerically("~", 4000, 1e-6))
-		clock = clock.Add(capacity.EpisodeGap + time.Minute)
-		Expect(minute(3000)).To(BeNumerically("~", 4000, 1e-6))
-		// What a restored snapshot, or a window put aside and brought back,
-		// leaves: the sample and its time, and not its per-pod readings.
-		analyzer.mu.Lock()
-		delete(analyzer.throughputPodReads, prefillBoundKey(key))
-		analyzer.mu.Unlock()
-		Expect(minute(3200, 3000)).To(BeNumerically("~", 4000, 1e-6))
+
+	// On (issue #397): the bound is the larger of the window's mean and the
+	// held figure, the max of the lower confidence bounds of its complete
+	// samples, taken at three and six complete samples and then once per
+	// full window. Noise-free, three equal minutes hold their level exactly.
+	Context("with "+SwitchPrefillBoundHeldConfidence+" on", func() {
+		It("holds the level three minutes agreed on after the lower minutes have filled the ring", func() {
+			Expect(minute(4000, 4000)).To(BeNumerically("~", 4000, 1e-6))
+			// Not 4000 again: a reading equal to the last is a re-read, not a
+			// sample of its own (recordSaturatedThroughputFrom).
+			clock = clock.Add(ThroughputSampleSpacing)
+			Expect(minute(3990, 4010)).To(BeNumerically("~", 4000, 1e-6))
+			clock = clock.Add(ThroughputSampleSpacing)
+			Expect(minute(4000, 4000)).To(BeNumerically("~", 4000, 1e-6))
+			for range capacity.RollingAverageWindowSize + 1 {
+				clock = clock.Add(ThroughputSampleSpacing)
+				Expect(minute(3000, 3200)).To(BeNumerically("~", 4000, 1e-6))
+			}
+			// One higher minute moves the mean by its weight, under the held
+			// figure: a rise is evidence one minute at a time.
+			clock = clock.Add(ThroughputSampleSpacing)
+			Expect(minute(4400, 4800)).To(BeNumerically("~", 4000, 1e-6))
+		})
+		It("prices one minute at its value and a lower one at the mean: one minute holds nothing", func() {
+			Expect(minute(4000, 4000)).To(BeNumerically("~", 4000, 1e-6))
+			clock = clock.Add(ThroughputSampleSpacing)
+			Expect(minute(3000, 3200)).To(BeNumerically("~", 3550, 1e-6))
+		})
+		It("keeps the held figure through a minute that starts a new window after EpisodeGap", func() {
+			minute(4000, 4000)
+			clock = clock.Add(ThroughputSampleSpacing)
+			minute(3990, 4010)
+			clock = clock.Add(ThroughputSampleSpacing)
+			minute(4000, 4000)
+			clock = clock.Add(capacity.EpisodeGap + time.Minute)
+			Expect(minute(3000, 3200)).To(BeNumerically("~", 4000, 1e-6))
+		})
+		It("keeps the held figure when a restart inside the minute lost the sample's readings", func() {
+			minute(4000, 4000)
+			clock = clock.Add(ThroughputSampleSpacing)
+			minute(3990, 4010)
+			clock = clock.Add(ThroughputSampleSpacing)
+			minute(4000, 4000)
+			clock = clock.Add(capacity.EpisodeGap + time.Minute)
+			Expect(minute(3000)).To(BeNumerically("~", 4000, 1e-6))
+			analyzer.mu.Lock()
+			delete(analyzer.throughputPodReads, prefillBoundKey(key))
+			analyzer.mu.Unlock()
+			Expect(minute(3200, 3000)).To(BeNumerically("~", 4000, 1e-6))
+		})
+		It("holds a noisy level at its lower confidence bound: under the mean, over the dropped level", func() {
+			// Ten minutes at 4000 +- 10 %, then ten at 3200: a fleet the bound
+			// grew, its readings lower by the growth.
+			level := []float64{4100, 3700, 4400, 3900, 4200, 3600, 4300, 4000, 3800, 4050}
+			for _, v := range level {
+				clock = clock.Add(ThroughputSampleSpacing)
+				minute(v)
+			}
+			mean := 0.0
+			for _, v := range level {
+				mean += v
+			}
+			mean /= float64(len(level))
+			var got float64
+			for i := range 2 * capacity.RollingAverageWindowSize {
+				clock = clock.Add(ThroughputSampleSpacing)
+				got = minute(3200 + 10*float64(i%3))
+			}
+			analyzer.mu.Lock()
+			held := analyzer.prefillBoundHeld[prefillBoundKey(key)].tokens
+			analyzer.mu.Unlock()
+			Expect(got).To(Equal(held), "the dropped minutes' mean is under the held figure")
+			Expect(held).To(BeNumerically("<", mean), "held at a lower confidence bound, not the level")
+			Expect(held).To(BeNumerically(">", 3500), "the drop does not reach the bound")
+		})
 	})
 })

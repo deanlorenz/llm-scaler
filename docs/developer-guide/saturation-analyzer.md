@@ -1573,6 +1573,78 @@ Two hold rules gate ordering, both measured rather than reasoned:
 
 Both are covered in [analyzer-evidence.md](analyzer-evidence.md).
 
+### The prefill bound
+
+With `enablePrefillThroughputBound` on, a prefill replica queued behind a full
+decode writes its computed-token rate to a window of its own
+(`prefill_bound.go`, the key's role field `prefill-bound`), and the floor
+prices prefill on it when prefill has no window of its own. Each such reading
+is at most what the replica sustains, so the bound is a lower bound. Within a
+minute the pods' readings fold at their mean, as mu's do (#395).
+
+Across minutes the bound was the running max: each sample raised to the
+window's max when it started (`RaiseLastAt`), carried past a new window after
+`EpisodeGap`. That holds for a noise-free reading. Under the rate gauge's
+noise (7.5-18.9 % per pod on E1) the max picks the noise: at one pod it read
+the true rate 15 % high after ten minutes at 10 % noise and 50 % high after a
+day at 15 % (#397). High is the side that breaks the SLO: the floor orders
+fewer prefill replicas than the load needs.
+
+With `SwitchPrefillBoundHeldConfidence` on, the constructor's default
+(`prefill_bound_held.go`), the window keeps its samples as read, and the bound
+is the larger of:
+
+- the window's mean, unbiased under stationary noise; and
+- the held figure (`prefillBoundHeld`): the max of lower confidence bounds
+  on a window's mean, `mean - t * sd / sqrt(n)` with `t` Student's quantile on
+  `n - 1` degrees of freedom. One is taken at three and at six complete samples
+  while a window fills, then once per full window of samples all new since the
+  last. The k-th is taken at confidence `1 - alpha/(k(k+1))`, `alpha = 0.05`, so
+  over the bound's whole life the chance that any of them stands above the
+  true rate stays under 5 %.
+
+The held figure does what the max did for a fleet the bound grew: decode's
+admission shared over more prefill replicas reads lower, and priced on that,
+prefill grew again on every decode episode. The held figure never falls, and
+carries past a new window after `EpisodeGap`. Noise-free it holds the level
+exactly; under noise it holds it less `t * sd / sqrt(n)`, so the fleet grows
+once by that much and then stays
+(`TestPrefillBoundHeld_AFleetTheBoundGrewGrowsOnceUnderNoise`; on the window's
+mean alone the fleet grows every episode, 5 to 15 replicas over six).
+
+Its error is on the safe side, under a condition: the 95 % holds only if each
+minute's sample is an unbiased, roughly independent reading of the rate.
+Measured at one pod (the worst case), under stationary noise with one read a
+pod a minute, the bound is within 0.2 % of the true rate after ten minutes and
+after an hour at 10, 15 and 19 % noise, and 0.6-1.2 % high after a day, where the held figure, under
+the true rate, catches the mean's low dips
+(`TestPrefillBoundHeld_TheBiasAtTheMeasuredNoise`). A rise reaches the bound
+through the mean, by its weight: it reads low while the window turns over,
+which orders more prefill. The held figure is working state, not in the
+snapshot: after a restart, or a window put aside and brought back, the bound
+is the window's mean until it takes a lower confidence bound again. Like the
+old max, the held figure falls only when the window is evicted, put aside by
+an engine-argument change, forgotten with the variant (or a flush), or lost to
+a restart. A window restored from a build that raised its samples is not
+tested as it stands: only samples taken since the held figure started are
+(`prefillHeldBound.fresh`), or the old build's max, equal values with no
+spread, would be held for good
+(`TestPrefillBoundHeld_ARestoredRaisedWindowDoesNotPinTheHeldFigure`).
+
+The four `n-dependence/prefill-bound/*` property cases (iid and AR(1) noise at
+10 and 15 %) pass with the switch on and fail on every seed with it off
+(`TestPrefillBoundHeld_TheClearedLedgerCasesFailWithTheSwitchOff`).
+
+Not fixed here ([#531](https://github.com/ev-shindin/llm-scaling-manager/issues/531)): the within-minute fold takes a max over one pod's re-reads
+before the mean across pods (`recordSaturatedThroughputFrom`), shared with mu.
+The property rig reads each pod once a minute, so it does not exercise that
+max. At the 15 s cycle a pod is re-read about four times a minute, and with
+AR(1) noise at phi 0.3 per cycle the bound then reads 8.8 % high at 10 %
+noise and 13 % at 15 %, at one pod and at four (the running max read 15-32 %
+high there). That breaks the condition above: at four reads a minute the held
+figure stood above the true rate on 47 of 50 seeds after an hour and 50 of 50
+after a day, at 10 % and 15 % noise.
+
 ## Shape change
 
 `shape_change.go`. One `shapeMemo` per `namespace|modelID`, guarded by
