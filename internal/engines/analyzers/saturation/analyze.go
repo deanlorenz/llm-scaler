@@ -1209,7 +1209,7 @@ func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandPart
 	if c.shapeChanged && d.roleDemand != nil {
 		_, scaleDown := c.cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
 		before := maps.Clone(d.roleDemand)
-		if moved, raised := holdFleetFloor(d.roleDemand, d.variants, scaleDown); moved > 0 {
+		if moved, raised := holdFleetFloorAs(d.roleDemand, d.variants, scaleDown, c.a.floorRaisesVariants); moved > 0 {
 			total += moved
 			for role := range raised {
 				hold(role, before[role])

@@ -497,6 +497,10 @@ type SaturationAnalyzer struct {
 	// (itl_tier_hysteresis.go): on from the constructor; a replay turns it
 	// off (SetSwitchesForReplay).
 	itlClearsOnRevision bool
+	// floorRaisesVariants is SwitchThroughputFloorRaisesVariants (issue
+	// #495, throughput_floor.go): on from the constructor; a replay turns it
+	// off (SetSwitchesForReplay).
+	floorRaisesVariants bool
 	// itlOneSidedLast is, per ITL key, the one-sided fields of the admission
 	// the line was last priced under (itlOneSided), and whether it was raised
 	// (noteITLOneSided), for the what-if refit (ITLOneSided): its prior on B
@@ -731,6 +735,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		itlOneSidedAtCap:       true,
 		itlTierHysteresis:      true,
 		itlClearsOnRevision:    true,
+		floorRaisesVariants:    true,
 		itlOneSidedLast:        make(map[string]itlOneSidedRecord),
 		prefillObserver:        prefill.NewObserver(),
 		prefillBounds:          make(map[string]stashedBound),

@@ -136,6 +136,15 @@ func startingReplicas(vc domain.VariantCapacity) int {
 	return 0
 }
 
+// Supply is one variant's ready capacity, ReplicaCount x PerReplicaCapacity
+// with a non-finite or non-positive capacity worth zero: exactly the term
+// AggregateByRole sums into ScopeTotals.TotalSupply. Exported so a caller
+// spreading a role's demand over its variants by supply uses the same rule
+// for each variant as the aggregate used for the role.
+func Supply(vc domain.VariantCapacity) float64 {
+	return float64(vc.ReplicaCount) * perReplica(vc)
+}
+
 // AnticipatedSupply is one variant's ready-plus-starting capacity: exactly the
 // term AggregateByRole sums into ScopeTotals.TotalAnticipatedSupply.
 //

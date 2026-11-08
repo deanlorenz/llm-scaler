@@ -139,6 +139,55 @@ so each must keep up with all of it), and on the total otherwise.
   prefill time plus the hand-off. Only a saturated decode makes it hold longer,
   and more prefill replicas do not fix that.
 
+The floor writes the role's figure (`RoleDemand`) and the model total. A role
+it raises also lifts that role's variants (`raiseVariantsToRoles`, the same
+step `holdFleetFloor` takes). The raised demand is water-filled over the
+variants by supply (`aggregation.Supply`):
+
+- A variant whose own `TotalDemand` is already above its supply share keeps
+  it.
+- The rest of the role's demand is spread over the other variants by supply,
+  again until none of them is above its share.
+- Each variant it lifts gets its `Utilization` moved with its `TotalDemand`.
+
+The variants then sum to the role (or to their own sum, if that is larger).
+Where no variant is above its share, each reads `1 - role demand / role
+supply` spare, which is what the warm pool's pressure reads
+(`steadystate.variantPressure`, `SpareFraction = 1 - Utilization`). A role the
+floor lowers (the swap above) or leaves alone is not touched. Neither is
+prefill's dropped scheduler-queue share: that share was added to the role
+only, never to a variant.
+
+Why a water-fill and not "the larger of own figure and share": with one
+variant above its share, that left the variants summing to more than the
+role. The optimizer prices each variant at its fraction of the variants' sum
+(`allocation.variantDemandShare`), so it priced the hot variant under what it
+holds: 38.5 instead of 50, on a role of 100 split 80/20
+(`TestCostAware_AFlooredRoleIsPricedAtTheVariantsShares`). The composite's
+`redistributeVariantDemand` skewed the same way.
+
+Before this, a variant kept its occupancy figure under a raised role. On a
+P/D fleet floored to 1.11 decode replicas out of six, the decode variant read
+99.7 % spare against the role's 81.5 %
+(`TestFloorRaisesVariants_TheDecodeVariantReadsTheRolesSpare`,
+`TestVariantPressure_AFlooredRoleIsReadAtTheRolesSpare`).
+
+The step is behind the replay switch `SwitchThroughputFloorRaisesVariants`.
+In the recorded goldens it moves only per-variant outputs
+(`variant-capacities`, `composite-variants`, `warm-pool-pressure`). It can
+also move a role's demand and the model total, through the hot-rank hold that
+runs after the floor (`holdHotRanks`). That hold adds what a hot replica's
+variant is short of, measured against the variant's own `TotalDemand`:
+
+- With the switch on, a floored variant already holds its share, and the hold
+  adds nothing that share covers.
+- With it off, the hold added the hot replica's want on top of a role the
+  floor had already raised -- the same load counted twice. In
+  `TestFloorRaisesVariants_TheHotRankHoldDoesNotCountTheFloorTwice` decode
+  reads 2 067 796 tokens on and 2 695 886 off.
+
+No recording has a hot rank on a floored role, so no golden shows it.
+
 Properties, each with a spec in `throughput_floor_test.go`:
 
 - **Invariant to fleet size.** `mu` is a per-replica constant, so the floor is

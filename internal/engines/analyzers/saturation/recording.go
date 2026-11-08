@@ -234,6 +234,9 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		SwitchITLTierHysteresis: &a.itlTierHysteresis,
 		// The window across a rollout (itl_tier_hysteresis.go).
 		SwitchITLClearsOnNewRevision: &a.itlClearsOnRevision,
+		// Issue #495: the variants follow a role the throughput floor
+		// raises (throughput_floor.go).
+		SwitchThroughputFloorRaisesVariants: &a.floorRaisesVariants,
 	}
 }
 
