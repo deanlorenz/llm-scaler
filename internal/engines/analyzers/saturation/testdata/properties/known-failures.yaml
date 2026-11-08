@@ -16,15 +16,15 @@
   class: edges
   learner: mu
   expect: flipped
-  finding: "The weighing (weighUnreadReplicas) switches the sample's source on read < siblingMuTolerance x h with no band: a queued reader whose rate over its unread siblings ramps 0.95 -> 0.65 under the measured rate noise (sigma 10 %, lag-one 0.3) changes source on most minutes near the crossing, and each change moves the sample by 3/4 of (h - read), about 0.15h at the tolerance, upward as the reader falls."
-  measured: "20/20 seeds; seed 1: 21 reversals in 168 cycles, first at cycles 16, 17, 32, 36; the sample stepped 1.010 -> 0.918 of h at the first"
+  finding: "The crossing is fixed: with the weighing's band (mu-weighing-band) it changes the source once. What still flips is a key's first reading landing in a noise trough (sigma 10 %, lag-one 0.3): the first set is on the first reading, it sets the weighing while the noise-free reader is at 0.95 of h, it is provisional and lets go once its own set-window mean is back at 0.90 (about 3 min, where the 10 min dwell held it before), and the crossing sets it again. The fix for that seals the closed-loop probe: 45 s of readings before a first set took a replica slow at 0.3 from the start to a peak of 27 against the 21.7 bound (105 s: 57), and setting a young key only under 0.75 sealed a replica slow at 0.65 mid-run at 24 (0/20 and 2/20 flips here then)."
+  measured: "3/100 seeds; seed 3: set on the first reading at 0.796 of h, cleared at cycle 11, set again at 76"
   owner: "#495"
 - id: edges/mu/sibling-tolerance-excursion-sigma15
   class: edges
   learner: mu
   expect: flipped
-  finding: "The weighing's unbanded tolerance at the high end of the measured rate noise (sigma 15 %, lag-one 0.3): the sample's source changes from the first minutes of the ramp, while the noise-free reader is still at 0.93 of h."
-  measured: "20/20 seeds; seed 1: 29 reversals in 168 cycles, first at cycles 16, 17, 28, 30; the sample stepped 1.047 -> 0.887 of h at the first"
+  finding: "As edges/mu/sibling-tolerance-excursion at the high end of the measured rate noise (sigma 15 %, lag-one 0.3): the crossing changes the source once; a key's first reading in a noise trough sets the weighing at its start, the provisional set clears within minutes, and the crossing sets it again. The fixes that remove it seal the closed-loop probe (see the 10 % row)."
+  measured: "14/100 seeds; seed 3: cleared at cycle 14, set again at 76"
   owner: "#495"
 - id: edges/shape-hold/tolerance-excursion-stress
   class: edges

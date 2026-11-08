@@ -98,8 +98,11 @@ func arEdgeCases() []propCase {
 		edge("mu", "latch-return-excursion-sigma15", cheapSeeds, checkLatchReturnExcursion(tuningDefault, rateNoise15)),
 		nonDefault("latch-return-excursion-nondefault", checkLatchReturnExcursion(ret, rateNoise10)),
 		nonDefault("latch-return-excursion-nondefault-sigma15", checkLatchReturnExcursion(ret, rateNoise15)),
-		edge("mu", "sibling-tolerance-excursion", 0, checkWeighExcursion(rateNoise10)),
-		edge("mu", "sibling-tolerance-excursion-sigma15", 0, checkWeighExcursion(rateNoise15)),
+		// On cheapSeeds, not 20: their rows fail on a few percent of seeds (a
+		// key's first reading in a noise trough), and on 20 a shift of the
+		// generator's draws could make one pass and fail the ledger.
+		edge("mu", "sibling-tolerance-excursion", cheapSeeds, checkWeighExcursion(rateNoise10)),
+		edge("mu", "sibling-tolerance-excursion-sigma15", cheapSeeds, checkWeighExcursion(rateNoise15)),
 		edge("k2", "key-bucket-excursion", 0, checkKeyBucketExcursion(false, lengthNoise, nil)),
 		edge("k2", "key-bucket-excursion-stress", keyStressSeeds, checkKeyBucketExcursion(false, keyStress, nil)),
 		edge("mu", "key-bucket-excursion", 0, checkKeyBucketExcursion(true, lengthNoise, nil)),
@@ -202,7 +205,16 @@ func (r *propRig) weighSample() (sample, read float64, ok bool) {
 // Between changes of source the sample moves no more than the reading it is
 // formed from (the weighing's slope is a quarter, the reader's own is one),
 // judged first and as kindMoved, so a break of it is never read as the
-// ledgered flip. Then the source changes at most once per excursion.
+// ledgered flip. Then the source changes at most once per excursion. A sample
+// is weighed when it differs from the readers' mean: with the band a weighing
+// key keeps counting its unread replicas while a noisy reader reads over h,
+// where the weighed sample sits under the reader.
+//
+// Ledger rows (#495): the band (mu-weighing-band) holds the crossing to one
+// change at 10 % and 15 %; a key's first set is on its first reading, so a
+// first reading in a noise trough sets it at the start, the provisional set
+// clears on its own set-window mean, and the crossing sets it again: 3 and 14
+// of 100 seeds.
 func checkWeighExcursion(ns arNoiseSpec) func(uint64) error {
 	return func(seed uint64) error {
 		r := propRand(seed)
@@ -225,7 +237,7 @@ func checkWeighExcursion(ns arNoiseSpec) func(uint64) error {
 				}
 				return violation(kindNotLearned, "cycle %d: no sample", i)
 			}
-			weighed = append(weighed, sample > read*(1+1e-9))
+			weighed = append(weighed, math.Abs(sample-read) > 1e-9*read)
 			samples, reads = append(samples, sample), append(reads, read)
 		}
 		for i := 1; i < len(samples); i++ {
@@ -487,7 +499,8 @@ func TestPropertyARKeyBucket_ShortSmoothingFlaps(t *testing.T) {
 	}
 }
 
-// The weighing's cases are ledger rows. Their control runs the same path
+// The weighing's cases are ledger rows, for a key's start only (see
+// checkWeighExcursion). Their control runs the same path
 // without noise, where the source changes once and the sample stays
 // Lipschitz in the reading: what fails is the noise at the tolerance, not
 // the rig.

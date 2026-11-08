@@ -520,6 +520,17 @@ type muChoice struct {
 	// unreadLast what they served on the newest of those samples
 	// (weighUnreadReplicas). Zero outside that state.
 	unread, unreadLast float64
+	// weighing is set while the newest sample counts the replicas its
+	// readers did not read, weighChanged is when that last changed, and
+	// weighRatios the readers' rate over what those count at, read over the
+	// band's windows: the weighing's latch (muChoice.weighs,
+	// SwitchMuWeighingBand). Not persisted.
+	weighing     bool
+	weighChanged time.Time
+	weighRatios  []weighRatio
+	// weighProvisional is set while the weighing was set on less than a set
+	// window of readings (muChoice.weighs): no dwell holds it.
+	weighProvisional bool
 	// minority is set while the replicas that read the window's newest
 	// sample are a minority of the fleet (noteSampleWriters), which lets a
 	// figure no line can replace expire (minorityFigureExpired). Unset for
