@@ -12,6 +12,20 @@
 # measured is the fail rate over the case's seeds and the first failure, when
 # the row was written. owner is what clears the row: an issue ("#394"), or
 # "open". CheckLedger holds that form only, so a closed issue passes.
+- id: edges/mu/sibling-tolerance-excursion
+  class: edges
+  learner: mu
+  expect: flipped
+  finding: "The weighing (weighUnreadReplicas) switches the sample's source on read < siblingMuTolerance x h with no band: a queued reader whose rate over its unread siblings ramps 0.95 -> 0.65 under 4 % AR(1) noise (phi 0.9) changes source 3-11 times on one crossing, and each change steps the sample about 11 % (0.85h <-> 0.945h), upward as the reader falls."
+  measured: "17/20 seeds (79/100 over seeds 1-100); seed 1: 7 reversals in 168 cycles, first at cycles 52, 53, 56, 58; the sample stepped 0.853 -> 0.945 of h at the first"
+  owner: "#495"
+- id: edges/shape-hold/tolerance-excursion
+  class: edges
+  learner: shape-hold
+  expect: flipped
+  finding: "The shape tracker moves its anchor, and the key's output length, on one reading past 20 % of the anchor, and the new anchor is that reading, on the noise's far side: on one noise-free excursion under 4 % AR(1) noise (phi 0.9) one tail reading moves the key a second time and the next moves it back."
+  measured: "1/100 seeds (5/1000 over seeds 1-1000: 64, 247, 407, 901, 926); seed 64, down to 775: 1000 -> 792 at cycle 91 -> 630 at 171 -> 765 at 185"
+  owner: "#495"
 - id: first-sample/mu/joiner-rate-timebase
   class: first-sample
   learner: mu
