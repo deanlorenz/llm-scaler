@@ -114,6 +114,7 @@ Full mechanics (branch prep, launch flags, post-steps, PR-branch cleanliness) ar
 11. Coder and reviewer must never create or modify `.claude/settings.json` or `.claude/settings.local.json`.
 12. Workers output to files only — no long content in chat. Return a short pointer plus one-line status.
 13. Never push or publish to GitHub without explicit per-operation authorization.
+14. **Suspect artifact:** if a delegated agent's artifact is suspect, re-dispatch the same agent type once to verify and fix its own output and report a summary. Do not open, parse, or verify the artifact in the delegating session. If that attempt does not resolve it, do not retry. Escalate to the user; the fix may need a new agent for the failing tool.
 
 ## Code reviewer
 
