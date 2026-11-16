@@ -43,3 +43,14 @@ Before delegating, provide at minimum:
 - validation and expected outcome.
 
 Coder-specific orchestration additionally follows `conv-coder-orchestration`.
+
+## Proposing a rule or process change
+
+- A proposal for `policy-writer` is a suggestion-box entry. Mission-local facts go in the mission spec, not the suggestion box.
+- One atomic finding per entry.
+- Draft it in `.session/drafts/suggestion-box-YYYY-MM-DD-HHMM.md` and commit the draft on the mission branch, by exact path.
+- Structure: Finding (with evidence and file references), Need, Proposed solution. Add "Where it might land" if known.
+- Writing into `session-tracking` is posting, even if no existing file is touched. Submit only when the user says to.
+- To submit: state the exact destination, `worktrees/session-tracking/suggestion-box/YYYY-MM-DD-HHMM-<mission-name>.md`, and get the authorization `conv-working-outside-worktree` requires. Check the destination does not exist and has no `.wip`, then copy the draft there.
+- Do not `git add` or commit in `session-tracking`. `policy-writer` commits entries when it processes them.
+- Record the copy and the destination path in your ledger. Optionally publish a one-line note on `session-tracking.suggestions`.
