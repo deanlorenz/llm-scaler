@@ -4,7 +4,7 @@
 
 - Own and maintain `<mission-worktree>/.session/STATE.md` and the mission's internal plan.
 - Maintain the owner's own session ledger continuously.
-- Subscribe to `mission.<mission-name>` on startup (per `conventions/agentbus.md`) to monitor
+- Subscribe to `mission.<mission-name>` on startup (per `conv-agentbus`) to monitor
   worker presence, status, and lifecycle events.
 - Register ownership and session status according to `conventions/resume-and-handoff.md`.
 - Keep `STATE.md` current with the actionable status, blockers, and immediate next step; keep
@@ -42,4 +42,4 @@ Before delegating, provide at minimum:
 - ledger/report file to write;
 - validation and expected outcome.
 
-Coder-specific orchestration additionally follows `conventions/coder-orchestration.md`.
+Coder-specific orchestration additionally follows `conv-coder-orchestration`.

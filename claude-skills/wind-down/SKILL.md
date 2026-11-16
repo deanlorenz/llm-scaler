@@ -42,7 +42,7 @@ session — record it honestly here and continue. Do not skip this step on that 
 
 This step is **not skippable**. Update `<mission-worktree>/.session/STATE.md` now. The
 mission owner's own STATE.md is single-writer — edit it directly, no `.wip` rename needed.
-(See `conventions/wip-editing.md` §"Who needs this protocol".)
+(`conv-wip-editing` applies only to files you do not own.)
 
 Required every wind-down, regardless of time pressure:
 - **Drift scan first:** before updating progress fields, scan STATE for settled design,
@@ -73,7 +73,7 @@ Rules:
 - Do not commit `.session/` on PR branches unless explicitly allowed.
 - Review the exact staged file list before committing.
 - Do not push automatically.
-- Push only after single-use user authorization and reading `conventions/push.md`.
+- Push only after single-use user authorization and invoking `conv-push`.
 - Before an authorized push, inspect outgoing commits and the remote destination.
 
 ## Step 5: Run ledger-capture on this session's own ledger

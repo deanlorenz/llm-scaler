@@ -87,7 +87,7 @@ worktrees/<mission-name>/          ← mission branch/worktree
 - Do not silently choose between ambiguous or conflicting instructions; ask.
 - **Use the narrowest command that achieves the goal.** When a guard fires, ask "is there a safer command?" first.
 - Do not override a guard because a task file said to run the original command. Disclose any substitution.
-- Never push without explicit authorization for that specific push. Authorization is single-use. After receiving it, read `conventions/push.md`.
+- Never push without explicit authorization for that specific push. Authorization is single-use. After receiving it, invoke `conv-push`.
 - Never stop or kill a running background task unless explicitly told to. A request to reduce chat noise is not permission to terminate work.
 - Keep long content out of chat. Write tool output, reports, and file dumps to `.session/` or the code tree; reply with a short pointer and status.
 - Never read plan/spec docs or ledger files at session start. Pull plan docs on demand; consult ledger files only when debugging. See `conventions/session-start.md`.

@@ -33,7 +33,7 @@ Rules:
 > *"No `.session/STATE.md` exists for `<mission-name>` in `<worktree>`. Shall I set up a new
 > mission worktree?"*
 
-Wait for confirmation. Follow `conventions/feature-worktree-setup.md` to create STATE.
+Wait for confirmation. Follow `conv-feature-worktree-setup` to create STATE.
 
 ### Case 2: Resume or takeover (STATE file exists)
 Rules:
@@ -152,7 +152,7 @@ done
 Rules:
 - Resolved paths must be under `$TRACKING/claude-skills/`.
 - Links into the main repository or missing links are invalid.
-- Repair links using `conventions/feature-worktree-setup.md`.
+- Repair links using `conv-feature-worktree-setup`.
 - Do not copy skills into mission worktrees.
 
 **c. Verify session-tracking convenience symlinks:**
@@ -161,7 +161,7 @@ Rules:
 ls "$TRACKING/missions/$MISSION_NAME/"
 ```
 
-If missing or broken, create per `conventions/feature-worktree-setup.md` and publish a
+If missing or broken, create per `conv-feature-worktree-setup` and publish a
 note to `session-tracking.pending-commits`.
 
 **d. Migrate tracking layout and STATE if needed:**
@@ -220,7 +220,7 @@ Scan `STATE.md`'s Session log. A log entry is **pending** if its `status` is `ac
 or `retired` without a `## Verified` marker in its ledger. Active ledgers remain in
 `.session/`; captured retired ledgers belong in `.session/ledger/`.
 
-For every pending entry, using the `.wip` protocol (`conventions/wip-editing.md`):
+For every pending entry, using the `.wip` protocol (`conv-wip-editing`):
 1. Mark it `retired` in `STATE.md` if still `active`.
 2. Assign ledger-capture `In:` and `Out:` channels. Include both channels and the subscription
    command in its task file or prompt.
@@ -269,7 +269,7 @@ grounded context. Do not auto-proceed — the parent decides the next action.
 ### Step 10: Record this session's start in STATE.md and open new ledger
 
 The mission owner's own `.session/STATE.md` is single-writer — edit it directly, no `.wip`
-rename needed. (See `conventions/wip-editing.md` §"Who needs this protocol".)
+rename needed. (`conv-wip-editing` applies only to files you do not own.)
 
 1. Create `.session/ledger/` if it does not exist.
 2. Append one line to the Session log in `STATE.md`:

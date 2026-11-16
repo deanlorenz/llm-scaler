@@ -123,9 +123,10 @@ diff -r $PW/conventions conventions
 diff $PW/CONVENTIONS.md CONVENTIONS.md
 git diff --name-only <ST HEAD before step 4> HEAD
 git ls-files | grep -E '(^backup_rules/|^\.session/|^\.claude/|\.bak$)' || echo none
+grep -rohE 'conventions/[A-Za-z0-9_-]+\.md' CONVENTIONS.md conventions claude-skills --exclude-dir=archived | sort -u | while read f; do test -f "$f" || echo "MISSING $f"; done
 ```
 
-The three `diff` commands must print nothing. Every name from `git diff --name-only` must be inside the production paths. The last command must print `none`. If anything else appears, stop and report.
+The three `diff` commands must print nothing. Every name from `git diff --name-only` must be inside the production paths. The `git ls-files` command must print `none`. The last command (dangling references) must print nothing: every `conventions/<name>.md` cited in production must exist outside `conventions/archived/`. If anything else appears, stop and report.
 
 ### Step 6: Install commit
 

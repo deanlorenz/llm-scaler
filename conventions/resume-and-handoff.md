@@ -61,9 +61,9 @@ agentbus_publish(topic="mission.<mission-name>", kind="handoff",
 
 A focused agent assigned to process exactly one ledger file:
 
-1. **Agentbus:** Follow standard agentbus contract (`conventions/agentbus.md`).
+1. **Agentbus:** Follow standard agentbus contract (`conv-agentbus`).
 2. **Shared-file edits:** Before editing any file you don't own (STATE.md, mission spec),
-   read and follow `conventions/wip-editing.md`.
+   read and follow `conv-wip-editing`.
 3. **Capture scope:** Locate the most recent `## Verified <date>` marker in the ledger.
    Treat everything before it as already captured — process only content after that marker.
    If there is no marker, process the entire ledger.
