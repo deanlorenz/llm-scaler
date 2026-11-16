@@ -41,6 +41,7 @@ Read the matching file only when its trigger occurs — not speculatively.
 - `conv-tasks` — before writing or assigning a task specification to any worker
 - `conv-coder-orchestration` — before dispatching or orchestrating a coder agent or background worker
 - `conv-install-to-session-tracking` — before installing any file from policy-writer onto session-tracking
+- `conv-cherry-pick` — before cherry-picking or porting changes from another commit
 - `conv-push` — before executing git push (after receiving explicit single-use approval)
 - `conv-pr-branch` — before creating or curating a PR branch
 - `conv-pr-workflow` — before opening a PR via the GitHub API

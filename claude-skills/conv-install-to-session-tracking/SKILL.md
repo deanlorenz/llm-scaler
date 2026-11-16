@@ -105,7 +105,7 @@ Report the install list and the skip list to the caller before continuing.
 
 ### Step 4: Cherry-pick, one commit at a time
 
-Only the commits classified "install", in order, from `$ST`:
+Apply `conv-cherry-pick`. Only the commits classified "install", in order, from `$ST`:
 
 ```bash
 git cherry-pick <sha>

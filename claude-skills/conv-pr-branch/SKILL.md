@@ -11,7 +11,7 @@ Runs in your own session. Apply before creating, populating, or pushing a PR bra
 
 1. **Spawn off `main`.** Always branch from `main` (or the project's stated base branch — check `CONTRIBUTING.md` or the issue). Never base a PR branch on the mission branch.
 
-2. **Cherry-pick only.** Select only the commits intended for the PR from the mission branch. Internal bookkeeping, WIP commits, and anything in `.session/` must not appear.
+2. **Cherry-pick only.** Select only the commits intended for the PR from the mission branch. Internal bookkeeping, WIP commits, and anything in `.session/` must not appear. Apply `conv-cherry-pick`.
 
 3. **Verify `.session/` is absent before pushing:**
    ```bash
