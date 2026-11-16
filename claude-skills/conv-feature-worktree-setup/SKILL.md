@@ -57,12 +57,12 @@ Skill discovery does not walk above the worktree root — each worktree needs it
 
 **If `pr-review` is a tracked git file in this worktree** (run `git -C MISSION_WT ls-files .claude/skills/pr-review` to check), do not replace the `.claude/skills` directory — skip to step 4 and report this as a blocker.
 
-Otherwise, create the dir-symlink:
+Otherwise, clear the old `.claude/skills` and create the dir-symlink. Never use `rm -rf`.
+
+- If `MISSION_WT/.claude/skills` is a symlink (to the wrong place): remove only that symlink with `rm MISSION_WT/.claude/skills`.
+- If it is a real directory: list it first with `ls -la MISSION_WT/.claude/skills`. Every entry must be a symlink; check with `find MISSION_WT/.claude/skills -mindepth 1 -maxdepth 1 ! -type l`, which must print nothing. If it prints anything, stop and report it. Otherwise remove each symlink by its exact path with `rm`, then `rmdir MISSION_WT/.claude/skills`.
 
 ```bash
-# Remove any existing per-skill symlinks or empty dir
-rm -rf MISSION_WT/.claude/skills
-
 # Create a single dir-symlink pointing to the shared skills dir
 # Use an absolute path — relative paths break when the shell CWD is not the repo root.
 SKILLS_ABS=$(git -C MISSION_WT rev-parse --show-toplevel)/worktrees/session-tracking/claude-skills
