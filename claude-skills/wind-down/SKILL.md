@@ -119,7 +119,7 @@ own it. This can be combined with Step 3's `STATE.md` update — no need for two
 ## Step 7: Release ownership on agentbus
 
 ```
-agentbus_publish(topic="mission.<mission-name>", kind="handoff",
+agentbus_publish(topic="mission.<mission-name>", from_session="<this-session-slug>", kind="handoff",
   body="session=<this-session-slug> releasing ownership of <mission-name>")
 ```
 

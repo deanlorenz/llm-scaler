@@ -239,7 +239,7 @@ If there are no pending entries, this step is a no-op.
 For mission-owner and role-takeover sessions:
 
 ```
-agentbus_publish(topic="mission.$MISSION_NAME", kind="handoff",
+agentbus_publish(topic="mission.$MISSION_NAME", from_session="<this-session-slug>", kind="handoff",
   body="session=<this-session-slug> taking ownership of $MISSION_NAME")
 ```
 

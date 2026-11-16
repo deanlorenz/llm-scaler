@@ -47,13 +47,13 @@ Status values:
 
 Taking ownership:
 ```
-agentbus_publish(topic="mission.<mission-name>", kind="handoff",
+agentbus_publish(topic="mission.<mission-name>", from_session="<slug>", kind="handoff",
   body="session=<slug> taking ownership of <mission-name>")
 ```
 
 Releasing ownership:
 ```
-agentbus_publish(topic="mission.<mission-name>", kind="handoff",
+agentbus_publish(topic="mission.<mission-name>", from_session="<slug>", kind="handoff",
   body="session=<slug> releasing ownership of <mission-name>")
 ```
 

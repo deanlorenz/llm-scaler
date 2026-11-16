@@ -114,7 +114,7 @@ If a link already exists with a different target, stop and report it. Do not rep
 Then publish on agentbus so policy-writer knows the links are waiting to be committed:
 
 ```
-agentbus_publish(topic="session-tracking.pending-commits", kind="note",
+agentbus_publish(topic="session-tracking.pending-commits", from_session="<slug>", kind="note",
   body="mission=MISSION_NAME symlinks created in missions/MISSION_NAME/, ready to commit")
 ```
 
