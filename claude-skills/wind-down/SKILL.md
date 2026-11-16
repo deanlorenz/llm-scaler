@@ -52,6 +52,7 @@ Required every wind-down, regardless of time pressure:
 - Set **Last completed** to the last finished step
 - Set **Next step / resume point** to exactly where the next session should pick up
 - Update **Status**
+- Take every git fact you record (branch position, last installed SHA, commits ahead of the remote) from a command run now, not from earlier STATE text. Branch position: `git fetch`, then `git rev-list --left-right --count <remote-ref>...<branch>`.
 - If you changed the STATE template (`conventions/state-vs-ledger.md`) or any field annotation
   this session: apply the same change to this living STATE.md in this same step — template and
   living file must stay in sync

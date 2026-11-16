@@ -25,6 +25,7 @@ If any of these differ from what the user authorized, stop and ask again.
 5. Confirm the destination branch is exactly what was authorized.
 6. Run applicable tests, lint, DCO, and project pre-push checks.
 7. If this is a PR branch: verify `.session/` is absent (`git ls-files --error-unmatch .session 2>/dev/null && echo "FAIL" || echo "OK"`) and invoke `conv-pr-branch` first.
+8. Run `git fetch`, then state the branch position with `git rev-list --left-right --count origin/<branch>...HEAD`. Never report a branch as "clean vs upstream" or "no diff" from a bare `git diff <remote-ref>..<branch>`: it mixes your changes with commits upstream added since your base.
 
 ## Active PR branches
 
