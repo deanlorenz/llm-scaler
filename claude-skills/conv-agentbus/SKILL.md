@@ -42,6 +42,10 @@ Every background agent launch must include in the task file and launch prompt:
 
 The child subscribes to `In:` before work starts, remains subscribed while running, answers any parent request on `Out:` before continuing, and publishes its final result to `Out:` before exiting.
 
+- The child publishes status, findings, questions, and completion to `Out:`.
+- The parent sends requests and progress questions to the child's `In:` and monitors `Out:`.
+- No background agent runs without channels.
+
 ## Status updates to user
 
 Any session may publish non-blocking visibility notes to the user:

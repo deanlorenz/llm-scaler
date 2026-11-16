@@ -84,6 +84,8 @@ nohup bob run --accept-license --workspace <worktree-path> --mode <mode> \
   > <logfile> 2>&1 &
 ```
 
+Record `--resume <task-id>` in the task file before launch. Without it the next invocation starts cold, with no prior context.
+
 Parent must not edit code in this worktree while the coder is active. Parent may read, monitor, plan, or launch a concurrent reviewer (reviewer reads committed history only).
 
 ### Post-steps
@@ -115,6 +117,7 @@ Full mechanics (branch prep, launch flags, post-steps, PR-branch cleanliness) ar
 12. Workers output to files only — no long content in chat. Return a short pointer plus one-line status.
 13. Never push or publish to GitHub without explicit per-operation authorization.
 14. **Do not replace the delegate's work.** If a delegated agent's output is suspect, do not verify, repair, or redo it yourself in the delegating session. Re-dispatch the same agent type once to verify and fix its own output and report a summary. If that attempt does not resolve it, do not retry. Escalate to the user; the fix may need a new agent for the failing tool.
+15. **Agentbus:** every worker uses agentbus. Workers are non-interactive by default; the user talks to the mission owner. Use a foreground worker when real-time steering is needed. Attach a background worker when mid-task guidance is needed.
 
 ## Code reviewer
 

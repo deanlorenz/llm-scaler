@@ -9,6 +9,12 @@ description: Use when about to edit a file you don't own, or write a new file in
 
 If the edit requires judgment from your session's context (e.g. the content to write depends on decisions being made interactively), run the steps below in your own session instead.
 
+## Who owns a file
+
+- You own a file if you created it this session, or it is in your own mission worktree and no other active session was granted write access to it. Everything else you do not own: files in another worktree, shared convention files, another mission's STATE.
+- The exemption is identity-based, not dispatcher-based. The mission owner may edit its own STATE.md directly, without `.wip`. An agent the owner dispatches is not the owner and must use `.wip` on that file, whoever gave the instruction.
+- When dispatching an agent, say in its task file whether it needs `.wip` for the files it will touch. A coder writing new code files it creates does not. An agent updating a STATE.md it does not own does.
+
 ## Caller instructions (sub-agent path)
 
 1. Confirm you know:
