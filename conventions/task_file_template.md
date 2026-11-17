@@ -11,6 +11,7 @@ Worktree: <name or "ephemeral — assigned at launch">
 Path: <absolute-path or "unknown — verify branch instead">
 Branch: <branch-name>
 Task SHA: <TASK_SHA>
+Session ID: <uuid — set by the parent at launch for a resumable coder; see conv-coder-orchestration>
 In: <mission>.<id>.in
 Out: <mission>.<id>
 Startup verification instructions:

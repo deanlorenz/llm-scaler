@@ -77,14 +77,21 @@ echo ".session/" >> "$(git rev-parse --git-common-dir)/worktrees/$WTID/info/excl
 
 ### Launch
 
+Default: Claude Code on CurveBender (a session you can resume).
+
 ```bash
-# Background (async):
-nohup bob run --accept-license --workspace <worktree-path> --mode <mode> \
-  --resume <task-id> -f stream-json "$PROMPT" \
-  > <logfile> 2>&1 &
+U=$(cat /proc/sys/kernel/random/uuid)      # record this in the task file as "Session ID:"
+export P="$(cat <prompt-file>)"            # points at .session/task-<id>.md; carries In:/Out: and the subscription command
+nohup bash -c "cd <worktree-path> && source ~/.bash_aliases >/dev/null 2>&1; curvebender rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 -p \"\$P\" --session-id $U --permission-mode auto --max-turns <n> --output-format json" > <logfile> 2>&1 < /dev/null &
 ```
 
-Record `--resume <task-id>` in the task file before launch. Without it the next invocation starts cold, with no prior context.
+Record `Session ID: <uuid>` in the task file before launch. Without it the next instruction starts cold, with no prior context.
+
+Later instruction to the same coder: the same command with `--resume <uuid>` in place of `--session-id`, in the same worktree and with the same model. Never `-c`; never `--no-session-persistence`.
+
+To keep a coder available after it reports done, the task file tells it to poll its `In:` channel (`agentbus_fetch_since`, `sleep 15` between polls) for the number of tries it states, then exit. Resume it after that.
+
+If this does not work, see `conv-background-agents` (Bob and native subagent launches).
 
 Parent must not edit code in this worktree while the coder is active. Parent may read, monitor, plan, or launch a concurrent reviewer (reviewer reads committed history only).
 

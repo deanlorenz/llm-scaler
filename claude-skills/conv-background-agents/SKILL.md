@@ -33,15 +33,17 @@ Launch a new session (record `<uuid>` in the task file as `Session ID:`):
 ```bash
 U=$(cat /proc/sys/kernel/random/uuid)
 export P="$(cat <prompt-file>)"
-nohup bash -c "source ~/.bash_aliases >/dev/null 2>&1; curvebender <model-id> -p \"\$P\" --session-id $U --permission-mode auto --max-turns <n> --output-format json" > <logfile> 2>&1 < /dev/null &
+nohup bash -c "cd <worktree-path> && source ~/.bash_aliases >/dev/null 2>&1; curvebender <model-id> -p \"\$P\" --session-id $U --permission-mode auto --max-turns <n> --output-format json" > <logfile> 2>&1 < /dev/null &
 ```
 
 Send a later instruction to the same session (same working directory, same model; new instruction in the prompt):
 
 ```bash
 export P="<new instruction>"
-nohup bash -c "source ~/.bash_aliases >/dev/null 2>&1; curvebender <model-id> -p \"\$P\" --resume <uuid> --permission-mode auto --max-turns <n> --output-format json" > <logfile> 2>&1 < /dev/null &
+nohup bash -c "cd <worktree-path> && source ~/.bash_aliases >/dev/null 2>&1; curvebender <model-id> -p \"\$P\" --resume <uuid> --permission-mode auto --max-turns <n> --output-format json" > <logfile> 2>&1 < /dev/null &
 ```
+
+Tested 2026-11-17 with this form: a coder created a file and committed it under `--permission-mode auto`, reported the commit as an agentbus heartbeat, and a later `--resume` continued the same session and committed again.
 
 Rules:
 - Use `--resume <uuid>`. Never `-c`: it skips sessions made with `-p`.
