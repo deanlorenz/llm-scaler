@@ -22,6 +22,7 @@
 ## Commits & Checkpoints
 
 - Commit after each logical step or resolved location.
+- After every commit, publish `kind="heartbeat"` on `Out:`, body `session=<slug> step=<i>/<n> commit <short-sha> <subject>`.
 - All tests must pass and code must adhere to repo style before declaring completion.
 
 ## Communication & Completion
