@@ -30,6 +30,7 @@ description: Use when installing conventions, skills, or CONVENTIONS.md from pol
    )
    ```
    Model note: `claude-haiku-4-5` (or `$CONV_SUBAGENT_MODEL`) is sufficient.
+   Assign `In:` `policy-writer.install-<n>.in` and `Out:` `policy-writer.install-<n>` (see `conv-agentbus`), subscribe to `Out:` yourself, and put both channels and the subscription command in the prompt.
 4. Do not modify `policy-writer` files while the subagent is running.
 5. After the subagent reports success, record the install in STATE and ledger.
 
@@ -48,6 +49,8 @@ PATHS="CONVENTIONS.md conventions claude-skills"
 ```
 
 Entering `$ST` with `cd` is permitted for this authorized operation. Use `$HEAD_SHA`, not the branch name, for the whole procedure.
+
+Subscribe to your `In:` channel and stay subscribed. After each of Steps 1-6, publish `kind="heartbeat"` on `Out:`, body `session=<slug> step=<i>/7 <what you just did>`; send the Step 7 report on `Out:` too. Answer any request from `In:` on `Out:`.
 
 ### Step 1: Verify nothing uncommitted would be overwritten
 

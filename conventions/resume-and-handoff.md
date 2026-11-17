@@ -20,8 +20,7 @@ Status values:
 ## Resume / Takeover Protocol
 
 1. **Ask user:** "Continuing `<slug>`?" — confirm mission and session before proceeding.
-2. **Live presence check:** Check agentbus for a recent heartbeat from the active slug.
-   If still alive: stop, do not take over, ask the user.
+2. **Still running?** The user's confirmation in step 1 covers this. There is no automatic presence check.
 3. **Pending scan:** Any session log entry that is `active`, or `retired` without a
    `## Verified` marker, is pending. Captured retired ledgers must be under `.session/ledger/`.
 4. **Lock & retire:** Update any unretired pending session to `status=retired`.

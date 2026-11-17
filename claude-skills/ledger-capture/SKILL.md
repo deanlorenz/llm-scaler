@@ -24,6 +24,16 @@ If any input is missing or unclear, publish a question on `Out:` and stop.
 2. Answer any progress, clarification, or interim-result request from `In:` on `Out:`.
 3. Publish status, findings, questions, and completion to `Out:`.
 
+## Progress events
+
+Publish `kind="heartbeat"` on `Out:`, body `session=<slug> step=<i>/7 <what you just did>` (`<slug>` is the `Name:` in your task file), after each of these, and at least every 2 minutes while working:
+- Step 1 done (ledger read).
+- Step 2 done (STATE and spec read).
+- Each gap folded or flagged (Steps 4-6): `step=4/7 folded <point> -> <file and section>`.
+- Step 7 done (`## Verified` appended).
+
+Then send the final report.
+
 ## Read first
 
 The conventions are in the `session-tracking` worktree, under `worktrees/session-tracking/`. Read these before any edit:

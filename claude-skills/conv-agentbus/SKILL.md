@@ -45,6 +45,8 @@ The child subscribes to `In:` before work starts, remains subscribed while runni
 - The child publishes status, findings, questions, and completion to `Out:`.
 - The parent sends requests and progress questions to the child's `In:` and monitors `Out:`.
 - No background agent runs without channels.
+- The child publishes `kind="heartbeat"`, body `session=<slug> step=<i>/<n> <what it just did>`, to `Out:` for each event in the task file's `Progress events:`, and at least every 2 minutes while working.
+- The parent treats 5 minutes without a message on `Out:` as possibly stuck and checks the process directly.
 
 ## Status updates to user
 

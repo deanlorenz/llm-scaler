@@ -17,6 +17,8 @@ Startup verification instructions:
   <worker's required first action and what to do on failure — never leave blank>
 Role / scope: <role and explicit limits>
 Ledger / log: .session/<slug>.md
+Progress events:
+  <exact events the worker publishes to Out: as kind="heartbeat"; see conv-agentbus — never leave blank for a background worker>
 
 Plan / spec: <path>  (pull on demand — do not read upfront)
 Context:
@@ -42,4 +44,5 @@ Known issues: <optional>
 - `In:` — child input channel: `<mission>.<id>.in`
 - `Out:` — child output channel: `<mission>.<id>`
 - Include the subscription command in the task file and launch prompt.
+- List the progress events in `Progress events:`.
 - Do not launch a background worker without both channels.
