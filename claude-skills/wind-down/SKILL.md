@@ -16,7 +16,7 @@ Rules:
 - Agent invocations may run all steps in the background without user interaction.
 - Record the outcome in the ledger and STATE; report to the parent agent when one exists.
 
-See `conventions/resume-and-handoff.md` for the ownership and ledger-capture contracts.
+See `conventions/resume-and-handoff.md` for the ownership contract and the `ledger-capture` skill for the ledger-capture contract.
 
 ## Step 1: Reach a safe stopping point
 
@@ -97,6 +97,7 @@ Rules:
 - Ledger-capture confirms every point in the ledger is reflected somewhere durable and appends
   `## Verified <date>` when done.
 - Only after it completes may STATE.md be updated with its findings or references to them.
+- If ledger-capture flags a finding for every mission, propose it yourself (`conventions/mission-owner.md`, "Proposing a rule or process change"). Ledger-capture writes nothing.
 
 This step runs in both modes (checkpoint and retirement).
 

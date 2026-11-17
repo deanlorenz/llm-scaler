@@ -231,8 +231,13 @@ For every pending entry, using the `.wip` protocol (`conv-wip-editing`):
    its `In:` channel when needed and wait for its completion message before proceeding.
 6. Confirm `## Verified <date>` is appended to the ledger.
 7. If ledger-capture surfaces anything genuinely ambiguous, ask the user now.
+8. If ledger-capture flags a finding for every mission, propose it yourself (`conventions/mission-owner.md`, "Proposing a rule or process change"). Ledger-capture writes nothing.
 
 If there are no pending entries, this step is a no-op.
+
+### Step 7a: Ground-truth check
+
+If STATE has a checklist or list derived from an outside source (a diff, file tree, test suite, config, or `git log`), regenerate it now by command and compare it with STATE before Step 9. Example for branch position: `git fetch`, then `git rev-list --left-right --count <remote-ref>...<branch>`. Report any difference in the Step 9 block. Do not silently correct STATE. Use a background agent only for a list too large to check by hand.
 
 ### Step 8: Declare ownership on agentbus
 

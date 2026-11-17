@@ -24,7 +24,7 @@ Status values:
 3. **Pending scan:** Any session log entry that is `active`, or `retired` without a
    `## Verified` marker, is pending. Captured retired ledgers must be under `.session/ledger/`.
 4. **Lock & retire:** Update any unretired pending session to `status=retired`.
-5. **Run `ledger-capture`:** Execute against the pending ledger in the foreground.
+5. **Run `ledger-capture`:** Execute against the pending ledger and wait for completion.
 6. **Verify:** Confirm `## Verified <date>` is appended to the processed ledger.
 7. **Ground-truth check:** If STATE has any checklist or file list derived from an external
    source (a diff, file tree, test suite, config), launch a background agent to regenerate
@@ -71,9 +71,8 @@ A focused agent assigned to process exactly one ledger file:
    ownership, authorization, and data-preservation rules.
 5. **Write destinations:** The mission's own `.session/STATE.md` and its internal plan/spec only.
 6. **Prohibition:** Never write to `CONVENTIONS.md` or `conventions/`.
-7. **Global findings:** Any finding warranting a global rule goes to
-   `session-tracking/suggestion-box/YYYY-MM-DD-HHMM-<mission-name>.md`.
-   Only `policy-writer` processes suggestion-box entries.
+7. **Global findings:** Flag any finding warranting a global rule in the report. Write nothing;
+   the main session proposes it (`conventions/mission-owner.md`, "Proposing a rule or process change").
 8. **Completion — append to the processed ledger:**
    ```markdown
    ## Verified YYYY-MM-DD — <all points already captured | folded in: summary>

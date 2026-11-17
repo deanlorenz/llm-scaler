@@ -1,8 +1,8 @@
 # Worktree delegation setups for coders
 
-Read this when `coder-orchestration.md`'s gate table has pointed you here. This file covers
+Read this when the `conv-coder-orchestration` gate table has pointed you here. This file covers
 the parent-side mechanics — the gates (which setup to pick, when) live in
-`coder-orchestration.md`, not here.
+`conv-coder-orchestration`, not here.
 
 Every background `Agent()` call always gets its own context window regardless of isolation
 mode. What differs between the three setups is filesystem/branch isolation, not context.
@@ -25,30 +25,12 @@ path. Read only the section you need.
 2. Record the branch/worktree as "in use by coder `<id>`" in mission STATE.
 3. Include `TASK_SHA`, branch name, and worktree path (where known) in the launch prompt.
 
-### Task file template — fill every field
+### Task file — fill every field
 
-```
-Name: <session-slug>
-Conventions: worktrees/session-tracking/CONVENTIONS.md
-What / goal / mission: <one or two sentences>
-Worktree: <name or "ephemeral — assigned at launch">
-Path: <absolute-path or "unknown — verify branch instead">
-Branch: <branch-name>
-Task SHA: <TASK_SHA>
-In: <mission>.<id>.in
-Out: <mission>.<id>
-Startup verification instructions:
-  See worktree-delegation.md §"Universal coder startup" — follow steps a–f exactly.
-  Fail and report on Out: if any step cannot be completed.
-Role / scope: <role and explicit limits>
-Ledger / log: .session/<slug>.md
-Expected output: <specific deliverable>
-Done / completion criteria: <checkable claims with actual results, not just pass/fail>
-Limits: <what must not change>
-Steps / subtasks:
-  [ ] ...
-Status: NOT STARTED
-```
+Use `conventions/task_file_template.md`. Pre-filled values for a coder:
+
+- `Startup verification instructions:` See `worktree-delegation.md` §"Universal coder startup" — follow steps a–f exactly. Fail and report on `Out:` if any step cannot be completed.
+- `Progress events:` each commit, as `conventions/coder.md` says (`step=<i>/<n> commit <short-sha> <subject>`).
 
 ### Universal coder startup (every path, in order — do not skip)
 
@@ -218,6 +200,6 @@ Task file is already on `<branch>` — child's startup step (c) finds the file a
 
 ### Alt B — `/tmp` path (no commit, ephemeral only)
 
-Use only for short-lived tasks exempt from requiring a ledger (see `coder-orchestration.md`
-rule 9). Write to `/tmp/task-<id>.md` and pass the path in the launch prompt. No commit
+Use only for short-lived tasks exempt from requiring a ledger (see `conv-coder-orchestration`,
+section "Code reviewer", last bullet). Write to `/tmp/task-<id>.md` and pass the path in the launch prompt. No commit
 anywhere; child reads directly from `/tmp`.
