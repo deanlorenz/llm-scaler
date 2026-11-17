@@ -21,14 +21,16 @@ If the edit requires judgment from your session's context (e.g. the content to w
    - The exact file path to edit
    - The exact change to make (write it out before spawning)
    - That no `.wip` lock already exists (`test ! -f <path>.wip`)
-2. Spawn a subagent:
+2. Launch a subagent (`general-purpose`, `haiku`: the edit is mechanical):
    ```
-   spawn_subagent(
-     description: "<paste the Subagent instructions block below, filling in FILE_PATH and CHANGE_DESCRIPTION>",
-     name: "general"
+   Agent(
+     description: "Edit <file> under .wip",
+     prompt: "<the Subagent instructions block below, with FILE_PATH and CHANGE_DESCRIPTION filled in, plus the In:/Out: channels and the subscription command>",
+     subagent_type: "general-purpose",
+     model: "haiku"
    )
    ```
-   Model note: `claude-haiku-4-5` (or `$CONV_SUBAGENT_MODEL`) is sufficient for mechanical edits.
+   Assign `In:` `<mission>.wip-<n>.in` and `Out:` `<mission>.wip-<n>` (see `conv-agentbus`), and subscribe to `Out:` yourself. The subagent publishes a heartbeat after each numbered step.
 3. Do not touch the file while the subagent holds the `.wip` lock.
 4. Verify the subagent committed before continuing.
 

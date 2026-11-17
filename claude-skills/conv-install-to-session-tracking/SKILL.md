@@ -22,15 +22,16 @@ description: Use when installing conventions, skills, or CONVENTIONS.md from pol
    ```bash
    git rev-parse HEAD
    ```
-3. Spawn a subagent:
+3. Launch a subagent (`general-purpose`, `haiku`: the install is mechanical):
    ```
-   spawn_subagent(
-     description: "<paste the Subagent instructions block below, filling in HEAD_SHA>",
-     name: "general"
+   Agent(
+     description: "Install policy-writer commits",
+     prompt: "<the Subagent instructions block below, with HEAD_SHA filled in, plus the In:/Out: channels and the subscription command>",
+     subagent_type: "general-purpose",
+     model: "haiku"
    )
    ```
-   Model note: `claude-haiku-4-5` (or `$CONV_SUBAGENT_MODEL`) is sufficient.
-   Assign `In:` `policy-writer.install-<n>.in` and `Out:` `policy-writer.install-<n>` (see `conv-agentbus`), subscribe to `Out:` yourself, and put both channels and the subscription command in the prompt.
+   Assign `In:` `policy-writer.install-<n>.in` and `Out:` `policy-writer.install-<n>` (see `conv-agentbus`), and subscribe to `Out:` yourself.
 4. Do not modify `policy-writer` files while the subagent is running.
 5. After the subagent reports success, record the install in STATE and ledger.
 

@@ -10,14 +10,16 @@ description: Use when creating or migrating a mission worktree, setting up .sess
 ## Caller instructions (run in your own session before spawning)
 
 1. Identify the mission name and full worktree path.
-2. Spawn a subagent:
+2. Launch a subagent (`general-purpose`, `haiku`: the work is mechanical):
    ```
-   spawn_subagent(
-     description: "<paste the Subagent instructions block below, filling in MISSION_NAME and MISSION_WT>",
-     name: "general"
+   Agent(
+     description: "Set up mission worktree",
+     prompt: "<the Subagent instructions block below, with MISSION_NAME and MISSION_WT filled in, plus the In:/Out: channels and the subscription command>",
+     subagent_type: "general-purpose",
+     model: "haiku"
    )
    ```
-   Model note: this task suits a lighter model. If `CONV_SUBAGENT_MODEL` is set in your environment, pass that; otherwise `claude-haiku-4-5` is recommended.
+   Assign `In:` `<mission>.setup.in` and `Out:` `<mission>.setup` (see `conv-agentbus`), and subscribe to `Out:` yourself. The subagent publishes a heartbeat after each numbered step.
 3. Wait for the subagent to report completion before continuing mission work.
 4. If the subagent reports a failure, address it before proceeding.
 

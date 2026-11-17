@@ -10,14 +10,16 @@ description: Use when finding an unexplained file, uncommitted edit, or unrecogn
 ## Caller instructions
 
 1. Note the path(s) of the unexplained file(s) or changes.
-2. Spawn a subagent:
+2. Launch a subagent (`general-purpose`, `haiku`: read-only investigation):
    ```
-   spawn_subagent(
-     description: "<paste the Subagent instructions block below, filling in FILE_PATH(S)>",
-     name: "general"
+   Agent(
+     description: "Investigate unexplained files",
+     prompt: "<the Subagent instructions block below, with FILE_PATH(S) filled in, plus the In:/Out: channels and the subscription command>",
+     subagent_type: "general-purpose",
+     model: "haiku"
    )
    ```
-   Model note: `claude-haiku-4-5` (or `$CONV_SUBAGENT_MODEL`) is sufficient — this is read-only investigation.
+   Assign `In:` `<mission>.unexplained.in` and `Out:` `<mission>.unexplained` (see `conv-agentbus`), and subscribe to `Out:` yourself. The subagent publishes a heartbeat after each numbered step.
 3. Wait for the subagent's verdict before taking any action on the file.
 4. **Do not delete, overwrite, or clean up anything** until the subagent reports and you have reviewed the finding.
 
