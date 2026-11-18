@@ -12,7 +12,7 @@ canonical `.claude/skills/` stored on the `session-tracking` branch.
 - `session-tracking` is the production branch of those rules and skills. Sessions read rules from it and use skills linked to it.
 - Never edit, draft, or iterate in `session-tracking`. Draft, review, and commit in `worktrees/policy-writer`.
 - Rules and skills reach `session-tracking` only through an authorized install.
-- Install only `CONVENTIONS.md`, `conventions/`, and `claude-skills/`.
+- Install only `CONVENTIONS.md`, `conventions/`, `claude-skills/`, and `bob/`.
 - Never install `backup_rules/`, `.session/`, `.claude/`, or `.bak` files.
 - Mission links under `session-tracking/missions/` are the only other content committed there.
 

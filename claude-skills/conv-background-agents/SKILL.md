@@ -56,7 +56,7 @@ Rules:
 ## Bob CLI
 
 Setup facts:
-- The workspace needs `.bob/custom_modes.yaml` with the mode, and `.bob/skills/<name>` linking the skill, when the mode loads a skill.
+- The workspace's `.bob/custom_modes.yaml` links to `session-tracking/bob/custom_modes.yaml`, and `.bob/skills/<name>` links to `session-tracking/claude-skills/<name>` (`conv-feature-worktree-setup`, step 4a). Never copy them and never track `.bob`. Tested 2026-11-18: Bob loads the mode and the skill through such links.
 - Bob edits only files its mode allows (`ledger-capture`: names ending `.wip`, claimed with `wip.sh`). Allowed commands are in `~/.bob/settings/settings.json` (`approvedCommands`).
 - The `bob-run` function in `~/.bash_aliases` wraps the headless form below.
 

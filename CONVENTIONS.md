@@ -59,6 +59,8 @@ session-tracking/                  ← global policy worktree; read-only unless 
     wind-down/SKILL.md
     conv-*/SKILL.md                ← situational-rule skills (auto-invoked)
     pr-review/SKILL.md
+  bob/                             ← Bob custom modes; every worktree's .bob links here
+    custom_modes.yaml
   missions/                        ← read-only convenience symlinks
     <mission-name>/
       STATE.md -> worktrees/<mission-name>/.session/STATE.md
@@ -68,6 +70,7 @@ session-tracking/                  ← global policy worktree; read-only unless 
 worktrees/<mission-name>/          ← mission branch/worktree
   .session/                        ← mission state, ledgers, and internal plans; never in a PR branch
   .claude/skills -> <abs-path>/worktrees/session-tracking/claude-skills  ← dir-symlink
+  .bob/custom_modes.yaml -> session-tracking/bob/custom_modes.yaml; .bob/skills/<name> -> session-tracking/claude-skills/<name>  ← links, never tracked
   <normal code tree>               ← mission output
 ```
 

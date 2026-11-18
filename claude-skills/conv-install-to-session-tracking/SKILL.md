@@ -11,7 +11,7 @@ description: Use when installing conventions, skills, or CONVENTIONS.md from pol
 
 ## What is installed
 
-- Production paths: `CONVENTIONS.md`, `conventions/`, `claude-skills/`. Nothing else is installed.
+- Production paths: `CONVENTIONS.md`, `conventions/`, `claude-skills/`, `bob/`. Nothing else is installed.
 - Never installed: `backup_rules/`, `.session/`, `.claude/`, `*.bak`, or any other path.
 - Ignore `claude-skills/pr-review` in every check below. It is an upstream skill, left untracked on `session-tracking`. Do not stage, move, or delete it.
 
@@ -46,7 +46,7 @@ Set these once (full paths; `HEAD_SHA` is the SHA the caller recorded):
 ```bash
 PW=<full path to worktrees/policy-writer>
 ST=<full path to worktrees/session-tracking>
-PATHS="CONVENTIONS.md conventions claude-skills"
+PATHS="CONVENTIONS.md conventions claude-skills bob"
 ```
 
 Entering `$ST` with `cd` is permitted for this authorized operation. Use `$HEAD_SHA`, not the branch name, for the whole procedure.
@@ -105,6 +105,8 @@ Classify every commit:
 - **No file is in the production paths** (for example, only `.session/` or `backup_rules/`): do not install it. List it as skipped.
 - **Mixed:** STOP and report the commit and the files on each side. Do not split, edit, or drop files from it. The caller decides.
 
+A commit that touches the production paths but sits at or before `LAST_SHA` is never in the range, so the range skips it (for example a commit held back earlier, or one whose path was added to the production paths later). The caller lists such commits as explicit picks in the prompt; cherry-pick them first, in order, under the same rules.
+
 Report the install list and the skip list to the caller before continuing.
 
 ### Step 4: Cherry-pick, one commit at a time
@@ -125,17 +127,18 @@ From `$ST`:
 diff -r -x pr-review $PW/claude-skills claude-skills
 diff -r $PW/conventions conventions
 diff $PW/CONVENTIONS.md CONVENTIONS.md
+diff -r $PW/bob bob
 git diff --name-only <ST HEAD before step 4> HEAD
 git ls-files | grep -E '(^backup_rules/|^\.session/|^\.claude/|\.bak$)' || echo none
 grep -rohE 'conventions/[A-Za-z0-9_-]+\.md' CONVENTIONS.md conventions claude-skills --exclude-dir=archived | sort -u | while read f; do test -f "$f" || echo "MISSING $f"; done
 ```
 
-The three `diff` commands must print nothing. Every name from `git diff --name-only` must be inside the production paths. The `git ls-files` command must print `none`. The last command (dangling references) must print nothing: every `conventions/<name>.md` cited in production must exist outside `conventions/archived/`. If anything else appears, stop and report.
+The four `diff` commands must print nothing. Every name from `git diff --name-only` must be inside the production paths. The `git ls-files` command must print `none`. The last command (dangling references) must print nothing: every `conventions/<name>.md` cited in production must exist outside `conventions/archived/`. If anything else appears, stop and report.
 
 ### Step 6: Install commit
 
 ```bash
-git commit --allow-empty -m "install: CONVENTIONS.md + conventions/ + claude-skills/ from policy-writer@$HEAD_SHA"
+git commit --allow-empty -m "install: CONVENTIONS.md + conventions/ + claude-skills/ + bob/ from policy-writer@$HEAD_SHA"
 ```
 
 Always record the exact `policy-writer` SHA used.

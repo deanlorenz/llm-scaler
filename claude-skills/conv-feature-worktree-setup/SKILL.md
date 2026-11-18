@@ -90,6 +90,27 @@ done
 
 All resolved paths must be under `worktrees/session-tracking/claude-skills/`. Report any broken or mis-targeted link.
 
+### 4a. Set up `.bob` links
+
+Bob agents in the worktree need the custom-mode file and the `ledger-capture` skill. Both are links into `session-tracking` (relative targets), never copies, and never tracked.
+
+```bash
+TRACKING=$(git -C MISSION_WT worktree list --porcelain | awk '/^worktree /{p=$2} /^branch refs\/heads\/session-tracking$/{print p}')
+mkdir -p MISSION_WT/.bob/skills
+for pair in "custom_modes.yaml:bob/custom_modes.yaml" "skills/ledger-capture:claude-skills/ledger-capture"; do
+  link="MISSION_WT/.bob/${pair%%:*}"; target="$TRACKING/${pair#*:}"
+  if [ -L "$link" ] && [ "$(readlink -f "$link")" = "$(readlink -f "$target")" ]; then continue; fi
+  if [ -e "$link" ] || [ -L "$link" ]; then echo "EXISTS, differs: $link"; exit 1; fi
+  ln -s "$(realpath --relative-to="$(dirname "$link")" "$target")" "$link"
+done
+```
+
+If a link path already exists and is not the expected link, stop and report it. Do not replace it. Exclude `.bob` from git tracking in the repo-shared exclude, as for `.claude/skills`:
+
+```bash
+grep -qxF ".bob" "$EXCLUDE" || echo ".bob" >> "$EXCLUDE"
+```
+
 ### 5. Create session-tracking convenience symlinks
 
 This is the one case where a new session writes directly into `session-tracking`. Create only these two links. Never commit them — only `policy-writer` commits them.
