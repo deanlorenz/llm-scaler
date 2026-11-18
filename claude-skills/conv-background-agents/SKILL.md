@@ -60,12 +60,22 @@ Setup facts:
 - Bob edits only files its mode allows (`ledger-capture`: names ending `.wip`, claimed with `wip.sh`). Allowed commands are in `~/.bob/settings/settings.json` (`approvedCommands`).
 - The `bob-run` function in `~/.bash_aliases` wraps the headless form below.
 
-Persistent coder (record `--resume <task-id>` in the task file before launch; losing it means the next run starts cold):
+Persistent coder. `bob run --help`: `--resume [task-id]` resumes a specific task, so a first run has no `--resume`. Bob reports a Task ID (the `Task ID` line of its end-of-run summary in the default output; not checked for `-f stream-json`). Record it in the task file; losing it means the next run starts cold. `$PROMPT` is the instruction text, set by the caller.
+
+First run:
+
+```bash
+nohup bob run --accept-license --workspace <worktree-path> --mode <mode> \
+  -f stream-json "$PROMPT" \
+  > <logfile> 2>&1 < /dev/null &
+```
+
+A later instruction to the same task (the original resume form, kept, with `< /dev/null` added):
 
 ```bash
 nohup bob run --accept-license --workspace <worktree-path> --mode <mode> \
   --resume <task-id> -f stream-json "$PROMPT" \
-  > <logfile> 2>&1 &
+  > <logfile> 2>&1 < /dev/null &
 ```
 
 Bounded headless run (used for `ledger-capture`, 2026-11-16, about 100 s):
@@ -99,6 +109,19 @@ Agent(
 - It runs in the background and reports back when done. Do not edit the files it works on meanwhile.
 - `Explore` and `Plan` are one-shot and cannot be resumed.
 - It has no persistence across launches. Use CurveBender or Bob when the worker must be resumed.
+
+## Reviewers, `/code-review`, and research
+
+- **Code reviewer (role):** Claude Code on CurveBender with `rits/zai-org/glm-5-3`, a different model from the coder's (DeepSeek), so the review is a second opinion. Same launch form as the coder; the task file follows `conventions/reviewer.md`. GLM was smoke-tested 2026-11-18; the reviewer role has not yet run on a real task.
+- **`/code-review` (Claude-specific and heavy; independent of the current session):** a separate CurveBender DeepSeek process, the skill invoked from the prompt. Tested 2026-11-18 with a path target at level `low`: it ran headless in 65 s and returned its findings in the JSON `result`. The Claude Code docs say user-invoked skills work in `-p` mode when the prompt starts with `/skill-name`.
+
+  ```bash
+  export P="/code-review <low|medium|high> <PR number, branch, or path>"
+  nohup bash -c "cd <worktree-path> && source ~/.bash_aliases >/dev/null 2>&1; curvebender rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 -p \"\$P\" --permission-mode auto --max-turns 40 --output-format json" > <logfile> 2>&1 < /dev/null &
+  ```
+
+- **Final review before a PR push (optional):** run `/code-review` in the main Claude session.
+- **Researcher:** `Agent(subagent_type: "general-purpose", model: "sonnet")`, never lighter than Sonnet. The built-in `Explore` agent follows the parent conversation's model (sub-agents docs), so do not assume it is Haiku-based; set `model` explicitly.
 
 ## Adding a default launch to a skill
 

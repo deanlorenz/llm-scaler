@@ -21,3 +21,5 @@ Runs in your own session. Apply before opening a PR or calling any GitHub PR API
 3. **Use the correct GitHub API.** This repo has two GitHub MCP servers (`gh-public`, `gh-ibm`). Use the one that matches the repo's hosting. Check `git remote -v` for the remote URL. If unsure which applies, confirm before calling any PR or issue API.
 
 4. **Invoke `conv-pr-branch` first** if the PR branch has not yet been verified clean.
+
+5. **Optional final review:** before pushing, you may run `/code-review` in this Claude session on the PR branch. The heavy default is the separate CurveBender launch in `conv-background-agents`.

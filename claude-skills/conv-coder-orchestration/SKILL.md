@@ -132,3 +132,4 @@ Full mechanics (branch prep, launch flags, post-steps, PR-branch cleanliness) ar
 - If coder diverges from task, reviewer notifies mission owner immediately.
 - Review output goes to a file in the mission owner's `.session/`, not the coder's worktree.
 - A narrowly scoped PR-prep agent (rebase, lint, DCO, test) needs no reviewer, no state file, no ledger.
+- Default launch: Claude Code on CurveBender with `rits/zai-org/glm-5-3`, a different model from the coder's, in the coder launch form above. Optionally run `/code-review` in this Claude session as a final check before a PR push. If a launch does not work, see `conv-background-agents`.
