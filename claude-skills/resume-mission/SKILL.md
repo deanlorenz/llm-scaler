@@ -222,13 +222,14 @@ or `retired` without a `## Verified` marker in its ledger. Active ledgers remain
 
 For every pending entry, using the `.wip` protocol (`conv-wip-editing`):
 1. Mark it `retired` in `STATE.md` if still `active`.
-2. Assign ledger-capture `In:` and `Out:` channels. Include both channels and the subscription
-   command in its task file or prompt.
-3. Require ledger-capture to subscribe to `In:` before work, remain subscribed while running, and
-   answer progress, clarification, or interim-result requests on `Out:`.
-4. Require ledger-capture to publish status, findings, questions, and completion to `Out:`.
-5. Launch ledger-capture against its ledger file as a background agent. Send progress questions to
-   its `In:` channel when needed and wait for its completion message before proceeding.
+2. Write the task file `.session/task-lc-<n>.md` from `conventions/task_file_template.md` and commit it by exact path. Fill: `Name: lc-<n>`; `Worktree`, `Path`, `Branch` of the mission worktree; `In: <mission>.lc-<n>.in`; `Out: <mission>.lc-<n>`; `Startup verification instructions` (one command at a time; on any failure publish it on `Out:` and stop): `git rev-parse --show-toplevel` equals `Path`, `git branch --show-current` equals `Branch`, `.session/task-lc-<n>.md` exists; `Role / scope`: ledger-capture, follows the `ledger-capture` skill and decides nothing it leaves to the owner; `Progress events`: as listed in the `ledger-capture` skill; `Limits`: writes only STATE.md, the spec and the end of the ledger.
+3. Subscribe to `Out:` yourself. Make sure the mission worktree has the `.bob` links (`conv-feature-worktree-setup`, step 4a).
+4. Launch (default: Bob, tested 2026-11-16):
+   ```bash
+   export P="Task file: .session/task-lc-<n>.md. Mission: <mission>. Ledger: <ledger path>. In: <mission>.lc-<n>.in. Out: <mission>.lc-<n>. Subscribe with agentbus_subscribe(topic=\"<mission>.lc-<n>.in\", session_id=\"lc-<n>\"). Run the startup verification in the task file first, then load the ledger-capture skill and follow it exactly. Publish status, findings, questions and completion to Out:."
+   nohup timeout 600 bob run -w <mission-worktree> --mode ledger-capture --max-turns 80 "$P" < /dev/null > /tmp/lc-<n>.log 2>&1 &
+   ```
+5. Wait for its completion note on `Out:`; send progress questions to its `In:` channel when needed. Heartbeats show progress: 5 minutes without one means possibly stuck, so check the process. If this launch does not work, see `conv-background-agents`.
 6. Confirm `## Verified <date>` is appended to the ledger.
 7. If ledger-capture surfaces anything genuinely ambiguous, ask the user now.
 8. If ledger-capture flags a finding for every mission, propose it yourself (`conventions/mission-owner.md`, "Proposing a rule or process change"). Ledger-capture writes nothing.

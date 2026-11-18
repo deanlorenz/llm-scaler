@@ -27,8 +27,8 @@ Status values:
 5. **Run `ledger-capture`:** Execute against the pending ledger and wait for completion.
 6. **Verify:** Confirm `## Verified <date>` is appended to the processed ledger.
 7. **Ground-truth check:** If STATE has any checklist or file list derived from an external
-   source (a diff, file tree, test suite, config), launch a background agent to regenerate
-   and diff it against STATE before starting work.
+   source (a diff, file tree, test suite, config), regenerate it by command and compare it
+   with STATE before starting work. Use a background agent only for a list too large to check by hand.
 8. **Declare ownership:** Publish on agentbus before recording the new active session.
 
 ## Checkpoint & Wind-Down Protocol
